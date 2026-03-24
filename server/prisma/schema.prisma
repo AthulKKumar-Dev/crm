@@ -13,10 +13,175 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(uuid())
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+
+enum OrganizationType {
+  PERSONAL     
+  ORGANIZATION 
 }
+
+enum BillingPlan {
+  FREE
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum OnboardingStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+
+enum UserRole {
+  OWNER     // Created the org. Cannot be removed. Full access + billing.
+  ADMIN     // Full access. Can invite/remove. Cannot change billing or remove owner.
+  MANAGER   // Manage orders, customers, campaigns. Cannot manage team.
+  AGENT     // View/respond to conversations, view orders. Limited write.
+  VIEWER    // Read-only. For stakeholders.
+}
+
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  password         String                                 // bcrypt hash
+  firstName        String    @map("first_name")           // Required at signup
+  lastName         String    @map("last_name")            // Required at signup
+  avatarUrl        String?   @map("avatar_url")           // Optional profile picture
+  emailVerified    Boolean   @default(false) @map("email_verified")
+  emailVerifiedAt  DateTime? @map("email_verified_at")
+  emailVerifyToken String?   @map("email_verify_token")   // Token sent via email
+  emailVerifyExpires DateTime? @map("email_verify_expires") // Token expiry (24hrs)
+  twoFactorEnabled Boolean   @default(false) @map("two_factor_enabled")
+  twoFactorSecret  String?   @map("two_factor_secret")    // TOTP secret, encrypted
+  lastLoginAt      DateTime? @map("last_login_at")
+  deletedAt        DateTime? @map("deleted_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  memberships         OrganizationMember[]
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([email])
+  @@map("users")
+}
+
+
+model Organization {
+  id                   String             @id @default(cuid())
+  name                 String                                  // "Acme Store" or "John's Workspace"
+  slug                 String             @unique              // URL-safe: "acme-store"
+  type                 OrganizationType   @default(PERSONAL)   // PERSONAL or ORGANIZATION
+  logo                 String?                                 // Upload URL
+  timezone             String             @default("UTC")
+  currency             String             @default("USD")
+  industry             String?                                 // e.g., "Fashion", "Electronics"
+  website              String?                                 // Business website URL
+  billingPlan          BillingPlan        @default(FREE) @map("billing_plan")
+  billingInterval      BillingInterval?   @map("billing_interval")
+  stripeCustomerId     String?            @unique @map("stripe_customer_id")
+  stripeSubscriptionId String?            @unique @map("stripe_subscription_id")
+  lowStockThreshold    Int                @default(10) @map("low_stock_threshold")
+  onboardingStatus     OnboardingStatus   @default(PENDING) @map("onboarding_status")
+  onboardingData       Json?              @map("onboarding_data") @db.JsonB
+  metadata             Json?              @db.JsonB
+  deletedAt            DateTime?          @map("deleted_at")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  members OrganizationMember[]
+  invites TeamInvite[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  userId         String   @map("user_id")
+  role           UserRole @default(AGENT)
+  permissions    Json?    @db.JsonB                       // Fine-grained overrides
+  isActive       Boolean  @default(true) @map("is_active")
+  joinedAt       DateTime @default(now()) @map("joined_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  token     String    @unique
+  userAgent String?   @map("user_agent")
+  ipAddress String?   @map("ip_address")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  token     String    @unique
+  expiresAt DateTime  @map("expires_at")         
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("password_reset_tokens")
+}
+
+model TeamInvite {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  email          String
+  role           UserRole     @default(AGENT)
+  token          String       @unique
+  status         InviteStatus @default(PENDING)
+  invitedBy      String       @map("invited_by")
+  expiresAt      DateTime     @map("expires_at")         // 7 days
+  acceptedAt     DateTime?    @map("accepted_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([token])
+  @@index([email])
+  @@map("team_invites")
+}
+
