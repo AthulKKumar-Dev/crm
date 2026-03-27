@@ -65,8 +65,8 @@ model User {
   avatarUrl        String?   @map("avatar_url")           // Optional profile picture
   emailVerified    Boolean   @default(false) @map("email_verified")
   emailVerifiedAt  DateTime? @map("email_verified_at")
-  emailVerifyToken String?   @map("email_verify_token")   // Token sent via email
-  emailVerifyExpires DateTime? @map("email_verify_expires") // Token expiry (24hrs)
+  emailVerifyCode    String?   @map("email_verify_code")    
+  emailVerifyExpires DateTime? @map("email_verify_expires") 
   twoFactorEnabled Boolean   @default(false) @map("two_factor_enabled")
   twoFactorSecret  String?   @map("two_factor_secret")    // TOTP secret, encrypted
   lastLoginAt      DateTime? @map("last_login_at")
