@@ -15,7 +15,11 @@ export default () => ({
         accessExpires: process.env.JWT_ACCESS_EXPIRES,
         refreshExpires: process.env.JWT_REFRESH_EXPIRES,
     },
-    resend: { apiKey: process.env.RESEND_API_KEY },
+    resend: {
+        apiKey: process.env.RESEND_API_KEY,
+        fromEmail: process.env.FROM_EMAIL || 'noreply@yourcrm.com',
+        fromName: process.env.FROM_NAME || 'YourCRM',
+    },
     shopify: {
         clientId: process.env.SHOPIFY_CLIENT_ID,
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
