@@ -9,12 +9,14 @@ import { toast } from "sonner";
 import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
+  Sun, Moon, Monitor,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "~/components/ui/select";
 import { cn } from "~/lib/utils";
 import { useAuthStore } from "~/stores/auth.store";
+import { useThemeStore } from "~/stores/theme.store";
 import { useCurrentOrg, useOrgMembers, useOrgInvites } from "~/hooks/use-org-queries";
 import {
   useUpdateOrganizationMutation,
@@ -91,6 +93,7 @@ const AVATAR_COLORS = [
 
 // ── Reusable components ──────────────────────────────────────────────────────
 
+/** A small toggle switch used for boolean settings (e.g. notification channels). */
 function Toggle({ enabled, onChange }: { enabled: boolean; onChange: () => void }) {
   return (
     <button
@@ -111,11 +114,12 @@ function Toggle({ enabled, onChange }: { enabled: boolean; onChange: () => void 
   );
 }
 
+/** A card wrapper that groups related settings with a title and optional description. */
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-border">
+    <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-border">
       <div className="mb-5 border-b pb-4">
-        <p className="text-sm font-semibold text-gray-900">{title}</p>
+        <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{title}</p>
         {description && <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>}
       </div>
       {children}
@@ -123,11 +127,12 @@ function Section({ title, description, children }: { title: string; description?
   );
 }
 
+/** A labeled form field row with an optional hint, laid out in a responsive grid. */
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 sm:items-start">
       <div>
-        <p className="text-xs font-medium text-gray-700">{label}</p>
+        <p className="text-xs font-medium text-gray-700 dark:text-gray-300">{label}</p>
         {hint && <p className="mt-0.5 text-[10px] text-muted-foreground leading-snug">{hint}</p>}
       </div>
       <div className="sm:col-span-2">{children}</div>
@@ -135,23 +140,24 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
+/** A single notification preference row with toggles for email and push channels. */
 function NotifRow({ label, hint, email, push }: { label: string; hint: string; email: boolean; push: boolean }) {
-  const [e, setE] = useState(email);
-  const [p, setP] = useState(push);
+  const [emailEnabled, setEmailEnabled] = useState(email);
+  const [pushEnabled, setPushEnabled] = useState(push);
   return (
     <div className="flex items-center justify-between gap-4 py-3">
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-gray-900">{label}</p>
+        <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{label}</p>
         <p className="text-[10px] text-muted-foreground">{hint}</p>
       </div>
       <div className="flex items-center gap-6 shrink-0">
         <div className="flex flex-col items-center gap-1">
           <span className="text-[10px] text-muted-foreground">Email</span>
-          <Toggle enabled={e} onChange={() => setE((v) => !v)} />
+          <Toggle enabled={emailEnabled} onChange={() => setEmailEnabled((prev) => !prev)} />
         </div>
         <div className="flex flex-col items-center gap-1">
           <span className="text-[10px] text-muted-foreground">Push</span>
-          <Toggle enabled={p} onChange={() => setP((v) => !v)} />
+          <Toggle enabled={pushEnabled} onChange={() => setPushEnabled((prev) => !prev)} />
         </div>
       </div>
     </div>
@@ -160,23 +166,25 @@ function NotifRow({ label, hint, email, push }: { label: string; hint: string; e
 
 // ── Password schema ──────────────────────────────────────────────────────────
 
+/** Zod schema for the change-password form with confirmation matching. */
 const passwordSchema = z.object({
   currentPassword: z.string().min(1, "Required"),
   newPassword: z.string().min(8, "Min. 8 characters"),
   confirmPassword: z.string(),
-}).refine((d) => d.newPassword === d.confirmPassword, {
+}).refine((data) => data.newPassword === data.confirmPassword, {
   message: "Passwords do not match", path: ["confirmPassword"],
 });
 type PasswordForm = z.infer<typeof passwordSchema>;
 
 // ── Invite dialog inline ─────────────────────────────────────────────────────
 
+/** Inline form for inviting a new team member by email with a selected role. */
 function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("AGENT");
   const sendInvite = useSendInviteMutation(orgId);
 
-  function handleSend() {
+  function handleSendInvite() {
     if (!email.trim()) return;
     sendInvite.mutate({ email: email.trim(), role }, {
       onSuccess: () => { setEmail(""); onDone(); },
@@ -186,57 +194,163 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   return (
     <div className="flex items-center gap-2 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-3">
       <div className="relative flex-1">
-        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-gray-400" />
+        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-gray-400 dark:text-gray-400" />
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="teammate@company.com"
-          className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-xs text-gray-900 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+          className="w-full rounded-lg border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 py-2 pl-9 pr-3 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
         />
       </div>
-      <Select value={role} onValueChange={(v) => setRole(v as UserRole)}>
-        <SelectTrigger className="w-[110px] h-9 shrink-0 border-gray-200 bg-white text-xs shadow-sm">
+      <Select value={role} onValueChange={(selectedRole) => setRole(selectedRole as UserRole)}>
+        <SelectTrigger className="w-[110px] h-9 shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-xs shadow-sm">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {ROLE_OPTIONS.map((r) => (
-            <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+          {ROLE_OPTIONS.map((roleOption) => (
+            <SelectItem key={roleOption.value} value={roleOption.value}>{roleOption.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>
       <button
         type="button"
-        onClick={handleSend}
+        onClick={handleSendInvite}
         disabled={sendInvite.isPending || !email.trim()}
         className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors disabled:opacity-50"
       >
         {sendInvite.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Send"}
       </button>
-      <button type="button" onClick={onDone} className="text-gray-400 hover:text-gray-600">
+      <button type="button" onClick={onDone} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
         <X className="size-4" />
       </button>
     </div>
   );
 }
 
+// ── Appearance tab ──────────────────────────────────────────────────────────
+
+const THEME_OPTIONS = [
+  { value: "light"  as const, label: "Light",  icon: Sun,     desc: "Clean light interface with white backgrounds" },
+  { value: "dark"   as const, label: "Dark",   icon: Moon,    desc: "Easy on the eyes with dark backgrounds" },
+  { value: "system" as const, label: "System", icon: Monitor, desc: "Automatically match your OS preference" },
+];
+
+/** Appearance settings tab with theme selection, accent color, and layout options. */
+function AppearanceTab() {
+  const { theme, setTheme } = useThemeStore();
+
+  return (
+    <>
+      <Section title="Theme" description="Choose your preferred color mode for the interface.">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          {THEME_OPTIONS.map(({ value, label, icon: Icon, desc }) => {
+            const isActive = theme === value;
+            return (
+              <button
+                key={value}
+                onClick={() => setTheme(value)}
+                className={cn(
+                  "group relative flex flex-col items-center gap-3 rounded-xl border-2 p-5 text-center transition-all",
+                  isActive
+                    ? "border-[#cdff8c] bg-[#cdff8c]/10 dark:bg-[#cdff8c]/5"
+                    : "border-transparent bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800"
+                )}
+              >
+                {/* Preview card */}
+                <div className={cn(
+                  "flex size-16 items-center justify-center rounded-xl shadow-sm ring-1 transition-colors",
+                  value === "light"
+                    ? "bg-white ring-gray-200"
+                    : value === "dark"
+                    ? "bg-gray-900 ring-gray-700"
+                    : "bg-gradient-to-br from-white to-gray-900 ring-gray-300"
+                )}>
+                  <Icon className={cn(
+                    "size-6",
+                    value === "light" ? "text-amber-500" : value === "dark" ? "text-blue-400" : "text-gray-500"
+                  )} />
+                </div>
+
+                <div>
+                  <p className={cn(
+                    "text-sm font-semibold",
+                    isActive ? "text-[#4d7a00] dark:text-[#cdff8c]" : "text-gray-900 dark:text-gray-100"
+                  )}>
+                    {label}
+                  </p>
+                  <p className="mt-0.5 text-[10px] text-muted-foreground leading-snug">{desc}</p>
+                </div>
+
+                {/* Checkmark */}
+                {isActive && (
+                  <div className="absolute top-2.5 right-2.5 flex size-5 items-center justify-center rounded-full bg-[#cdff8c]">
+                    <Check className="size-3 text-gray-900" />
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </Section>
+
+      <Section title="Accent Color" description="Used for buttons, highlights, and active states.">
+        <div className="flex items-center gap-3">
+          {["#cdff8c", "#60a5fa", "#f472b6", "#fb923c", "#a78bfa", "#34d399"].map((color) => (
+            <button
+              key={color}
+              className={cn(
+                "size-8 rounded-full ring-2 ring-offset-2 dark:ring-offset-gray-900 transition-all",
+                color === "#cdff8c" ? "ring-gray-900 dark:ring-gray-100" : "ring-transparent hover:ring-gray-300"
+              )}
+              style={{ backgroundColor: color }}
+            />
+          ))}
+        </div>
+        <p className="mt-3 text-[10px] text-muted-foreground">
+          Accent color customization coming soon. Currently using green.
+        </p>
+      </Section>
+
+      <Section title="Layout" description="How the navigation is displayed.">
+        <Field label="Navigation Style" hint="Choose how the main navigation appears.">
+          <Select defaultValue="top">
+            <SelectTrigger className="h-9 w-full rounded-lg border border-input bg-transparent dark:bg-gray-900 dark:text-gray-100 px-3 text-sm focus:ring-2 focus:ring-[#cdff8c]/50">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="top">Top navigation (current)</SelectItem>
+              <SelectItem value="left">Left sidebar</SelectItem>
+              <SelectItem value="compact">Compact sidebar</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+        <p className="mt-3 text-[10px] text-muted-foreground">
+          Layout customization coming soon.
+        </p>
+      </Section>
+    </>
+  );
+}
+
 // ── Main component ───────────────────────────────────────────────────────────
 
+/** Main settings page with tabbed navigation for workspace, security, and preferences. */
 export default function SettingsPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("general");
   const [showInvite, setShowInvite] = useState(false);
 
-  const authUser = useAuthStore((s) => s.user);
-  const currentOrgId = useAuthStore((s) => s.currentOrgId);
-  const logout = useAuthStore((s) => s.logout);
+  const authUser = useAuthStore((state) => state.user);
+  const currentOrgId = useAuthStore((state) => state.currentOrgId);
+  const logout = useAuthStore((state) => state.logout);
 
   // Org data
   const { data: org, isLoading: orgLoading } = useCurrentOrg();
   const { data: members, isLoading: membersLoading } = useOrgMembers(currentOrgId);
   const { data: invites } = useOrgInvites(currentOrgId);
 
-  // Mutations
+  // ── Mutations for organization, member, and invite operations ──
   const updateOrg = useUpdateOrganizationMutation(currentOrgId ?? "");
   const deleteOrg = useDeleteOrganizationMutation();
   const updateRole = useUpdateMemberRoleMutation(currentOrgId ?? "");
@@ -313,7 +427,7 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-gray-900">Settings</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Settings</h1>
         <p className="text-sm text-muted-foreground">
           Manage your workspace configuration, security, and preferences.
         </p>
@@ -322,7 +436,7 @@ export default function SettingsPage() {
       <div className="flex gap-6 items-start">
         {/* Sidebar */}
         <aside className="hidden w-52 shrink-0 md:block">
-          <div className="rounded-xl bg-white p-2 shadow-sm ring-1 ring-border">
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-2 shadow-sm ring-1 ring-border">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
@@ -331,7 +445,7 @@ export default function SettingsPage() {
                   "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
                   activeTab === id
                     ? "bg-[#cdff8c] text-gray-900"
-                    : "text-gray-500 hover:bg-[#f1f7fa] hover:text-gray-900"
+                    : "text-gray-500 dark:text-gray-400 hover:bg-[#f1f7fa] dark:hover:bg-gray-800/60 hover:text-gray-900 dark:hover:text-gray-100"
                 )}
               >
                 <Icon className="size-4 shrink-0" />
@@ -352,7 +466,7 @@ export default function SettingsPage() {
                 "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                 activeTab === id
                   ? "bg-[#cdff8c] text-gray-900"
-                  : "bg-white text-gray-500 ring-1 ring-border"
+                  : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 ring-1 ring-border"
               )}
             >
               {label}
@@ -388,8 +502,8 @@ export default function SettingsPage() {
                               <SelectValue placeholder="Select industry" />
                             </SelectTrigger>
                             <SelectContent>
-                              {INDUSTRIES.map((i) => (
-                                <SelectItem key={i} value={i}>{i}</SelectItem>
+                              {INDUSTRIES.map((industry) => (
+                                <SelectItem key={industry} value={industry}>{industry}</SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
@@ -459,8 +573,8 @@ export default function SettingsPage() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {CURRENCIES.map((c) => (
-                            <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
+                          {CURRENCIES.map((currency) => (
+                            <SelectItem key={currency.value} value={currency.value}>{currency.label}</SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
@@ -479,13 +593,13 @@ export default function SettingsPage() {
                 </div>
               </Section>
 
-              <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-red-100">
+              <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-red-100">
                 <div className="flex items-start gap-3">
                   <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-red-100">
                     <AlertTriangle className="size-4 text-red-600" />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-semibold text-gray-900">Danger Zone</p>
+                    <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Danger Zone</p>
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       Permanently delete this workspace and all its data. This action cannot be undone.
                     </p>
@@ -507,7 +621,7 @@ export default function SettingsPage() {
           {activeTab === "security" && (
             <>
               <Section title="Change Password" description="Update your account password regularly.">
-                <form onSubmit={passwordForm.handleSubmit((d) => changePassword.mutate(d))} className="space-y-3">
+                <form onSubmit={passwordForm.handleSubmit((formData) => changePassword.mutate(formData))} className="space-y-3">
                   <Field label="Current Password">
                     <input
                       type="password"
@@ -561,25 +675,25 @@ export default function SettingsPage() {
                       <Smartphone className="size-5 text-[#4d7a00]" />
                     </div>
                     <div>
-                      <p className="text-sm font-medium text-gray-900">Authenticator App</p>
+                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Authenticator App</p>
                       <p className="text-xs text-muted-foreground">
                         {authUser?.twoFactorEnabled ? "Two-factor is enabled." : "Use Google Authenticator or similar app."}
                       </p>
                     </div>
                   </div>
-                  <button className="inline-flex h-8 items-center rounded-lg border border-input bg-white px-3 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+                  <button className="inline-flex h-8 items-center rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors">
                     {authUser?.twoFactorEnabled ? "Disable 2FA" : "Enable 2FA"}
                   </button>
                 </div>
               </Section>
 
-              <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-red-100">
+              <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-red-100">
                 <div className="flex items-start gap-3">
                   <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-red-100">
                     <AlertTriangle className="size-4 text-red-600" />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-semibold text-gray-900">Delete Account</p>
+                    <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Delete Account</p>
                     <p className="mt-0.5 text-xs text-muted-foreground">
                       Permanently delete your account. This cannot be undone.
                     </p>
@@ -649,22 +763,22 @@ export default function SettingsPage() {
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {members?.map((m, i) => {
-                      const initials = `${m.user.firstName[0]}${m.user.lastName[0]}`.toUpperCase();
-                      const isOwner = m.role === "OWNER";
-                      const isCurrentUser = m.user.id === authUser?.id;
+                    {members?.map((member, index) => {
+                      const initials = `${member.user.firstName[0]}${member.user.lastName[0]}`.toUpperCase();
+                      const isOwner = member.role === "OWNER";
+                      const isCurrentUser = member.user.id === authUser?.id;
 
                       return (
-                        <div key={m.id} className="flex items-center gap-3 rounded-lg bg-[#f1f7fa] px-4 py-3">
-                          <div className={cn("flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold", AVATAR_COLORS[i % AVATAR_COLORS.length])}>
+                        <div key={member.id} className="flex items-center gap-3 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-4 py-3">
+                          <div className={cn("flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold", AVATAR_COLORS[index % AVATAR_COLORS.length])}>
                             {initials}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <p className="text-xs font-medium text-gray-900">
-                              {m.user.firstName} {m.user.lastName}
+                            <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
+                              {member.user.firstName} {member.user.lastName}
                               {isCurrentUser && <span className="ml-1.5 text-[10px] text-gray-400">(you)</span>}
                             </p>
-                            <p className="text-[10px] text-muted-foreground">{m.user.email}</p>
+                            <p className="text-[10px] text-muted-foreground">{member.user.email}</p>
                           </div>
 
                           {isOwner ? (
@@ -673,17 +787,17 @@ export default function SettingsPage() {
                             </span>
                           ) : (
                             <Select
-                              value={m.role}
-                              onValueChange={(v) =>
-                                updateRole.mutate({ memberId: m.id, data: { role: v as UserRole } })
+                              value={member.role}
+                              onValueChange={(selectedRole) =>
+                                updateRole.mutate({ memberId: member.id, data: { role: selectedRole as UserRole } })
                               }
                             >
-                              <SelectTrigger className="h-7 w-[100px] shrink-0 border-input bg-white text-xs">
+                              <SelectTrigger className="h-7 w-[100px] shrink-0 border-input bg-white dark:bg-gray-900 text-xs">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
-                                {ROLE_OPTIONS.map((r) => (
-                                  <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                                {ROLE_OPTIONS.map((roleOption) => (
+                                  <SelectItem key={roleOption.value} value={roleOption.value}>{roleOption.label}</SelectItem>
                                 ))}
                               </SelectContent>
                             </Select>
@@ -692,8 +806,8 @@ export default function SettingsPage() {
                           {!isOwner && !isCurrentUser && (
                             <button
                               onClick={() => {
-                                if (window.confirm(`Remove ${m.user.firstName} from this workspace?`)) {
-                                  removeMember.mutate(m.id);
+                                if (window.confirm(`Remove ${member.user.firstName} from this workspace?`)) {
+                                  removeMember.mutate(member.id);
                                 }
                               }}
                               className="shrink-0 text-gray-300 hover:text-red-500 transition-colors"
@@ -712,21 +826,21 @@ export default function SettingsPage() {
               {invites && invites.length > 0 && (
                 <Section title="Pending Invitations" description="Invitations that haven't been accepted yet.">
                   <div className="space-y-2">
-                    {invites.map((inv) => (
-                      <div key={inv.id} className="flex items-center justify-between gap-3 rounded-lg bg-[#f1f7fa] px-4 py-3">
+                    {invites.map((invite) => (
+                      <div key={invite.id} className="flex items-center justify-between gap-3 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-4 py-3">
                         <div className="flex items-center gap-3">
                           <div className="flex size-8 items-center justify-center rounded-full bg-orange-100 text-xs font-bold text-orange-700">
                             <Mail className="size-3.5" />
                           </div>
                           <div>
-                            <p className="text-xs font-medium text-gray-900">{inv.email}</p>
+                            <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{invite.email}</p>
                             <p className="text-[10px] text-muted-foreground">
-                              Invited as {inv.role.toLowerCase()} · Expires {new Date(inv.expiresAt).toLocaleDateString()}
+                              Invited as {invite.role.toLowerCase()} · Expires {new Date(invite.expiresAt).toLocaleDateString()}
                             </p>
                           </div>
                         </div>
                         <button
-                          onClick={() => revokeInvite.mutate(inv.id)}
+                          onClick={() => revokeInvite.mutate(invite.id)}
                           className="text-xs font-medium text-red-500 hover:text-red-700 transition-colors"
                         >
                           Revoke
@@ -743,30 +857,30 @@ export default function SettingsPage() {
           {activeTab === "billing" && (
             <>
               <Section title="Current Plan" description={`You are on the ${org?.billingPlan?.toLowerCase() ?? "free"} plan.`}>
-                <div className="flex items-center justify-between gap-4 rounded-lg bg-[#f1f7fa] p-4">
+                <div className="flex items-center justify-between gap-4 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 p-4">
                   <div>
-                    <p className="text-sm font-bold text-gray-900 capitalize">
+                    <p className="text-sm font-bold text-gray-900 dark:text-gray-100 capitalize">
                       {org?.billingPlan ?? "Free"} Plan
                     </p>
                     <p className="text-xs text-muted-foreground">
                       {org?.billingPlan === "FREE" ? "No charge — upgrade to unlock more features." : "Managed via Stripe."}
                     </p>
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {["Unlimited orders", `${members?.length ?? 1} team member${(members?.length ?? 1) !== 1 ? "s" : ""}`, "Analytics", "Email support"].map((f) => (
-                        <span key={f} className="inline-flex items-center gap-1 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-[10px] font-medium text-[#4d7a00]">
-                          <Check className="size-2.5" /> {f}
+                      {["Unlimited orders", `${members?.length ?? 1} team member${(members?.length ?? 1) !== 1 ? "s" : ""}`, "Analytics", "Email support"].map((feature) => (
+                        <span key={feature} className="inline-flex items-center gap-1 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-[10px] font-medium text-[#4d7a00]">
+                          <Check className="size-2.5" /> {feature}
                         </span>
                       ))}
                     </div>
                   </div>
-                  <button className="shrink-0 inline-flex h-8 items-center rounded-lg border border-input bg-white px-3 text-xs font-medium text-gray-700 hover:bg-gray-50 transition-colors">
+                  <button className="shrink-0 inline-flex h-8 items-center rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors">
                     Upgrade
                   </button>
                 </div>
               </Section>
 
               <Section title="Payment Method" description="Manage your billing information.">
-                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-dashed border-input px-3 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 transition-colors">
+                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-dashed border-input px-3 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
                   + Add Payment Method
                 </button>
               </Section>
@@ -775,55 +889,7 @@ export default function SettingsPage() {
 
           {/* ─── APPEARANCE ─── */}
           {activeTab === "appearance" && (
-            <Section title="Appearance" description="Customize how your CRM looks and feels.">
-              <div className="space-y-5">
-                <Field label="Theme" hint="Choose your preferred color mode.">
-                  <div className="flex gap-2">
-                    {["Light", "Dark", "System"].map((t) => (
-                      <button
-                        key={t}
-                        className={cn(
-                          "flex-1 rounded-lg border py-2 text-xs font-medium transition-colors",
-                          t === "Light"
-                            ? "border-[#cdff8c] bg-[#cdff8c]/20 text-[#4d7a00]"
-                            : "border-input bg-white text-gray-500 hover:border-gray-300"
-                        )}
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-                </Field>
-
-                <Field label="Accent Color" hint="Used for buttons, highlights, and active states.">
-                  <div className="flex items-center gap-2">
-                    {["#cdff8c", "#60a5fa", "#f472b6", "#fb923c", "#a78bfa", "#34d399"].map((c) => (
-                      <button
-                        key={c}
-                        className={cn(
-                          "size-7 rounded-full ring-2 ring-offset-2 transition-all",
-                          c === "#cdff8c" ? "ring-gray-900" : "ring-transparent hover:ring-gray-300"
-                        )}
-                        style={{ backgroundColor: c }}
-                      />
-                    ))}
-                  </div>
-                </Field>
-
-                <Field label="Sidebar Layout" hint="How the navigation is displayed.">
-                  <select className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50">
-                    <option>Top navigation (current)</option>
-                    <option>Left sidebar</option>
-                    <option>Compact sidebar</option>
-                  </select>
-                </Field>
-              </div>
-              <div className="mt-5 flex justify-end">
-                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors">
-                  <Check className="size-3.5" /> Apply
-                </button>
-              </div>
-            </Section>
+            <AppearanceTab />
           )}
 
         </div>

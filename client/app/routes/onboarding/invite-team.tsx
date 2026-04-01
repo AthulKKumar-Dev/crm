@@ -27,13 +27,23 @@ interface InviteRow {
   error?: string;
 }
 
-const ROLES: { value: UserRole; label: string; desc: string }[] = [
-  { value: "ADMIN", label: "Admin", desc: "Full access, manage team" },
-  { value: "MANAGER", label: "Manager", desc: "Manage orders & customers" },
-  { value: "AGENT", label: "Agent", desc: "Handle conversations" },
-  { value: "VIEWER", label: "Viewer", desc: "Read-only access" },
+const ROLES: { value: UserRole; label: string; description: string }[] = [
+  { value: "ADMIN", label: "Admin", description: "Full access, manage team" },
+  { value: "MANAGER", label: "Manager", description: "Manage orders & customers" },
+  { value: "AGENT", label: "Agent", description: "Handle conversations" },
+  { value: "VIEWER", label: "Viewer", description: "Read-only access" },
 ];
 
+/** Delay (in ms) before checking if all invites were sent and redirecting. */
+const REDIRECT_CHECK_DELAY = 300;
+
+/** Delay (in ms) after success toast before navigating to the dashboard. */
+const REDIRECT_NAVIGATE_DELAY = 1200;
+
+/**
+ * Onboarding step 3: invite team members to the organization.
+ * Allows adding multiple email/role rows and sending invitations in sequence.
+ */
 export default function InviteTeamPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -46,60 +56,64 @@ export default function InviteTeamPage() {
 
   const sendInvite = useSendInviteMutation(orgId);
 
-  function addRow() {
-    setRows((prev) => [
-      ...prev,
+  /* ── Row management handlers ─────────────────────────── */
+
+  function handleAddRow() {
+    setRows((previousRows) => [
+      ...previousRows,
       { id: crypto.randomUUID(), email: "", role: "AGENT", status: "idle" },
     ]);
   }
 
-  function removeRow(id: string) {
-    setRows((prev) => prev.filter((r) => r.id !== id));
+  function handleRemoveRow(id: string) {
+    setRows((previousRows) => previousRows.filter((row) => row.id !== id));
   }
 
-  function updateEmail(id: string, email: string) {
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, email, status: "idle", error: undefined } : r))
+  function handleEmailChange(id: string, email: string) {
+    setRows((previousRows) =>
+      previousRows.map((row) => (row.id === id ? { ...row, email, status: "idle", error: undefined } : row))
     );
   }
 
-  function updateRole(id: string, role: UserRole) {
-    setRows((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, role } : r))
+  function handleRoleChange(id: string, role: UserRole) {
+    setRows((previousRows) =>
+      previousRows.map((row) => (row.id === id ? { ...row, role } : row))
     );
   }
+
+  /* ── Send all invitations sequentially ───────────────── */
 
   async function handleSendAll() {
-    const validRows = rows.filter(
-      (r) => r.email.trim() && r.status !== "sent"
+    const pendingRows = rows.filter(
+      (row) => row.email.trim() && row.status !== "sent"
     );
 
-    if (validRows.length === 0) {
+    if (pendingRows.length === 0) {
       navigate("/dashboard");
       return;
     }
 
     setIsSendingAll(true);
 
-    for (const row of validRows) {
+    for (const inviteRow of pendingRows) {
       // Mark as sending
-      setRows((prev) =>
-        prev.map((r) => (r.id === row.id ? { ...r, status: "sending" } : r))
+      setRows((previousRows) =>
+        previousRows.map((row) => (row.id === inviteRow.id ? { ...row, status: "sending" } : row))
       );
 
       try {
-        await sendInvite.mutateAsync({ email: row.email.trim(), role: row.role });
-        setRows((prev) =>
-          prev.map((r) => (r.id === row.id ? { ...r, status: "sent" } : r))
+        await sendInvite.mutateAsync({ email: inviteRow.email.trim(), role: inviteRow.role });
+        setRows((previousRows) =>
+          previousRows.map((row) => (row.id === inviteRow.id ? { ...row, status: "sent" } : row))
         );
       } catch (error) {
-        const msg =
+        const errorMessage =
           isAxiosError(error)
             ? error.response?.data?.message || "Failed to send"
             : "Failed to send";
-        setRows((prev) =>
-          prev.map((r) =>
-            r.id === row.id ? { ...r, status: "error", error: msg } : r
+        setRows((previousRows) =>
+          previousRows.map((row) =>
+            row.id === inviteRow.id ? { ...row, status: "error", error: errorMessage } : row
           )
         );
       }
@@ -107,27 +121,29 @@ export default function InviteTeamPage() {
 
     setIsSendingAll(false);
 
-    // Check if all sent successfully
+    // Check if all sent successfully and redirect
     setTimeout(() => {
-      setRows((current) => {
-        const allDone = current.every(
-          (r) => r.status === "sent" || !r.email.trim()
+      setRows((currentRows) => {
+        const allDone = currentRows.every(
+          (row) => row.status === "sent" || !row.email.trim()
         );
         if (allDone) {
           toast.success("All invitations sent! Redirecting to dashboard…");
-          setTimeout(() => navigate("/dashboard"), 1200);
+          setTimeout(() => navigate("/dashboard"), REDIRECT_NAVIGATE_DELAY);
         }
-        return current;
+        return currentRows;
       });
-    }, 300);
+    }, REDIRECT_CHECK_DELAY);
   }
 
   function handleSkip() {
     navigate("/dashboard");
   }
 
-  const sentCount = rows.filter((r) => r.status === "sent").length;
-  const hasValidEmails = rows.some((r) => r.email.trim() && r.status !== "sent");
+  /* ── Derived state ───────────────────────────────────── */
+
+  const sentCount = rows.filter((row) => row.status === "sent").length;
+  const hasValidEmails = rows.some((row) => row.email.trim() && row.status !== "sent");
 
   return (
     <div>
@@ -166,7 +182,7 @@ export default function InviteTeamPage() {
                   type="email"
                   placeholder="teammate@company.com"
                   value={row.email}
-                  onChange={(e) => updateEmail(row.id, e.target.value)}
+                  onChange={(event) => handleEmailChange(row.id, event.target.value)}
                   disabled={row.status === "sent" || row.status === "sending"}
                   className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 disabled:bg-gray-50 disabled:opacity-60"
                 />
@@ -178,18 +194,18 @@ export default function InviteTeamPage() {
               {/* Role select */}
               <Select
                 value={row.role}
-                onValueChange={(v) => updateRole(row.id, v as UserRole)}
+                onValueChange={(selectedRole) => handleRoleChange(row.id, selectedRole as UserRole)}
                 disabled={row.status === "sent" || row.status === "sending"}
               >
-                <SelectTrigger className="w-[130px] shrink-0 border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
+                <SelectTrigger className="w-[130px] shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {ROLES.map((r) => (
-                    <SelectItem key={r.value} value={r.value}>
+                  {ROLES.map((roleOption) => (
+                    <SelectItem key={roleOption.value} value={roleOption.value}>
                       <div>
-                        <span className="font-medium">{r.label}</span>
-                        <span className="ml-1.5 text-[10px] text-gray-400">{r.desc}</span>
+                        <span className="font-medium">{roleOption.label}</span>
+                        <span className="ml-1.5 text-[10px] text-gray-400">{roleOption.description}</span>
                       </div>
                     </SelectItem>
                   ))}
@@ -200,7 +216,7 @@ export default function InviteTeamPage() {
               {rows.length > 1 && row.status !== "sent" && (
                 <button
                   type="button"
-                  onClick={() => removeRow(row.id)}
+                  onClick={() => handleRemoveRow(row.id)}
                   className="mt-2.5 shrink-0 text-gray-300 hover:text-gray-500 transition-colors"
                 >
                   <X className="size-4" />
@@ -215,13 +231,13 @@ export default function InviteTeamPage() {
           ))}
 
           {/* Error messages */}
-          {rows.some((r) => r.error) && (
+          {rows.some((row) => row.error) && (
             <div className="space-y-1 pt-1">
               {rows
-                .filter((r) => r.error)
-                .map((r) => (
-                  <p key={r.id} className="text-xs text-red-500">
-                    {r.email}: {r.error}
+                .filter((row) => row.error)
+                .map((row) => (
+                  <p key={row.id} className="text-xs text-red-500">
+                    {row.email}: {row.error}
                   </p>
                 ))}
             </div>
@@ -231,7 +247,7 @@ export default function InviteTeamPage() {
         {/* Add another */}
         <button
           type="button"
-          onClick={addRow}
+          onClick={handleAddRow}
           disabled={isSendingAll}
           className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-[#4d7a00] hover:text-[#3d6000] transition-colors disabled:opacity-50"
         >

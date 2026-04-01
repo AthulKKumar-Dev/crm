@@ -15,25 +15,29 @@ export function meta() {
   ];
 }
 
-const schema = z
+const resetPasswordSchema = z
   .object({
     newPassword: z
       .string()
       .min(8, "Password must be at least 8 characters"),
     confirmPassword: z.string(),
   })
-  .refine((d) => d.newPassword === d.confirmPassword, {
+  .refine((values) => values.newPassword === values.confirmPassword, {
     message: "Passwords do not match",
     path: ["confirmPassword"],
   });
 
-type FormValues = z.infer<typeof schema>;
+type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>;
 
+/**
+ * Reset password page where users set a new password using a token from email.
+ * Validates that both password fields match and enforces minimum length.
+ */
 export default function ResetPasswordPage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") ?? "";
-  const [showNew, setShowNew] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   const reset = useResetPasswordMutation();
 
@@ -41,8 +45,8 @@ export default function ResetPasswordPage() {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<FormValues>({
-    resolver: zodResolver(schema),
+  } = useForm<ResetPasswordFormValues>({
+    resolver: zodResolver(resetPasswordSchema),
     defaultValues: { newPassword: "", confirmPassword: "" },
   });
 
@@ -51,7 +55,7 @@ export default function ResetPasswordPage() {
       ? reset.error.response?.data?.message
       : null;
 
-  function onSubmit(data: FormValues) {
+  function onSubmit(data: ResetPasswordFormValues) {
     reset.mutate({ token, newPassword: data.newPassword });
   }
 
@@ -98,7 +102,7 @@ export default function ResetPasswordPage() {
           <div className="relative">
             <input
               id="newPassword"
-              type={showNew ? "text" : "password"}
+              type={showNewPassword ? "text" : "password"}
               placeholder="Min. 8 characters"
               autoComplete="new-password"
               aria-invalid={!!errors.newPassword}
@@ -108,10 +112,10 @@ export default function ResetPasswordPage() {
             <button
               type="button"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-              onClick={() => setShowNew((p) => !p)}
+              onClick={() => setShowNewPassword((visible) => !visible)}
               tabIndex={-1}
             >
-              {showNew ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              {showNewPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </button>
           </div>
           {errors.newPassword && (
@@ -127,7 +131,7 @@ export default function ResetPasswordPage() {
           <div className="relative">
             <input
               id="confirmPassword"
-              type={showConfirm ? "text" : "password"}
+              type={showConfirmPassword ? "text" : "password"}
               placeholder="Re-enter your password"
               autoComplete="new-password"
               aria-invalid={!!errors.confirmPassword}
@@ -137,10 +141,10 @@ export default function ResetPasswordPage() {
             <button
               type="button"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-              onClick={() => setShowConfirm((p) => !p)}
+              onClick={() => setShowConfirmPassword((visible) => !visible)}
               tabIndex={-1}
             >
-              {showConfirm ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+              {showConfirmPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </button>
           </div>
           {errors.confirmPassword && (

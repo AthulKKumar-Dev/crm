@@ -20,6 +20,8 @@ import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { orgKeys } from "~/hooks/use-org-queries";
 
+/* ── Select field option lists ───────────────────────────── */
+
 const INDUSTRIES = [
   "Retail", "E-commerce", "Fashion", "Electronics", "Food & Beverage",
   "Health & Beauty", "Home & Garden", "Sports & Outdoors", "Technology",
@@ -51,7 +53,9 @@ const CURRENCIES = [
   { label: "AED — UAE Dirham", value: "AED" },
 ];
 
-const schema = z.object({
+/* ── Form validation schema ─────────────────────────────── */
+
+const createOrganizationSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters").max(100),
   industry: z.string().optional(),
   website: z.string().url("Please enter a valid URL").optional().or(z.literal("")),
@@ -60,16 +64,20 @@ const schema = z.object({
   currency: z.string().optional(),
 });
 
-type FormValues = z.infer<typeof schema>;
+type CreateOrganizationFormValues = z.infer<typeof createOrganizationSchema>;
 
 export function meta() {
   return [{ title: "Create Organization | Collabo CRM" }];
 }
 
+/**
+ * Onboarding step 2: organization creation form.
+ * Collects org name, logo, industry, website, timezone, and currency.
+ */
 export default function CreateOrganizationPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+  const setCurrentOrg = useAuthStore((state) => state.setCurrentOrg);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
   const {
@@ -78,15 +86,16 @@ export default function CreateOrganizationPage() {
     setValue,
     watch,
     formState: { errors },
-  } = useForm<FormValues>({
-    resolver: zodResolver(schema),
+  } = useForm<CreateOrganizationFormValues>({
+    resolver: zodResolver(createOrganizationSchema),
     defaultValues: { name: "", industry: "", website: "", logo: "", timezone: "UTC", currency: "USD" },
   });
 
   const logoValue = watch("logo");
 
+  /* ── Mutation: create the organization ────────────────── */
   const createOrg = useMutation({
-    mutationFn: (data: FormValues) =>
+    mutationFn: (data: CreateOrganizationFormValues) =>
       orgService.create({
         name: data.name,
         industry: data.industry || undefined,
@@ -111,7 +120,9 @@ export default function CreateOrganizationPage() {
     },
   });
 
-  function onSubmit(data: FormValues) {
+  /* ── Event handlers ──────────────────────────────────── */
+
+  function onSubmit(data: CreateOrganizationFormValues) {
     createOrg.mutate(data);
   }
 
@@ -124,7 +135,7 @@ export default function CreateOrganizationPage() {
     }
   }
 
-  function clearLogo() {
+  function handleClearLogo() {
     setValue("logo", "");
     setLogoPreview(null);
   }
@@ -179,7 +190,7 @@ export default function CreateOrganizationPage() {
                     />
                     <button
                       type="button"
-                      onClick={clearLogo}
+                      onClick={handleClearLogo}
                       className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-gray-900 text-white shadow-sm hover:bg-gray-700"
                     >
                       <X className="size-3" />
@@ -232,13 +243,13 @@ export default function CreateOrganizationPage() {
               <label className="block text-sm font-medium text-gray-700">
                 Industry
               </label>
-              <Select onValueChange={(v) => setValue("industry", v)}>
-                <SelectTrigger className="w-full border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
+              <Select onValueChange={(selectedIndustry) => setValue("industry", selectedIndustry)}>
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
                   <SelectValue placeholder="Select your industry" />
                 </SelectTrigger>
                 <SelectContent>
-                  {INDUSTRIES.map((ind) => (
-                    <SelectItem key={ind} value={ind}>{ind}</SelectItem>
+                  {INDUSTRIES.map((industry) => (
+                    <SelectItem key={industry} value={industry}>{industry}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -267,13 +278,13 @@ export default function CreateOrganizationPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-gray-700">Timezone</label>
-              <Select defaultValue="UTC" onValueChange={(v) => setValue("timezone", v)}>
-                <SelectTrigger className="w-full border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
+              <Select defaultValue="UTC" onValueChange={(selectedTimezone) => setValue("timezone", selectedTimezone)}>
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
                   <SelectValue placeholder="Select timezone" />
                 </SelectTrigger>
                 <SelectContent>
-                  {TIMEZONES.map((tz) => (
-                    <SelectItem key={tz.value} value={tz.value}>{tz.label}</SelectItem>
+                  {TIMEZONES.map((timezone) => (
+                    <SelectItem key={timezone.value} value={timezone.value}>{timezone.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -281,13 +292,13 @@ export default function CreateOrganizationPage() {
 
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-gray-700">Currency</label>
-              <Select defaultValue="USD" onValueChange={(v) => setValue("currency", v)}>
-                <SelectTrigger className="w-full border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
+              <Select defaultValue="USD" onValueChange={(selectedCurrency) => setValue("currency", selectedCurrency)}>
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
                   <SelectValue placeholder="Select currency" />
                 </SelectTrigger>
                 <SelectContent>
-                  {CURRENCIES.map((c) => (
-                    <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>
+                  {CURRENCIES.map((currency) => (
+                    <SelectItem key={currency.value} value={currency.value}>{currency.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

@@ -32,6 +32,7 @@ export interface Product {
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
 
+/** Summary statistics shown on the main dashboard overview. */
 export const DASHBOARD_STATS: StatCardData[] = [
   { label: "Total Products Sales", value: "118,594", change: -10, changeLabel: "vs last month" },
   { label: "Total Volume of Products", value: "257,361", change: 54, changeLabel: "vs last month" },
@@ -41,6 +42,7 @@ export const DASHBOARD_STATS: StatCardData[] = [
 
 // ─── Orders Stats ────────────────────────────────────────────────────────────
 
+/** Summary statistics shown on the orders page. */
 export const ORDER_STATS: StatCardData[] = [
   { label: "Total New Orders", value: "594", change: 54, changeLabel: "vs last week" },
   { label: "Total Orders Pending", value: "257,361", change: -10, changeLabel: "vs last week" },
@@ -50,6 +52,7 @@ export const ORDER_STATS: StatCardData[] = [
 
 // ─── Bar Chart Data ───────────────────────────────────────────────────────────
 
+/** Monthly revenue vs. profit data for the bar chart widget. */
 export const PROFIT_CHART_DATA = [
   { month: "Jan", revenue: 62000, profit: 38000 },
   { month: "Mar", revenue: 48000, profit: 28000 },
@@ -62,6 +65,7 @@ export const PROFIT_CHART_DATA = [
 
 // ─── Donut Chart Data ─────────────────────────────────────────────────────────
 
+/** Sales distribution by category for the donut chart widget. */
 export const SALES_CHART_DATA = [
   { name: "Electronics", value: 37715, color: "#a78bfa" },
   { name: "Furniture", value: 29153, color: "#fbbf24" },
@@ -71,6 +75,7 @@ export const SALES_CHART_DATA = [
 
 // ─── Sample Orders ────────────────────────────────────────────────────────────
 
+/** Placeholder order rows for the orders table. */
 export const SAMPLE_ORDERS: Order[] = [
   { id: "#302012", productName: "Wall Clock Special Edition", productImage: "", variantCount: 3, customerName: "Cameron Williamson", date: "22 Jan 2022", payment: "Mastercard", amount: 121.0, status: "COMPLETED" },
   { id: "#302011", productName: "Airpods Max 2024 Edition", productImage: "", variantCount: 0, customerName: "Brooklyn Simmons", date: "20 Jan 2022", payment: "Visa", amount: 590.0, status: "IN_PROGRESS" },
@@ -96,6 +101,7 @@ export const SAMPLE_ORDERS: Order[] = [
 
 // ─── Top Products ─────────────────────────────────────────────────────────────
 
+/** Top-selling products displayed on the dashboard. */
 export const TOP_PRODUCTS: Product[] = [
   { id: "1", name: "Apple Watch Series 10 46mm GPS", brand: "Apple", price: 799.0, stockCount: 5800, sold: 20618, image: "", sparkline: [30, 40, 35, 50, 45, 55, 60, 58, 65, 70, 68, 72] },
   { id: "2", name: "Sony WH-1000XM5 Headphones", brand: "Sony", price: 349.99, stockCount: 2300, sold: 14200, image: "", sparkline: [20, 30, 28, 35, 40, 38, 45, 42, 48, 50, 52, 55] },
@@ -106,6 +112,7 @@ export const TOP_PRODUCTS: Product[] = [
 
 // ─── Analytics Stats ──────────────────────────────────────────────────────────
 
+/** Summary statistics shown on the analytics page. */
 export const ANALYTICS_STATS: StatCardData[] = [
   { label: "Total Revenue", value: "$96,715", change: 18, changeLabel: "vs last month" },
   { label: "Conversion Rate", value: "3.24%", change: -5, changeLabel: "vs last month" },
@@ -113,6 +120,7 @@ export const ANALYTICS_STATS: StatCardData[] = [
   { label: "Returning Customers", value: "41.8%", change: 7, changeLabel: "vs last month" },
 ];
 
+/** Month-over-month trend data (revenue, sessions, orders) for the analytics line chart. */
 export const ANALYTICS_TREND_DATA = [
   { month: "Jan", revenue: 62000, sessions: 18400, orders: 419 },
   { month: "Feb", revenue: 54000, sessions: 16200, orders: 364 },
@@ -128,6 +136,7 @@ export const ANALYTICS_TREND_DATA = [
   { month: "Dec", revenue: 110000, sessions: 33500, orders: 742 },
 ];
 
+/** Traffic acquisition channel breakdown for the analytics table. */
 export const ANALYTICS_CHANNEL_DATA = [
   { channel: "Organic", sessions: 12400, orders: 298, revenue: 44200 },
   { channel: "Paid Search", sessions: 8900, orders: 214, revenue: 31800 },
@@ -152,6 +161,7 @@ export interface CatalogProduct {
   status: ProductStatus;
 }
 
+/** Summary statistics shown on the product catalog page. */
 export const CATALOG_STATS: StatCardData[] = [
   { label: "Total Products", value: "1,284", change: 8, changeLabel: "vs last month" },
   { label: "Active Listings", value: "1,047", change: 5, changeLabel: "vs last month" },
@@ -159,6 +169,7 @@ export const CATALOG_STATS: StatCardData[] = [
   { label: "Low Stock Items", value: "144", change: 22, changeLabel: "vs last month" },
 ];
 
+/** Placeholder product catalog rows for the products table. */
 export const SAMPLE_CATALOG: CatalogProduct[] = [
   { id: "1", name: "Apple Watch Series 10 46mm GPS", category: "Electronics", sku: "APL-AW10-46", price: 799.0, stock: 5800, sold: 20618, status: "ACTIVE" },
   { id: "2", name: "Sony WH-1000XM5 Headphones", category: "Electronics", sku: "SNY-WH1000XM5", price: 349.99, stock: 2300, sold: 14200, status: "ACTIVE" },
@@ -190,6 +201,7 @@ export interface Customer {
   status: CustomerStatus;
 }
 
+/** Summary statistics shown on the customers page. */
 export const CUSTOMER_STATS: StatCardData[] = [
   { label: "Total Customers", value: "12,847", change: 23, changeLabel: "vs last month" },
   { label: "Active Customers", value: "9,312", change: 11, changeLabel: "vs last month" },
@@ -197,6 +209,7 @@ export const CUSTOMER_STATS: StatCardData[] = [
   { label: "At Risk", value: "391", change: -8, changeLabel: "vs last month" },
 ];
 
+/** Placeholder customer rows for the customers table. */
 export const SAMPLE_CUSTOMERS: Customer[] = [
   { id: "1", firstName: "Cameron", lastName: "Williamson", email: "cameron.w@email.com", location: "New York, US", orders: 24, totalSpent: 4280.50, lastOrderDate: "22 Jan 2022", status: "VIP" },
   { id: "2", firstName: "Brooklyn", lastName: "Simmons", email: "brooklyn.s@email.com", location: "Los Angeles, US", orders: 12, totalSpent: 1890.00, lastOrderDate: "20 Jan 2022", status: "ACTIVE" },
@@ -233,6 +246,7 @@ export interface Conversation {
   messages: Message[];
 }
 
+/** Placeholder conversation threads for the messaging inbox. */
 export const SAMPLE_CONVERSATIONS: Conversation[] = [
   {
     id: "c1",

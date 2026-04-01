@@ -9,10 +9,14 @@ export function meta() {
   return [{ title: "Choose Account Type | Collabo CRM" }];
 }
 
+/**
+ * Onboarding step 1: account type selection.
+ * Users choose between a personal (solo) workspace or a team organization.
+ */
 export default function AccountTypePage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<"personal" | "organization" | null>(null);
-  const user = useAuthStore((s) => s.user);
+  const user = useAuthStore((state) => state.user);
   const createPersonal = useCreatePersonalMutation();
 
   function handleSelect(type: "personal" | "organization") {

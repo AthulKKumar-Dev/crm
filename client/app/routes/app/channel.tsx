@@ -14,14 +14,17 @@ export function meta() {
   return [{ title: "Channel | Collabo CRM" }];
 }
 
-/* ─── Data ──────────────────────────────────────────────────────── */
+/* ─── Channel overview data ────────────────────────────────────── */
 
+/** Summary statistics displayed at the top of the channel page. */
 const CHANNEL_STATS = [
   { label: "Active Channels",   value: "5",        change: 1,   positive: true,  changeLabel: "vs last month" },
   { label: "Total GMV",         value: "$284,910",  change: 31,  positive: true,  changeLabel: "vs last month" },
   { label: "Channel Orders",    value: "4,821",     change: 18,  positive: true,  changeLabel: "vs last month" },
   { label: "Sync Errors",       value: "3",         change: -60, positive: true,  changeLabel: "vs last month" },
 ];
+
+/* ─── Sales channel types and data ─────────────────────────────── */
 
 type ChannelStatus = "CONNECTED" | "SYNCING" | "ERROR";
 
@@ -36,7 +39,8 @@ interface SalesChannel {
   lastSync: string;
 }
 
-const CHANNELS: SalesChannel[] = [
+/** Connected sales channels shown in the channel list. */
+const SALES_CHANNELS: SalesChannel[] = [
   { id: "1", name: "Shopify Store",      type: "shopify",     status: "CONNECTED", orders: 1842, revenue: 128400, products: 284, lastSync: "2 min ago" },
   { id: "2", name: "Amazon Seller",      type: "amazon",      status: "CONNECTED", orders: 1204, revenue: 84200,  products: 96,  lastSync: "5 min ago" },
   { id: "3", name: "eBay Store",         type: "ebay",        status: "SYNCING",   orders: 621,  revenue: 32800,  products: 142, lastSync: "Syncing…" },
@@ -44,6 +48,7 @@ const CHANNELS: SalesChannel[] = [
   { id: "5", name: "Etsy Shop",          type: "etsy",        status: "ERROR",     orders: 264,  revenue: 10110,  products: 58,  lastSync: "Failed — 1h ago" },
 ];
 
+/** Revenue data for the channel breakdown bar chart. */
 const REVENUE_BY_CHANNEL = [
   { name: "Shopify",     revenue: 128400 },
   { name: "Amazon",      revenue: 84200 },
@@ -52,12 +57,14 @@ const REVENUE_BY_CHANNEL = [
   { name: "Etsy",        revenue: 10110 },
 ];
 
+/** Visual configuration for each channel connection status. */
 const STATUS_CONFIG: Record<ChannelStatus, { label: string; className: string; icon: React.ReactNode }> = {
   CONNECTED: { label: "Connected", className: "bg-[#cdff8c]/30 text-[#4d7a00]", icon: <CheckCircle className="size-3" /> },
   SYNCING:   { label: "Syncing",   className: "bg-blue-100 text-blue-700",       icon: <Clock className="size-3" /> },
   ERROR:     { label: "Error",     className: "bg-red-100 text-red-600",         icon: <AlertCircle className="size-3" /> },
 };
 
+/** Emoji icons for each channel platform type. */
 const CHANNEL_EMOJI: Record<string, string> = {
   shopify:     "🛍️",
   amazon:      "📦",
@@ -66,7 +73,7 @@ const CHANNEL_EMOJI: Record<string, string> = {
   etsy:        "🎨",
 };
 
-/* ─── Marketplace Integrations ──────────────────────────────────── */
+/* ─── Marketplace integration types and data ───────────────────── */
 
 type IntegrationCategory =
   | "marketplace"
@@ -88,7 +95,8 @@ interface Integration {
   comingSoon?: boolean;
 }
 
-const CATEGORIES: { value: IntegrationCategory | "all"; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+/** Category filter options for the integration dialog sidebar. */
+const INTEGRATION_CATEGORIES: { value: IntegrationCategory | "all"; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { value: "all",         label: "All",          icon: Globe },
   { value: "marketplace", label: "Marketplaces",  icon: Store },
   { value: "ecommerce",   label: "E-Commerce",    icon: ShoppingCart },
@@ -100,6 +108,7 @@ const CATEGORIES: { value: IntegrationCategory | "all"; label: string; icon: Rea
   { value: "accounting",  label: "Accounting",     icon: FileText },
 ];
 
+/** Full catalog of available integrations across all categories. */
 const INTEGRATIONS: Integration[] = [
   // Marketplaces
   { id: "shopify",       name: "Shopify",          description: "Sync products, orders & inventory with your Shopify store",                   icon: "🛍️", category: "marketplace", popular: true },
@@ -159,35 +168,40 @@ const INTEGRATIONS: Integration[] = [
   { id: "zoho-books",    name: "Zoho Books",       description: "Accounting integration for Zoho ecosystem",                                  icon: "📕", category: "accounting", comingSoon: true },
 ];
 
-/* ─── Component ─────────────────────────────────────────────────── */
+/* ─── Channel page component ──────────────────────────────────── */
 
+/**
+ * Channel page — manage connected sales channels, view revenue
+ * breakdown, and browse/connect marketplace integrations.
+ */
 export default function ChannelPage() {
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [search, setSearch]         = useState("");
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [integrationSearch, setIntegrationSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<IntegrationCategory | "all">("all");
 
-  const filteredIntegrations = INTEGRATIONS.filter((i) => {
-    const matchesCategory = activeCategory === "all" || i.category === activeCategory;
-    const matchesSearch   = !search || i.name.toLowerCase().includes(search.toLowerCase()) || i.description.toLowerCase().includes(search.toLowerCase());
+  /** Filter integrations by selected category and search query. */
+  const filteredIntegrations = INTEGRATIONS.filter((integration) => {
+    const matchesCategory = activeCategory === "all" || integration.category === activeCategory;
+    const matchesSearch   = !integrationSearch || integration.name.toLowerCase().includes(integrationSearch.toLowerCase()) || integration.description.toLowerCase().includes(integrationSearch.toLowerCase());
     return matchesCategory && matchesSearch;
   });
 
-  // Already connected channel types
-  const connectedTypes = new Set(CHANNELS.map((ch) => ch.type));
+  /** Set of channel types that are already connected. */
+  const connectedChannelTypes = new Set(SALES_CHANNELS.map((channel) => channel.type));
 
   return (
     <div className="space-y-6">
 
-      {/* Header */}
+      {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Channel</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Channel</h1>
           <p className="text-sm text-muted-foreground">
             Connect and manage all your sales channels in one place.
           </p>
         </div>
         <button
-          onClick={() => setDialogOpen(true)}
+          onClick={() => setIsDialogOpen(true)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a] transition-colors"
         >
           <Plus className="size-3.5" />
@@ -197,49 +211,50 @@ export default function ChannelPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {CHANNEL_STATS.map((s) => (
-          <div key={s.label} className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="text-xs font-medium text-muted-foreground">{s.label}</p>
+        {CHANNEL_STATS.map((stat) => (
+          <div key={stat.label} className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="text-xs font-medium text-muted-foreground">{stat.label}</p>
             <div className="mt-3 flex items-end justify-between gap-2">
-              <p className="text-2xl font-bold text-gray-900 leading-none">{s.value}</p>
-              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${s.positive ? "bg-[#cdff8c]/30 text-[#4d7a00]" : "bg-red-100 text-red-600"}`}>
-                {s.positive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
-                {Math.abs(s.change)}%
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">{stat.value}</p>
+              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${stat.positive ? "bg-[#cdff8c]/30 text-[#4d7a00]" : "bg-red-100 text-red-600"}`}>
+                {stat.positive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+                {Math.abs(stat.change)}%
               </span>
             </div>
-            <p className="mt-1.5 text-xs text-muted-foreground">{s.changeLabel}</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">{stat.changeLabel}</p>
           </div>
         ))}
       </div>
 
+      {/* Connected channels list and revenue chart */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
 
-        {/* Channels list */}
-        <div className="rounded-xl bg-white shadow-sm ring-1 ring-border overflow-hidden lg:col-span-2">
+        {/* Connected channels list */}
+        <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden lg:col-span-2">
           <div className="border-b px-5 py-4">
-            <p className="text-sm font-semibold text-gray-900">Connected Channels</p>
+            <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Connected Channels</p>
             <p className="text-xs text-muted-foreground">Manage your active sales channel integrations.</p>
           </div>
           <div className="divide-y divide-border">
-            {CHANNELS.map((ch) => {
-              const statusCfg = STATUS_CONFIG[ch.status];
+            {SALES_CHANNELS.map((channel) => {
+              const statusConfig = STATUS_CONFIG[channel.status];
               return (
-                <div key={ch.id} className="flex items-center gap-4 px-5 py-4 hover:bg-gray-50/50 transition-colors">
-                  <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#f1f7fa] text-xl">
-                    {CHANNEL_EMOJI[ch.type]}
+                <div key={channel.id} className="flex items-center gap-4 px-5 py-4 hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
+                  <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#f1f7fa] dark:bg-gray-800/60 text-xl">
+                    {CHANNEL_EMOJI[channel.type]}
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <p className="text-xs font-semibold text-gray-900">{ch.name}</p>
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusCfg.className}`}>
-                        {statusCfg.icon} {statusCfg.label}
+                      <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">{channel.name}</p>
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusConfig.className}`}>
+                        {statusConfig.icon} {statusConfig.label}
                       </span>
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
-                      <span className="flex items-center gap-1"><ShoppingBag className="size-3" />{ch.orders.toLocaleString()} orders</span>
-                      <span className="flex items-center gap-1"><TrendingUp className="size-3" />${ch.revenue.toLocaleString()}</span>
-                      <span className="flex items-center gap-1"><Package className="size-3" />{ch.products} products</span>
-                      <span className="flex items-center gap-1"><Clock className="size-3" />{ch.lastSync}</span>
+                      <span className="flex items-center gap-1"><ShoppingBag className="size-3" />{channel.orders.toLocaleString()} orders</span>
+                      <span className="flex items-center gap-1"><TrendingUp className="size-3" />${channel.revenue.toLocaleString()}</span>
+                      <span className="flex items-center gap-1"><Package className="size-3" />{channel.products} products</span>
+                      <span className="flex items-center gap-1"><Clock className="size-3" />{channel.lastSync}</span>
                     </div>
                   </div>
                   <button className="flex shrink-0 items-center gap-1 text-xs font-medium text-[#4d7a00] hover:text-[#3d6000]">
@@ -251,16 +266,16 @@ export default function ChannelPage() {
           </div>
         </div>
 
-        {/* Revenue by channel chart */}
-        <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-          <p className="mb-1 text-sm font-semibold text-gray-900">Revenue by Channel</p>
+        {/* Revenue by channel bar chart */}
+        <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+          <p className="mb-1 text-sm font-semibold text-gray-900 dark:text-gray-100">Revenue by Channel</p>
           <p className="mb-4 text-xs text-muted-foreground">Total GMV breakdown</p>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={REVENUE_BY_CHANNEL} layout="vertical" margin={{ left: 8, right: 8 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} />
+              <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} tickFormatter={(rawValue) => `$${(rawValue / 1000).toFixed(0)}k`} />
               <YAxis type="category" dataKey="name" tick={{ fontSize: 10, fill: "#6b7280" }} axisLine={false} tickLine={false} width={72} />
-              <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #e5e7eb" }} formatter={(v) => [`$${Number(v).toLocaleString()}`, "Revenue"]} />
+              <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8, border: "1px solid #e5e7eb" }} formatter={(tooltipValue) => [`$${Number(tooltipValue).toLocaleString()}`, "Revenue"]} />
               <Bar dataKey="revenue" fill="#cdff8c" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -269,7 +284,7 @@ export default function ChannelPage() {
           <div className="mt-4 space-y-2 border-t pt-4">
             <div className="flex items-center justify-between text-xs">
               <span className="text-muted-foreground">Top channel</span>
-              <span className="font-semibold text-gray-900">Shopify</span>
+              <span className="font-semibold text-gray-900 dark:text-gray-100">Shopify</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-muted-foreground">Fastest growing</span>
@@ -283,10 +298,10 @@ export default function ChannelPage() {
         </div>
       </div>
 
-      {/* ── Add Channel Dialog (Marketplace) ────────────────────────── */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      {/* ── Add Channel dialog (marketplace integrations) ─────────── */}
+      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0">
-          {/* Header */}
+          {/* Dialog header */}
           <DialogHeader className="px-6 pt-6 pb-4 border-b">
             <DialogTitle className="flex items-center gap-2 text-lg">
               <div className="flex size-8 items-center justify-center rounded-lg bg-[#cdff8c]/30">
@@ -298,31 +313,31 @@ export default function ChannelPage() {
               Connect a marketplace, platform or service to centralize your operations.
             </DialogDescription>
 
-            {/* Search */}
+            {/* Integration search */}
             <div className="relative mt-3">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400" />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400 dark:text-gray-400" />
               <input
                 type="text"
                 placeholder="Search integrations..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                value={integrationSearch}
+                onChange={(event) => setIntegrationSearch(event.target.value)}
+                className="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 py-2 pl-9 pr-3 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
               />
             </div>
           </DialogHeader>
 
-          {/* Body */}
+          {/* Dialog body */}
           <div className="flex flex-1 min-h-0">
-            {/* Category sidebar */}
-            <div className="w-44 shrink-0 border-r bg-gray-50/50 py-3 overflow-y-auto hidden sm:block">
-              {CATEGORIES.map(({ value, label, icon: Icon }) => (
+            {/* Category sidebar (desktop) */}
+            <div className="w-44 shrink-0 border-r bg-gray-50/50 dark:bg-gray-800/50 py-3 overflow-y-auto hidden sm:block">
+              {INTEGRATION_CATEGORIES.map(({ value, label, icon: Icon }) => (
                 <button
                   key={value}
-                  onClick={() => { setActiveCategory(value); setSearch(""); }}
+                  onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
                   className={`flex w-full items-center gap-2 px-4 py-2 text-xs font-medium transition-colors ${
                     activeCategory === value
                       ? "bg-[#cdff8c]/20 text-[#4d7a00] border-r-2 border-[#4d7a00]"
-                      : "text-gray-500 hover:text-gray-800 hover:bg-gray-100/70"
+                      : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
                   }`}
                 >
                   <Icon className="size-3.5" />
@@ -334,14 +349,14 @@ export default function ChannelPage() {
             {/* Mobile category pills */}
             <div className="sm:hidden w-full flex flex-col">
               <div className="flex gap-1.5 overflow-x-auto px-4 py-3 border-b">
-                {CATEGORIES.map(({ value, label }) => (
+                {INTEGRATION_CATEGORIES.map(({ value, label }) => (
                   <button
                     key={value}
-                    onClick={() => { setActiveCategory(value); setSearch(""); }}
+                    onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
                     className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
                       activeCategory === value
                         ? "bg-[#cdff8c] text-gray-900"
-                        : "bg-gray-100 text-gray-500 hover:bg-gray-200"
+                        : "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800"
                     }`}
                   >
                     {label}
@@ -350,23 +365,23 @@ export default function ChannelPage() {
               </div>
               <IntegrationGrid
                 integrations={filteredIntegrations}
-                connectedTypes={connectedTypes}
-                onConnect={() => setDialogOpen(false)}
+                connectedTypes={connectedChannelTypes}
+                onConnect={() => setIsDialogOpen(false)}
               />
             </div>
 
-            {/* Desktop grid */}
+            {/* Desktop integration grid */}
             <div className="hidden sm:block flex-1 overflow-y-auto">
               <IntegrationGrid
                 integrations={filteredIntegrations}
-                connectedTypes={connectedTypes}
-                onConnect={() => setDialogOpen(false)}
+                connectedTypes={connectedChannelTypes}
+                onConnect={() => setIsDialogOpen(false)}
               />
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="border-t px-6 py-3 flex items-center justify-between bg-gray-50/50">
+          {/* Dialog footer */}
+          <div className="border-t px-6 py-3 flex items-center justify-between bg-gray-50/50 dark:bg-gray-800/50">
             <p className="text-[11px] text-muted-foreground">
               {filteredIntegrations.length} integration{filteredIntegrations.length !== 1 ? "s" : ""} available
             </p>
@@ -381,8 +396,13 @@ export default function ChannelPage() {
   );
 }
 
-/* ─── Integration Grid ──────────────────────────────────────────── */
+/* ─── Integration grid sub-component ───────────────────────────── */
 
+/**
+ * Renders a responsive grid of integration cards, each showing
+ * the integration name, description, connection status, and a
+ * connect action button.
+ */
 function IntegrationGrid({
   integrations,
   connectedTypes,
@@ -395,8 +415,8 @@ function IntegrationGrid({
   if (integrations.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 px-6 text-center">
-        <Search className="size-8 text-gray-300 mb-3" />
-        <p className="text-sm font-medium text-gray-500">No integrations found</p>
+        <Search className="size-8 text-gray-300 dark:text-gray-600 mb-3" />
+        <p className="text-sm font-medium text-gray-500 dark:text-gray-400">No integrations found</p>
         <p className="text-xs text-muted-foreground mt-1">Try a different search term or category</p>
       </div>
     );
@@ -418,10 +438,10 @@ function IntegrationGrid({
             }}
             className={`group relative flex items-start gap-3 rounded-xl border p-4 text-left transition-all ${
               integration.comingSoon
-                ? "border-dashed border-gray-200 bg-gray-50/50 cursor-default opacity-70"
+                ? "border-dashed border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 cursor-default opacity-70"
                 : isConnected
                 ? "border-[#cdff8c] bg-[#cdff8c]/10 cursor-default"
-                : "border-gray-200 bg-white hover:border-[#cdff8c] hover:shadow-md hover:-translate-y-0.5 cursor-pointer"
+                : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-[#cdff8c] hover:shadow-md hover:-translate-y-0.5 cursor-pointer"
             }`}
           >
             {/* Popular badge */}
@@ -431,24 +451,24 @@ function IntegrationGrid({
               </span>
             )}
 
-            {/* Icon */}
+            {/* Integration icon */}
             <div className={`flex size-10 shrink-0 items-center justify-center rounded-xl text-xl ${
-              isConnected ? "bg-[#cdff8c]/30" : "bg-[#f1f7fa]"
+              isConnected ? "bg-[#cdff8c]/30" : "bg-[#f1f7fa] dark:bg-gray-800/60"
             }`}>
               {integration.icon}
             </div>
 
-            {/* Content */}
+            {/* Integration details */}
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold text-gray-900">{integration.name}</p>
+                <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{integration.name}</p>
                 {isConnected && (
                   <span className="inline-flex items-center gap-0.5 rounded-full bg-[#cdff8c]/40 px-1.5 py-0.5 text-[9px] font-semibold text-[#4d7a00]">
                     <CheckCircle className="size-2.5" /> Connected
                   </span>
                 )}
                 {integration.comingSoon && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-gray-200 px-1.5 py-0.5 text-[9px] font-semibold text-gray-500">
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 text-[9px] font-semibold text-gray-500 dark:text-gray-400">
                     <Clock className="size-2.5" /> Soon
                   </span>
                 )}
@@ -458,9 +478,9 @@ function IntegrationGrid({
               </p>
             </div>
 
-            {/* Connect arrow */}
+            {/* Connect arrow indicator */}
             {!isConnected && !integration.comingSoon && (
-              <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-400 transition-all group-hover:bg-[#cdff8c] group-hover:text-gray-900">
+              <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400 transition-all group-hover:bg-[#cdff8c] group-hover:text-gray-900">
                 <ArrowRight className="size-3.5" />
               </div>
             )}

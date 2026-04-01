@@ -1,6 +1,13 @@
 import axios from "axios";
 import { useAuthStore } from "~/stores/auth.store";
 
+/**
+ * Pre-configured Axios instance for all API communication.
+ *
+ * - Attaches the access token to every outgoing request.
+ * - Unwraps the backend `{ success, data }` envelope automatically.
+ * - Performs a silent token refresh on 401 responses (once per request).
+ */
 export const apiClient = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api/v1",
   headers: { "Content-Type": "application/json" },
@@ -30,9 +37,9 @@ apiClient.interceptors.response.use(
     // Attempt silent token refresh on 401 (only once per request)
     if (
       error.response?.status === 401 &&
-      !originalRequest._retried
+      !originalRequest._hasRetried
     ) {
-      originalRequest._retried = true;
+      originalRequest._hasRetried = true;
 
       const { refreshToken, setTokens, logout } = useAuthStore.getState();
 

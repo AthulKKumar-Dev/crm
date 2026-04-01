@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { isAxiosError } from "axios";
 import { authService } from "~/services/auth.service";
 import { useAuthStore } from "~/stores/auth.store";
+import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   SignupRequest,
   LoginRequest,
@@ -14,10 +15,15 @@ import type {
   AcceptInviteRequest,
 } from "~/types/api";
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function resolvePostAuthRoute(nextStep: string | null): string {
   return nextStep === "choose-account-type" ? "/onboarding/account-type" : "/dashboard";
 }
 
+// ─── Signup ──────────────────────────────────────────────────────────────────
+
+/** Mutation hook for new user registration. Navigates to email verification on success. */
 export function useSignupMutation() {
   const navigate = useNavigate();
 
@@ -27,19 +33,13 @@ export function useSignupMutation() {
       toast.success("Account created! Please verify your email.");
       navigate(`/auth/verify-email?userId=${data.userId}`);
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        const msg = error.response?.data?.message;
-        if (msg) {
-          toast.error(msg);
-        }
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error),
   });
 }
 
+// ─── Login ───────────────────────────────────────────────────────────────────
+
+/** Mutation hook for user login. Sets auth state and navigates to the appropriate post-auth route. */
 export function useLoginMutation() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -78,6 +78,9 @@ export function useLoginMutation() {
   });
 }
 
+// ─── Email Verification ─────────────────────────────────────────────────────
+
+/** Mutation hook for email verification via OTP code. Sets auth state on success. */
 export function useVerifyEmailMutation() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -93,19 +96,11 @@ export function useVerifyEmailMutation() {
       toast.success("Email verified successfully!");
       navigate(resolvePostAuthRoute(data.nextStep));
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        const msg = error.response?.data?.message;
-        if (msg) {
-          toast.error(msg);
-        }
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error),
   });
 }
 
+/** Mutation hook for resending the email verification code. */
 export function useResendVerificationMutation() {
   return useMutation({
     mutationFn: (data: ResendVerificationRequest) =>
@@ -113,28 +108,22 @@ export function useResendVerificationMutation() {
     onSuccess: () => {
       toast.success("Verification code resent to your email.");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to resend code.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to resend code."),
   });
 }
 
+// ─── Password Reset ─────────────────────────────────────────────────────────
+
+/** Mutation hook for requesting a password reset email. */
 export function useForgotPasswordMutation() {
   return useMutation({
     mutationFn: (data: ForgotPasswordRequest) =>
       authService.forgotPassword(data),
-    onError: (error) => {
-      if (!isAxiosError(error)) {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error),
   });
 }
 
+/** Mutation hook for setting a new password via reset token. Navigates to login on success. */
 export function useResetPasswordMutation() {
   const navigate = useNavigate();
 
@@ -145,14 +134,13 @@ export function useResetPasswordMutation() {
       toast.success("Password reset successfully. You can now sign in.");
       navigate("/auth/login");
     },
-    onError: (error) => {
-      if (!isAxiosError(error)) {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error),
   });
 }
 
+// ─── Invite Accept ──────────────────────────────────────────────────────────
+
+/** Mutation hook for accepting a team invitation. Creates a session and navigates to dashboard. */
 export function useAcceptInviteMutation() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
@@ -161,8 +149,8 @@ export function useAcceptInviteMutation() {
     mutationFn: (data: AcceptInviteRequest) =>
       authService.acceptInvite(data),
     onSuccess: (data) => {
-      // Build a minimal User object from the response
-      const user = {
+      // Build a minimal User object from the invite response
+      const invitedUser = {
         id: data.user.id,
         email: data.user.email,
         firstName: data.user.firstName,
@@ -175,8 +163,8 @@ export function useAcceptInviteMutation() {
         updatedAt: new Date().toISOString(),
       };
 
-      // Build org membership from invite response
-      const membership = {
+      // Build org membership from the invite response
+      const invitedOrgMembership = {
         id: crypto.randomUUID(),
         organizationId: data.organization.id,
         role: "AGENT" as const,
@@ -198,15 +186,11 @@ export function useAcceptInviteMutation() {
         },
       };
 
-      setAuth(user, data.accessToken, data.refreshToken, [membership]);
+      setAuth(invitedUser, data.accessToken, data.refreshToken, [invitedOrgMembership]);
       useAuthStore.getState().setCurrentOrg(data.organization.id);
       toast.success(`Joined ${data.organization.name} successfully!`);
       navigate("/dashboard");
     },
-    onError: (error) => {
-      if (!isAxiosError(error)) {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error),
   });
 }

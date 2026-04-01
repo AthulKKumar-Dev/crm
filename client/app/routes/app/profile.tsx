@@ -21,7 +21,10 @@ export function meta() {
   return [{ title: "Profile | Collabo CRM" }];
 }
 
-const ACTIVITY = [
+/* ─── Static data ──────────────────────────────────────────────── */
+
+/** Recent user actions displayed in the activity feed. */
+const ACTIVITY_FEED = [
   { id: 1, action: "Created a new order", detail: "#302015 — MacBook Pro M4", time: "2 hours ago" },
   { id: 2, action: "Added a new customer", detail: "Jessica Thompson", time: "5 hours ago" },
   { id: 3, action: "Updated product listing", detail: "Sony WH-1000XM5 Headphones", time: "Yesterday at 3:42 PM" },
@@ -30,6 +33,7 @@ const ACTIVITY = [
   { id: 6, action: "Invited a team member", detail: "michael@collabo.io", time: "3 days ago" },
 ];
 
+/** Summary statistics shown on the profile sidebar. */
 const PROFILE_STATS = [
   { label: "Orders Managed", value: "1,284", icon: ShoppingCart },
   { label: "Customers Added", value: "342", icon: Users },
@@ -37,6 +41,7 @@ const PROFILE_STATS = [
   { label: "Products Listed", value: "128", icon: Package },
 ];
 
+/** Social media links displayed on the profile sidebar. */
 const SOCIAL_LINKS = [
   { icon: AtSign,    label: "Twitter",  handle: "@collabosteve" },
   { icon: Briefcase, label: "LinkedIn", handle: "linkedin.com/in/steverogers" },
@@ -44,10 +49,15 @@ const SOCIAL_LINKS = [
   { icon: Globe,    label: "Website",  handle: "steverogers.io" },
 ];
 
+/**
+ * Profile page — displays and allows editing of user personal information,
+ * avatar, social links, activity stats, and recent activity feed.
+ */
 export default function ProfilePage() {
-  const user = useAuthStore((s) => s.user);
-  const [editing, setEditing] = useState(false);
+  const user = useAuthStore((state) => state.user);
+  const [isEditing, setIsEditing] = useState(false);
 
+  /* ── Derived user fields with fallback defaults ────────────────── */
   const firstName = user?.firstName ?? "Steve";
   const lastName  = user?.lastName  ?? "Rogers";
   const email     = user?.email     ?? "steve.rogers@collabo.io";
@@ -56,41 +66,41 @@ export default function ProfilePage() {
   return (
     <div className="space-y-6">
 
-      {/* Header */}
+      {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Profile</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Profile</h1>
           <p className="text-sm text-muted-foreground">
             Manage your personal information and account preferences.
           </p>
         </div>
         <button
-          onClick={() => setEditing((v) => !v)}
+          onClick={() => setIsEditing((prev) => !prev)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a] transition-colors"
         >
-          {editing ? <Check className="size-3.5" /> : <Edit2 className="size-3.5" />}
-          {editing ? "Save Changes" : "Edit Profile"}
+          {isEditing ? <Check className="size-3.5" /> : <Edit2 className="size-3.5" />}
+          {isEditing ? "Save Changes" : "Edit Profile"}
         </button>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
 
-        {/* ── Left col — avatar card + stats + social ── */}
+        {/* ── Left column — avatar card, stats, and social links ── */}
         <div className="flex flex-col gap-4">
 
           {/* Avatar card */}
-          <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-border text-center">
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-border text-center">
             <div className="relative mx-auto mb-4 size-20 w-fit">
               <div className="flex size-20 items-center justify-center rounded-full bg-[#cdff8c] text-2xl font-bold text-gray-900">
                 {initials}
               </div>
-              {editing && (
+              {isEditing && (
                 <button className="absolute -bottom-1 -right-1 flex size-7 items-center justify-center rounded-full bg-gray-900 text-white shadow hover:bg-gray-700 transition-colors">
                   <Camera className="size-3.5" />
                 </button>
               )}
             </div>
-            <h2 className="text-base font-bold text-gray-900">{firstName} {lastName}</h2>
+            <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">{firstName} {lastName}</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">Super Admin</p>
             <span className="mt-2 inline-flex items-center rounded-full bg-[#cdff8c]/30 px-2.5 py-0.5 text-xs font-semibold text-[#4d7a00]">
               Active
@@ -111,16 +121,16 @@ export default function ProfilePage() {
             </div>
           </div>
 
-          {/* Stats */}
-          <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="mb-3 text-xs font-semibold text-gray-900">Activity Stats</p>
+          {/* Activity stats grid */}
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="mb-3 text-xs font-semibold text-gray-900 dark:text-gray-100">Activity Stats</p>
             <div className="grid grid-cols-2 gap-3">
               {PROFILE_STATS.map(({ label, value, icon: Icon }) => (
-                <div key={label} className="rounded-lg bg-[#f1f7fa] p-3">
+                <div key={label} className="rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 p-3">
                   <div className="mb-1 flex size-7 items-center justify-center rounded-full bg-[#cdff8c]/40">
                     <Icon className="size-3.5 text-[#4d7a00]" />
                   </div>
-                  <p className="text-sm font-bold text-gray-900">{value}</p>
+                  <p className="text-sm font-bold text-gray-900 dark:text-gray-100">{value}</p>
                   <p className="text-[10px] text-muted-foreground leading-tight">{label}</p>
                 </div>
               ))}
@@ -128,23 +138,23 @@ export default function ProfilePage() {
           </div>
 
           {/* Social links */}
-          <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="mb-3 text-xs font-semibold text-gray-900">Social Links</p>
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="mb-3 text-xs font-semibold text-gray-900 dark:text-gray-100">Social Links</p>
             <div className="space-y-2.5">
               {SOCIAL_LINKS.map(({ icon: Icon, label, handle }) => (
                 <div key={label} className="flex items-center gap-2.5">
-                  <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gray-100">
-                    <Icon className="size-3.5 text-gray-500" />
+                  <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-gray-100 dark:bg-gray-800">
+                    <Icon className="size-3.5 text-gray-500 dark:text-gray-400" />
                   </div>
                   <div className="min-w-0">
                     <p className="text-[10px] text-muted-foreground">{label}</p>
-                    {editing ? (
+                    {isEditing ? (
                       <input
                         defaultValue={handle}
                         className="mt-0.5 h-6 w-full rounded border border-input bg-transparent px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#cdff8c]"
                       />
                     ) : (
-                      <p className="text-xs font-medium text-gray-900 truncate">{handle}</p>
+                      <p className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">{handle}</p>
                     )}
                   </div>
                 </div>
@@ -153,12 +163,12 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* ── Right col — personal details + activity ── */}
+        {/* ── Right column — personal details form and activity feed ── */}
         <div className="flex flex-col gap-4 lg:col-span-2">
 
-          {/* Personal info form */}
-          <div className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-border">
-            <p className="mb-5 text-sm font-semibold text-gray-900">Personal Information</p>
+          {/* Personal information form */}
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-border">
+            <p className="mb-5 text-sm font-semibold text-gray-900 dark:text-gray-100">Personal Information</p>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {[
                 { label: "First Name",    value: firstName,           col: 1 },
@@ -170,14 +180,14 @@ export default function ProfilePage() {
                 { label: "Language",      value: "English (US)",      col: 1 },
               ].map(({ label, value, col }) => (
                 <div key={label} className={col === 2 ? "sm:col-span-2" : ""}>
-                  <label className="mb-1 block text-xs font-medium text-gray-700">{label}</label>
-                  {editing ? (
+                  <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">{label}</label>
+                  {isEditing ? (
                     <input
                       defaultValue={value}
                       className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
                     />
                   ) : (
-                    <div className="flex h-9 items-center rounded-lg bg-[#f1f7fa] px-3 text-sm text-gray-900">
+                    <div className="flex h-9 items-center rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-3 text-sm text-gray-900 dark:text-gray-100">
                       {value}
                     </div>
                   )}
@@ -185,39 +195,40 @@ export default function ProfilePage() {
               ))}
             </div>
 
+            {/* Bio field */}
             <div className="mt-4">
               <label className="mb-1 block text-xs font-medium text-gray-700">Bio</label>
-              {editing ? (
+              {isEditing ? (
                 <textarea
                   rows={3}
                   defaultValue="Super Admin at Collabo CRM. Passionate about building great products and helping teams succeed."
                   className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50 resize-none"
                 />
               ) : (
-                <div className="rounded-lg bg-[#f1f7fa] px-3 py-2 text-sm text-gray-900 leading-relaxed">
+                <div className="rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 leading-relaxed">
                   Super Admin at Collabo CRM. Passionate about building great products and helping teams succeed.
                 </div>
               )}
             </div>
           </div>
 
-          {/* Recent activity */}
-          <div className="rounded-xl bg-white shadow-sm ring-1 ring-border overflow-hidden">
+          {/* Recent activity feed */}
+          <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
             <div className="border-b px-6 py-4">
-              <p className="text-sm font-semibold text-gray-900">Recent Activity</p>
+              <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recent Activity</p>
               <p className="text-xs text-muted-foreground">Your latest actions across the platform.</p>
             </div>
             <div className="divide-y divide-border">
-              {ACTIVITY.map((item) => (
-                <div key={item.id} className="flex items-start gap-3 px-6 py-3.5">
+              {ACTIVITY_FEED.map((activityItem) => (
+                <div key={activityItem.id} className="flex items-start gap-3 px-6 py-3.5">
                   <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-[#cdff8c]/25">
                     <div className="size-1.5 rounded-full bg-[#4d7a00]" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium text-gray-900">{item.action}</p>
-                    <p className="text-xs text-muted-foreground">{item.detail}</p>
+                    <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{activityItem.action}</p>
+                    <p className="text-xs text-muted-foreground">{activityItem.detail}</p>
                   </div>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{item.time}</span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{activityItem.time}</span>
                 </div>
               ))}
             </div>

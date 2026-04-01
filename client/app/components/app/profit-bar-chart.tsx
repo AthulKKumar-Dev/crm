@@ -16,6 +16,7 @@ interface CustomTooltipProps {
   label?: string;
 }
 
+/** Custom Recharts tooltip that formats values as currency. */
 function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
   return (
@@ -33,18 +34,19 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
   );
 }
 
+/** Bar chart card showing monthly revenue vs. profit with a summary header. */
 export function ProfitBarChart() {
   return (
-    <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
+    <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
       <div className="mb-1 flex items-start justify-between">
-        <p className="text-sm font-semibold text-gray-900">Total Profit Overview</p>
-        <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-gray-100">
+        <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Total Profit Overview</p>
+        <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">
           <MoreHorizontal className="size-4" />
         </button>
       </div>
 
       <div className="mb-3 flex items-center gap-2">
-        <p className="text-2xl font-bold text-gray-900">$96,715.28</p>
+        <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">$96,715.28</p>
         <span className="inline-flex items-center gap-1 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-xs font-semibold text-[#4d7a00]">
           <TrendingUp className="size-3" />
           54%

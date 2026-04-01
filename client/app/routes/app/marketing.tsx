@@ -6,6 +6,9 @@ export function meta() {
   return [{ title: "Marketing | Collabo CRM" }];
 }
 
+/* ─── Static data ──────────────────────────────────────────────── */
+
+/** Summary statistics shown at the top of the marketing page. */
 const CAMPAIGN_STATS = [
   { label: "Active Campaigns", value: "12",     change: 3,   changeLabel: "vs last month", positive: true },
   { label: "Emails Sent",      value: "48,291", change: 22,  changeLabel: "vs last month", positive: true },
@@ -13,6 +16,7 @@ const CAMPAIGN_STATS = [
   { label: "Conversions",      value: "1,842",  change: 17,  changeLabel: "vs last month", positive: true },
 ];
 
+/** Individual campaign records for the campaigns table. */
 const CAMPAIGNS = [
   { id: "1", name: "January Flash Sale",      type: "email",   status: "SENT",    sent: 12400, opens: 3844, clicks: 921,  conversions: 184 },
   { id: "2", name: "New Year Welcome Series", type: "email",   status: "ACTIVE",  sent: 5200,  opens: 1768, clicks: 412,  conversions: 86 },
@@ -22,6 +26,7 @@ const CAMPAIGNS = [
   { id: "6", name: "Product Launch — AW S10",  type: "push",    status: "SENT",    sent: 22000, opens: 6600, clicks: 1540, conversions: 308 },
 ];
 
+/** Monthly engagement data for the open/click rate line chart. */
 const ENGAGEMENT_DATA = [
   { month: "Jul", opens: 24, clicks: 8 },
   { month: "Aug", opens: 28, clicks: 10 },
@@ -32,12 +37,15 @@ const ENGAGEMENT_DATA = [
   { month: "Jan", opens: 28, clicks: 12 },
 ];
 
+/** Conversions breakdown by marketing channel for the bar chart. */
 const CHANNEL_DATA = [
   { name: "Email",     campaigns: 8, conversions: 420 },
   { name: "SMS",       campaigns: 2, conversions: 144 },
   { name: "Push",      campaigns: 1, conversions: 308 },
   { name: "In-App",    campaigns: 1, conversions: 96 },
 ];
+
+/* ─── Status and type display configuration ────────────────────── */
 
 type CampaignStatus = "ACTIVE" | "SENT" | "DRAFT" | "PAUSED";
 
@@ -48,22 +56,27 @@ const STATUS_CLASS: Record<CampaignStatus, string> = {
   PAUSED: "bg-orange-100 text-orange-600",
 };
 
+/** Icon displayed next to each campaign type in the table. */
 const TYPE_ICON: Record<string, React.ReactNode> = {
   email: <Mail className="size-3.5 text-blue-500" />,
   sms:   <Smartphone className="size-3.5 text-orange-500" />,
   push:  <BarChart2 className="size-3.5 text-purple-500" />,
 };
 
+/**
+ * Marketing page — manage campaigns, view engagement analytics,
+ * and track conversions across email, SMS, and push channels.
+ */
 export default function MarketingPage() {
-  const [tab, setTab] = useState<"campaigns" | "analytics">("campaigns");
+  const [activeTab, setActiveTab] = useState<"campaigns" | "analytics">("campaigns");
 
   return (
     <div className="space-y-6">
 
-      {/* Header */}
+      {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Marketing</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Marketing</h1>
           <p className="text-sm text-muted-foreground">
             Manage campaigns, track engagement, and grow your audience.
           </p>
@@ -76,43 +89,43 @@ export default function MarketingPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {CAMPAIGN_STATS.map((s) => (
-          <div key={s.label} className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="text-xs font-medium text-muted-foreground">{s.label}</p>
+        {CAMPAIGN_STATS.map((stat) => (
+          <div key={stat.label} className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="text-xs font-medium text-muted-foreground">{stat.label}</p>
             <div className="mt-3 flex items-end justify-between gap-2">
-              <p className="text-2xl font-bold text-gray-900 leading-none">{s.value}</p>
-              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${s.positive ? "bg-[#cdff8c]/30 text-[#4d7a00]" : "bg-red-100 text-red-600"}`}>
-                {s.positive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
-                {Math.abs(s.change)}%
+              <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">{stat.value}</p>
+              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${stat.positive ? "bg-[#cdff8c]/30 text-[#4d7a00]" : "bg-red-100 text-red-600"}`}>
+                {stat.positive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+                {Math.abs(stat.change)}%
               </span>
             </div>
-            <p className="mt-1.5 text-xs text-muted-foreground">{s.changeLabel}</p>
+            <p className="mt-1.5 text-xs text-muted-foreground">{stat.changeLabel}</p>
           </div>
         ))}
       </div>
 
-      {/* Tab bar */}
-      <div className="flex gap-1 rounded-full bg-white p-1 shadow-sm ring-1 ring-border w-fit">
-        {(["campaigns", "analytics"] as const).map((t) => (
+      {/* Tab bar — campaigns vs analytics */}
+      <div className="flex gap-1 rounded-full bg-white dark:bg-gray-900 p-1 shadow-sm ring-1 ring-border w-fit">
+        {(["campaigns", "analytics"] as const).map((tabName) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
+            key={tabName}
+            onClick={() => setActiveTab(tabName)}
             className={`rounded-full px-4 py-1.5 text-xs font-medium capitalize transition-colors ${
-              tab === t ? "bg-[#cdff8c] text-gray-900" : "text-gray-500 hover:text-gray-800"
+              activeTab === tabName ? "bg-[#cdff8c] text-gray-900" : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
             }`}
           >
-            {t}
+            {tabName}
           </button>
         ))}
       </div>
 
-      {/* Campaigns tab */}
-      {tab === "campaigns" && (
-        <div className="rounded-xl bg-white shadow-sm ring-1 ring-border overflow-hidden">
+      {/* Campaigns tab — campaign table */}
+      {activeTab === "campaigns" && (
+        <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b bg-gray-50/60 text-left">
+                <tr className="border-b bg-gray-50/60 dark:bg-gray-800/60 text-left">
                   <th className="px-5 py-3 text-xs font-semibold text-muted-foreground">Campaign</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Type</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Sent</th>
@@ -123,34 +136,34 @@ export default function MarketingPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {CAMPAIGNS.map((c) => (
-                  <tr key={c.id} className="hover:bg-gray-50/50 transition-colors">
+                {CAMPAIGNS.map((campaign) => (
+                  <tr key={campaign.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="px-5 py-3">
-                      <p className="text-xs font-medium text-gray-900">{c.name}</p>
+                      <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{campaign.name}</p>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
-                        {TYPE_ICON[c.type]}
-                        <span className="text-xs text-muted-foreground capitalize">{c.type}</span>
+                        {TYPE_ICON[campaign.type]}
+                        <span className="text-xs text-muted-foreground capitalize">{campaign.type}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-xs text-gray-900 text-right font-medium">{c.sent.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs text-gray-900 dark:text-gray-100 text-right font-medium">{campaign.sent.toLocaleString()}</td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-col items-end">
-                        <span className="text-xs font-medium text-gray-900">{c.opens.toLocaleString()}</span>
-                        {c.sent > 0 && <span className="text-[10px] text-muted-foreground">{((c.opens / c.sent) * 100).toFixed(1)}%</span>}
+                        <span className="text-xs font-medium text-gray-900 dark:text-gray-100">{campaign.opens.toLocaleString()}</span>
+                        {campaign.sent > 0 && <span className="text-[10px] text-muted-foreground">{((campaign.opens / campaign.sent) * 100).toFixed(1)}%</span>}
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex flex-col items-end">
-                        <span className="text-xs font-medium text-gray-900">{c.clicks.toLocaleString()}</span>
-                        {c.opens > 0 && <span className="text-[10px] text-muted-foreground">{((c.clicks / c.opens) * 100).toFixed(1)}%</span>}
+                        <span className="text-xs font-medium text-gray-900 dark:text-gray-100">{campaign.clicks.toLocaleString()}</span>
+                        {campaign.opens > 0 && <span className="text-[10px] text-muted-foreground">{((campaign.clicks / campaign.opens) * 100).toFixed(1)}%</span>}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-xs font-semibold text-[#4d7a00] text-right">{c.conversions.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs font-semibold text-[#4d7a00] text-right">{campaign.conversions.toLocaleString()}</td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_CLASS[c.status as CampaignStatus]}`}>
-                        {c.status.charAt(0) + c.status.slice(1).toLowerCase()}
+                      <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_CLASS[campaign.status as CampaignStatus]}`}>
+                        {campaign.status.charAt(0) + campaign.status.slice(1).toLowerCase()}
                       </span>
                     </td>
                   </tr>
@@ -161,11 +174,12 @@ export default function MarketingPage() {
         </div>
       )}
 
-      {/* Analytics tab */}
-      {tab === "analytics" && (
+      {/* Analytics tab — engagement and channel charts */}
+      {activeTab === "analytics" && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="mb-1 text-sm font-semibold text-gray-900">Email Engagement Rate</p>
+          {/* Email engagement rate line chart */}
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="mb-1 text-sm font-semibold text-gray-900 dark:text-gray-100">Email Engagement Rate</p>
             <p className="mb-4 text-xs text-muted-foreground">Open rate vs click rate over time</p>
             <ResponsiveContainer width="100%" height={200}>
               <LineChart data={ENGAGEMENT_DATA}>
@@ -179,8 +193,9 @@ export default function MarketingPage() {
             </ResponsiveContainer>
           </div>
 
-          <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
-            <p className="mb-1 text-sm font-semibold text-gray-900">Conversions by Channel</p>
+          {/* Conversions by channel bar chart */}
+          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+            <p className="mb-1 text-sm font-semibold text-gray-900 dark:text-gray-100">Conversions by Channel</p>
             <p className="mb-4 text-xs text-muted-foreground">Which channels drive the most conversions</p>
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={CHANNEL_DATA}>

@@ -27,6 +27,10 @@ const newUserSchema = z.object({
 
 type NewUserForm = z.infer<typeof newUserSchema>;
 
+/**
+ * Invitation acceptance page for users invited to join an organization.
+ * Handles both existing users (one-click accept) and new users (account creation form).
+ */
 export default function InvitePage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") ?? "";
@@ -256,7 +260,7 @@ export default function InvitePage() {
                 <button
                   type="button"
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                  onClick={() => setShowPassword((p) => !p)}
+                  onClick={() => setShowPassword((visible) => !visible)}
                   tabIndex={-1}
                 >
                   {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}

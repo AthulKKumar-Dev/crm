@@ -16,6 +16,10 @@ export function meta() {
   ];
 }
 
+/**
+ * Signup page for new user registration with name, email, and password fields.
+ * Validates input via Zod schema and displays server-side errors.
+ */
 export default function SignupPage() {
   const [showPassword, setShowPassword] = useState(false);
   const signup = useSignupMutation();
@@ -122,7 +126,7 @@ export default function SignupPage() {
             <button
               type="button"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-              onClick={() => setShowPassword((p) => !p)}
+              onClick={() => setShowPassword((visible) => !visible)}
               tabIndex={-1}
               aria-label={showPassword ? "Hide password" : "Show password"}
             >

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { User, OrganizationMembership, AuthOrganization } from "~/types/api";
 
+/** Persisted authentication state for the current user session. */
 interface AuthState {
   user: User | null;
   accessToken: string | null;
@@ -11,6 +12,7 @@ interface AuthState {
   currentOrgId: string | null;
 }
 
+/** Actions available on the auth store. */
 interface AuthActions {
   setAuth: (
     user: Partial<User> & { id: string; email: string; firstName: string; lastName: string },
@@ -92,6 +94,12 @@ function normalizeUser(
   };
 }
 
+/**
+ * Global auth store — manages user session, tokens, and organization memberships.
+ *
+ * Persisted to `localStorage` under the key `"crm-auth"` so sessions survive
+ * page reloads. Token refresh is handled by the API client interceptor.
+ */
 export const useAuthStore = create<AuthState & AuthActions>()(
   persist(
     (set) => ({

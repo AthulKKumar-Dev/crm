@@ -1,6 +1,10 @@
 import { Outlet, Link } from "react-router";
 import { Leaf } from "lucide-react";
 
+/**
+ * Shared layout for the onboarding flow (account type, create org, invite team).
+ * Renders a top bar with logo, main content area, and footer.
+ */
 export default function OnboardingLayout() {
   return (
     <div className="flex min-h-svh flex-col bg-[#f1f7fa]">

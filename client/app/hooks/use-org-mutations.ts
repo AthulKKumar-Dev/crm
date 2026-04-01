@@ -1,10 +1,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
-import { isAxiosError } from "axios";
 import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { orgKeys } from "~/hooks/use-org-queries";
+import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   CreateOrganizationRequest,
   UpdateOrganizationRequest,
@@ -12,8 +12,9 @@ import type {
   SendInviteRequest,
 } from "~/types/api";
 
-// ─── Organization Mutations ───
+// ─── Organization Mutations ─────────────────────────────────────────────────
 
+/** Mutation hook for creating a new organization. Sets it as active and navigates to dashboard. */
 export function useCreateOrganizationMutation() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -27,16 +28,11 @@ export function useCreateOrganizationMutation() {
       toast.success(`${org.name} created successfully!`);
       navigate("/dashboard");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to create organization.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to create organization."),
   });
 }
 
+/** Mutation hook for creating a personal workspace. */
 export function useCreatePersonalMutation() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -49,36 +45,26 @@ export function useCreatePersonalMutation() {
       setCurrentOrg(org.id);
       navigate("/dashboard");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to create workspace.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to create workspace."),
   });
 }
 
+/** Mutation hook for updating an existing organization's settings. */
 export function useUpdateOrganizationMutation(orgId: string) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: (data: UpdateOrganizationRequest) => orgService.update(orgId, data),
-    onSuccess: (org) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: orgKeys.detail(orgId) });
       queryClient.invalidateQueries({ queryKey: orgKeys.list() });
       toast.success("Organization updated successfully.");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to update organization.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to update organization."),
   });
 }
 
+/** Mutation hook for deleting an organization. Navigates to dashboard on success. */
 export function useDeleteOrganizationMutation() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -90,18 +76,13 @@ export function useDeleteOrganizationMutation() {
       toast.success("Organization deleted.");
       navigate("/dashboard");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to delete organization.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to delete organization."),
   });
 }
 
-// ─── Member Mutations ───
+// ─── Member Mutations ───────────────────────────────────────────────────────
 
+/** Mutation hook for changing a member's role within an organization. */
 export function useUpdateMemberRoleMutation(orgId: string) {
   const queryClient = useQueryClient();
 
@@ -112,16 +93,11 @@ export function useUpdateMemberRoleMutation(orgId: string) {
       queryClient.invalidateQueries({ queryKey: orgKeys.members(orgId) });
       toast.success("Member role updated.");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to update member role.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to update member role."),
   });
 }
 
+/** Mutation hook for removing a member from an organization. */
 export function useRemoveMemberMutation(orgId: string) {
   const queryClient = useQueryClient();
 
@@ -131,18 +107,13 @@ export function useRemoveMemberMutation(orgId: string) {
       queryClient.invalidateQueries({ queryKey: orgKeys.members(orgId) });
       toast.success("Member removed.");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to remove member.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to remove member."),
   });
 }
 
-// ─── Invite Mutations ───
+// ─── Invite Mutations ───────────────────────────────────────────────────────
 
+/** Mutation hook for sending a team invitation email. */
 export function useSendInviteMutation(orgId: string) {
   const queryClient = useQueryClient();
 
@@ -152,16 +123,11 @@ export function useSendInviteMutation(orgId: string) {
       queryClient.invalidateQueries({ queryKey: orgKeys.invites(orgId) });
       toast.success(`Invitation sent to ${invite.email}`);
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to send invitation.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to send invitation."),
   });
 }
 
+/** Mutation hook for revoking a pending team invitation. */
 export function useRevokeInviteMutation(orgId: string) {
   const queryClient = useQueryClient();
 
@@ -171,12 +137,6 @@ export function useRevokeInviteMutation(orgId: string) {
       queryClient.invalidateQueries({ queryKey: orgKeys.invites(orgId) });
       toast.success("Invitation revoked.");
     },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to revoke invitation.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
+    onError: (error) => handleMutationError(error, "Failed to revoke invitation."),
   });
 }

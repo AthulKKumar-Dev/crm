@@ -22,6 +22,13 @@ export function meta() {
 
 const RESEND_COOLDOWN = 60;
 
+/** Number of OTP digits expected for email verification. */
+const OTP_LENGTH = 6;
+
+/**
+ * Email verification page where users enter a 6-digit OTP code.
+ * Supports auto-submit on full code entry and resend with cooldown.
+ */
 export default function VerifyEmailPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -36,7 +43,7 @@ export default function VerifyEmailPage() {
   // Cooldown timer
   useEffect(() => {
     if (cooldown <= 0) return;
-    const timer = setInterval(() => setCooldown((p) => p - 1), 1000);
+    const timer = setInterval(() => setCooldown((seconds) => seconds - 1), 1000);
     return () => clearInterval(timer);
   }, [cooldown]);
 
@@ -44,14 +51,14 @@ export default function VerifyEmailPage() {
   function handleCodeChange(value: string) {
     setCode(value);
 
-    if (value.length === 6 && userId) {
+    if (value.length === OTP_LENGTH && userId) {
       verify.mutate({ userId, code: value });
     }
   }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!userId || code.length !== 6) return;
+    if (!userId || code.length !== OTP_LENGTH) return;
     verify.mutate({ userId, code });
   }
 
@@ -89,16 +96,16 @@ export default function VerifyEmailPage() {
         {/* OTP input */}
         <div className="flex justify-center">
           <InputOTP
-            maxLength={6}
+            maxLength={OTP_LENGTH}
             value={code}
             onChange={handleCodeChange}
             disabled={verify.isPending}
           >
             <InputOTPGroup className="gap-2">
-              {[0, 1, 2, 3, 4, 5].map((i) => (
+              {[0, 1, 2, 3, 4, 5].map((slotIndex) => (
                 <InputOTPSlot
-                  key={i}
-                  index={i}
+                  key={slotIndex}
+                  index={slotIndex}
                   className="!size-11 !rounded-lg !border !border-gray-200 bg-white text-base font-bold shadow-sm transition-all data-[active=true]:!border-[#cdff8c] data-[active=true]:!ring-2 data-[active=true]:!ring-[#cdff8c]/40"
                 />
               ))}
@@ -116,7 +123,7 @@ export default function VerifyEmailPage() {
         {/* Submit */}
         <button
           type="submit"
-          disabled={verify.isPending || code.length !== 6}
+          disabled={verify.isPending || code.length !== OTP_LENGTH}
           className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {verify.isPending ? (

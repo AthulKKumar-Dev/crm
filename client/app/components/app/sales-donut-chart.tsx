@@ -1,19 +1,26 @@
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { TrendingUp } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { SALES_CHART_DATA } from "~/lib/placeholder-data";
 
-const TOTAL = SALES_CHART_DATA.reduce((sum, d) => sum + d.value, 0);
+const TOTAL = SALES_CHART_DATA.reduce((sum, entry) => sum + entry.value, 0);
 
+/** Donut chart card showing sales breakdown by category with a legend and totals. */
 export function SalesDonutChart() {
   return (
-    <div className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-border">
+    <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
       <div className="mb-4 flex items-start justify-between">
-        <p className="text-sm font-semibold text-gray-900">Total Sales Statistics</p>
-        <select className="rounded-md border border-input bg-transparent px-2 py-0.5 text-xs text-muted-foreground focus:outline-none">
-          <option>Monthly</option>
-          <option>Weekly</option>
-          <option>Yearly</option>
-        </select>
+        <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Total Sales Statistics</p>
+        <Select defaultValue="monthly">
+          <SelectTrigger className="h-7 w-[95px] rounded-md border border-input bg-transparent dark:bg-gray-900 px-2 text-xs text-muted-foreground shadow-none focus:ring-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="monthly">Monthly</SelectItem>
+            <SelectItem value="weekly">Weekly</SelectItem>
+            <SelectItem value="yearly">Yearly</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="flex items-center gap-6">
@@ -39,7 +46,7 @@ export function SalesDonutChart() {
             </PieChart>
           </ResponsiveContainer>
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
-            <p className="text-base font-bold text-gray-900 leading-tight">
+            <p className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">
               {TOTAL.toLocaleString()}
             </p>
             <p className="text-[10px] text-muted-foreground leading-tight">Weekly Visits</p>
@@ -53,11 +60,11 @@ export function SalesDonutChart() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-[10px] text-muted-foreground">Total Number of Sales</p>
-              <p className="text-lg font-bold text-gray-900">
+              <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
                 ${SALES_CHART_DATA[0].value.toLocaleString()}
               </p>
             </div>
-            <div className="flex size-8 items-center justify-center rounded-full border border-gray-100 text-xs font-bold text-gray-500">
+            <div className="flex size-8 items-center justify-center rounded-full border border-gray-100 dark:border-gray-700 text-xs font-bold text-gray-500 dark:text-gray-400">
               S
             </div>
           </div>
@@ -69,7 +76,7 @@ export function SalesDonutChart() {
                   <span className="inline-block size-2.5 rounded-full" style={{ backgroundColor: entry.color }} />
                   <span className="text-xs text-muted-foreground">{entry.name}</span>
                 </div>
-                <p className="mt-0.5 pl-4 text-xs font-semibold text-gray-900">
+                <p className="mt-0.5 pl-4 text-xs font-semibold text-gray-900 dark:text-gray-100">
                   ${entry.value.toLocaleString()}
                 </p>
               </div>

@@ -16,6 +16,10 @@ export function meta() {
   ];
 }
 
+/**
+ * Login page allowing existing users to sign in with email and password.
+ * Displays server-side validation errors and provides a link to sign up.
+ */
 export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const login = useLoginMutation();
@@ -94,7 +98,7 @@ export default function LoginPage() {
             <button
               type="button"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-              onClick={() => setShowPassword((p) => !p)}
+              onClick={() => setShowPassword((visible) => !visible)}
               tabIndex={-1}
               aria-label={showPassword ? "Hide password" : "Show password"}
             >

@@ -11,21 +11,22 @@ interface StatCardProps {
   icon?: ReactNode;
 }
 
+/** Displays a single KPI metric with its current value, trend percentage, and optional icon. */
 export function StatCard({ label, value, change, changeLabel, className, icon }: StatCardProps) {
   const isPositive = change >= 0;
 
   return (
-    <div className={cn("rounded-xl bg-white p-5 shadow-sm ring-1 ring-border", className)}>
+    <div className={cn("rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border", className)}>
       <div className="flex items-start justify-between gap-2">
         <p className="text-xs font-medium text-muted-foreground">{label}</p>
         {icon && (
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-gray-100 text-gray-400">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-gray-100 dark:border-gray-700 text-gray-400">
             {icon}
           </div>
         )}
       </div>
       <div className="mt-3 flex items-end justify-between gap-3">
-        <p className="text-2xl font-bold text-gray-900 leading-none">{value}</p>
+        <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">{value}</p>
         <span
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",

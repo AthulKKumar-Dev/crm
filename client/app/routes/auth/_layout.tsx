@@ -8,6 +8,10 @@ const FEATURES = [
   { icon: MessageSquare,text: "Centralised conversation inbox" },
 ];
 
+/**
+ * Shared layout for all authentication pages (login, signup, verify, etc.).
+ * Renders a split-screen with a brand panel on the left and a form area on the right.
+ */
 export default function AuthLayout() {
   return (
     <div className="flex min-h-svh bg-[#f1f7fa]">

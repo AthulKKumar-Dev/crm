@@ -151,6 +151,10 @@ body {
   scrollbar-color: #d1d5db #f1f7fa;
 }
 
+.dark * {
+  scrollbar-color: #374151 #0a0a0a;
+}
+
 /* Chrome, Edge, Safari */
 ::-webkit-scrollbar {
   width: 6px;
@@ -162,10 +166,19 @@ body {
   border-radius: 999px;
 }
 
+.dark ::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
 ::-webkit-scrollbar-thumb {
   background: #d1d5db;
   border-radius: 999px;
   border: 1px solid #f1f7fa;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #374151;
+  border: 1px solid #0a0a0a;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -174,4 +187,16 @@ body {
 
 ::-webkit-scrollbar-corner {
   background: #f1f7fa;
+}
+
+.dark ::-webkit-scrollbar-corner {
+  background: #0a0a0a;
+}
+
+/* ── Native select/option dark-mode fix ─────────────────────────────────── */
+/* Native <option> elements ignore most CSS — background + color are the
+   only reliable properties across browsers. */
+.dark select option {
+  background-color: #111827;  /* gray-900 */
+  color: #f3f4f6;            /* gray-100 */
 }

@@ -35,6 +35,7 @@ interface OrdersTableProps {
   showCustomerName?: boolean;
 }
 
+/** Renders a data table of orders with status badges, product info, and row-level actions. */
 export function OrdersTable({ orders, showCustomerName = false }: OrdersTableProps) {
   return (
     <Table>
@@ -59,7 +60,7 @@ export function OrdersTable({ orders, showCustomerName = false }: OrdersTablePro
             <TableCell>
               <input type="checkbox" className="rounded border-border" />
             </TableCell>
-            <TableCell className="font-medium text-gray-900">
+            <TableCell className="font-medium text-gray-900 dark:text-gray-100">
               {order.status === "COMPLETED" && (
                 <span className="mr-1.5 inline-block size-4 rounded-full bg-[#cdff8c]/30 text-[#4d7a00] text-center text-[10px] leading-4">✓</span>
               )}
@@ -67,11 +68,11 @@ export function OrdersTable({ orders, showCustomerName = false }: OrdersTablePro
             </TableCell>
             <TableCell>
               <div className="flex items-center gap-2">
-                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gray-100">
+                <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-gray-100 dark:bg-gray-800">
                   <Package className="size-4 text-muted-foreground" />
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-gray-900 leading-tight">
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100 leading-tight">
                     {order.productName}
                   </p>
                   {order.variantCount > 0 && (
@@ -98,7 +99,7 @@ export function OrdersTable({ orders, showCustomerName = false }: OrdersTablePro
             <TableCell>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <button className="flex size-7 items-center justify-center rounded-md hover:bg-gray-100">
+                  <button className="flex size-7 items-center justify-center rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
                     <MoreHorizontal className="size-4 text-muted-foreground" />
                   </button>
                 </DropdownMenuTrigger>

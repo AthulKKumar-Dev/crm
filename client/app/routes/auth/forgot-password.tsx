@@ -15,12 +15,16 @@ export function meta() {
   ];
 }
 
-const schema = z.object({
+const forgotPasswordSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
 });
 
-type FormValues = z.infer<typeof schema>;
+type ForgotPasswordFormValues = z.infer<typeof forgotPasswordSchema>;
 
+/**
+ * Forgot password page that sends a password reset link to the user's email.
+ * Shows a success confirmation view after the link has been sent.
+ */
 export default function ForgotPasswordPage() {
   const [submitted, setSubmitted] = useState(false);
   const [sentEmail, setSentEmail] = useState("");
@@ -30,8 +34,8 @@ export default function ForgotPasswordPage() {
     register,
     handleSubmit,
     formState: { errors },
-  } = useForm<FormValues>({
-    resolver: zodResolver(schema),
+  } = useForm<ForgotPasswordFormValues>({
+    resolver: zodResolver(forgotPasswordSchema),
     defaultValues: { email: "" },
   });
 
@@ -40,7 +44,7 @@ export default function ForgotPasswordPage() {
       ? forgot.error.response?.data?.message
       : null;
 
-  function onSubmit(data: FormValues) {
+  function onSubmit(data: ForgotPasswordFormValues) {
     setSentEmail(data.email);
     forgot.mutate(data, {
       onSuccess: () => setSubmitted(true),

@@ -7,6 +7,8 @@ export function meta() {
   return [{ title: "Customers | Collabo CRM" }];
 }
 
+/* ─── Status display configuration ─────────────────────────────── */
+
 const STATUS_LABEL: Record<CustomerStatus, string> = {
   ACTIVE: "Active",
   INACTIVE: "Inactive",
@@ -21,12 +23,15 @@ const STATUS_CLASS: Record<CustomerStatus, string> = {
   AT_RISK: "bg-red-100 text-red-700",
 };
 
+/** Ordered list of filter options shown in the status pill bar. */
 const STATUS_FILTERS: Array<"All" | CustomerStatus> = ["All", "ACTIVE", "VIP", "AT_RISK", "INACTIVE"];
 
+/** Derive two-letter initials from first and last name. */
 function getInitials(first: string, last: string) {
   return `${first[0]}${last[0]}`.toUpperCase();
 }
 
+/** Rotating palette for customer avatar backgrounds. */
 const AVATAR_COLORS = [
   "bg-blue-100 text-blue-700",
   "bg-purple-100 text-purple-700",
@@ -36,26 +41,31 @@ const AVATAR_COLORS = [
   "bg-indigo-100 text-indigo-700",
 ];
 
+/**
+ * Customers page — displays customer statistics, status filters,
+ * and a searchable table of all customers with avatar initials.
+ */
 export default function CustomersPage() {
-  const [search, setSearch] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"All" | CustomerStatus>("All");
 
-  const filtered = SAMPLE_CUSTOMERS.filter((c) => {
-    const fullName = `${c.firstName} ${c.lastName}`.toLowerCase();
-    const matchSearch =
-      fullName.includes(search.toLowerCase()) ||
-      c.email.toLowerCase().includes(search.toLowerCase()) ||
-      c.location.toLowerCase().includes(search.toLowerCase());
-    const matchStatus = statusFilter === "All" || c.status === statusFilter;
-    return matchSearch && matchStatus;
+  /** Filter customers by name/email/location and selected status. */
+  const filteredCustomers = SAMPLE_CUSTOMERS.filter((customer) => {
+    const fullName = `${customer.firstName} ${customer.lastName}`.toLowerCase();
+    const matchesSearch =
+      fullName.includes(searchQuery.toLowerCase()) ||
+      customer.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      customer.location.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = statusFilter === "All" || customer.status === statusFilter;
+    return matchesSearch && matchesStatus;
   });
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Customers</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Customers</h1>
           <p className="text-sm text-muted-foreground">
             View and manage your customer database, segments, and activity.
           </p>
@@ -73,41 +83,41 @@ export default function CustomersPage() {
         ))}
       </div>
 
-      {/* Search + filter row */}
+      {/* Search input and status filter pills */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[200px] max-w-xs">
           <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
             placeholder="Search by name, email, or location…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-8 w-full rounded-lg border border-input bg-white pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
           />
         </div>
         <div className="flex items-center gap-1.5">
-          {STATUS_FILTERS.map((s) => (
+          {STATUS_FILTERS.map((filterValue) => (
             <button
-              key={s}
-              onClick={() => setStatusFilter(s)}
+              key={filterValue}
+              onClick={() => setStatusFilter(filterValue)}
               className={`h-7 rounded-full px-3 text-xs font-medium transition-colors ${
-                statusFilter === s
+                statusFilter === filterValue
                   ? "bg-[#cdff8c]/30 text-[#4d7a00]"
-                  : "bg-white text-gray-500 hover:text-gray-900 border border-input"
+                  : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 border border-input"
               }`}
             >
-              {s === "All" ? "All" : STATUS_LABEL[s]}
+              {filterValue === "All" ? "All" : STATUS_LABEL[filterValue]}
             </button>
           ))}
         </div>
       </div>
 
       {/* Customers table */}
-      <div className="rounded-xl bg-white shadow-sm ring-1 ring-border overflow-hidden">
+      <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-gray-50/60 text-left">
+              <tr className="border-b bg-gray-50/60 dark:bg-gray-800/60 text-left">
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Customer</th>
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Location</th>
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Orders</th>
@@ -117,25 +127,25 @@ export default function CustomersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {filtered.length === 0 ? (
+              {filteredCustomers.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-4 py-10 text-center text-xs text-muted-foreground">
                     No customers match your search.
                   </td>
                 </tr>
               ) : (
-                filtered.map((customer, idx) => {
+                filteredCustomers.map((customer, rowIndex) => {
                   const initials = getInitials(customer.firstName, customer.lastName);
-                  const avatarColor = AVATAR_COLORS[idx % AVATAR_COLORS.length];
+                  const avatarColor = AVATAR_COLORS[rowIndex % AVATAR_COLORS.length];
                   return (
-                    <tr key={customer.id} className="hover:bg-gray-50/50 transition-colors">
+                    <tr key={customer.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
                           <div className={`flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${avatarColor}`}>
                             {initials}
                           </div>
                           <div className="min-w-0">
-                            <p className="text-xs font-medium text-gray-900">
+                            <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
                               {customer.firstName} {customer.lastName}
                             </p>
                             <p className="text-xs text-muted-foreground">{customer.email}</p>
@@ -143,10 +153,10 @@ export default function CustomersPage() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground">{customer.location}</td>
-                      <td className="px-4 py-3 text-xs font-medium text-gray-900 text-right">
+                      <td className="px-4 py-3 text-xs font-medium text-gray-900 dark:text-gray-100 text-right">
                         {customer.orders}
                       </td>
-                      <td className="px-4 py-3 text-xs font-semibold text-gray-900 text-right">
+                      <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
                         ${customer.totalSpent.toLocaleString("en-US", { minimumFractionDigits: 2 })}
                       </td>
                       <td className="px-4 py-3 text-xs text-muted-foreground">{customer.lastOrderDate}</td>
@@ -162,15 +172,17 @@ export default function CustomersPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination footer */}
         <div className="flex items-center justify-between border-t px-4 py-3">
           <p className="text-xs text-muted-foreground">
-            Showing {filtered.length} of {SAMPLE_CUSTOMERS.length} customers
+            Showing {filteredCustomers.length} of {SAMPLE_CUSTOMERS.length} customers
           </p>
           <div className="flex items-center gap-1">
-            <button className="h-7 rounded-md border border-input bg-white px-3 text-xs text-muted-foreground hover:text-gray-900 disabled:opacity-40" disabled>
+            <button className="h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40" disabled>
               Previous
             </button>
-            <button className="h-7 rounded-md border border-input bg-white px-3 text-xs text-muted-foreground hover:text-gray-900 disabled:opacity-40" disabled>
+            <button className="h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40" disabled>
               Next
             </button>
           </div>

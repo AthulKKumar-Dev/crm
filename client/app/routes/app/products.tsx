@@ -7,6 +7,8 @@ export function meta() {
   return [{ title: "Products | Collabo CRM" }];
 }
 
+/* ─── Status display configuration ─────────────────────────────── */
+
 const STATUS_LABEL: Record<ProductStatus, string> = {
   ACTIVE: "Active",
   DRAFT: "Draft",
@@ -21,25 +23,31 @@ const STATUS_CLASS: Record<ProductStatus, string> = {
   ARCHIVED: "bg-orange-100 text-orange-700",
 };
 
+/** Available category filter options for the product catalog. */
 const CATEGORY_FILTERS = ["All", "Electronics", "Clothes", "Shoes", "Furniture", "Home Appliances"];
 
+/**
+ * Products page — displays catalog statistics, category filters,
+ * a searchable product table with stock and status indicators.
+ */
 export default function ProductsPage() {
-  const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("All");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState("All");
 
-  const filtered = SAMPLE_CATALOG.filter((p) => {
-    const matchSearch = p.name.toLowerCase().includes(search.toLowerCase()) ||
-      p.sku.toLowerCase().includes(search.toLowerCase());
-    const matchCat = category === "All" || p.category === category;
-    return matchSearch && matchCat;
+  /** Filter products by name/SKU search and selected category. */
+  const filteredProducts = SAMPLE_CATALOG.filter((product) => {
+    const matchesSearch = product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      product.sku.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory = selectedCategory === "All" || product.category === selectedCategory;
+    return matchesSearch && matchesCategory;
   });
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900">Products</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Products</h1>
           <p className="text-sm text-muted-foreground">
             Manage your product catalog, inventory, and pricing.
           </p>
@@ -57,42 +65,42 @@ export default function ProductsPage() {
         ))}
       </div>
 
-      {/* Filter + search bar */}
+      {/* Search input and category filter pills */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[200px] max-w-xs">
           <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             type="text"
             placeholder="Search by name or SKU…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-8 w-full rounded-lg border border-input bg-white pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
           />
         </div>
         <div className="flex items-center gap-1.5">
           <Filter className="size-3.5 text-muted-foreground" />
-          {CATEGORY_FILTERS.map((cat) => (
+          {CATEGORY_FILTERS.map((categoryName) => (
             <button
-              key={cat}
-              onClick={() => setCategory(cat)}
+              key={categoryName}
+              onClick={() => setSelectedCategory(categoryName)}
               className={`h-7 rounded-full px-3 text-xs font-medium transition-colors ${
-                category === cat
+                selectedCategory === categoryName
                   ? "bg-[#cdff8c]/30 text-[#4d7a00]"
-                  : "bg-white text-gray-500 hover:text-gray-900 border border-input"
+                  : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 border border-input"
               }`}
             >
-              {cat}
+              {categoryName}
             </button>
           ))}
         </div>
       </div>
 
       {/* Products table */}
-      <div className="rounded-xl bg-white shadow-sm ring-1 ring-border overflow-hidden">
+      <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b bg-gray-50/60 text-left">
+              <tr className="border-b bg-gray-50/60 dark:bg-gray-800/60 text-left">
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Product</th>
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">SKU</th>
                 <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Category</th>
@@ -103,32 +111,32 @@ export default function ProductsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {filtered.length === 0 ? (
+              {filteredProducts.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="px-4 py-10 text-center text-xs text-muted-foreground">
                     No products match your search.
                   </td>
                 </tr>
               ) : (
-                filtered.map((product) => (
-                  <tr key={product.id} className="hover:bg-gray-50/50 transition-colors">
+                filteredProducts.map((product) => (
+                  <tr key={product.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-400">
+                        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400">
                           <span className="text-lg">📦</span>
                         </div>
-                        <span className="text-xs font-medium text-gray-900 line-clamp-1">
+                        <span className="text-xs font-medium text-gray-900 dark:text-gray-100 line-clamp-1">
                           {product.name}
                         </span>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-xs text-muted-foreground font-mono">{product.sku}</td>
                     <td className="px-4 py-3 text-xs text-muted-foreground">{product.category}</td>
-                    <td className="px-4 py-3 text-xs font-semibold text-gray-900 text-right">
+                    <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
                       ${product.price.toLocaleString("en-US", { minimumFractionDigits: 2 })}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <span className={`text-xs font-medium ${product.stock === 0 ? "text-red-600" : product.stock < 100 ? "text-orange-600" : "text-gray-900"}`}>
+                      <span className={`text-xs font-medium ${product.stock === 0 ? "text-red-600" : product.stock < 100 ? "text-orange-600" : "text-gray-900 dark:text-gray-100"}`}>
                         {product.stock.toLocaleString()}
                       </span>
                     </td>
@@ -146,15 +154,17 @@ export default function ProductsPage() {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination footer */}
         <div className="flex items-center justify-between border-t px-4 py-3">
           <p className="text-xs text-muted-foreground">
-            Showing {filtered.length} of {SAMPLE_CATALOG.length} products
+            Showing {filteredProducts.length} of {SAMPLE_CATALOG.length} products
           </p>
           <div className="flex items-center gap-1">
-            <button className="h-7 rounded-md border border-input bg-white px-3 text-xs text-muted-foreground hover:text-gray-900 disabled:opacity-40" disabled>
+            <button className="h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40" disabled>
               Previous
             </button>
-            <button className="h-7 rounded-md border border-input bg-white px-3 text-xs text-muted-foreground hover:text-gray-900 disabled:opacity-40" disabled>
+            <button className="h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40" disabled>
               Next
             </button>
           </div>

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
 
+/** React Query key factory for all organization-related queries. */
 export const orgKeys = {
   all: ["organizations"] as const,
   list: () => [...orgKeys.all, "list"] as const,

@@ -10,6 +10,8 @@ import {
 import type { Route } from "./+types/root";
 import { QueryProvider } from "~/providers/query-provider";
 import { Toaster } from "~/components/ui/sonner";
+import { useThemeStore } from "~/stores/theme.store";
+import { useEffect } from "react";
 import "./app.css";
 
 export const links: Route.LinksFunction = () => [
@@ -44,9 +46,23 @@ export function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Syncs the theme store state to the document root class on mount and theme changes. */
+function ThemeInit() {
+  const theme = useThemeStore((s) => s.theme);
+  useEffect(() => {
+    const root = document.documentElement;
+    const isDark =
+      theme === "dark" ||
+      (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    root.classList.toggle("dark", isDark);
+  }, [theme]);
+  return null;
+}
+
 export default function App() {
   return (
     <QueryProvider>
+      <ThemeInit />
       <Outlet />
     </QueryProvider>
   );
