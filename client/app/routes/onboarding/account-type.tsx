@@ -1,12 +1,9 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useMutation } from "@tanstack/react-query";
-import { isAxiosError } from "axios";
 import { User, Users, ArrowRight, Loader2, Sparkles } from "lucide-react";
-import { toast } from "sonner";
 import { cn } from "~/lib/utils";
-import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
+import { useCreatePersonalMutation } from "~/hooks/use-org-mutations";
 
 export function meta() {
   return [{ title: "Choose Account Type | Collabo CRM" }];
@@ -15,32 +12,8 @@ export function meta() {
 export default function AccountTypePage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<"personal" | "organization" | null>(null);
-  const { setOrganizations, setCurrentOrg, organizations, user } = useAuthStore();
-
-  const createPersonal = useMutation({
-    mutationFn: () => orgService.createPersonal(),
-    onSuccess: (org) => {
-      setOrganizations([
-        ...organizations,
-        {
-          id: crypto.randomUUID(),
-          organizationId: org.id,
-          role: "OWNER" as const,
-          isActive: true,
-          organization: org,
-        },
-      ]);
-      setCurrentOrg(org.id);
-      navigate("/dashboard");
-    },
-    onError: (error) => {
-      if (isAxiosError(error)) {
-        toast.error(error.response?.data?.message || "Failed to create workspace.");
-      } else {
-        toast.error("Something went wrong. Please try again.");
-      }
-    },
-  });
+  const user = useAuthStore((s) => s.user);
+  const createPersonal = useCreatePersonalMutation();
 
   function handleSelect(type: "personal" | "organization") {
     setSelected(type);
@@ -61,8 +34,10 @@ export default function AccountTypePage() {
           <div className="size-2 rounded-full bg-[#cdff8c]" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
+          <div className="h-px w-6 bg-gray-200" />
+          <div className="size-2 rounded-full bg-gray-200" />
         </div>
-        <span className="ml-2 text-xs text-gray-400">Step 1 of 2</span>
+        <span className="ml-2 text-xs text-gray-400">Step 1 of 3</span>
       </div>
 
       {/* Heading */}
@@ -90,7 +65,6 @@ export default function AccountTypePage() {
             selected === "personal" ? "border-[#cdff8c] shadow-md" : "border-transparent"
           )}
         >
-          {/* Hover glow */}
           <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-2 ring-[#cdff8c]/50 transition group-hover:opacity-100" />
 
           <div className={cn(

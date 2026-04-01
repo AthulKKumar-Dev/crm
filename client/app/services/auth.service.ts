@@ -12,6 +12,9 @@ import type {
   ForgotPasswordResponse,
   ResetPasswordRequest,
   ResetPasswordResponse,
+  GetInviteResponse,
+  AcceptInviteRequest,
+  AcceptInviteResponse,
 } from "~/types/api";
 
 export const authService = {
@@ -39,5 +42,15 @@ export const authService = {
   resetPassword: (data: ResetPasswordRequest) =>
     apiClient
       .post<ResetPasswordResponse>("/auth/reset-password", data)
+      .then((r) => r.data),
+
+  getInvite: (token: string) =>
+    apiClient
+      .get<GetInviteResponse>(`/auth/invite/${token}`)
+      .then((r) => r.data),
+
+  acceptInvite: (data: AcceptInviteRequest) =>
+    apiClient
+      .post<AcceptInviteResponse>("/auth/invite/accept", data)
       .then((r) => r.data),
 };

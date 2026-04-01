@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useSearchParams, useNavigate, Link } from "react-router";
 import { isAxiosError } from "axios";
 import { Loader2, Mail, ArrowLeft } from "lucide-react";
@@ -33,24 +33,21 @@ export default function VerifyEmailPage() {
   const verify = useVerifyEmailMutation();
   const resend = useResendVerificationMutation();
 
-  // Only redirect if no userId when actually submitting — allow preview
-  // useEffect(() => {
-  //   if (!userId) navigate("/auth/signup", { replace: true });
-  // }, [userId, navigate]);
-
+  // Cooldown timer
   useEffect(() => {
     if (cooldown <= 0) return;
     const timer = setInterval(() => setCooldown((p) => p - 1), 1000);
     return () => clearInterval(timer);
   }, [cooldown]);
 
-  const handleComplete = useCallback(
-    (value: string) => {
-      if (!userId) return;
+  // Auto-submit when all 6 digits entered
+  function handleCodeChange(value: string) {
+    setCode(value);
+
+    if (value.length === 6 && userId) {
       verify.mutate({ userId, code: value });
-    },
-    [userId, verify]
-  );
+    }
+  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -60,6 +57,9 @@ export default function VerifyEmailPage() {
 
   function handleResend() {
     if (!userId || cooldown > 0) return;
+    // Reset the code and any previous error
+    setCode("");
+    verify.reset();
     resend.mutate({ userId });
     setCooldown(RESEND_COOLDOWN);
   }
@@ -67,7 +67,9 @@ export default function VerifyEmailPage() {
   const serverError =
     verify.error && isAxiosError(verify.error)
       ? verify.error.response?.data?.message
-      : null;
+      : verify.error
+        ? "Something went wrong. Please try again."
+        : null;
 
   return (
     <div>
@@ -89,8 +91,7 @@ export default function VerifyEmailPage() {
           <InputOTP
             maxLength={6}
             value={code}
-            onChange={setCode}
-            onComplete={handleComplete}
+            onChange={handleCodeChange}
             disabled={verify.isPending}
           >
             <InputOTPGroup className="gap-2">
@@ -98,7 +99,7 @@ export default function VerifyEmailPage() {
                 <InputOTPSlot
                   key={i}
                   index={i}
-                  className="size-11 rounded-lg border border-gray-200 bg-white text-base font-bold shadow-sm transition data-[active=true]:border-[#cdff8c] data-[active=true]:ring-2 data-[active=true]:ring-[#cdff8c]/40"
+                  className="!size-11 !rounded-lg !border !border-gray-200 bg-white text-base font-bold shadow-sm transition-all data-[active=true]:!border-[#cdff8c] data-[active=true]:!ring-2 data-[active=true]:!ring-[#cdff8c]/40"
                 />
               ))}
             </InputOTPGroup>

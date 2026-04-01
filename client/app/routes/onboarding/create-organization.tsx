@@ -1,10 +1,13 @@
-import { useNavigate, Link } from "react-router";
+import { useState } from "react";
+import { Link, useNavigate } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useMutation } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
-import { ArrowLeft, Loader2, Building2 } from "lucide-react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowLeft, Loader2, Building2, Globe, Upload, X,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   Select,
@@ -15,10 +18,12 @@ import {
 } from "~/components/ui/select";
 import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
+import { orgKeys } from "~/hooks/use-org-queries";
 
 const INDUSTRIES = [
   "Retail", "E-commerce", "Fashion", "Electronics", "Food & Beverage",
-  "Health & Beauty", "Home & Garden", "Sports & Outdoors", "Technology", "Other",
+  "Health & Beauty", "Home & Garden", "Sports & Outdoors", "Technology",
+  "Education", "Finance", "Healthcare", "Real Estate", "Travel & Hospitality", "Other",
 ];
 
 const TIMEZONES = [
@@ -49,6 +54,8 @@ const CURRENCIES = [
 const schema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters").max(100),
   industry: z.string().optional(),
+  website: z.string().url("Please enter a valid URL").optional().or(z.literal("")),
+  logo: z.string().url("Please enter a valid logo URL").optional().or(z.literal("")),
   timezone: z.string().optional(),
   currency: z.string().optional(),
 });
@@ -61,40 +68,39 @@ export function meta() {
 
 export default function CreateOrganizationPage() {
   const navigate = useNavigate();
-  const { setOrganizations, setCurrentOrg, organizations } = useAuthStore();
+  const queryClient = useQueryClient();
+  const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
   const {
     register,
     handleSubmit,
     setValue,
+    watch,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { name: "", industry: "", timezone: "UTC", currency: "USD" },
+    defaultValues: { name: "", industry: "", website: "", logo: "", timezone: "UTC", currency: "USD" },
   });
+
+  const logoValue = watch("logo");
 
   const createOrg = useMutation({
     mutationFn: (data: FormValues) =>
-      orgService.createOrganization({
+      orgService.create({
         name: data.name,
         industry: data.industry || undefined,
+        website: data.website || undefined,
+        logo: data.logo || undefined,
         timezone: data.timezone || undefined,
         currency: data.currency || undefined,
       }),
     onSuccess: (org) => {
-      setOrganizations([
-        ...organizations,
-        {
-          id: crypto.randomUUID(),
-          organizationId: org.id,
-          role: "OWNER" as const,
-          isActive: true,
-          organization: org,
-        },
-      ]);
+      queryClient.invalidateQueries({ queryKey: orgKeys.list() });
       setCurrentOrg(org.id);
-      toast.success(`${org.name} created successfully!`);
-      navigate("/dashboard");
+      toast.success(`${org.name} created!`);
+      // Navigate to invite step instead of dashboard
+      navigate(`/onboarding/invite-team?orgId=${org.id}`);
     },
     onError: (error) => {
       if (isAxiosError(error)) {
@@ -107,6 +113,20 @@ export default function CreateOrganizationPage() {
 
   function onSubmit(data: FormValues) {
     createOrg.mutate(data);
+  }
+
+  function handleLogoUrlBlur() {
+    const url = logoValue?.trim();
+    if (url && /^https?:\/\/.+/.test(url)) {
+      setLogoPreview(url);
+    } else {
+      setLogoPreview(null);
+    }
+  }
+
+  function clearLogo() {
+    setValue("logo", "");
+    setLogoPreview(null);
   }
 
   const serverError =
@@ -122,8 +142,10 @@ export default function CreateOrganizationPage() {
           <div className="size-2 rounded-full bg-gray-300" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-[#cdff8c]" />
+          <div className="h-px w-6 bg-gray-200" />
+          <div className="size-2 rounded-full bg-gray-200" />
         </div>
-        <span className="ml-2 text-xs text-gray-400">Step 2 of 2</span>
+        <span className="ml-2 text-xs text-gray-400">Step 2 of 3</span>
       </div>
 
       {/* Heading */}
@@ -133,7 +155,7 @@ export default function CreateOrganizationPage() {
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Set up your organization</h2>
         <p className="mt-1.5 text-sm text-gray-500">
-          Tell us about your team. You can update these details later in settings.
+          Tell us about your business. You can update these details anytime.
         </p>
       </div>
 
@@ -141,38 +163,104 @@ export default function CreateOrganizationPage() {
       <div className="rounded-2xl bg-white p-8 shadow-sm ring-1 ring-black/[0.06]">
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
 
-          {/* Org name */}
-          <div className="space-y-1.5">
-            <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-              Organization name <span className="text-red-500">*</span>
-            </label>
-            <input
-              id="name"
-              placeholder="Acme Store"
-              aria-invalid={!!errors.name}
-              {...register("name")}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
-            />
-            {errors.name && (
-              <p className="text-xs text-red-500">{errors.name.message}</p>
-            )}
+          {/* Logo + Org name row */}
+          <div className="flex gap-4">
+            {/* Logo */}
+            <div className="shrink-0">
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Logo</label>
+              <div className="relative flex size-[72px] items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 overflow-hidden transition hover:border-[#cdff8c]/60">
+                {logoPreview ? (
+                  <>
+                    <img
+                      src={logoPreview}
+                      alt="Logo preview"
+                      className="size-full object-cover"
+                      onError={() => setLogoPreview(null)}
+                    />
+                    <button
+                      type="button"
+                      onClick={clearLogo}
+                      className="absolute -right-1 -top-1 flex size-5 items-center justify-center rounded-full bg-gray-900 text-white shadow-sm hover:bg-gray-700"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </>
+                ) : (
+                  <Upload className="size-5 text-gray-300" />
+                )}
+              </div>
+            </div>
+
+            {/* Name + Logo URL */}
+            <div className="flex-1 space-y-3">
+              <div className="space-y-1.5">
+                <label htmlFor="name" className="block text-sm font-medium text-gray-700">
+                  Organization name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  id="name"
+                  placeholder="Acme Store"
+                  aria-invalid={!!errors.name}
+                  {...register("name")}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+                />
+                {errors.name && (
+                  <p className="text-xs text-red-500">{errors.name.message}</p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor="logo" className="block text-xs font-medium text-gray-500">
+                  Logo URL <span className="text-gray-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  id="logo"
+                  placeholder="https://example.com/logo.png"
+                  {...register("logo")}
+                  onBlur={handleLogoUrlBlur}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-xs text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                />
+                {errors.logo && (
+                  <p className="text-xs text-red-500">{errors.logo.message}</p>
+                )}
+              </div>
+            </div>
           </div>
 
-          {/* Industry */}
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-gray-700">
-              Industry <span className="text-gray-400 font-normal">(optional)</span>
-            </label>
-            <Select onValueChange={(v) => setValue("industry", v)}>
-              <SelectTrigger className="w-full border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
-                <SelectValue placeholder="Select your industry" />
-              </SelectTrigger>
-              <SelectContent>
-                {INDUSTRIES.map((ind) => (
-                  <SelectItem key={ind} value={ind}>{ind}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          {/* Industry + Website */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-gray-700">
+                Industry
+              </label>
+              <Select onValueChange={(v) => setValue("industry", v)}>
+                <SelectTrigger className="w-full border-gray-200 bg-white shadow-sm focus:ring-[#cdff8c]/40">
+                  <SelectValue placeholder="Select your industry" />
+                </SelectTrigger>
+                <SelectContent>
+                  {INDUSTRIES.map((ind) => (
+                    <SelectItem key={ind} value={ind}>{ind}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label htmlFor="website" className="block text-sm font-medium text-gray-700">
+                Website
+              </label>
+              <div className="relative">
+                <Globe className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400" />
+                <input
+                  id="website"
+                  placeholder="https://yourstore.com"
+                  {...register("website")}
+                  className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                />
+              </div>
+              {errors.website && (
+                <p className="text-xs text-red-500">{errors.website.message}</p>
+              )}
+            </div>
           </div>
 
           {/* Timezone + Currency */}
@@ -233,7 +321,7 @@ export default function CreateOrganizationPage() {
                   Creating…
                 </>
               ) : (
-                "Create organization"
+                "Continue"
               )}
             </button>
           </div>

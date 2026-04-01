@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { User, OrganizationMembership } from "~/types/api";
+import type { User, OrganizationMembership, AuthOrganization } from "~/types/api";
 
 interface AuthState {
   user: User | null;
@@ -13,10 +13,10 @@ interface AuthState {
 
 interface AuthActions {
   setAuth: (
-    user: User,
+    user: Partial<User> & { id: string; email: string; firstName: string; lastName: string },
     accessToken: string,
     refreshToken: string,
-    organizations?: OrganizationMembership[]
+    organizations?: OrganizationMembership[] | AuthOrganization[]
   ) => void;
   setTokens: (accessToken: string, refreshToken: string) => void;
   setOrganizations: (organizations: OrganizationMembership[]) => void;
@@ -33,6 +33,65 @@ const initialState: AuthState = {
   currentOrgId: null,
 };
 
+/**
+ * Normalize organizations from backend flat shape to the nested
+ * OrganizationMembership shape used throughout the frontend.
+ *
+ * Backend returns: { id, name, slug, type, role }
+ * Frontend needs:  { id, organizationId, role, isActive, organization: { id, name, slug, ... } }
+ */
+function normalizeOrganizations(
+  orgs: OrganizationMembership[] | AuthOrganization[]
+): OrganizationMembership[] {
+  if (!orgs || orgs.length === 0) return [];
+
+  // Check if it's already in the nested format
+  const first = orgs[0] as unknown as Record<string, unknown>;
+  if ("organization" in first && typeof first.organization === "object") {
+    return orgs as OrganizationMembership[];
+  }
+
+  // Convert flat backend shape → nested frontend shape
+  return (orgs as AuthOrganization[]).map((o) => ({
+    id: crypto.randomUUID(),
+    organizationId: o.id,
+    role: o.role,
+    isActive: true,
+    organization: {
+      id: o.id,
+      name: o.name,
+      slug: o.slug,
+      type: o.type,
+      logo: null,
+      timezone: "UTC",
+      currency: "USD",
+      industry: null,
+      website: null,
+      billingPlan: "FREE" as const,
+      onboardingStatus: "COMPLETED" as const,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  }));
+}
+
+/**
+ * Fill in missing User fields so the store always has a full User object.
+ */
+function normalizeUser(
+  partial: Partial<User> & { id: string; email: string; firstName: string; lastName: string }
+): User {
+  return {
+    avatarUrl: null,
+    emailVerified: false,
+    twoFactorEnabled: false,
+    lastLoginAt: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...partial,
+  };
+}
+
 export const useAuthStore = create<AuthState & AuthActions>()(
   persist(
     (set) => ({
@@ -40,11 +99,11 @@ export const useAuthStore = create<AuthState & AuthActions>()(
 
       setAuth: (user, accessToken, refreshToken, organizations = []) =>
         set({
-          user,
+          user: normalizeUser(user),
           accessToken,
           refreshToken,
           isAuthenticated: true,
-          organizations,
+          organizations: normalizeOrganizations(organizations),
         }),
 
       setTokens: (accessToken, refreshToken) =>

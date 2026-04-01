@@ -8,6 +8,7 @@ import {
   Layers,
   MessageSquare,
   Users,
+  BarChart3,
   Bell,
   Settings,
   ChevronDown,
@@ -36,6 +37,7 @@ const NAV_LINKS = [
   { label: "Channel",      href: "/channel",      icon: Layers },
   { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
   { label: "Customers",    href: "/customers",    icon: Users },
+  { label: "Analytics",    href: "/analytics",    icon: BarChart3 },
 ];
 
 export function Navbar() {
