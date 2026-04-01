@@ -30,14 +30,14 @@ import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 
 const NAV_LINKS = [
-  { label: "Dashboard",    href: "/dashboard",    icon: LayoutDashboard },
-  { label: "Orders",       href: "/orders",       icon: ShoppingCart },
-  { label: "Products",     href: "/products",     icon: Package },
-  { label: "Marketing",    href: "/marketing",    icon: Megaphone },
-  { label: "Channel",      href: "/channel",      icon: Layers },
+  { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+  { label: "Orders", href: "/orders", icon: ShoppingCart },
+  { label: "Products", href: "/products", icon: Package },
+  { label: "Marketing", href: "/marketing", icon: Megaphone },
+  { label: "Channel", href: "/channel", icon: Layers },
   { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
-  { label: "Customers",    href: "/customers",    icon: Users },
-  { label: "Analytics",    href: "/analytics",    icon: BarChart3 },
+  { label: "Customers", href: "/customers", icon: Users },
+  { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
 
 /** Top navigation bar with pill-style nav links, notification icons, and user/workspace dropdown. */
@@ -59,7 +59,7 @@ export function Navbar() {
     }
   }
 
-  const initials   = user ? `${user.firstName[0]}${user.lastName[0]}`.toUpperCase() : "?";
+  const initials = user ? `${user.firstName[0]}${user.lastName[0]}`.toUpperCase() : "?";
   const currentOrg = organizations.find((membership) => membership.organization.id === currentOrgId);
 
   return (
@@ -84,7 +84,7 @@ export function Navbar() {
                   key={href}
                   to={href}
                   className={cn(
-                    "relative flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none",
+                    "relative flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none p-2.5",
                     isActive
                       ? "font-semibold text-gray-900 dark:text-gray-900"
                       : "font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
@@ -98,8 +98,8 @@ export function Navbar() {
                       transition={{
                         type: "spring",
                         stiffness: 380,
-                        damping:   32,
-                        mass:      1,
+                        damping: 32,
+                        mass: 1,
                       }}
                     />
                   )}
