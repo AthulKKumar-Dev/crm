@@ -47,13 +47,25 @@ export class GlobalExceptionFilter implements ExceptionFilter {
             );
         }
 
-        response.status(statusCode).json({
+        // Build the base error body
+        const body: Record<string, unknown> = {
             success: false,
             statusCode,
             message,
             ...(errors && { errors }),
             timestamp: new Date().toISOString(),
             path: request.url,
-        });
+        };
+
+        // Forward extra fields (e.g. userId, nextStep) from structured exceptions
+        if (exception instanceof HttpException) {
+            const exceptionResponse = exception.getResponse();
+            if (typeof exceptionResponse === 'object' && !Array.isArray(exceptionResponse)) {
+                const { statusCode: _, message: __, ...extra } = exceptionResponse as Record<string, unknown>;
+                Object.assign(body, extra);
+            }
+        }
+
+        response.status(statusCode).json(body);
     }
 }
