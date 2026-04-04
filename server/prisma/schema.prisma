@@ -55,6 +55,30 @@ enum InviteStatus {
   REVOKED
 }
 
+enum ChannelPlatform {
+  SHOPIFY
+  WOOCOMMERCE
+  INSTAGRAM
+  FACEBOOK
+  WHATSAPP
+  TIKTOK
+  MANUAL
+}
+
+enum ChannelStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  SYNCING
+}
+
+enum SyncStatus {
+  IDLE
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
 
 model User {
   id               String    @id @default(cuid())
@@ -107,6 +131,8 @@ model Organization {
 
   members OrganizationMember[]
   invites TeamInvite[]
+  channels Channel[]        
+  syncLogs SyncLog[] 
 
   @@map("organizations")
 }
@@ -185,3 +211,51 @@ model TeamInvite {
   @@map("team_invites")
 }
 
+model Channel {
+  id               String          @id @default(cuid())
+  organizationId   String          @map("organization_id")
+  name             String                                    // "My Shopify Store"
+  platform         ChannelPlatform                           // SHOPIFY, INSTAGRAM, etc.
+  status           ChannelStatus   @default(DISCONNECTED)    // Connection health
+  isEnabled        Boolean         @default(true) @map("is_enabled")
+  credentials      Json?           @db.JsonB                 // Encrypted OAuth tokens
+  externalStoreId  String?         @map("external_store_id") // Shopify shop ID
+  externalStoreUrl String?         @map("external_store_url") // https://mystore.myshopify.com
+  lastSyncedAt     DateTime?       @map("last_synced_at")
+  syncStatus       SyncStatus      @default(IDLE) @map("sync_status")
+  metadata         Json?           @db.JsonB
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  syncLogs     SyncLog[]
+
+  @@unique([organizationId, platform])    // ← ONE store per platform per org
+  @@index([organizationId])
+  @@map("channels")
+}
+
+model SyncLog {
+  id               String     @id @default(cuid())
+  organizationId   String     @map("organization_id")
+  channelId        String     @map("channel_id")
+  status           SyncStatus
+  entityType       String     @map("entity_type")          // "products" | "orders" | "customers"
+  recordsProcessed Int        @default(0) @map("records_processed")
+  recordsFailed    Int        @default(0) @map("records_failed")
+  totalEstimated   Int?       @map("total_estimated")      // For progress bar
+  cursor           String?                                  // Resume point for pagination
+  errorMessage     String?    @map("error_message")
+  errorDetails     Json?      @map("error_details") @db.JsonB
+  startedAt        DateTime   @map("started_at")
+  completedAt      DateTime?  @map("completed_at")
+  createdAt        DateTime   @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([channelId])
+  @@index([createdAt])
+  @@map("sync_logs")
+}

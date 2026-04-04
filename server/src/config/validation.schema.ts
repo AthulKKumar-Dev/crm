@@ -11,4 +11,7 @@ export const validationSchema = Joi.object({
     SHOPIFY_CLIENT_ID: Joi.string().required(),
     SHOPIFY_CLIENT_SECRET: Joi.string().required(),
     ENCRYPTION_KEY: Joi.string().length(32).required(),
+    META_APP_ID: Joi.string().required(),
+    META_APP_SECRET: Joi.string().required(),
+    INSTAGRAM_WEBHOOK_VERIFY_TOKEN: Joi.string().required(),
 });
