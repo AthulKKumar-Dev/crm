@@ -17,6 +17,7 @@ import { RolesGuard } from './auth/roles.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
 import { EmailModule } from './email/email.module';
+import { ChannelModule } from './channel/channel.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { EmailModule } from './email/email.module';
     AuthModule,
     UserModule,
     OrganizationModule,
+    ChannelModule,
   ],
   controllers: [AppController],
   providers: [
