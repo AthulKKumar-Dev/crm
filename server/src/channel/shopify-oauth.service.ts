@@ -29,7 +29,7 @@ export class ShopifyOAuthService {
     ) {
         this.clientId = this.config.get<string>('shopify.clientId')!;
         this.clientSecret = this.config.get<string>('shopify.clientSecret')!;
-        this.scopes = 'read_products,read_orders,read_customers,read_inventory,read_locations';
+        this.scopes = 'read_products,read_orders,read_all_orders,read_customers,read_inventory,read_locations';
         this.appUrl = this.config.get<string>('appUrl')!;
     }
 

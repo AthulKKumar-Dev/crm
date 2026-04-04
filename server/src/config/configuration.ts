@@ -5,9 +5,7 @@ export default () => ({
     frontendUrl: process.env.FRONTEND_URL,
     database: { url: process.env.DATABASE_URL },
     redis: {
-        host: process.env.REDIS_HOST,
-        port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-        password: process.env.REDIS_PASSWORD || undefined,
+        url: process.env.REDIS_URL,
     },
     jwt: {
         accessSecret: process.env.JWT_ACCESS_SECRET,

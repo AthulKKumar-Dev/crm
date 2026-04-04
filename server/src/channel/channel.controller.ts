@@ -1,6 +1,10 @@
 import { Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req } from '@nestjs/common';
 import type { Response, Request } from 'express';
 import { UserRole } from '@prisma/client';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { SYNC_QUEUE, SyncJobData } from './sync.queue';
+
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
@@ -17,6 +21,7 @@ export class ChannelController {
     private readonly channelService: ChannelService,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly instagramOAuth: InstagramOAuthService,
+    @InjectQueue(SYNC_QUEUE) private readonly syncQueue: Queue,
   ) { }
 
   // POST /channels/shopify/install — start OAuth flow
@@ -98,8 +103,24 @@ export class ChannelController {
     @CurrentUser() user: JwtPayload,
     @Body() dto: TriggerSyncDto,
   ) {
-    // TODO: Queue background sync job
-    return { message: 'Sync started', channelId: id, entityTypes: dto.entityTypes };
+    // Add job to BullMQ queue — returns immediately
+    const job = await this.syncQueue.add('sync', {
+      channelId: id,
+      organizationId: user.orgId!,
+      entityTypes: dto.entityTypes,
+    } satisfies SyncJobData, {
+      attempts: 3,                          // Retry up to 3 times
+      backoff: { type: 'exponential', delay: 5000 },  // 5s, 10s, 20s
+      removeOnComplete: { count: 100 },     // Keep last 100 completed jobs
+      removeOnFail: { count: 50 },          // Keep last 50 failed jobs
+    });
+
+    return {
+      message: 'Sync started',
+      jobId: job.id,
+      channelId: id,
+      entityTypes: dto.entityTypes,
+    };
   }
 
   // GET /channels/:id/sync-logs — list sync history
