@@ -25,5 +25,10 @@ export default () => ({
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
         webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || undefined,
     },
+    instagram: {
+        appId: process.env.META_APP_ID,
+        appSecret: process.env.META_APP_SECRET,
+        webhookVerifyToken: process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN,
+    },
     encryptionKey: process.env.ENCRYPTION_KEY || undefined,
 });

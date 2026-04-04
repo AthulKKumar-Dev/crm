@@ -9,12 +9,14 @@ import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ConnectShopifyDto } from './dto/connect-shopify.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import { TriggerSyncDto } from './dto/trigger-sync.dto';
+import { InstagramOAuthService } from './instagram-oauth.service';
 
 @Controller('channels')
 export class ChannelController {
   constructor(
     private readonly channelService: ChannelService,
     private readonly shopifyOAuth: ShopifyOAuthService,
+    private readonly instagramOAuth: InstagramOAuthService,
   ) { }
 
   // POST /channels/shopify/install — start OAuth flow
@@ -40,6 +42,24 @@ export class ChannelController {
   ) {
     console.log("Hello", query);
     const { redirectUrl } = await this.shopifyOAuth.handleCallback(query);
+    return res.redirect(redirectUrl);
+  }
+
+  // POST /channels/instagram/install — start Meta OAuth flow
+  @Post('instagram/install')
+  async installInstagram(@CurrentUser() user: JwtPayload) {
+    const authUrl = await this.instagramOAuth.getInstallUrl(user.orgId!, user.sub);
+    return { authUrl };
+  }
+
+  // GET /channels/instagram/callback — Meta redirects here after OAuth
+  @Public()
+  @Get('instagram/callback')
+  async instagramCallback(
+    @Query() query: { code: string; state: string },
+    @Res() res: Response,
+  ) {
+    const { redirectUrl } = await this.instagramOAuth.handleCallback(query);
     return res.redirect(redirectUrl);
   }
 
