@@ -638,3 +638,57 @@ export interface UpdateCustomerRequest {
   segments?: string[];
   tags?: string[];
 }
+
+// ─── Dashboard Types ────────────────────────────────────────────────────────
+
+/** Query parameters for the dashboard overview endpoint. */
+export interface DashboardQueryParams {
+  dateFrom?: string;
+  dateTo?: string;
+  channelId?: string;
+}
+
+/** Fulfillment status breakdown counts. */
+export interface FulfillmentBreakdown {
+  unfulfilled: number;
+  fulfilled: number;
+  partial: number;
+  restocked: number;
+}
+
+/** A top-selling product returned by the dashboard endpoint. */
+export interface DashboardTopProduct {
+  externalProductId: string;
+  title: string;
+  image: string | null;
+  totalQuantitySold: number;
+  totalOrders: number;
+  currentStock: number;
+  price: string;
+}
+
+/** A recent order returned by the dashboard endpoint (subset of full Order). */
+export interface DashboardRecentOrder {
+  id: string;
+  orderNumber: number;
+  name: string;
+  totalPrice: number;
+  currency: string;
+  financialStatus: FinancialStatus;
+  fulfillmentStatus: FulfillmentStatus;
+  customer: OrderCustomer;
+  itemCount: number;
+  createdAt: string;
+}
+
+/** Full dashboard overview response. */
+export interface DashboardOverview {
+  totalSales: number;
+  totalOrders: number;
+  totalCustomers: number;
+  totalProducts: number;
+  totalInventory: number;
+  fulfillmentBreakdown: FulfillmentBreakdown;
+  topSellingProducts: DashboardTopProduct[];
+  recentOrders: DashboardRecentOrder[];
+}
