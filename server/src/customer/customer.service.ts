@@ -108,4 +108,110 @@ export class CustomerService {
     customers.forEach((c) => c.segments.forEach((s) => allSegments.add(s)));
     return [...allSegments].sort();
   }
+
+  async getStats(orgId: string, channelId?: string) {
+    const baseWhere: Prisma.CustomerWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      ...(channelId && { channelId }),
+    };
+
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const previousMonthEnd = new Date(currentMonthStart.getTime() - 1);
+
+    const [
+      totalCustomers,
+      newCustomersThisMonth,
+      newCustomersLastMonth,
+      activeCustomers,
+      customersByVip,
+      totalRevenue,
+      averageOrderValue,
+    ] = await Promise.all([
+      // Total customers
+      this.prisma.customer.count({ where: baseWhere }),
+
+      // New customers this month
+      this.prisma.customer.count({
+        where: { ...baseWhere, externalCreatedAt: { gte: currentMonthStart } },
+      }),
+
+      // New customers last month
+      this.prisma.customer.count({
+        where: { ...baseWhere, externalCreatedAt: { gte: previousMonthStart, lte: previousMonthEnd } },
+      }),
+
+      // Active customers — have placed at least 1 order
+      this.prisma.customer.count({
+        where: { ...baseWhere, ordersCount: { gt: 0 } },
+      }),
+
+      // Customers by VIP level
+      this.prisma.customer.groupBy({
+        by: ['vipLevel'],
+        where: baseWhere,
+        _count: true,
+      }),
+
+      // Total customer revenue (sum of totalSpent)
+      this.prisma.customer.aggregate({
+        where: baseWhere,
+        _sum: { totalSpent: true },
+        _avg: { totalSpent: true },
+      }),
+
+      // Average order value (from orders, not customers)
+      this.prisma.order.aggregate({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          financialStatus: { in: ['PAID', 'PARTIALLY_PAID'] },
+          ...(channelId && { channelId }),
+        },
+        _avg: { totalPrice: true },
+      }),
+    ]);
+
+    // Calculate new customers change
+    const newCustomersChange = this.calcChange(newCustomersThisMonth, newCustomersLastMonth);
+
+    // Format VIP breakdown
+    const vipBreakdown: Record<string, number> = {};
+    for (const group of customersByVip) {
+      vipBreakdown[group.vipLevel] = group._count;
+    }
+
+    return {
+      totalCustomers,
+      activeCustomers,
+      inactiveCustomers: totalCustomers - activeCustomers,
+
+      newCustomers: {
+        current: newCustomersThisMonth,
+        previous: newCustomersLastMonth,
+        change: newCustomersChange,
+      },
+
+      totalRevenue: totalRevenue._sum.totalSpent ?? 0,
+      averageCustomerValue: totalRevenue._avg.totalSpent ?? 0,
+      averageOrderValue: averageOrderValue._avg.totalPrice ?? 0,
+
+      vipBreakdown: {
+        none: vipBreakdown['NONE'] ?? 0,
+        bronze: vipBreakdown['BRONZE'] ?? 0,
+        silver: vipBreakdown['SILVER'] ?? 0,
+        gold: vipBreakdown['GOLD'] ?? 0,
+        platinum: vipBreakdown['PLATINUM'] ?? 0,
+      },
+    };
+  }
+
+  private calcChange(current: number, previous: number): { percentage: number; direction: 'up' | 'down' | 'same' } {
+    if (previous === 0 && current === 0) return { percentage: 0, direction: 'same' };
+    if (previous === 0) return { percentage: 100, direction: 'up' };
+    const pct = Math.round(((current - previous) / previous) * 100);
+    return { percentage: Math.abs(pct), direction: pct > 0 ? 'up' : pct < 0 ? 'down' : 'same' };
+  }
 }

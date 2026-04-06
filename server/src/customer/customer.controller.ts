@@ -24,6 +24,12 @@ export class CustomerController {
     return this.customerService.getSegments(user.orgId!);
   }
 
+  // GET /api/v1/customers/stats — PLACE BEFORE :id route
+  @Get('stats')
+  getStats(@CurrentUser() user: JwtPayload, @Query('channelId') channelId?: string) {
+    return this.customerService.getStats(user.orgId!, channelId);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.customerService.findOne(id, user.orgId!);
