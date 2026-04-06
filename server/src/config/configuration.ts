@@ -5,9 +5,7 @@ export default () => ({
     frontendUrl: process.env.FRONTEND_URL,
     database: { url: process.env.DATABASE_URL },
     redis: {
-        host: process.env.REDIS_HOST,
-        port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-        password: process.env.REDIS_PASSWORD || undefined,
+        url: process.env.REDIS_URL,
     },
     jwt: {
         accessSecret: process.env.JWT_ACCESS_SECRET,
@@ -24,6 +22,11 @@ export default () => ({
         clientId: process.env.SHOPIFY_CLIENT_ID,
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
         webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || undefined,
+    },
+    instagram: {
+        appId: process.env.META_APP_ID,
+        appSecret: process.env.META_APP_SECRET,
+        webhookVerifyToken: process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN,
     },
     encryptionKey: process.env.ENCRYPTION_KEY || undefined,
 });
