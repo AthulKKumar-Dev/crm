@@ -720,6 +720,39 @@ export interface DashboardOverview {
   recentOrders: DashboardRecentOrder[];
 }
 
+// ─── Customer Stats Types ──────────────────────────────────────────────────
+
+/** New-customers metric with period-over-period comparison. */
+export interface NewCustomersMetric {
+  current: number;
+  previous: number;
+  change: {
+    percentage: number;
+    direction: ChangeDirection;
+  };
+}
+
+/** VIP tier breakdown counts. */
+export interface VipBreakdown {
+  none: number;
+  bronze: number;
+  silver: number;
+  gold: number;
+  platinum: number;
+}
+
+/** Aggregate customer statistics returned by GET /customers/stats. */
+export interface CustomerStatsResponse {
+  totalCustomers: number;
+  activeCustomers: number;
+  inactiveCustomers: number;
+  newCustomers: NewCustomersMetric;
+  totalRevenue: number;
+  averageCustomerValue: number;
+  averageOrderValue: number;
+  vipBreakdown: VipBreakdown;
+}
+
 // ─── Product Stats Types ───────────────────────────────────────────────────
 
 /** Aggregate product statistics returned by GET /products/stats. */

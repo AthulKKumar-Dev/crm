@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Search, UserPlus, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, UserPlus, ChevronLeft, ChevronRight, Users, UserCheck, UserRoundPlus, DollarSign } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
-import { useCustomers } from "~/hooks/use-customer-queries";
-import { CUSTOMER_STATS } from "~/lib/placeholder-data";
+import { Skeleton } from "~/components/ui/skeleton";
+import { useCustomers, useCustomerStats } from "~/hooks/use-customer-queries";
 import type { VipLevel, CustomerListParams } from "~/types/api";
 
 export function meta() {
@@ -57,6 +57,7 @@ export default function CustomersPage() {
   };
 
   const { data, isLoading } = useCustomers(params);
+  const { data: stats, isLoading: statsLoading } = useCustomerStats();
   const customers = data?.data ?? [];
   const meta = data?.meta;
   const totalPages = meta?.totalPages ?? 1;
@@ -89,9 +90,49 @@ export default function CustomersPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {CUSTOMER_STATS.map((stat) => (
-          <StatCard key={stat.label} {...stat} />
-        ))}
+        {statsLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+              <Skeleton className="h-3 w-24 mb-4" />
+              <Skeleton className="h-7 w-20" />
+            </div>
+          ))
+        ) : stats ? (
+          <>
+            <StatCard
+              label="Total Customers"
+              value={stats.totalCustomers.toLocaleString()}
+              change={0}
+              icon={<Users className="size-4" />}
+            />
+            <StatCard
+              label="Active Customers"
+              value={stats.activeCustomers.toLocaleString()}
+              change={0}
+              icon={<UserCheck className="size-4" />}
+            />
+            <StatCard
+              label="New This Month"
+              value={stats.newCustomers.current.toLocaleString()}
+              change={stats.newCustomers.change.direction === "down" ? -stats.newCustomers.change.percentage : stats.newCustomers.change.percentage}
+              changeLabel="vs last month"
+              icon={<UserRoundPlus className="size-4" />}
+            />
+            <StatCard
+              label="Avg. Order Value"
+              value={`$${Number(stats.averageOrderValue).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              change={0}
+              icon={<DollarSign className="size-4" />}
+            />
+          </>
+        ) : (
+          <>
+            <StatCard label="Total Customers" value="—" change={0} icon={<Users className="size-4" />} />
+            <StatCard label="Active Customers" value="—" change={0} icon={<UserCheck className="size-4" />} />
+            <StatCard label="New This Month" value="—" change={0} icon={<UserRoundPlus className="size-4" />} />
+            <StatCard label="Avg. Order Value" value="—" change={0} icon={<DollarSign className="size-4" />} />
+          </>
+        )}
       </div>
 
       {/* Search input and VIP filter pills */}
