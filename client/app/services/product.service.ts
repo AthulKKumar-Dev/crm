@@ -4,6 +4,7 @@ import type {
   Product,
   ProductDetail,
   ProductListParams,
+  ProductStatsResponse,
 } from "~/types/api";
 
 /**
@@ -24,4 +25,7 @@ export const productService = {
 
   types: () =>
     apiClient.get<string[]>("/products/types").then((response) => response.data),
+
+  stats: (params?: { channelId?: string }) =>
+    apiClient.get<ProductStatsResponse>("/products/stats", { params }).then((response) => response.data),
 };

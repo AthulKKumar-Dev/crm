@@ -64,16 +64,6 @@ export const ANALYTICS_CHANNEL_DATA = [
   { channel: "Referral", sessions: 1500, orders: 36, revenue: 5300 },
 ];
 
-// ─── Product Catalog Stats ──────────────────────────────────────────────────
-
-/** Summary statistics shown on the product catalog page. */
-export const CATALOG_STATS: StatCardData[] = [
-  { label: "Total Products", value: "1,284", change: 8, changeLabel: "vs last month" },
-  { label: "Active Listings", value: "1,047", change: 5, changeLabel: "vs last month" },
-  { label: "Out of Stock", value: "93", change: -12, changeLabel: "vs last month" },
-  { label: "Low Stock Items", value: "144", change: 22, changeLabel: "vs last month" },
-];
-
 // ─── Customers Stats ────────────────────────────────────────────────────────
 
 /** Summary statistics shown on the customers page. */
