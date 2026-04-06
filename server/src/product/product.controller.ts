@@ -26,6 +26,12 @@ export class ProductController {
     return this.productService.getProductTypes(user.orgId!);
   }
 
+  // GET /api/v1/products/stats — PLACE BEFORE :id route
+  @Get('stats')
+  getStats(@CurrentUser() user: JwtPayload, @Query('channelId') channelId?: string) {
+    return this.productService.getStats(user.orgId!, channelId);
+  }
+
   // GET /api/v1/products/:id — full detail with all variants and images
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {

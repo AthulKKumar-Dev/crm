@@ -134,6 +134,78 @@ export class ProductService {
     return types.map((t) => t.productType).filter(Boolean);
   }
 
+  async getStats(orgId: string, channelId?: string) {
+    const baseWhere: Prisma.ProductWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      ...(channelId && { channelId }),
+    };
+
+    // Get the org's low stock threshold
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { lowStockThreshold: true },
+    });
+    const threshold = org?.lowStockThreshold ?? 10;
+
+    const [
+      totalProducts,
+      activeListings,
+      draftProducts,
+      archivedProducts,
+      outOfStockProducts,
+      lowStockProducts,
+      totalInventory,
+    ] = await Promise.all([
+      // Total products (all statuses)
+      this.prisma.product.count({ where: baseWhere }),
+
+      // Active listings
+      this.prisma.product.count({ where: { ...baseWhere, status: 'ACTIVE' } }),
+
+      // Draft products
+      this.prisma.product.count({ where: { ...baseWhere, status: 'DRAFT' } }),
+
+      // Archived products
+      this.prisma.product.count({ where: { ...baseWhere, status: 'ARCHIVED' } }),
+
+      // Out of stock — all variants have 0 or less inventory
+      this.prisma.product.count({
+        where: {
+          ...baseWhere,
+          status: 'ACTIVE',
+          variants: { every: { inventoryQuantity: { lte: 0 } } },
+        },
+      }),
+
+      // Low stock — at least one variant has stock > 0 but <= threshold
+      this.prisma.product.count({
+        where: {
+          ...baseWhere,
+          status: 'ACTIVE',
+          variants: { some: { inventoryQuantity: { gt: 0, lte: threshold } } },
+        },
+      }),
+
+      // Total inventory units across all variants
+      this.prisma.productVariant.aggregate({
+        where: { product: baseWhere },
+        _sum: { inventoryQuantity: true },
+      }),
+    ]);
+
+    return {
+      totalProducts,
+      activeListings,
+      draftProducts,
+      archivedProducts,
+      outOfStockProducts,
+      lowStockProducts,
+      lowStockThreshold: threshold,
+      totalInventoryUnits: totalInventory._sum.inventoryQuantity ?? 0,
+    };
+  }
+
   private getPriceRange(variants: Array<{ price: any }>) {
     if (variants.length === 0) return { min: '0', max: '0' };
     const prices = variants.map((v) => parseFloat(String(v.price)));
