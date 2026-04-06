@@ -1,10 +1,10 @@
 import { useState } from "react";
-import { Search, Plus, Filter, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks, PackageX, AlertTriangle } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
-import { useProducts, useProductTypes } from "~/hooks/use-product-queries";
-import { CATALOG_STATS } from "~/lib/placeholder-data";
+import { Skeleton } from "~/components/ui/skeleton";
+import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
 import type { ProductStatus, ProductListParams } from "~/types/api";
 
 export function meta() {
@@ -39,6 +39,7 @@ export default function ProductsPage() {
 
   const { data, isLoading } = useProducts(params);
   const { data: productTypes } = useProductTypes();
+  const { data: stats, isLoading: statsLoading } = useProductStats();
 
   const products = data?.data ?? [];
   const meta = data?.meta;
@@ -73,9 +74,48 @@ export default function ProductsPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {CATALOG_STATS.map((stat) => (
-          <StatCard key={stat.label} {...stat} />
-        ))}
+        {statsLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+              <Skeleton className="h-3 w-24 mb-4" />
+              <Skeleton className="h-7 w-20" />
+            </div>
+          ))
+        ) : stats ? (
+          <>
+            <StatCard
+              label="Total Products"
+              value={stats.totalProducts.toLocaleString()}
+              change={0}
+              icon={<Package className="size-4" />}
+            />
+            <StatCard
+              label="Active Listings"
+              value={stats.activeListings.toLocaleString()}
+              change={0}
+              icon={<ListChecks className="size-4" />}
+            />
+            <StatCard
+              label="Out of Stock"
+              value={stats.outOfStockProducts.toLocaleString()}
+              change={0}
+              icon={<PackageX className="size-4" />}
+            />
+            <StatCard
+              label="Low Stock Items"
+              value={stats.lowStockProducts.toLocaleString()}
+              change={0}
+              icon={<AlertTriangle className="size-4" />}
+            />
+          </>
+        ) : (
+          <>
+            <StatCard label="Total Products" value="—" change={0} icon={<Package className="size-4" />} />
+            <StatCard label="Active Listings" value="—" change={0} icon={<ListChecks className="size-4" />} />
+            <StatCard label="Out of Stock" value="—" change={0} icon={<PackageX className="size-4" />} />
+            <StatCard label="Low Stock Items" value="—" change={0} icon={<AlertTriangle className="size-4" />} />
+          </>
+        )}
       </div>
 
       {/* Search input and category filter pills */}

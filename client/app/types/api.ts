@@ -719,3 +719,17 @@ export interface DashboardOverview {
   topSellingProducts: DashboardTopProduct[];
   recentOrders: DashboardRecentOrder[];
 }
+
+// ─── Product Stats Types ───────────────────────────────────────────────────
+
+/** Aggregate product statistics returned by GET /products/stats. */
+export interface ProductStatsResponse {
+  totalProducts: number;
+  activeListings: number;
+  draftProducts: number;
+  archivedProducts: number;
+  outOfStockProducts: number;
+  lowStockProducts: number;
+  lowStockThreshold: number;
+  totalInventoryUnits: number;
+}

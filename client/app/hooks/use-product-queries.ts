@@ -9,6 +9,7 @@ export const productKeys = {
   detail: (id: string) => [...productKeys.all, "detail", id] as const,
   vendors: () => [...productKeys.all, "vendors"] as const,
   types: () => [...productKeys.all, "types"] as const,
+  stats: (params?: { channelId?: string }) => [...productKeys.all, "stats", params] as const,
 };
 
 /** Fetch a paginated list of products with optional filters. */
@@ -41,5 +42,13 @@ export function useProductTypes() {
   return useQuery({
     queryKey: productKeys.types(),
     queryFn: () => productService.types(),
+  });
+}
+
+/** Fetch aggregate product statistics. */
+export function useProductStats(params?: { channelId?: string }) {
+  return useQuery({
+    queryKey: productKeys.stats(params),
+    queryFn: () => productService.stats(params),
   });
 }
