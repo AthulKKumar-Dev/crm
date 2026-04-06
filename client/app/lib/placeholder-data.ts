@@ -1,33 +1,8 @@
-export type OrderStatus = "COMPLETED" | "IN_PROGRESS" | "WAITING" | "CANCELLED";
-
-export interface Order {
-  id: string;
-  productName: string;
-  productImage: string;
-  variantCount: number;
-  customerName: string;
-  date: string;
-  payment: "Mastercard" | "Visa" | "Paypal";
-  amount: number;
-  status: OrderStatus;
-}
-
 export interface StatCardData {
   label: string;
   value: string;
   change: number;
   changeLabel: string;
-}
-
-export interface Product {
-  id: string;
-  name: string;
-  brand: string;
-  price: number;
-  stockCount: number;
-  sold: number;
-  image: string;
-  sparkline: number[];
 }
 
 // ─── Dashboard Stats ────────────────────────────────────────────────────────
@@ -73,33 +48,18 @@ export const SALES_CHART_DATA = [
   { name: "Shoes", value: 35715, color: "#818cf8" },
 ];
 
-// ─── Sample Orders ────────────────────────────────────────────────────────────
-
-/** Placeholder order rows for the orders table. */
-export const SAMPLE_ORDERS: Order[] = [
-  { id: "#302012", productName: "Wall Clock Special Edition", productImage: "", variantCount: 3, customerName: "Cameron Williamson", date: "22 Jan 2022", payment: "Mastercard", amount: 121.0, status: "COMPLETED" },
-  { id: "#302011", productName: "Airpods Max 2024 Edition", productImage: "", variantCount: 0, customerName: "Brooklyn Simmons", date: "20 Jan 2022", payment: "Visa", amount: 590.0, status: "IN_PROGRESS" },
-  { id: "#302002", productName: "Nike Shoes", productImage: "", variantCount: 1, customerName: "Darlene Robertson", date: "24 Jan 2022", payment: "Paypal", amount: 348.0, status: "WAITING" },
-  { id: "#301900", productName: "Wooden Stylish Chair", productImage: "", variantCount: 0, customerName: "Courtney Henry", date: "26 Jan 2022", payment: "Mastercard", amount: 607.0, status: "COMPLETED" },
-  { id: "#301899", productName: "PS 5 Pro Special Edition", productImage: "", variantCount: 1, customerName: "Kathryn Murphy", date: "26 Jan 2022", payment: "Paypal", amount: 607.0, status: "WAITING" },
-  { id: "#301898", productName: "Xiaomi 360° CC Camera", productImage: "", variantCount: 7, customerName: "Ronald Richards", date: "26 Jan 2022", payment: "Mastercard", amount: 607.0, status: "IN_PROGRESS" },
-  { id: "#301897", productName: "Winter Jacket", productImage: "", variantCount: 0, customerName: "Savannah Nguyen", date: "26 Jan 2022", payment: "Visa", amount: 607.0, status: "CANCELLED" },
-  { id: "#301896", productName: "MacBook Air M3", productImage: "", variantCount: 2, customerName: "Jerome Bell", date: "25 Jan 2022", payment: "Visa", amount: 1299.0, status: "COMPLETED" },
-  { id: "#301895", productName: "Samsung 4K Monitor", productImage: "", variantCount: 0, customerName: "Bessie Cooper", date: "25 Jan 2022", payment: "Mastercard", amount: 449.0, status: "IN_PROGRESS" },
-  { id: "#301894", productName: "Leather Handbag", productImage: "", variantCount: 4, customerName: "Arlene McCoy", date: "24 Jan 2022", payment: "Paypal", amount: 189.0, status: "COMPLETED" },
-  { id: "#301893", productName: "Running Shoes Pro", productImage: "", variantCount: 3, customerName: "Floyd Miles", date: "24 Jan 2022", payment: "Visa", amount: 210.0, status: "WAITING" },
-  { id: "#301892", productName: "Wireless Keyboard", productImage: "", variantCount: 1, customerName: "Guy Hawkins", date: "23 Jan 2022", payment: "Mastercard", amount: 89.0, status: "COMPLETED" },
-  { id: "#301891", productName: "Gaming Mouse RGB", productImage: "", variantCount: 0, customerName: "Wade Warren", date: "23 Jan 2022", payment: "Paypal", amount: 65.0, status: "COMPLETED" },
-  { id: "#301890", productName: "Coffee Maker Deluxe", productImage: "", variantCount: 2, customerName: "Esther Howard", date: "22 Jan 2022", payment: "Visa", amount: 175.0, status: "IN_PROGRESS" },
-  { id: "#301889", productName: "Yoga Mat Premium", productImage: "", variantCount: 0, customerName: "Jenny Wilson", date: "22 Jan 2022", payment: "Mastercard", amount: 55.0, status: "COMPLETED" },
-  { id: "#301888", productName: "Smart Watch Series 9", productImage: "", variantCount: 5, customerName: "Kristin Watson", date: "21 Jan 2022", payment: "Paypal", amount: 399.0, status: "COMPLETED" },
-  { id: "#301887", productName: "Office Desk Chair", productImage: "", variantCount: 1, customerName: "Cody Fisher", date: "21 Jan 2022", payment: "Visa", amount: 320.0, status: "WAITING" },
-  { id: "#301886", productName: "Bluetooth Speaker", productImage: "", variantCount: 2, customerName: "Theresa Webb", date: "20 Jan 2022", payment: "Mastercard", amount: 129.0, status: "COMPLETED" },
-  { id: "#301885", productName: "Desk Lamp LED", productImage: "", variantCount: 0, customerName: "Albert Flores", date: "20 Jan 2022", payment: "Paypal", amount: 42.0, status: "CANCELLED" },
-  { id: "#301884", productName: "Sunglasses UV400", productImage: "", variantCount: 6, customerName: "Eleanor Pena", date: "19 Jan 2022", payment: "Visa", amount: 95.0, status: "COMPLETED" },
-];
-
 // ─── Top Products ─────────────────────────────────────────────────────────────
+
+export interface Product {
+  id: string;
+  name: string;
+  brand: string;
+  price: number;
+  stockCount: number;
+  sold: number;
+  image: string;
+  sparkline: number[];
+}
 
 /** Top-selling products displayed on the dashboard. */
 export const TOP_PRODUCTS: Product[] = [
@@ -146,20 +106,7 @@ export const ANALYTICS_CHANNEL_DATA = [
   { channel: "Referral", sessions: 1500, orders: 36, revenue: 5300 },
 ];
 
-// ─── Product Catalog ──────────────────────────────────────────────────────────
-
-export type ProductStatus = "ACTIVE" | "DRAFT" | "OUT_OF_STOCK" | "ARCHIVED";
-
-export interface CatalogProduct {
-  id: string;
-  name: string;
-  category: string;
-  sku: string;
-  price: number;
-  stock: number;
-  sold: number;
-  status: ProductStatus;
-}
+// ─── Product Catalog Stats ──────────────────────────────────────────────────
 
 /** Summary statistics shown on the product catalog page. */
 export const CATALOG_STATS: StatCardData[] = [
@@ -169,37 +116,7 @@ export const CATALOG_STATS: StatCardData[] = [
   { label: "Low Stock Items", value: "144", change: 22, changeLabel: "vs last month" },
 ];
 
-/** Placeholder product catalog rows for the products table. */
-export const SAMPLE_CATALOG: CatalogProduct[] = [
-  { id: "1", name: "Apple Watch Series 10 46mm GPS", category: "Electronics", sku: "APL-AW10-46", price: 799.0, stock: 5800, sold: 20618, status: "ACTIVE" },
-  { id: "2", name: "Sony WH-1000XM5 Headphones", category: "Electronics", sku: "SNY-WH1000XM5", price: 349.99, stock: 2300, sold: 14200, status: "ACTIVE" },
-  { id: "3", name: "Samsung Galaxy S25 Ultra", category: "Electronics", sku: "SAM-GS25U", price: 1199.0, stock: 8100, sold: 18450, status: "ACTIVE" },
-  { id: "4", name: "Nike Air Max 270", category: "Shoes", sku: "NK-AM270", price: 150.0, stock: 12500, sold: 32100, status: "ACTIVE" },
-  { id: "5", name: "Dyson V15 Detect Vacuum", category: "Home Appliances", sku: "DYS-V15D", price: 749.99, stock: 1900, sold: 9830, status: "ACTIVE" },
-  { id: "6", name: "Levi's 511 Slim Jeans", category: "Clothes", sku: "LV-511-32", price: 69.99, stock: 0, sold: 5420, status: "OUT_OF_STOCK" },
-  { id: "7", name: "IKEA KALLAX Shelf Unit", category: "Furniture", sku: "IKA-KALLAX-2X4", price: 129.0, stock: 340, sold: 7810, status: "ACTIVE" },
-  { id: "8", name: "MacBook Air M3 13-inch", category: "Electronics", sku: "APL-MBA-M3-13", price: 1099.0, stock: 0, sold: 4200, status: "OUT_OF_STOCK" },
-  { id: "9", name: "Adidas Ultraboost 22", category: "Shoes", sku: "ADI-UB22-44", price: 189.0, stock: 85, sold: 11200, status: "ACTIVE" },
-  { id: "10", name: "Herman Miller Aeron Chair", category: "Furniture", sku: "HM-AERON-B", price: 1495.0, stock: 0, sold: 1800, status: "ARCHIVED" },
-  { id: "11", name: "Zara Oversized Blazer", category: "Clothes", sku: "ZR-OVB-M-BLK", price: 89.99, stock: 620, sold: 3900, status: "DRAFT" },
-  { id: "12", name: "Instant Pot Duo 7-in-1", category: "Home Appliances", sku: "IP-DUO-7N1-6Q", price: 99.95, stock: 2400, sold: 22100, status: "ACTIVE" },
-];
-
-// ─── Customers ────────────────────────────────────────────────────────────────
-
-export type CustomerStatus = "ACTIVE" | "INACTIVE" | "VIP" | "AT_RISK";
-
-export interface Customer {
-  id: string;
-  firstName: string;
-  lastName: string;
-  email: string;
-  location: string;
-  orders: number;
-  totalSpent: number;
-  lastOrderDate: string;
-  status: CustomerStatus;
-}
+// ─── Customers Stats ────────────────────────────────────────────────────────
 
 /** Summary statistics shown on the customers page. */
 export const CUSTOMER_STATS: StatCardData[] = [
@@ -207,22 +124,6 @@ export const CUSTOMER_STATS: StatCardData[] = [
   { label: "Active Customers", value: "9,312", change: 11, changeLabel: "vs last month" },
   { label: "New This Month", value: "842", change: 34, changeLabel: "vs last month" },
   { label: "At Risk", value: "391", change: -8, changeLabel: "vs last month" },
-];
-
-/** Placeholder customer rows for the customers table. */
-export const SAMPLE_CUSTOMERS: Customer[] = [
-  { id: "1", firstName: "Cameron", lastName: "Williamson", email: "cameron.w@email.com", location: "New York, US", orders: 24, totalSpent: 4280.50, lastOrderDate: "22 Jan 2022", status: "VIP" },
-  { id: "2", firstName: "Brooklyn", lastName: "Simmons", email: "brooklyn.s@email.com", location: "Los Angeles, US", orders: 12, totalSpent: 1890.00, lastOrderDate: "20 Jan 2022", status: "ACTIVE" },
-  { id: "3", firstName: "Darlene", lastName: "Robertson", email: "darlene.r@email.com", location: "Chicago, US", orders: 7, totalSpent: 760.00, lastOrderDate: "24 Jan 2022", status: "ACTIVE" },
-  { id: "4", firstName: "Courtney", lastName: "Henry", email: "courtney.h@email.com", location: "Houston, US", orders: 3, totalSpent: 250.00, lastOrderDate: "10 Dec 2021", status: "AT_RISK" },
-  { id: "5", firstName: "Kathryn", lastName: "Murphy", email: "kathryn.m@email.com", location: "Phoenix, US", orders: 31, totalSpent: 6720.00, lastOrderDate: "26 Jan 2022", status: "VIP" },
-  { id: "6", firstName: "Ronald", lastName: "Richards", email: "ronald.r@email.com", location: "Philadelphia, US", orders: 9, totalSpent: 1100.00, lastOrderDate: "18 Jan 2022", status: "ACTIVE" },
-  { id: "7", firstName: "Savannah", lastName: "Nguyen", email: "savannah.n@email.com", location: "San Antonio, US", orders: 1, totalSpent: 89.00, lastOrderDate: "26 Jan 2022", status: "INACTIVE" },
-  { id: "8", firstName: "Jerome", lastName: "Bell", email: "jerome.b@email.com", location: "Dallas, US", orders: 18, totalSpent: 3450.00, lastOrderDate: "25 Jan 2022", status: "ACTIVE" },
-  { id: "9", firstName: "Bessie", lastName: "Cooper", email: "bessie.c@email.com", location: "San Diego, US", orders: 5, totalSpent: 590.00, lastOrderDate: "21 Jan 2022", status: "AT_RISK" },
-  { id: "10", firstName: "Arlene", lastName: "McCoy", email: "arlene.m@email.com", location: "Austin, US", orders: 22, totalSpent: 3890.00, lastOrderDate: "24 Jan 2022", status: "VIP" },
-  { id: "11", firstName: "Floyd", lastName: "Miles", email: "floyd.m@email.com", location: "Jacksonville, US", orders: 6, totalSpent: 820.00, lastOrderDate: "23 Jan 2022", status: "ACTIVE" },
-  { id: "12", firstName: "Guy", lastName: "Hawkins", email: "guy.h@email.com", location: "Columbus, US", orders: 14, totalSpent: 2100.00, lastOrderDate: "22 Jan 2022", status: "ACTIVE" },
 ];
 
 // ─── Messages / Conversations ─────────────────────────────────────────────────

@@ -5,7 +5,10 @@ import { ProfitBarChart } from "~/components/app/profit-bar-chart";
 import { SalesDonutChart } from "~/components/app/sales-donut-chart";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TopProductsPanel } from "~/components/app/top-products-panel";
-import { DASHBOARD_STATS, SAMPLE_ORDERS } from "~/lib/placeholder-data";
+import { TableSkeleton } from "~/components/app/table-skeleton";
+import { EmptyState } from "~/components/app/empty-state";
+import { useOrders } from "~/hooks/use-order-queries";
+import { DASHBOARD_STATS } from "~/lib/placeholder-data";
 
 export function meta() {
   return [
@@ -14,11 +17,10 @@ export function meta() {
   ];
 }
 
-/**
- * Dashboard page — provides a high-level overview of sales, orders,
- * profit trends, and top products.
- */
 export default function DashboardPage() {
+  const { data, isLoading } = useOrders({ page: 1, limit: 5 });
+  const recentOrders = data?.data ?? [];
+
   return (
     <div className="space-y-6">
 
@@ -118,9 +120,22 @@ export default function DashboardPage() {
               View All <ArrowRight className="size-3.5" />
             </Link>
           </div>
-          <div className="overflow-x-auto">
-            <OrdersTable orders={SAMPLE_ORDERS.slice(0, 5)} />
-          </div>
+          {isLoading ? (
+            <div className="p-4">
+              <TableSkeleton rows={5} columns={7} />
+            </div>
+          ) : recentOrders.length === 0 ? (
+            <div className="p-8">
+              <EmptyState
+                title="No orders yet"
+                description="Orders will appear here once synced from your channels."
+              />
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <OrdersTable orders={recentOrders} />
+            </div>
+          )}
         </div>
         <TopProductsPanel />
       </div>
