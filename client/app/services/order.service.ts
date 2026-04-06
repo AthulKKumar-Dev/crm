@@ -4,6 +4,8 @@ import type {
   Order,
   OrderDetail,
   OrderListParams,
+  OrderStatsResponse,
+  DashboardQueryParams,
 } from "~/types/api";
 
 /**
@@ -18,4 +20,7 @@ export const orderService = {
 
   get: (id: string) =>
     apiClient.get<OrderDetail>(`/orders/${id}`).then((response) => response.data),
+
+  stats: (params?: DashboardQueryParams) =>
+    apiClient.get<OrderStatsResponse>("/orders/stats", { params }).then((response) => response.data),
 };

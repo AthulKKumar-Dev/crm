@@ -5,9 +5,9 @@ import { StatCard } from "~/components/app/stat-card";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
-import { useOrders } from "~/hooks/use-order-queries";
-import { ORDER_STATS } from "~/lib/placeholder-data";
-import type { OrderListParams } from "~/types/api";
+import { Skeleton } from "~/components/ui/skeleton";
+import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
+import type { OrderListParams, DashboardQueryParams } from "~/types/api";
 
 export function meta() {
   return [
@@ -16,16 +16,8 @@ export function meta() {
   ];
 }
 
-const ORDER_STAT_ICONS = [
-  <ShoppingBag className="size-4" />,
-  <Package className="size-4" />,
-  <Target className="size-4" />,
-  <Box className="size-4" />,
-];
-
 const PAGE_SIZE = 9;
 
-/** Compute an ISO date string N days ago from today. */
 function daysAgo(days: number): string {
   const date = new Date();
   date.setDate(date.getDate() - days);
@@ -40,14 +32,19 @@ export default function OrdersPage() {
   const [dateRange, setDateRange] = useState("all");
 
   const daysBack = DATE_RANGE_MAP[dateRange];
+  const dateFrom = daysBack != null ? daysAgo(daysBack) : undefined;
+
   const params: OrderListParams = {
     page: currentPage,
     limit: PAGE_SIZE,
     search: searchQuery || undefined,
-    dateFrom: daysBack != null ? daysAgo(daysBack) : undefined,
+    dateFrom,
   };
 
+  const statsParams: DashboardQueryParams | undefined = dateFrom ? { dateFrom } : undefined;
+
   const { data, isLoading } = useOrders(params);
+  const { data: stats, isLoading: statsLoading } = useOrderStats(statsParams);
   const orders = data?.data ?? [];
   const meta = data?.meta;
   const totalPages = meta?.totalPages ?? 1;
@@ -60,6 +57,11 @@ export default function OrdersPage() {
   function handleDateRangeChange(value: string) {
     setDateRange(value);
     setCurrentPage(1);
+  }
+
+  /** Format a stat metric value for display. */
+  function formatChange(direction: "up" | "down" | "same", percentage: number) {
+    return direction === "down" ? -percentage : percentage;
   }
 
   return (
@@ -97,9 +99,52 @@ export default function OrdersPage() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        {ORDER_STATS.map((stat, statIndex) => (
-          <StatCard key={stat.label} {...stat} icon={ORDER_STAT_ICONS[statIndex]} />
-        ))}
+        {statsLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+              <Skeleton className="h-3 w-24 mb-4" />
+              <Skeleton className="h-7 w-20" />
+            </div>
+          ))
+        ) : stats ? (
+          <>
+            <StatCard
+              label="Total New Orders"
+              value={stats.totalNewOrders.current.toLocaleString()}
+              change={formatChange(stats.totalNewOrders.change.direction, stats.totalNewOrders.change.percentage)}
+              changeLabel="vs previous period"
+              icon={<ShoppingBag className="size-4" />}
+            />
+            <StatCard
+              label="Pending Orders"
+              value={stats.pendingOrders.current.toLocaleString()}
+              change={formatChange(stats.pendingOrders.change.direction, stats.pendingOrders.change.percentage)}
+              changeLabel="vs previous period"
+              icon={<Package className="size-4" />}
+            />
+            <StatCard
+              label="Total Sales"
+              value={`$${Number(stats.totalSales.current).toLocaleString()}`}
+              change={formatChange(stats.totalSales.change.direction, stats.totalSales.change.percentage)}
+              changeLabel="vs previous period"
+              icon={<Target className="size-4" />}
+            />
+            <StatCard
+              label="Products Sold"
+              value={Number(stats.totalProductsSold.current).toLocaleString()}
+              change={formatChange(stats.totalProductsSold.change.direction, stats.totalProductsSold.change.percentage)}
+              changeLabel="vs previous period"
+              icon={<Box className="size-4" />}
+            />
+          </>
+        ) : (
+          <>
+            <StatCard label="Total New Orders" value="—" change={0} icon={<ShoppingBag className="size-4" />} />
+            <StatCard label="Pending Orders" value="—" change={0} icon={<Package className="size-4" />} />
+            <StatCard label="Total Sales" value="—" change={0} icon={<Target className="size-4" />} />
+            <StatCard label="Products Sold" value="—" change={0} icon={<Box className="size-4" />} />
+          </>
+        )}
       </div>
 
       {/* Orders table with search and pagination */}
