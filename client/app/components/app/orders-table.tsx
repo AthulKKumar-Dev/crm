@@ -50,8 +50,10 @@ const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
   RESTOCKED: "Restocked",
 };
 
+type OrderRow = Pick<Order, "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer">;
+
 interface OrdersTableProps {
-  orders: Order[];
+  orders: OrderRow[];
   showCustomerName?: boolean;
 }
 

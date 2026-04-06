@@ -5,16 +5,6 @@ export interface StatCardData {
   changeLabel: string;
 }
 
-// ─── Dashboard Stats ────────────────────────────────────────────────────────
-
-/** Summary statistics shown on the main dashboard overview. */
-export const DASHBOARD_STATS: StatCardData[] = [
-  { label: "Total Products Sales", value: "118,594", change: -10, changeLabel: "vs last month" },
-  { label: "Total Volume of Products", value: "257,361", change: 54, changeLabel: "vs last month" },
-  { label: "Total Revenue", value: "$96,715.28", change: 54, changeLabel: "vs last month" },
-  { label: "Total Customers", value: "12,847", change: 23, changeLabel: "vs last month" },
-];
-
 // ─── Orders Stats ────────────────────────────────────────────────────────────
 
 /** Summary statistics shown on the orders page. */
@@ -46,28 +36,6 @@ export const SALES_CHART_DATA = [
   { name: "Furniture", value: 29153, color: "#fbbf24" },
   { name: "Clothes", value: 11682, color: "#fb923c" },
   { name: "Shoes", value: 35715, color: "#818cf8" },
-];
-
-// ─── Top Products ─────────────────────────────────────────────────────────────
-
-export interface Product {
-  id: string;
-  name: string;
-  brand: string;
-  price: number;
-  stockCount: number;
-  sold: number;
-  image: string;
-  sparkline: number[];
-}
-
-/** Top-selling products displayed on the dashboard. */
-export const TOP_PRODUCTS: Product[] = [
-  { id: "1", name: "Apple Watch Series 10 46mm GPS", brand: "Apple", price: 799.0, stockCount: 5800, sold: 20618, image: "", sparkline: [30, 40, 35, 50, 45, 55, 60, 58, 65, 70, 68, 72] },
-  { id: "2", name: "Sony WH-1000XM5 Headphones", brand: "Sony", price: 349.99, stockCount: 2300, sold: 14200, image: "", sparkline: [20, 30, 28, 35, 40, 38, 45, 42, 48, 50, 52, 55] },
-  { id: "3", name: "Samsung Galaxy S25 Ultra", brand: "Samsung", price: 1199.0, stockCount: 8100, sold: 18450, image: "", sparkline: [40, 45, 42, 55, 60, 58, 65, 62, 70, 68, 72, 78] },
-  { id: "4", name: "Nike Air Max 270", brand: "Nike", price: 150.0, stockCount: 12500, sold: 32100, image: "", sparkline: [50, 48, 55, 52, 60, 58, 62, 68, 65, 72, 70, 75] },
-  { id: "5", name: "Dyson V15 Detect Vacuum", brand: "Dyson", price: 749.99, stockCount: 1900, sold: 9830, image: "", sparkline: [25, 30, 28, 32, 35, 38, 36, 40, 42, 45, 44, 48] },
 ];
 
 // ─── Analytics Stats ──────────────────────────────────────────────────────────
