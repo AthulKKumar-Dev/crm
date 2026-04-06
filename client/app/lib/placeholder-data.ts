@@ -67,13 +67,6 @@ export const ANALYTICS_CHANNEL_DATA = [
 // ─── Customers Stats ────────────────────────────────────────────────────────
 
 /** Summary statistics shown on the customers page. */
-export const CUSTOMER_STATS: StatCardData[] = [
-  { label: "Total Customers", value: "12,847", change: 23, changeLabel: "vs last month" },
-  { label: "Active Customers", value: "9,312", change: 11, changeLabel: "vs last month" },
-  { label: "New This Month", value: "842", change: 34, changeLabel: "vs last month" },
-  { label: "At Risk", value: "391", change: -8, changeLabel: "vs last month" },
-];
-
 // ─── Messages / Conversations ─────────────────────────────────────────────────
 
 export type MessageChannel = "email" | "sms" | "whatsapp" | "chat";

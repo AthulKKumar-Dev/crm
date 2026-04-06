@@ -9,6 +9,7 @@ export const customerKeys = {
   detail: (id: string) => [...customerKeys.all, "detail", id] as const,
   tags: () => [...customerKeys.all, "tags"] as const,
   segments: () => [...customerKeys.all, "segments"] as const,
+  stats: (params?: { channelId?: string }) => [...customerKeys.all, "stats", params] as const,
 };
 
 /** Fetch a paginated list of customers with optional filters. */
@@ -41,5 +42,13 @@ export function useCustomerSegments() {
   return useQuery({
     queryKey: customerKeys.segments(),
     queryFn: () => customerService.segments(),
+  });
+}
+
+/** Fetch aggregate customer statistics. */
+export function useCustomerStats(params?: { channelId?: string }) {
+  return useQuery({
+    queryKey: customerKeys.stats(params),
+    queryFn: () => customerService.stats(params),
   });
 }

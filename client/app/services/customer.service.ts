@@ -4,6 +4,7 @@ import type {
   Customer,
   CustomerDetail,
   CustomerListParams,
+  CustomerStatsResponse,
   UpdateCustomerRequest,
 } from "~/types/api";
 
@@ -28,4 +29,7 @@ export const customerService = {
 
   segments: () =>
     apiClient.get<string[]>("/customers/segments").then((response) => response.data),
+
+  stats: (params?: { channelId?: string }) =>
+    apiClient.get<CustomerStatsResponse>("/customers/stats", { params }).then((response) => response.data),
 };
