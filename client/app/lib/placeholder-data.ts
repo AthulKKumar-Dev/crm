@@ -5,16 +5,6 @@ export interface StatCardData {
   changeLabel: string;
 }
 
-// ─── Orders Stats ────────────────────────────────────────────────────────────
-
-/** Summary statistics shown on the orders page. */
-export const ORDER_STATS: StatCardData[] = [
-  { label: "Total New Orders", value: "594", change: 54, changeLabel: "vs last week" },
-  { label: "Total Orders Pending", value: "257,361", change: -10, changeLabel: "vs last week" },
-  { label: "Total Products Sales", value: "8,594", change: 54, changeLabel: "vs last month" },
-  { label: "Total Volume of Products", value: "257,361", change: -10, changeLabel: "vs last month" },
-];
-
 // ─── Bar Chart Data ───────────────────────────────────────────────────────────
 
 /** Monthly revenue vs. profit data for the bar chart widget. */

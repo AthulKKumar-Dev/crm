@@ -639,6 +639,33 @@ export interface UpdateCustomerRequest {
   tags?: string[];
 }
 
+// ─── Order Stats Types ──────────────────────────────────────────────────────
+
+/** Direction of a period-over-period change. */
+export type ChangeDirection = "up" | "down" | "same";
+
+/** A single metric with current/previous values and change percentage. */
+export interface StatMetric {
+  current: number;
+  previous: number;
+  change: {
+    percentage: number;
+    direction: ChangeDirection;
+  };
+}
+
+/** Period-over-period comparison stats returned by GET /orders/stats. */
+export interface OrderStatsResponse {
+  period: {
+    current: { from: string; to: string };
+    previous: { from: string; to: string };
+  };
+  totalNewOrders: StatMetric;
+  pendingOrders: StatMetric;
+  totalSales: StatMetric;
+  totalProductsSold: StatMetric;
+}
+
 // ─── Dashboard Types ────────────────────────────────────────────────────────
 
 /** Query parameters for the dashboard overview endpoint. */
