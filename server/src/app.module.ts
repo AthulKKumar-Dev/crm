@@ -22,6 +22,7 @@ import { ChannelModule } from './channel/channel.module';
 import { OrderModule } from './order/order.module';
 import { ProductModule } from './product/product.module';
 import { CustomerModule } from './customer/customer.module';
+import { DashboardModule } from './dashboard/dashboard.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { CustomerModule } from './customer/customer.module';
     OrderModule,
     ProductModule,
     CustomerModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [
