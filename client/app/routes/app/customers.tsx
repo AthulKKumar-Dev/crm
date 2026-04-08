@@ -36,7 +36,7 @@ function getInitials(first: string, last: string) {
 const AVATAR_COLORS = [
   "bg-blue-100 text-blue-700",
   "bg-purple-100 text-purple-700",
-  "bg-[#cdff8c]/30 text-[#4d7a00]",
+  "bg-[#CEF17B]/30 text-[#084734]",
   "bg-orange-100 text-orange-700",
   "bg-pink-100 text-pink-700",
   "bg-indigo-100 text-indigo-700",
@@ -82,7 +82,7 @@ export default function CustomersPage() {
             View and manage your customer database, segments, and activity.
           </p>
         </div>
-        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a]">
+        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]">
           <UserPlus className="size-3.5" />
           Add Customer
         </button>
@@ -144,7 +144,7 @@ export default function CustomersPage() {
             placeholder="Search by name, email, or phone…"
             value={searchQuery}
             onChange={handleSearchChange}
-            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -154,7 +154,7 @@ export default function CustomersPage() {
               onClick={() => handleVipFilter(filterValue)}
               className={`h-7 rounded-full px-3 text-xs font-medium transition-colors ${
                 vipFilter === filterValue
-                  ? "bg-[#cdff8c]/30 text-[#4d7a00]"
+                  ? "bg-[#CEF17B]/30 text-[#084734]"
                   : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 border border-input"
               }`}
             >

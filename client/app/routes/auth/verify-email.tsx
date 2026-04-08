@@ -82,8 +82,8 @@ export default function VerifyEmailPage() {
     <div>
       {/* Icon + heading */}
       <div className="mb-7 text-center">
-        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Mail className="size-6 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Mail className="size-6 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Check your inbox</h2>
         <p className="mt-2 text-sm text-gray-500">
@@ -106,7 +106,7 @@ export default function VerifyEmailPage() {
                 <InputOTPSlot
                   key={slotIndex}
                   index={slotIndex}
-                  className="!size-11 !rounded-lg !border !border-gray-200 bg-white text-base font-bold shadow-sm transition-all data-[active=true]:!border-[#cdff8c] data-[active=true]:!ring-2 data-[active=true]:!ring-[#cdff8c]/40"
+                  className="!size-11 !rounded-lg !border !border-gray-200 bg-white text-base font-bold shadow-sm transition-all data-[active=true]:!border-[#CEF17B] data-[active=true]:!ring-2 data-[active=true]:!ring-[#CEF17B]/40"
                 />
               ))}
             </InputOTPGroup>
@@ -124,7 +124,7 @@ export default function VerifyEmailPage() {
         <button
           type="submit"
           disabled={verify.isPending || code.length !== OTP_LENGTH}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {verify.isPending ? (
             <>
@@ -144,7 +144,7 @@ export default function VerifyEmailPage() {
           type="button"
           onClick={handleResend}
           disabled={cooldown > 0 || resend.isPending}
-          className="mt-1 text-sm font-semibold text-[#4d7a00] hover:text-[#3d6000] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-1 text-sm font-semibold text-[#084734] hover:text-[#3d6000] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
         >
           {resend.isPending
             ? "Sending…"

@@ -31,7 +31,7 @@ export function StatCard({ label, value, change, changeLabel, className, icon }:
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
             isPositive
-              ? "bg-[#cdff8c]/30 text-[#4d7a00]"
+              ? "bg-[#CEF17B]/30 text-[#084734]"
               : "bg-red-100 text-red-600"
           )}
         >

@@ -58,7 +58,7 @@ export function TopProductsPanel({ products, isLoading }: TopProductsPanelProps)
                 </p>
               </div>
               <div className="shrink-0 text-right">
-                <p className="text-[10px] font-semibold text-[#4d7a00]">
+                <p className="text-[10px] font-semibold text-[#084734]">
                   {product.totalQuantitySold.toLocaleString()} sold
                 </p>
                 <p className="text-[10px] text-muted-foreground">

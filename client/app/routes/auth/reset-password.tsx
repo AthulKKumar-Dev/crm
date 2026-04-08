@@ -72,7 +72,7 @@ export default function ResetPasswordPage() {
         </p>
         <Link
           to="/auth/forgot-password"
-          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a]"
+          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F]"
         >
           Request a new link
         </Link>
@@ -84,8 +84,8 @@ export default function ResetPasswordPage() {
     <div>
       {/* Heading */}
       <div className="mb-7">
-        <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <KeyRound className="size-5 text-[#4d7a00]" />
+        <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <KeyRound className="size-5 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Set a new password</h2>
         <p className="mt-1.5 text-sm text-gray-500">
@@ -107,7 +107,7 @@ export default function ResetPasswordPage() {
               autoComplete="new-password"
               aria-invalid={!!errors.newPassword}
               {...register("newPassword")}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
             />
             <button
               type="button"
@@ -136,7 +136,7 @@ export default function ResetPasswordPage() {
               autoComplete="new-password"
               aria-invalid={!!errors.confirmPassword}
               {...register("confirmPassword")}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
             />
             <button
               type="button"
@@ -169,7 +169,7 @@ export default function ResetPasswordPage() {
         <button
           type="submit"
           disabled={reset.isPending}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {reset.isPending ? (
             <>

@@ -25,7 +25,7 @@ export function meta() {
 
 /** Color mapping for each traffic acquisition channel. */
 const CHANNEL_COLOR: Record<string, string> = {
-  Organic: "#cdff8c",
+  Organic: "#CEF17B",
   "Paid Search": "#6366f1",
   Social: "#f59e0b",
   Email: "#0ea5e9",
@@ -63,7 +63,7 @@ export default function AnalyticsPage() {
             <Upload className="size-3.5" />
             Export CSV
           </button>
-          <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a]">
+          <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]">
             <Download className="size-3.5" />
             Download Report
           </button>
@@ -99,8 +99,8 @@ export default function AnalyticsPage() {
           <AreaChart data={ANALYTICS_TREND_DATA} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
             <defs>
               <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#cdff8c" stopOpacity={0.15} />
-                <stop offset="95%" stopColor="#cdff8c" stopOpacity={0} />
+                <stop offset="5%" stopColor="#CEF17B" stopOpacity={0.15} />
+                <stop offset="95%" stopColor="#CEF17B" stopOpacity={0} />
               </linearGradient>
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
@@ -113,7 +113,7 @@ export default function AnalyticsPage() {
             <Area
               type="monotone"
               dataKey="revenue"
-              stroke="#cdff8c"
+              stroke="#CEF17B"
               strokeWidth={2}
               fill="url(#colorRevenue)"
               dot={false}
@@ -138,8 +138,8 @@ export default function AnalyticsPage() {
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}
               />
-              <Bar dataKey="sessions" name="Sessions" fill="#cdff8c" radius={[0, 4, 4, 0]} />
-              <Bar dataKey="orders" name="Orders" fill="#cdff8c" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="sessions" name="Sessions" fill="#CEF17B" radius={[0, 4, 4, 0]} />
+              <Bar dataKey="orders" name="Orders" fill="#CEF17B" radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -187,8 +187,8 @@ export default function AnalyticsPage() {
             <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} />
             <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
-            <Bar dataKey="sessions" name="Sessions" fill="#cdff8c" radius={[4, 4, 0, 0]} />
-            <Bar dataKey="orders" name="Orders" fill="#cdff8c" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="sessions" name="Sessions" fill="#CEF17B" radius={[4, 4, 0, 0]} />
+            <Bar dataKey="orders" name="Orders" fill="#CEF17B" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>

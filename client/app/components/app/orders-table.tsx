@@ -17,7 +17,7 @@ import { cn } from "~/lib/utils";
 import type { Order, FinancialStatus, FulfillmentStatus } from "~/types/api";
 
 const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
-  PAID: "bg-[#cdff8c]/30 text-[#4d7a00]",
+  PAID: "bg-[#CEF17B]/30 text-[#084734]",
   PARTIALLY_PAID: "bg-blue-100 text-blue-700",
   PENDING: "bg-orange-100 text-orange-600",
   AUTHORIZED: "bg-blue-100 text-blue-700",
@@ -37,7 +37,7 @@ const FINANCIAL_LABELS: Record<FinancialStatus, string> = {
 };
 
 const FULFILLMENT_CLASSES: Record<FulfillmentStatus, string> = {
-  FULFILLED: "bg-[#cdff8c]/30 text-[#4d7a00]",
+  FULFILLED: "bg-[#CEF17B]/30 text-[#084734]",
   PARTIAL: "bg-blue-100 text-blue-700",
   UNFULFILLED: "bg-orange-100 text-orange-600",
   RESTOCKED: "bg-gray-100 text-gray-600",
@@ -84,7 +84,7 @@ export function OrdersTable({ orders, showCustomerName = false }: OrdersTablePro
             </TableCell>
             <TableCell className="font-medium text-gray-900 dark:text-gray-100">
               {order.financialStatus === "PAID" && (
-                <span className="mr-1.5 inline-block size-4 rounded-full bg-[#cdff8c]/30 text-[#4d7a00] text-center text-[10px] leading-4">✓</span>
+                <span className="mr-1.5 inline-block size-4 rounded-full bg-[#CEF17B]/30 text-[#084734] text-center text-[10px] leading-4">✓</span>
               )}
               {order.name}
             </TableCell>

@@ -89,7 +89,7 @@ export default function InvitePage() {
         </p>
         <Link
           to="/auth/login"
-          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a]"
+          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F]"
         >
           Go to sign in
         </Link>
@@ -101,7 +101,7 @@ export default function InvitePage() {
   if (invite.isLoading) {
     return (
       <div className="flex flex-col items-center gap-4 py-12">
-        <Loader2 className="size-8 animate-spin text-[#4d7a00]" />
+        <Loader2 className="size-8 animate-spin text-[#084734]" />
         <p className="text-sm text-gray-500">Loading invitation…</p>
       </div>
     );
@@ -120,7 +120,7 @@ export default function InvitePage() {
         </p>
         <Link
           to="/auth/login"
-          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a]"
+          className="mt-6 inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F]"
         >
           Go to sign in
         </Link>
@@ -135,8 +135,8 @@ export default function InvitePage() {
     <div>
       {/* Header */}
       <div className="mb-7 text-center">
-        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Users className="size-6 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Users className="size-6 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">You're invited!</h2>
         <p className="mt-2 text-sm text-gray-500">
@@ -152,7 +152,7 @@ export default function InvitePage() {
         {organization.logo ? (
           <img src={organization.logo} alt="" className="size-10 rounded-xl object-cover" />
         ) : (
-          <div className="flex size-10 items-center justify-center rounded-xl bg-[#cdff8c]/30 text-sm font-bold text-[#4d7a00]">
+          <div className="flex size-10 items-center justify-center rounded-xl bg-[#CEF17B]/30 text-sm font-bold text-[#084734]">
             {organization.name.charAt(0).toUpperCase()}
           </div>
         )}
@@ -185,7 +185,7 @@ export default function InvitePage() {
             type="button"
             onClick={handleAcceptExisting}
             disabled={accept.isPending}
-            className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {accept.isPending ? (
               <>
@@ -219,7 +219,7 @@ export default function InvitePage() {
                   autoComplete="given-name"
                   aria-invalid={!!errors.firstName}
                   {...register("firstName")}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
                 />
                 {errors.firstName && (
                   <p className="text-xs text-red-500">{errors.firstName.message}</p>
@@ -235,7 +235,7 @@ export default function InvitePage() {
                   autoComplete="family-name"
                   aria-invalid={!!errors.lastName}
                   {...register("lastName")}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
                 />
                 {errors.lastName && (
                   <p className="text-xs text-red-500">{errors.lastName.message}</p>
@@ -255,7 +255,7 @@ export default function InvitePage() {
                   autoComplete="new-password"
                   aria-invalid={!!errors.password}
                   {...register("password")}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
                 />
                 <button
                   type="button"
@@ -280,7 +280,7 @@ export default function InvitePage() {
             <button
               type="submit"
               disabled={accept.isPending}
-              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {accept.isPending ? (
                 <>
@@ -300,7 +300,7 @@ export default function InvitePage() {
         Already have an account?{" "}
         <Link
           to="/auth/login"
-          className="font-semibold text-[#4d7a00] hover:text-[#3d6000] transition-colors"
+          className="font-semibold text-[#084734] hover:text-[#3d6000] transition-colors"
         >
           Sign in
         </Link>

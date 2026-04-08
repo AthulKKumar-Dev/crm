@@ -50,7 +50,7 @@ const CHANNEL_DATA = [
 type CampaignStatus = "ACTIVE" | "SENT" | "DRAFT" | "PAUSED";
 
 const STATUS_CLASS: Record<CampaignStatus, string> = {
-  ACTIVE: "bg-[#cdff8c]/30 text-[#4d7a00]",
+  ACTIVE: "bg-[#CEF17B]/30 text-[#084734]",
   SENT:   "bg-blue-100 text-blue-700",
   DRAFT:  "bg-gray-100 text-gray-500",
   PAUSED: "bg-orange-100 text-orange-600",
@@ -81,7 +81,7 @@ export default function MarketingPage() {
             Manage campaigns, track engagement, and grow your audience.
           </p>
         </div>
-        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a] transition-colors">
+        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F] transition-colors">
           <Plus className="size-3.5" />
           New Campaign
         </button>
@@ -94,7 +94,7 @@ export default function MarketingPage() {
             <p className="text-xs font-medium text-muted-foreground">{stat.label}</p>
             <div className="mt-3 flex items-end justify-between gap-2">
               <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">{stat.value}</p>
-              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${stat.positive ? "bg-[#cdff8c]/30 text-[#4d7a00]" : "bg-red-100 text-red-600"}`}>
+              <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ${stat.positive ? "bg-[#CEF17B]/30 text-[#084734]" : "bg-red-100 text-red-600"}`}>
                 {stat.positive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
                 {Math.abs(stat.change)}%
               </span>
@@ -111,7 +111,7 @@ export default function MarketingPage() {
             key={tabName}
             onClick={() => setActiveTab(tabName)}
             className={`rounded-full px-4 py-1.5 text-xs font-medium capitalize transition-colors ${
-              activeTab === tabName ? "bg-[#cdff8c] text-gray-900" : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+              activeTab === tabName ? "bg-[#CEF17B] text-gray-900" : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
             }`}
           >
             {tabName}
@@ -160,7 +160,7 @@ export default function MarketingPage() {
                         {campaign.opens > 0 && <span className="text-[10px] text-muted-foreground">{((campaign.clicks / campaign.opens) * 100).toFixed(1)}%</span>}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-xs font-semibold text-[#4d7a00] text-right">{campaign.conversions.toLocaleString()}</td>
+                    <td className="px-4 py-3 text-xs font-semibold text-[#084734] text-right">{campaign.conversions.toLocaleString()}</td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_CLASS[campaign.status as CampaignStatus]}`}>
                         {campaign.status.charAt(0) + campaign.status.slice(1).toLowerCase()}
@@ -187,7 +187,7 @@ export default function MarketingPage() {
                 <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} unit="%" />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }} />
-                <Line type="monotone" dataKey="opens"  name="Open Rate"  stroke="#cdff8c" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="opens"  name="Open Rate"  stroke="#CEF17B" strokeWidth={2} dot={false} />
                 <Line type="monotone" dataKey="clicks" name="Click Rate" stroke="#fb923c" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
@@ -203,7 +203,7 @@ export default function MarketingPage() {
                 <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: 11, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
                 <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }} />
-                <Bar dataKey="conversions" name="Conversions" fill="#cdff8c" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="conversions" name="Conversions" fill="#CEF17B" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
