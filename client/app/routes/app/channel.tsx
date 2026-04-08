@@ -1,9 +1,8 @@
 import { useState } from "react";
 import {
-  ShoppingBag, Globe, Package, TrendingUp, Plus,
+  ShoppingBag, Package, Plus,
   ExternalLink, CheckCircle, AlertCircle, Clock, Search,
-  ArrowRight, Star, Zap, ShoppingCart, Store, Smartphone,
-  CreditCard, MessageSquare, BarChart3, Truck, FileText,
+  ArrowRight, Store, Check,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
@@ -67,80 +66,42 @@ function timeAgo(dateString: string | null): string {
 
 /* ─── Marketplace integration types and data ───────────────────── */
 
-type IntegrationCategory =
-  | "marketplace"
-  | "ecommerce"
-  | "social"
-  | "payment"
-  | "shipping"
-  | "messaging"
-  | "analytics"
-  | "accounting";
-
 interface Integration {
   id: string;
   name: string;
   description: string;
   icon: string;
-  category: IntegrationCategory;
   popular?: boolean;
   comingSoon?: boolean;
+  features: string[];
 }
 
-const INTEGRATION_CATEGORIES: { value: IntegrationCategory | "all"; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { value: "all",         label: "All",          icon: Globe },
-  { value: "marketplace", label: "Marketplaces",  icon: Store },
-  { value: "ecommerce",   label: "E-Commerce",    icon: ShoppingCart },
-  { value: "social",      label: "Social Commerce",icon: Smartphone },
-  { value: "payment",     label: "Payments",       icon: CreditCard },
-  { value: "shipping",    label: "Shipping",       icon: Truck },
-  { value: "messaging",   label: "Messaging",      icon: MessageSquare },
-  { value: "analytics",   label: "Analytics",      icon: BarChart3 },
-  { value: "accounting",  label: "Accounting",     icon: FileText },
-];
 
 const INTEGRATIONS: Integration[] = [
-  { id: "shopify",       name: "Shopify",          description: "Sync products, orders & inventory with your Shopify store",                   icon: "🛍️", category: "marketplace", popular: true },
-  { id: "amazon",        name: "Amazon",           description: "Connect your Amazon Seller account for unified order management",             icon: "📦", category: "marketplace", popular: true },
-  { id: "ebay",          name: "eBay",             description: "List products and manage eBay auctions & orders",                            icon: "🏷️", category: "marketplace" },
-  { id: "etsy",          name: "Etsy",             description: "Sync your handmade & vintage shop with Collabo",                             icon: "🎨", category: "marketplace" },
-  { id: "walmart",       name: "Walmart",          description: "Sell on Walmart Marketplace with real-time inventory sync",                  icon: "🏪", category: "marketplace" },
-  { id: "tiktok-shop",   name: "TikTok Shop",      description: "Manage TikTok Shop orders and product listings",                             icon: "🎵", category: "marketplace", popular: true },
-  { id: "faire",         name: "Faire",            description: "Wholesale marketplace — sync your B2B catalog",                              icon: "🎁", category: "marketplace" },
-  { id: "mercado-libre", name: "Mercado Libre",    description: "Latin America's largest marketplace integration",                            icon: "🌎", category: "marketplace", comingSoon: true },
-  { id: "woocommerce",   name: "WooCommerce",      description: "WordPress-powered store with full product & order sync",                     icon: "🛒", category: "ecommerce", popular: true },
-  { id: "magento",       name: "Magento",          description: "Adobe Commerce / Magento 2 bi-directional sync",                             icon: "🔶", category: "ecommerce" },
-  { id: "bigcommerce",   name: "BigCommerce",      description: "Headless-ready commerce platform integration",                               icon: "🏬", category: "ecommerce" },
-  { id: "squarespace",   name: "Squarespace",      description: "Sync products and orders from your Squarespace site",                        icon: "⬛", category: "ecommerce" },
-  { id: "wix",           name: "Wix eCommerce",    description: "Connect your Wix online store",                                              icon: "🌐", category: "ecommerce" },
-  { id: "prestashop",    name: "PrestaShop",       description: "Open-source e-commerce platform integration",                                icon: "🔵", category: "ecommerce", comingSoon: true },
-  { id: "instagram-shop",name: "Instagram Shop",   description: "Tag products & manage orders from Instagram Shopping",                       icon: "📸", category: "social", popular: true },
-  { id: "facebook-shop", name: "Facebook Shop",    description: "Sync your Facebook Commerce catalog & orders",                               icon: "👤", category: "social" },
-  { id: "pinterest",     name: "Pinterest",        description: "Product pins & buyable pins integration",                                    icon: "📌", category: "social" },
-  { id: "google-shop",   name: "Google Shopping",  description: "Manage your Google Merchant Center product feed",                            icon: "🔍", category: "social" },
-  { id: "youtube-shop",  name: "YouTube Shopping",  description: "Sell products through your YouTube channel",                                 icon: "▶️",  category: "social", comingSoon: true },
-  { id: "stripe",        name: "Stripe",           description: "Accept payments and manage subscriptions",                                   icon: "💳", category: "payment", popular: true },
-  { id: "paypal",        name: "PayPal",           description: "PayPal checkout, invoicing & payment tracking",                              icon: "🅿️", category: "payment" },
-  { id: "square",        name: "Square",           description: "POS & online payment processing",                                            icon: "⬜", category: "payment" },
-  { id: "klarna",        name: "Klarna",           description: "Buy now, pay later — split payment integration",                             icon: "💗", category: "payment" },
-  { id: "razorpay",      name: "Razorpay",         description: "Payment gateway for Indian market",                                          icon: "💙", category: "payment", comingSoon: true },
-  { id: "shipstation",   name: "ShipStation",      description: "Multi-carrier shipping automation & label printing",                         icon: "🚢", category: "shipping" },
-  { id: "shippo",        name: "Shippo",           description: "Discounted shipping rates & tracking across carriers",                       icon: "📬", category: "shipping" },
-  { id: "fedex",         name: "FedEx",            description: "Direct FedEx rate shopping & tracking integration",                           icon: "🟣", category: "shipping" },
-  { id: "dhl",           name: "DHL",              description: "International shipping with DHL Express",                                    icon: "🟡", category: "shipping" },
-  { id: "ups",           name: "UPS",              description: "UPS shipping rates, labels & package tracking",                               icon: "🟤", category: "shipping", comingSoon: true },
-  { id: "whatsapp",      name: "WhatsApp Business", description: "Customer conversations via WhatsApp Business API",                          icon: "💬", category: "messaging", popular: true },
-  { id: "intercom",      name: "Intercom",          description: "Live chat & customer messaging platform",                                   icon: "💭", category: "messaging" },
-  { id: "zendesk",       name: "Zendesk",           description: "Help desk & customer support ticket sync",                                  icon: "🎫", category: "messaging" },
-  { id: "slack",         name: "Slack",             description: "Get order & inventory alerts in Slack channels",                             icon: "💡", category: "messaging" },
-  { id: "telegram",      name: "Telegram Bot",      description: "Receive notifications & manage orders via Telegram",                        icon: "✈️",  category: "messaging", comingSoon: true },
-  { id: "google-analytics",name: "Google Analytics", description: "Track e-commerce events & conversion funnels",                             icon: "📊", category: "analytics" },
-  { id: "meta-pixel",     name: "Meta Pixel",        description: "Facebook/Instagram conversion tracking & audiences",                       icon: "🔷", category: "analytics" },
-  { id: "hotjar",         name: "Hotjar",            description: "Heatmaps & session recordings for your storefront",                        icon: "🔥", category: "analytics" },
-  { id: "mixpanel",       name: "Mixpanel",          description: "Product analytics & user behavior tracking",                               icon: "🧪", category: "analytics", comingSoon: true },
-  { id: "quickbooks",    name: "QuickBooks",       description: "Sync orders, refunds & payouts to QuickBooks",                               icon: "📗", category: "accounting" },
-  { id: "xero",          name: "Xero",             description: "Automated bookkeeping & invoice sync",                                       icon: "📘", category: "accounting" },
-  { id: "zoho-books",    name: "Zoho Books",       description: "Accounting integration for Zoho ecosystem",                                  icon: "📕", category: "accounting", comingSoon: true },
+  {
+    id: "shopify",
+    name: "Shopify",
+    description: "Sync products, orders, customers & inventory with your Shopify store in real-time. Automatic two-way sync keeps everything up to date.",
+    icon: "🛍️",
+    popular: true,
+    features: ["Product sync", "Order management", "Inventory tracking", "Customer import"],
+  },
+  {
+    id: "instagram-shop",
+    name: "Instagram Shop",
+    description: "Tag products in your posts & stories, manage orders from Instagram Shopping, and track social commerce performance.",
+    icon: "📸",
+    popular: true,
+    features: ["Product tagging", "Order sync", "Shoppable posts", "Insights & analytics"],
+  },
+  {
+    id: "whatsapp",
+    name: "WhatsApp Business",
+    description: "Engage customers directly via WhatsApp Business API. Send order updates, handle support queries, and drive conversions through chat.",
+    icon: "💬",
+    popular: true,
+    features: ["Customer chat", "Order notifications", "Broadcast messages", "Quick replies"],
+  },
 ];
 
 /* ─── Channel page component ──────────────────────────────────── */
@@ -148,14 +109,11 @@ const INTEGRATIONS: Integration[] = [
 export default function ChannelPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [integrationSearch, setIntegrationSearch] = useState("");
-  const [activeCategory, setActiveCategory] = useState<IntegrationCategory | "all">("all");
 
   const { data: channels, isLoading } = useChannels();
 
   const filteredIntegrations = INTEGRATIONS.filter((integration) => {
-    const matchesCategory = activeCategory === "all" || integration.category === activeCategory;
-    const matchesSearch   = !integrationSearch || integration.name.toLowerCase().includes(integrationSearch.toLowerCase()) || integration.description.toLowerCase().includes(integrationSearch.toLowerCase());
-    return matchesCategory && matchesSearch;
+    return !integrationSearch || integration.name.toLowerCase().includes(integrationSearch.toLowerCase()) || integration.description.toLowerCase().includes(integrationSearch.toLowerCase());
   });
 
   const connectedPlatforms = new Set((channels ?? []).map((ch) => ch.platform.toLowerCase()));
@@ -241,7 +199,7 @@ export default function ChannelPage() {
 
       {/* ── Add Channel dialog (marketplace integrations) ─────────── */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0">
+        <DialogContent className="sm:max-w-lg max-h-[85vh] flex flex-col gap-0 p-0">
           <DialogHeader className="px-6 pt-6 pb-4 border-b">
             <DialogTitle className="flex items-center gap-2 text-lg">
               <div className="flex size-8 items-center justify-center rounded-lg bg-[#CEF17B]/30">
@@ -265,57 +223,12 @@ export default function ChannelPage() {
             </div>
           </DialogHeader>
 
-          <div className="flex flex-1 min-h-0">
-            {/* Category sidebar (desktop) */}
-            <div className="w-44 shrink-0 border-r bg-gray-50/50 dark:bg-gray-800/50 py-3 overflow-y-auto hidden sm:block">
-              {INTEGRATION_CATEGORIES.map(({ value, label, icon: Icon }) => (
-                <button
-                  key={value}
-                  onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
-                  className={`flex w-full items-center gap-2 px-4 py-2 text-xs font-medium transition-colors ${
-                    activeCategory === value
-                      ? "bg-[#CEF17B]/20 text-[#084734] border-r-2 border-[#084734]"
-                      : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
-                  }`}
-                >
-                  <Icon className="size-3.5" />
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {/* Mobile category pills */}
-            <div className="sm:hidden w-full flex flex-col">
-              <div className="flex gap-1.5 overflow-x-auto px-4 py-3 border-b">
-                {INTEGRATION_CATEGORIES.map(({ value, label }) => (
-                  <button
-                    key={value}
-                    onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
-                    className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
-                      activeCategory === value
-                        ? "bg-[#CEF17B] text-gray-900"
-                        : "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <IntegrationGrid
-                integrations={filteredIntegrations}
-                connectedPlatforms={connectedPlatforms}
-                onConnect={() => setIsDialogOpen(false)}
-              />
-            </div>
-
-            {/* Desktop integration grid */}
-            <div className="hidden sm:block flex-1 overflow-y-auto">
-              <IntegrationGrid
-                integrations={filteredIntegrations}
-                connectedPlatforms={connectedPlatforms}
-                onConnect={() => setIsDialogOpen(false)}
-              />
-            </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <IntegrationGrid
+              integrations={filteredIntegrations}
+              connectedPlatforms={connectedPlatforms}
+              onConnect={() => setIsDialogOpen(false)}
+            />
           </div>
 
           <div className="border-t px-6 py-3 flex items-center justify-between bg-gray-50/50 dark:bg-gray-800/50">
@@ -355,7 +268,7 @@ function IntegrationGrid({
   }
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4">
+    <div className="grid grid-cols-1 gap-4 p-4">
       {integrations.map((integration) => {
         const isConnected = connectedPlatforms.has(integration.id);
         return (
@@ -367,7 +280,7 @@ function IntegrationGrid({
                 onConnect();
               }
             }}
-            className={`group relative flex items-start gap-3 rounded-xl border p-4 text-left transition-all ${
+            className={`group relative flex flex-col rounded-xl border p-5 text-left transition-all ${
               integration.comingSoon
                 ? "border-dashed border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 cursor-default opacity-70"
                 : isConnected
@@ -375,42 +288,43 @@ function IntegrationGrid({
                 : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-[#CEF17B] hover:shadow-md hover:-translate-y-0.5 cursor-pointer"
             }`}
           >
-            {integration.popular && !isConnected && (
-              <span className="absolute -top-2 right-3 inline-flex items-center gap-0.5 rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-bold text-amber-700">
-                <Star className="size-2.5 fill-amber-500 text-amber-500" /> Popular
-              </span>
-            )}
+            <div className="flex items-start gap-4 w-full">
+              <div className={`flex size-12 shrink-0 items-center justify-center rounded-xl text-2xl ${
+                isConnected ? "bg-[#CEF17B]/30" : "bg-[#f1f7fa] dark:bg-gray-800/60"
+              }`}>
+                {integration.icon}
+              </div>
 
-            <div className={`flex size-10 shrink-0 items-center justify-center rounded-xl text-xl ${
-              isConnected ? "bg-[#CEF17B]/30" : "bg-[#f1f7fa] dark:bg-gray-800/60"
-            }`}>
-              {integration.icon}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{integration.name}</p>
+                  {isConnected && (
+                    <span className="inline-flex items-center gap-0.5 rounded-full bg-[#CEF17B]/40 px-1.5 py-0.5 text-[9px] font-semibold text-[#084734]">
+                      <CheckCircle className="size-2.5" /> Connected
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                  {integration.description}
+                </p>
+              </div>
+
+              {!isConnected && !integration.comingSoon && (
+                <div className="mt-1 flex size-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400 transition-all group-hover:bg-[#CEF17B] group-hover:text-gray-900">
+                  <ArrowRight className="size-4" />
+                </div>
+              )}
             </div>
 
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{integration.name}</p>
-                {isConnected && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-[#CEF17B]/40 px-1.5 py-0.5 text-[9px] font-semibold text-[#084734]">
-                    <CheckCircle className="size-2.5" /> Connected
-                  </span>
-                )}
-                {integration.comingSoon && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 text-[9px] font-semibold text-gray-500 dark:text-gray-400">
-                    <Clock className="size-2.5" /> Soon
-                  </span>
-                )}
-              </div>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground line-clamp-2">
-                {integration.description}
-              </p>
+            {/* Feature list */}
+            <div className="mt-3 flex flex-wrap gap-2 pl-16">
+              {integration.features.map((feature) => (
+                <span key={feature} className="inline-flex items-center gap-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2.5 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-400">
+                  <Check className="size-3 text-[#084734]" />
+                  {feature}
+                </span>
+              ))}
             </div>
-
-            {!isConnected && !integration.comingSoon && (
-              <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400 transition-all group-hover:bg-[#CEF17B] group-hover:text-gray-900">
-                <ArrowRight className="size-3.5" />
-              </div>
-            )}
           </button>
         );
       })}
