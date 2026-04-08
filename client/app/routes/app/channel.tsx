@@ -20,7 +20,7 @@ export function meta() {
 /* ─── Visual config for channel status ────────────────────────── */
 
 const STATUS_CONFIG: Record<ChannelStatus, { label: string; className: string; icon: React.ReactNode }> = {
-  CONNECTED:    { label: "Connected",    className: "bg-[#cdff8c]/30 text-[#4d7a00]", icon: <CheckCircle className="size-3" /> },
+  CONNECTED:    { label: "Connected",    className: "bg-[#CEF17B]/30 text-[#084734]", icon: <CheckCircle className="size-3" /> },
   SYNCING:      { label: "Syncing",      className: "bg-blue-100 text-blue-700",       icon: <Clock className="size-3" /> },
   ERROR:        { label: "Error",        className: "bg-red-100 text-red-600",         icon: <AlertCircle className="size-3" /> },
   DISCONNECTED: { label: "Disconnected", className: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400", icon: <AlertCircle className="size-3" /> },
@@ -173,7 +173,7 @@ export default function ChannelPage() {
         </div>
         <button
           onClick={() => setIsDialogOpen(true)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a] transition-colors"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F] transition-colors"
         >
           <Plus className="size-3.5" />
           Add Channel
@@ -190,7 +190,7 @@ export default function ChannelPage() {
           action={
             <button
               onClick={() => setIsDialogOpen(true)}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a]"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
             >
               <Plus className="size-3.5" />
               Add Channel
@@ -223,13 +223,13 @@ export default function ChannelPage() {
                       <span className="flex items-center gap-1"><ShoppingBag className="size-3" />{SYNC_STATUS_LABEL[channel.syncStatus]}</span>
                       <span className="flex items-center gap-1"><Clock className="size-3" />{timeAgo(channel.lastSyncedAt)}</span>
                       {channel.externalStoreUrl && (
-                        <a href={channel.externalStoreUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[#4d7a00] hover:underline">
+                        <a href={channel.externalStoreUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[#084734] hover:underline">
                           <ExternalLink className="size-3" />{channel.externalStoreUrl}
                         </a>
                       )}
                     </div>
                   </div>
-                  <button className="flex shrink-0 items-center gap-1 text-xs font-medium text-[#4d7a00] hover:text-[#3d6000]">
+                  <button className="flex shrink-0 items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
                     Manage <ExternalLink className="size-3" />
                   </button>
                 </div>
@@ -244,8 +244,8 @@ export default function ChannelPage() {
         <DialogContent className="sm:max-w-3xl max-h-[85vh] flex flex-col gap-0 p-0">
           <DialogHeader className="px-6 pt-6 pb-4 border-b">
             <DialogTitle className="flex items-center gap-2 text-lg">
-              <div className="flex size-8 items-center justify-center rounded-lg bg-[#cdff8c]/30">
-                <Store className="size-4 text-[#4d7a00]" />
+              <div className="flex size-8 items-center justify-center rounded-lg bg-[#CEF17B]/30">
+                <Store className="size-4 text-[#084734]" />
               </div>
               Add a Channel
             </DialogTitle>
@@ -260,7 +260,7 @@ export default function ChannelPage() {
                 placeholder="Search integrations..."
                 value={integrationSearch}
                 onChange={(event) => setIntegrationSearch(event.target.value)}
-                className="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 py-2 pl-9 pr-3 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                className="w-full rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 py-2 pl-9 pr-3 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
               />
             </div>
           </DialogHeader>
@@ -274,7 +274,7 @@ export default function ChannelPage() {
                   onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
                   className={`flex w-full items-center gap-2 px-4 py-2 text-xs font-medium transition-colors ${
                     activeCategory === value
-                      ? "bg-[#cdff8c]/20 text-[#4d7a00] border-r-2 border-[#4d7a00]"
+                      ? "bg-[#CEF17B]/20 text-[#084734] border-r-2 border-[#084734]"
                       : "text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100/70 dark:hover:bg-gray-800/70"
                   }`}
                 >
@@ -293,7 +293,7 @@ export default function ChannelPage() {
                     onClick={() => { setActiveCategory(value); setIntegrationSearch(""); }}
                     className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition-colors ${
                       activeCategory === value
-                        ? "bg-[#cdff8c] text-gray-900"
+                        ? "bg-[#CEF17B] text-gray-900"
                         : "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-800"
                     }`}
                   >
@@ -324,7 +324,7 @@ export default function ChannelPage() {
             </p>
             <p className="text-[11px] text-muted-foreground">
               Don't see what you need?{" "}
-              <button className="text-[#4d7a00] font-medium hover:underline">Request integration</button>
+              <button className="text-[#084734] font-medium hover:underline">Request integration</button>
             </p>
           </div>
         </DialogContent>
@@ -371,8 +371,8 @@ function IntegrationGrid({
               integration.comingSoon
                 ? "border-dashed border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/50 cursor-default opacity-70"
                 : isConnected
-                ? "border-[#cdff8c] bg-[#cdff8c]/10 cursor-default"
-                : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-[#cdff8c] hover:shadow-md hover:-translate-y-0.5 cursor-pointer"
+                ? "border-[#CEF17B] bg-[#CEF17B]/10 cursor-default"
+                : "border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 hover:border-[#CEF17B] hover:shadow-md hover:-translate-y-0.5 cursor-pointer"
             }`}
           >
             {integration.popular && !isConnected && (
@@ -382,7 +382,7 @@ function IntegrationGrid({
             )}
 
             <div className={`flex size-10 shrink-0 items-center justify-center rounded-xl text-xl ${
-              isConnected ? "bg-[#cdff8c]/30" : "bg-[#f1f7fa] dark:bg-gray-800/60"
+              isConnected ? "bg-[#CEF17B]/30" : "bg-[#f1f7fa] dark:bg-gray-800/60"
             }`}>
               {integration.icon}
             </div>
@@ -391,7 +391,7 @@ function IntegrationGrid({
               <div className="flex items-center gap-2">
                 <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{integration.name}</p>
                 {isConnected && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-[#cdff8c]/40 px-1.5 py-0.5 text-[9px] font-semibold text-[#4d7a00]">
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-[#CEF17B]/40 px-1.5 py-0.5 text-[9px] font-semibold text-[#084734]">
                     <CheckCircle className="size-2.5" /> Connected
                   </span>
                 )}
@@ -407,7 +407,7 @@ function IntegrationGrid({
             </div>
 
             {!isConnected && !integration.comingSoon && (
-              <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400 transition-all group-hover:bg-[#cdff8c] group-hover:text-gray-900">
+              <div className="mt-1 flex size-7 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400 transition-all group-hover:bg-[#CEF17B] group-hover:text-gray-900">
                 <ArrowRight className="size-3.5" />
               </div>
             )}

@@ -70,7 +70,7 @@ export function Navbar() {
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
         <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-[#cdff8c] shadow-sm dark:shadow-none">
+          <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
             <Leaf className="size-4 text-gray-900" />
           </div>
           <span className="hidden text-base font-bold text-gray-900 dark:text-gray-100 sm:block">Collabo</span>
@@ -96,7 +96,7 @@ export function Navbar() {
                     <motion.span
                       layoutId="nav-pill"
                       initial={false}
-                      className="absolute inset-0 rounded-full bg-[#cdff8c]"
+                      className="absolute inset-0 rounded-full bg-[#CEF17B]"
                       transition={{
                         type: "spring",
                         stiffness: 380,
@@ -150,7 +150,7 @@ export function Navbar() {
               <button className="flex items-center gap-2 rounded-full bg-white dark:bg-gray-900 py-1.5 pl-1.5 pr-3 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
                 <Avatar size="sm">
                   <AvatarImage src={user?.avatarUrl ?? ""} alt={user?.firstName} />
-                  <AvatarFallback className="bg-[#cdff8c] text-gray-900 text-xs font-bold">
+                  <AvatarFallback className="bg-[#CEF17B] text-gray-900 text-xs font-bold">
                     {initials}
                   </AvatarFallback>
                 </Avatar>
@@ -187,7 +187,7 @@ export function Navbar() {
                     <DropdownMenuItem
                       key={membership.organization.id}
                       onClick={() => setCurrentOrg(membership.organization.id)}
-                      className={cn(membership.organization.id === currentOrgId && "bg-[#cdff8c]/20 text-[#4d7a00]")}
+                      className={cn(membership.organization.id === currentOrgId && "bg-[#CEF17B]/20 text-[#084734]")}
                     >
                       {membership.organization.name}
                     </DropdownMenuItem>

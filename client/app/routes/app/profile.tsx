@@ -76,7 +76,7 @@ export default function ProfilePage() {
         </div>
         <button
           onClick={() => setIsEditing((prev) => !prev)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a] transition-colors"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F] transition-colors"
         >
           {isEditing ? <Check className="size-3.5" /> : <Edit2 className="size-3.5" />}
           {isEditing ? "Save Changes" : "Edit Profile"}
@@ -91,7 +91,7 @@ export default function ProfilePage() {
           {/* Avatar card */}
           <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-border text-center">
             <div className="relative mx-auto mb-4 size-20 w-fit">
-              <div className="flex size-20 items-center justify-center rounded-full bg-[#cdff8c] text-2xl font-bold text-gray-900">
+              <div className="flex size-20 items-center justify-center rounded-full bg-[#CEF17B] text-2xl font-bold text-gray-900">
                 {initials}
               </div>
               {isEditing && (
@@ -102,7 +102,7 @@ export default function ProfilePage() {
             </div>
             <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">{firstName} {lastName}</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">Super Admin</p>
-            <span className="mt-2 inline-flex items-center rounded-full bg-[#cdff8c]/30 px-2.5 py-0.5 text-xs font-semibold text-[#4d7a00]">
+            <span className="mt-2 inline-flex items-center rounded-full bg-[#CEF17B]/30 px-2.5 py-0.5 text-xs font-semibold text-[#084734]">
               Active
             </span>
             <div className="mt-4 border-t pt-4 text-left space-y-2">
@@ -127,8 +127,8 @@ export default function ProfilePage() {
             <div className="grid grid-cols-2 gap-3">
               {PROFILE_STATS.map(({ label, value, icon: Icon }) => (
                 <div key={label} className="rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 p-3">
-                  <div className="mb-1 flex size-7 items-center justify-center rounded-full bg-[#cdff8c]/40">
-                    <Icon className="size-3.5 text-[#4d7a00]" />
+                  <div className="mb-1 flex size-7 items-center justify-center rounded-full bg-[#CEF17B]/40">
+                    <Icon className="size-3.5 text-[#084734]" />
                   </div>
                   <p className="text-sm font-bold text-gray-900 dark:text-gray-100">{value}</p>
                   <p className="text-[10px] text-muted-foreground leading-tight">{label}</p>
@@ -151,7 +151,7 @@ export default function ProfilePage() {
                     {isEditing ? (
                       <input
                         defaultValue={handle}
-                        className="mt-0.5 h-6 w-full rounded border border-input bg-transparent px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                        className="mt-0.5 h-6 w-full rounded border border-input bg-transparent px-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#CEF17B]"
                       />
                     ) : (
                       <p className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">{handle}</p>
@@ -184,7 +184,7 @@ export default function ProfilePage() {
                   {isEditing ? (
                     <input
                       defaultValue={value}
-                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                     />
                   ) : (
                     <div className="flex h-9 items-center rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-3 text-sm text-gray-900 dark:text-gray-100">
@@ -202,7 +202,7 @@ export default function ProfilePage() {
                 <textarea
                   rows={3}
                   defaultValue="Super Admin at Collabo CRM. Passionate about building great products and helping teams succeed."
-                  className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50 resize-none"
+                  className="w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 resize-none"
                 />
               ) : (
                 <div className="rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-3 py-2 text-sm text-gray-900 dark:text-gray-100 leading-relaxed">
@@ -221,8 +221,8 @@ export default function ProfilePage() {
             <div className="divide-y divide-border">
               {ACTIVITY_FEED.map((activityItem) => (
                 <div key={activityItem.id} className="flex items-start gap-3 px-6 py-3.5">
-                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-[#cdff8c]/25">
-                    <div className="size-1.5 rounded-full bg-[#4d7a00]" />
+                  <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-[#CEF17B]/25">
+                    <div className="size-1.5 rounded-full bg-[#084734]" />
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{activityItem.action}</p>

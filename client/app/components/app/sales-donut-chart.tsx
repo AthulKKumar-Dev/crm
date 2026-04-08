@@ -50,7 +50,7 @@ export function SalesDonutChart() {
               {TOTAL.toLocaleString()}
             </p>
             <p className="text-[10px] text-muted-foreground leading-tight">Weekly Visits</p>
-            <span className="mt-1 inline-flex items-center gap-0.5 rounded-full bg-[#cdff8c]/30 px-1.5 py-0.5 text-[10px] font-semibold text-[#4d7a00]">
+            <span className="mt-1 inline-flex items-center gap-0.5 rounded-full bg-[#CEF17B]/30 px-1.5 py-0.5 text-[10px] font-semibold text-[#084734]">
               <TrendingUp className="size-2.5" /> 54%
             </span>
           </div>

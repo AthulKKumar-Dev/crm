@@ -47,7 +47,7 @@ export function ProfitBarChart() {
 
       <div className="mb-3 flex items-center gap-2">
         <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">$96,715.28</p>
-        <span className="inline-flex items-center gap-1 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-xs font-semibold text-[#4d7a00]">
+        <span className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-xs font-semibold text-[#084734]">
           <TrendingUp className="size-3" />
           54%
         </span>

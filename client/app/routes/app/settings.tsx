@@ -90,7 +90,7 @@ const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
 ];
 
 const AVATAR_COLORS = [
-  "bg-[#cdff8c] text-gray-900",
+  "bg-[#CEF17B] text-gray-900",
   "bg-blue-100 text-blue-700",
   "bg-purple-100 text-purple-700",
   "bg-orange-100 text-orange-700",
@@ -108,7 +108,7 @@ function Toggle({ enabled, onChange }: { enabled: boolean; onChange: () => void 
       onClick={onChange}
       className={cn(
         "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200",
-        enabled ? "bg-[#cdff8c]" : "bg-gray-200"
+        enabled ? "bg-[#CEF17B]" : "bg-gray-200"
       )}
     >
       <span
@@ -199,7 +199,7 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-3">
+    <div className="flex items-center gap-2 rounded-lg border border-dashed border-[#CEF17B] bg-[#CEF17B]/5 p-3">
       <div className="relative flex-1">
         <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-gray-400 dark:text-gray-400" />
         <input
@@ -207,7 +207,7 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="teammate@company.com"
-          className="w-full rounded-lg border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 py-2 pl-9 pr-3 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+          className="w-full rounded-lg border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 py-2 pl-9 pr-3 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
         />
       </div>
       <Select value={role} onValueChange={(selectedRole) => setRole(selectedRole as UserRole)}>
@@ -224,7 +224,7 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
         type="button"
         onClick={handleSendInvite}
         disabled={sendInvite.isPending || !email.trim()}
-        className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors disabled:opacity-50"
+        className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
       >
         {sendInvite.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Send"}
       </button>
@@ -685,7 +685,7 @@ function AppearanceTab() {
                 className={cn(
                   "group relative flex flex-col items-center gap-3 rounded-xl border-2 p-5 text-center transition-all",
                   isActive
-                    ? "border-[#cdff8c] bg-[#cdff8c]/10 dark:bg-[#cdff8c]/5"
+                    ? "border-[#CEF17B] bg-[#CEF17B]/10 dark:bg-[#CEF17B]/5"
                     : "border-transparent bg-gray-50 dark:bg-gray-800/50 hover:bg-gray-100 dark:hover:bg-gray-800"
                 )}
               >
@@ -707,7 +707,7 @@ function AppearanceTab() {
                 <div>
                   <p className={cn(
                     "text-sm font-semibold",
-                    isActive ? "text-[#4d7a00] dark:text-[#cdff8c]" : "text-gray-900 dark:text-gray-100"
+                    isActive ? "text-[#084734] dark:text-[#CEF17B]" : "text-gray-900 dark:text-gray-100"
                   )}>
                     {label}
                   </p>
@@ -716,7 +716,7 @@ function AppearanceTab() {
 
                 {/* Checkmark */}
                 {isActive && (
-                  <div className="absolute top-2.5 right-2.5 flex size-5 items-center justify-center rounded-full bg-[#cdff8c]">
+                  <div className="absolute top-2.5 right-2.5 flex size-5 items-center justify-center rounded-full bg-[#CEF17B]">
                     <Check className="size-3 text-gray-900" />
                   </div>
                 )}
@@ -728,12 +728,12 @@ function AppearanceTab() {
 
       <Section title="Accent Color" description="Used for buttons, highlights, and active states.">
         <div className="flex items-center gap-3">
-          {["#cdff8c", "#60a5fa", "#f472b6", "#fb923c", "#a78bfa", "#34d399"].map((color) => (
+          {["#CEF17B", "#60a5fa", "#f472b6", "#fb923c", "#a78bfa", "#34d399"].map((color) => (
             <button
               key={color}
               className={cn(
                 "size-8 rounded-full ring-2 ring-offset-2 dark:ring-offset-gray-900 transition-all",
-                color === "#cdff8c" ? "ring-gray-900 dark:ring-gray-100" : "ring-transparent hover:ring-gray-300"
+                color === "#CEF17B" ? "ring-gray-900 dark:ring-gray-100" : "ring-transparent hover:ring-gray-300"
               )}
               style={{ backgroundColor: color }}
             />
@@ -747,7 +747,7 @@ function AppearanceTab() {
       <Section title="Layout" description="How the navigation is displayed.">
         <Field label="Navigation Style" hint="Choose how the main navigation appears.">
           <Select defaultValue="top">
-            <SelectTrigger className="h-9 w-full rounded-lg border border-input bg-transparent dark:bg-gray-900 dark:text-gray-100 px-3 text-sm focus:ring-2 focus:ring-[#cdff8c]/50">
+            <SelectTrigger className="h-9 w-full rounded-lg border border-input bg-transparent dark:bg-gray-900 dark:text-gray-100 px-3 text-sm focus:ring-2 focus:ring-[#CEF17B]/50">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -876,7 +876,7 @@ export default function SettingsPage() {
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
                   activeTab === id
-                    ? "bg-[#cdff8c] text-gray-900"
+                    ? "bg-[#CEF17B] text-gray-900"
                     : "text-gray-500 dark:text-gray-400 hover:bg-[#f1f7fa] dark:hover:bg-gray-800/60 hover:text-gray-900 dark:hover:text-gray-100"
                 )}
               >
@@ -897,7 +897,7 @@ export default function SettingsPage() {
               className={cn(
                 "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                 activeTab === id
-                  ? "bg-[#cdff8c] text-gray-900"
+                  ? "bg-[#CEF17B] text-gray-900"
                   : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 ring-1 ring-border"
               )}
             >
@@ -924,7 +924,7 @@ export default function SettingsPage() {
                         <input
                           value={displayName}
                           onChange={(e) => setOrgName(e.target.value)}
-                          className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                          className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                         />
                       </Field>
                       <div className="pt-4">
@@ -947,14 +947,14 @@ export default function SettingsPage() {
                             value={displayWebsite}
                             onChange={(e) => setOrgWebsite(e.target.value)}
                             placeholder="https://yourstore.com"
-                            className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                            className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                           />
                         </Field>
                       </div>
                       {org?.type === "ORGANIZATION" && (
                         <div className="pt-4">
                           <Field label="Workspace Type" hint="This workspace is a team organization.">
-                            <span className="inline-flex rounded-full bg-[#cdff8c]/30 px-2.5 py-1 text-xs font-semibold text-[#4d7a00]">
+                            <span className="inline-flex rounded-full bg-[#CEF17B]/30 px-2.5 py-1 text-xs font-semibold text-[#084734]">
                               Organization
                             </span>
                           </Field>
@@ -974,7 +974,7 @@ export default function SettingsPage() {
                       <button
                         onClick={handleSaveGeneral}
                         disabled={updateOrg.isPending}
-                        className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors disabled:opacity-50"
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-4 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
                       >
                         {updateOrg.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
                         Save Changes
@@ -1017,7 +1017,7 @@ export default function SettingsPage() {
                   <button
                     onClick={handleSaveLocalization}
                     disabled={updateOrg.isPending}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-4 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
                   >
                     {updateOrg.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
                     Save Changes
@@ -1059,7 +1059,7 @@ export default function SettingsPage() {
                       type="password"
                       placeholder="••••••••"
                       {...passwordForm.register("currentPassword")}
-                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                     />
                     {passwordForm.formState.errors.currentPassword && (
                       <p className="mt-1 text-xs text-red-500">{passwordForm.formState.errors.currentPassword.message}</p>
@@ -1070,7 +1070,7 @@ export default function SettingsPage() {
                       type="password"
                       placeholder="••••••••"
                       {...passwordForm.register("newPassword")}
-                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                     />
                     {passwordForm.formState.errors.newPassword && (
                       <p className="mt-1 text-xs text-red-500">{passwordForm.formState.errors.newPassword.message}</p>
@@ -1081,7 +1081,7 @@ export default function SettingsPage() {
                       type="password"
                       placeholder="••••••••"
                       {...passwordForm.register("confirmPassword")}
-                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+                      className="h-9 w-full rounded-lg border border-input bg-transparent px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                     />
                     {passwordForm.formState.errors.confirmPassword && (
                       <p className="mt-1 text-xs text-red-500">{passwordForm.formState.errors.confirmPassword.message}</p>
@@ -1091,7 +1091,7 @@ export default function SettingsPage() {
                     <button
                       type="submit"
                       disabled={changePassword.isPending}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors disabled:opacity-50"
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-4 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
                     >
                       {changePassword.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
                       Update Password
@@ -1103,8 +1103,8 @@ export default function SettingsPage() {
               <Section title="Two-Factor Authentication" description="Add an extra layer of security.">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
-                    <div className="flex size-10 items-center justify-center rounded-full bg-[#cdff8c]/25">
-                      <Smartphone className="size-5 text-[#4d7a00]" />
+                    <div className="flex size-10 items-center justify-center rounded-full bg-[#CEF17B]/25">
+                      <Smartphone className="size-5 text-[#084734]" />
                     </div>
                     <div>
                       <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Authenticator App</p>
@@ -1160,7 +1160,7 @@ export default function SettingsPage() {
                 <NotifRow label="Team Updates" hint="When a team member joins or changes role." email={false} push={false} />
               </div>
               <div className="mt-5 flex justify-end">
-                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors">
+                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-4 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors">
                   <Check className="size-3.5" /> Save Preferences
                 </button>
               </div>
@@ -1177,7 +1177,7 @@ export default function SettingsPage() {
                   </p>
                   <button
                     onClick={() => setShowInvite(true)}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e87a] transition-colors"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors"
                   >
                     <Plus className="size-3.5" /> Invite Member
                   </button>
@@ -1214,7 +1214,7 @@ export default function SettingsPage() {
                           </div>
 
                           {isOwner ? (
-                            <span className="shrink-0 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-[10px] font-semibold text-[#4d7a00]">
+                            <span className="shrink-0 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-[10px] font-semibold text-[#084734]">
                               Owner
                             </span>
                           ) : (
@@ -1299,7 +1299,7 @@ export default function SettingsPage() {
                     </p>
                     <div className="mt-2 flex flex-wrap gap-1.5">
                       {["Unlimited orders", `${members?.length ?? 1} team member${(members?.length ?? 1) !== 1 ? "s" : ""}`, "Analytics", "Email support"].map((feature) => (
-                        <span key={feature} className="inline-flex items-center gap-1 rounded-full bg-[#cdff8c]/30 px-2 py-0.5 text-[10px] font-medium text-[#4d7a00]">
+                        <span key={feature} className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-[10px] font-medium text-[#084734]">
                           <Check className="size-2.5" /> {feature}
                         </span>
                       ))}
@@ -1312,7 +1312,7 @@ export default function SettingsPage() {
               </Section>
 
               <Section title="Payment Method" description="Manage your billing information.">
-                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-dashed border-input px-3 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
+                <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-dashed border-input px-3 text-xs text-muted-foreground hover:border-[#CEF17B] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
                   + Add Payment Method
                 </button>
               </Section>

@@ -12,7 +12,7 @@ export default function OnboardingLayout() {
       {/* Top bar */}
       <header className="flex h-[64px] shrink-0 items-center justify-between px-6 sm:px-10">
         <Link to="/" className="flex items-center gap-2.5">
-          <div className="flex size-8 items-center justify-center rounded-xl bg-[#cdff8c]">
+          <div className="flex size-8 items-center justify-center rounded-xl bg-[#CEF17B]">
             <Leaf className="size-4 text-gray-900" />
           </div>
           <span className="text-base font-bold text-gray-900">Collabo</span>
@@ -23,7 +23,7 @@ export default function OnboardingLayout() {
           className="text-sm text-gray-500 hover:text-gray-800 transition-colors"
         >
           Already have an account?{" "}
-          <span className="font-semibold text-[#4d7a00]">Sign in</span>
+          <span className="font-semibold text-[#084734]">Sign in</span>
         </Link>
       </header>
 

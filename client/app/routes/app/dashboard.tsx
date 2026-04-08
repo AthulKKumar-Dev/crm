@@ -38,7 +38,7 @@ export default function DashboardPage() {
             <input
               type="search"
               placeholder="Search here..."
-              className="h-8 w-48 rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-10 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+              className="h-8 w-48 rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-10 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
             />
             <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-muted px-1 font-mono text-[10px] text-muted-foreground">
               ⌘K
@@ -53,7 +53,7 @@ export default function DashboardPage() {
           </button>
           <button
             onClick={() => exportJson()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a]"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
           >
             <Download className="size-3.5" />
             Download Report
@@ -111,7 +111,7 @@ export default function DashboardPage() {
               <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recent Orders</p>
               <p className="text-xs text-muted-foreground">Keep track of recent order data and others information.</p>
             </div>
-            <Link to="/orders" className="flex items-center gap-1 text-xs font-medium text-[#4d7a00] hover:text-[#3d6000]">
+            <Link to="/orders" className="flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
               View All <ArrowRight className="size-3.5" />
             </Link>
           </div>
@@ -172,7 +172,7 @@ function StatCard({
           </p>
         )}
       </div>
-      <Link to={linkTo} className="mt-4 flex items-center gap-1 text-xs font-medium text-[#4d7a00] hover:text-[#3d6000]">
+      <Link to={linkTo} className="mt-4 flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
         {linkLabel} <ArrowRight className="size-3" />
       </Link>
     </div>

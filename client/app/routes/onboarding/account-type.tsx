@@ -35,7 +35,7 @@ export default function AccountTypePage() {
       {/* Step indicator */}
       <div className="mb-8 flex items-center justify-center gap-2">
         <div className="flex items-center gap-1.5">
-          <div className="size-2 rounded-full bg-[#cdff8c]" />
+          <div className="size-2 rounded-full bg-[#CEF17B]" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
           <div className="h-px w-6 bg-gray-200" />
@@ -46,8 +46,8 @@ export default function AccountTypePage() {
 
       {/* Heading */}
       <div className="mb-8 text-center">
-        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Sparkles className="size-5 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Sparkles className="size-5 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">
           Welcome, {firstName}!
@@ -65,22 +65,22 @@ export default function AccountTypePage() {
           onClick={() => handleSelect("personal")}
           disabled={createPersonal.isPending}
           className={cn(
-            "group relative flex flex-col items-center gap-5 rounded-2xl border-2 bg-white p-8 text-center shadow-sm transition-all hover:border-[#cdff8c] hover:shadow-md disabled:pointer-events-none disabled:opacity-60",
-            selected === "personal" ? "border-[#cdff8c] shadow-md" : "border-transparent"
+            "group relative flex flex-col items-center gap-5 rounded-2xl border-2 bg-white p-8 text-center shadow-sm transition-all hover:border-[#CEF17B] hover:shadow-md disabled:pointer-events-none disabled:opacity-60",
+            selected === "personal" ? "border-[#CEF17B] shadow-md" : "border-transparent"
           )}
         >
-          <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-2 ring-[#cdff8c]/50 transition group-hover:opacity-100" />
+          <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-2 ring-[#CEF17B]/50 transition group-hover:opacity-100" />
 
           <div className={cn(
             "flex size-14 items-center justify-center rounded-2xl transition-colors",
             selected === "personal" && createPersonal.isPending
-              ? "bg-[#cdff8c]/40"
-              : "bg-[#cdff8c]/15 group-hover:bg-[#cdff8c]/30"
+              ? "bg-[#CEF17B]/40"
+              : "bg-[#CEF17B]/15 group-hover:bg-[#CEF17B]/30"
           )}>
             {createPersonal.isPending && selected === "personal" ? (
-              <Loader2 className="size-6 animate-spin text-[#4d7a00]" />
+              <Loader2 className="size-6 animate-spin text-[#084734]" />
             ) : (
-              <User className="size-6 text-[#4d7a00]" />
+              <User className="size-6 text-[#084734]" />
             )}
           </div>
 
@@ -91,7 +91,7 @@ export default function AccountTypePage() {
             </p>
           </div>
 
-          <div className="mt-auto inline-flex items-center gap-1.5 rounded-full bg-[#cdff8c]/20 px-3 py-1 text-xs font-semibold text-[#4d7a00] transition group-hover:bg-[#cdff8c]/40">
+          <div className="mt-auto inline-flex items-center gap-1.5 rounded-full bg-[#CEF17B]/20 px-3 py-1 text-xs font-semibold text-[#084734] transition group-hover:bg-[#CEF17B]/40">
             Get started <ArrowRight className="size-3.5" />
           </div>
         </button>
@@ -102,14 +102,14 @@ export default function AccountTypePage() {
           onClick={() => handleSelect("organization")}
           disabled={createPersonal.isPending}
           className={cn(
-            "group relative flex flex-col items-center gap-5 rounded-2xl border-2 bg-white p-8 text-center shadow-sm transition-all hover:border-[#cdff8c] hover:shadow-md disabled:pointer-events-none disabled:opacity-60",
-            selected === "organization" ? "border-[#cdff8c] shadow-md" : "border-transparent"
+            "group relative flex flex-col items-center gap-5 rounded-2xl border-2 bg-white p-8 text-center shadow-sm transition-all hover:border-[#CEF17B] hover:shadow-md disabled:pointer-events-none disabled:opacity-60",
+            selected === "organization" ? "border-[#CEF17B] shadow-md" : "border-transparent"
           )}
         >
-          <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-2 ring-[#cdff8c]/50 transition group-hover:opacity-100" />
+          <div className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 ring-2 ring-[#CEF17B]/50 transition group-hover:opacity-100" />
 
-          <div className="flex size-14 items-center justify-center rounded-2xl bg-[#cdff8c]/15 transition-colors group-hover:bg-[#cdff8c]/30">
-            <Users className="size-6 text-[#4d7a00]" />
+          <div className="flex size-14 items-center justify-center rounded-2xl bg-[#CEF17B]/15 transition-colors group-hover:bg-[#CEF17B]/30">
+            <Users className="size-6 text-[#084734]" />
           </div>
 
           <div className="space-y-1.5">
@@ -119,7 +119,7 @@ export default function AccountTypePage() {
             </p>
           </div>
 
-          <div className="mt-auto inline-flex items-center gap-1.5 rounded-full bg-[#cdff8c]/20 px-3 py-1 text-xs font-semibold text-[#4d7a00] transition group-hover:bg-[#cdff8c]/40">
+          <div className="mt-auto inline-flex items-center gap-1.5 rounded-full bg-[#CEF17B]/20 px-3 py-1 text-xs font-semibold text-[#084734] transition group-hover:bg-[#CEF17B]/40">
             Create organization <ArrowRight className="size-3.5" />
           </div>
         </button>

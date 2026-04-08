@@ -55,8 +55,8 @@ export default function ForgotPasswordPage() {
   if (submitted) {
     return (
       <div className="text-center">
-        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <CheckCircle2 className="size-6 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <CheckCircle2 className="size-6 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Check your email</h2>
         <p className="mt-2 text-sm text-gray-500">
@@ -76,7 +76,7 @@ export default function ForgotPasswordPage() {
               <button
                 type="button"
                 onClick={() => setSubmitted(false)}
-                className="font-semibold text-[#4d7a00] hover:text-[#3d6000] transition-colors"
+                className="font-semibold text-[#084734] hover:text-[#3d6000] transition-colors"
               >
                 Try again with a different email
               </button>
@@ -99,8 +99,8 @@ export default function ForgotPasswordPage() {
     <div>
       {/* Heading */}
       <div className="mb-7">
-        <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Mail className="size-5 text-[#4d7a00]" />
+        <div className="mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Mail className="size-5 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Forgot your password?</h2>
         <p className="mt-1.5 text-sm text-gray-500">
@@ -121,7 +121,7 @@ export default function ForgotPasswordPage() {
             autoComplete="email"
             aria-invalid={!!errors.email}
             {...register("email")}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+            className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
           />
           {errors.email && (
             <p className="text-xs text-red-500">{errors.email.message}</p>
@@ -139,7 +139,7 @@ export default function ForgotPasswordPage() {
         <button
           type="submit"
           disabled={forgot.isPending}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {forgot.isPending ? (
             <>

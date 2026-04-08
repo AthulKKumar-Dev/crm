@@ -152,7 +152,7 @@ export default function CreateOrganizationPage() {
         <div className="flex items-center gap-1.5">
           <div className="size-2 rounded-full bg-gray-300" />
           <div className="h-px w-6 bg-gray-200" />
-          <div className="size-2 rounded-full bg-[#cdff8c]" />
+          <div className="size-2 rounded-full bg-[#CEF17B]" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
         </div>
@@ -161,8 +161,8 @@ export default function CreateOrganizationPage() {
 
       {/* Heading */}
       <div className="mb-8 text-center">
-        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Building2 className="size-5 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Building2 className="size-5 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Set up your organization</h2>
         <p className="mt-1.5 text-sm text-gray-500">
@@ -179,7 +179,7 @@ export default function CreateOrganizationPage() {
             {/* Logo */}
             <div className="shrink-0">
               <label className="block text-sm font-medium text-gray-700 mb-1.5">Logo</label>
-              <div className="relative flex size-[72px] items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 overflow-hidden transition hover:border-[#cdff8c]/60">
+              <div className="relative flex size-[72px] items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 overflow-hidden transition hover:border-[#CEF17B]/60">
                 {logoPreview ? (
                   <>
                     <img
@@ -213,7 +213,7 @@ export default function CreateOrganizationPage() {
                   placeholder="Acme Store"
                   aria-invalid={!!errors.name}
                   {...register("name")}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
                 />
                 {errors.name && (
                   <p className="text-xs text-red-500">{errors.name.message}</p>
@@ -228,7 +228,7 @@ export default function CreateOrganizationPage() {
                   placeholder="https://example.com/logo.png"
                   {...register("logo")}
                   onBlur={handleLogoUrlBlur}
-                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-xs text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                  className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2 text-xs text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
                 />
                 {errors.logo && (
                   <p className="text-xs text-red-500">{errors.logo.message}</p>
@@ -244,7 +244,7 @@ export default function CreateOrganizationPage() {
                 Industry
               </label>
               <Select onValueChange={(selectedIndustry) => setValue("industry", selectedIndustry)}>
-                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#CEF17B]/40">
                   <SelectValue placeholder="Select your industry" />
                 </SelectTrigger>
                 <SelectContent>
@@ -265,7 +265,7 @@ export default function CreateOrganizationPage() {
                   id="website"
                   placeholder="https://yourstore.com"
                   {...register("website")}
-                  className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40"
+                  className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
                 />
               </div>
               {errors.website && (
@@ -279,7 +279,7 @@ export default function CreateOrganizationPage() {
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-gray-700">Timezone</label>
               <Select defaultValue="UTC" onValueChange={(selectedTimezone) => setValue("timezone", selectedTimezone)}>
-                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#CEF17B]/40">
                   <SelectValue placeholder="Select timezone" />
                 </SelectTrigger>
                 <SelectContent>
@@ -293,7 +293,7 @@ export default function CreateOrganizationPage() {
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-gray-700">Currency</label>
               <Select defaultValue="USD" onValueChange={(selectedCurrency) => setValue("currency", selectedCurrency)}>
-                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
+                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#CEF17B]/40">
                   <SelectValue placeholder="Select currency" />
                 </SelectTrigger>
                 <SelectContent>
@@ -324,7 +324,7 @@ export default function CreateOrganizationPage() {
             <button
               type="submit"
               disabled={createOrg.isPending}
-              className="inline-flex items-center gap-2 rounded-lg bg-[#cdff8c] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-lg bg-[#CEF17B] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
             >
               {createOrg.isPending ? (
                 <>

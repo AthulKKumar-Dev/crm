@@ -154,15 +154,15 @@ export default function InviteTeamPage() {
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-300" />
           <div className="h-px w-6 bg-gray-200" />
-          <div className="size-2 rounded-full bg-[#cdff8c]" />
+          <div className="size-2 rounded-full bg-[#CEF17B]" />
         </div>
         <span className="ml-2 text-xs text-gray-400">Step 3 of 3</span>
       </div>
 
       {/* Heading */}
       <div className="mb-8 text-center">
-        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#cdff8c]/30">
-          <Users className="size-5 text-[#4d7a00]" />
+        <div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-2xl bg-[#CEF17B]/30">
+          <Users className="size-5 text-[#084734]" />
         </div>
         <h2 className="text-2xl font-bold text-gray-900">Invite your team</h2>
         <p className="mt-1.5 text-sm text-gray-500">
@@ -184,10 +184,10 @@ export default function InviteTeamPage() {
                   value={row.email}
                   onChange={(event) => handleEmailChange(row.id, event.target.value)}
                   disabled={row.status === "sent" || row.status === "sending"}
-                  className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 disabled:bg-gray-50 disabled:opacity-60"
+                  className="w-full rounded-lg border border-gray-200 bg-white py-2.5 pl-9 pr-3.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 disabled:bg-gray-50 disabled:opacity-60"
                 />
                 {row.status === "sent" && (
-                  <CheckCircle2 className="absolute right-3 top-1/2 -translate-y-1/2 size-4 text-[#4d7a00]" />
+                  <CheckCircle2 className="absolute right-3 top-1/2 -translate-y-1/2 size-4 text-[#084734]" />
                 )}
               </div>
 
@@ -197,7 +197,7 @@ export default function InviteTeamPage() {
                 onValueChange={(selectedRole) => handleRoleChange(row.id, selectedRole as UserRole)}
                 disabled={row.status === "sent" || row.status === "sending"}
               >
-                <SelectTrigger className="w-[130px] shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#cdff8c]/40">
+                <SelectTrigger className="w-[130px] shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#CEF17B]/40">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -249,14 +249,14 @@ export default function InviteTeamPage() {
           type="button"
           onClick={handleAddRow}
           disabled={isSendingAll}
-          className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-[#4d7a00] hover:text-[#3d6000] transition-colors disabled:opacity-50"
+          className="mt-4 inline-flex items-center gap-1.5 text-sm font-medium text-[#084734] hover:text-[#3d6000] transition-colors disabled:opacity-50"
         >
           <Plus className="size-4" /> Add another
         </button>
 
         {/* Sent counter */}
         {sentCount > 0 && (
-          <p className="mt-3 text-xs text-[#4d7a00]">
+          <p className="mt-3 text-xs text-[#084734]">
             <CheckCircle2 className="inline size-3.5 mr-1" />
             {sentCount} invitation{sentCount > 1 ? "s" : ""} sent successfully
           </p>
@@ -286,7 +286,7 @@ export default function InviteTeamPage() {
             type="button"
             onClick={handleSendAll}
             disabled={isSendingAll || (!hasValidEmails && sentCount === 0)}
-            className="inline-flex items-center gap-2 rounded-lg bg-[#cdff8c] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-lg bg-[#CEF17B] px-5 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
           >
             {isSendingAll ? (
               <>

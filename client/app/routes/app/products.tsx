@@ -28,7 +28,7 @@ const STATUS_LABEL: Record<ProductStatus, string> = {
 };
 
 const STATUS_CLASS: Record<ProductStatus, string> = {
-  ACTIVE: "bg-[#cdff8c]/30 text-[#4d7a00]",
+  ACTIVE: "bg-[#CEF17B]/30 text-[#084734]",
   DRAFT: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
   ARCHIVED: "bg-orange-100 text-orange-700",
 };
@@ -82,7 +82,7 @@ export default function ProductsPage() {
             Manage your product catalog, inventory, and pricing.
           </p>
         </div>
-        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#b8e87a]">
+        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]">
           <Plus className="size-3.5" />
           Add Product
         </button>
@@ -123,7 +123,7 @@ export default function ProductsPage() {
             placeholder="Search by name or SKU…"
             value={searchQuery}
             onChange={handleSearchChange}
-            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#cdff8c]/50"
+            className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -134,7 +134,7 @@ export default function ProductsPage() {
               onClick={() => handleTypeFilter(filterName)}
               className={`h-7 rounded-full px-3 text-xs font-medium transition-colors ${
                 selectedType === filterName
-                  ? "bg-[#cdff8c]/30 text-[#4d7a00]"
+                  ? "bg-[#CEF17B]/30 text-[#084734]"
                   : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 border border-input"
               }`}
             >

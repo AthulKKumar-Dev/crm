@@ -20,12 +20,12 @@ export default function AuthLayout() {
       <div className="hidden lg:flex lg:w-[45%] flex-col justify-between bg-gray-950 p-12 relative overflow-hidden">
 
         {/* Background accent blob */}
-        <div className="pointer-events-none absolute -top-32 -left-32 size-96 rounded-full bg-[#cdff8c]/10 blur-3xl" />
-        <div className="pointer-events-none absolute -bottom-32 -right-16 size-72 rounded-full bg-[#cdff8c]/8 blur-3xl" />
+        <div className="pointer-events-none absolute -top-32 -left-32 size-96 rounded-full bg-[#CEF17B]/10 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-32 -right-16 size-72 rounded-full bg-[#CEF17B]/8 blur-3xl" />
 
         {/* Logo */}
         <div className="relative flex items-center gap-2.5">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-[#cdff8c]">
+          <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B]">
             <Leaf className="size-4 text-gray-900" />
           </div>
           <span className="text-lg font-bold text-white">Collabo</span>
@@ -36,7 +36,7 @@ export default function AuthLayout() {
           <div>
             <h1 className="text-3xl font-bold leading-tight text-white">
               Unified Commerce,<br />
-              <span className="text-[#cdff8c]">Simplified.</span>
+              <span className="text-[#CEF17B]">Simplified.</span>
             </h1>
             <p className="mt-3 text-sm leading-relaxed text-gray-400">
               One platform for orders, customers, marketing, and conversations —
@@ -48,8 +48,8 @@ export default function AuthLayout() {
           <ul className="space-y-3">
             {FEATURES.map(({ icon: Icon, text }) => (
               <li key={text} className="flex items-center gap-3">
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-[#cdff8c]/15">
-                  <Icon className="size-3.5 text-[#cdff8c]" />
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-[#CEF17B]/15">
+                  <Icon className="size-3.5 text-[#CEF17B]" />
                 </div>
                 <span className="text-sm text-gray-300">{text}</span>
               </li>
@@ -63,7 +63,7 @@ export default function AuthLayout() {
               view of every customer across Shopify and Amazon."
             </p>
             <div className="mt-3 flex items-center gap-2.5">
-              <div className="flex size-7 items-center justify-center rounded-full bg-[#cdff8c] text-[10px] font-bold text-gray-900">
+              <div className="flex size-7 items-center justify-center rounded-full bg-[#CEF17B] text-[10px] font-bold text-gray-900">
                 JT
               </div>
               <div>
@@ -84,7 +84,7 @@ export default function AuthLayout() {
       <div className="flex flex-1 flex-col items-center justify-center px-6 py-12">
         {/* Mobile logo */}
         <div className="mb-8 flex items-center gap-2 lg:hidden">
-          <div className="flex size-8 items-center justify-center rounded-xl bg-[#cdff8c]">
+          <div className="flex size-8 items-center justify-center rounded-xl bg-[#CEF17B]">
             <Leaf className="size-4 text-gray-900" />
           </div>
           <span className="text-base font-bold text-gray-900">Collabo</span>

@@ -65,7 +65,7 @@ export default function LoginPage() {
             autoComplete="email"
             aria-invalid={!!errors.email}
             {...register("email")}
-            className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+            className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
           />
           {errors.email && (
             <p className="text-xs text-red-500">{errors.email.message}</p>
@@ -80,7 +80,7 @@ export default function LoginPage() {
             </label>
             <Link
               to="/auth/forgot-password"
-              className="text-xs font-medium text-[#4d7a00] hover:text-[#3d6000] transition-colors"
+              className="text-xs font-medium text-[#084734] hover:text-[#3d6000] transition-colors"
             >
               Forgot password?
             </Link>
@@ -93,7 +93,7 @@ export default function LoginPage() {
               autoComplete="current-password"
               aria-invalid={!!errors.password}
               {...register("password")}
-              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#cdff8c] focus:ring-2 focus:ring-[#cdff8c]/40 aria-[invalid=true]:border-red-400"
+              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 pr-10 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40 aria-[invalid=true]:border-red-400"
             />
             <button
               type="button"
@@ -121,7 +121,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={login.isPending}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#b8e87a] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {login.isPending ? (
             <>
@@ -139,7 +139,7 @@ export default function LoginPage() {
         Don&apos;t have an account?{" "}
         <Link
           to="/auth/signup"
-          className="font-semibold text-[#4d7a00] hover:text-[#3d6000] transition-colors"
+          className="font-semibold text-[#084734] hover:text-[#3d6000] transition-colors"
         >
           Create one
         </Link>
