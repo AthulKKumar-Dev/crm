@@ -176,6 +176,7 @@ export class OrganizationService {
       industry: org.industry,
       website: org.website,
       lowStockThreshold: org.lowStockThreshold,
+      gstEnabled: org.gstEnabled,
       onboardingStatus: org.onboardingStatus,
       role,
       createdAt: org.createdAt,

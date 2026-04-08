@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
-  Sun, Moon, Monitor,
+  Sun, Moon, Monitor, Receipt, Star, MapPin,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -27,7 +27,13 @@ import {
   useRevokeInviteMutation,
 } from "~/hooks/use-org-mutations";
 import { userService } from "~/services/user.service";
-import type { UserRole } from "~/types/api";
+import { useGstins, useIndianStates, useStateTaxRates, useCollections, useCollectionOverrides } from "~/hooks/use-gst-queries";
+import {
+  useCreateGstinMutation, useUpdateGstinMutation, useDeleteGstinMutation,
+  useCreateStateTaxRateMutation, useDeleteStateTaxRateMutation,
+  useCreateCollectionOverrideMutation, useDeleteCollectionOverrideMutation,
+} from "~/hooks/use-gst-mutations";
+import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, CollectionTaxOverride, ShopifyCollection } from "~/types/api";
 
 export function meta() {
   return [{ title: "Settings | Collabo CRM" }];
@@ -37,6 +43,7 @@ export function meta() {
 
 const TABS = [
   { id: "general",       label: "General",        icon: Building2 },
+  { id: "tax-gst",       label: "Tax & GST",      icon: Receipt },
   { id: "security",      label: "Security",        icon: Lock },
   { id: "notifications", label: "Notifications",   icon: Bell },
   { id: "members",       label: "Team Members",    icon: Users },
@@ -237,6 +244,431 @@ const THEME_OPTIONS = [
 ];
 
 /** Appearance settings tab with theme selection, accent color, and layout options. */
+// ── Tax & GST Tab ───────────────────────────────────────────────────────────
+
+const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
+
+function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gstEnabled: boolean }) {
+  const [gstEnabled, setGstEnabled] = useState(initialGstEnabled);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const updateOrg = useUpdateOrganizationMutation(orgId);
+  const { data: gstins = [], isLoading: gstinsLoading } = useGstins();
+  const { data: states = [] } = useIndianStates();
+  const createGstin = useCreateGstinMutation();
+  const deleteGstin = useDeleteGstinMutation();
+  const updateGstin = useUpdateGstinMutation();
+
+  // Form state for adding GSTIN
+  const [form, setForm] = useState<CreateGstinRequest>({
+    gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false,
+  });
+
+  function handleGstToggle() {
+    const newValue = !gstEnabled;
+    setGstEnabled(newValue);
+    updateOrg.mutate({ gstEnabled: newValue });
+  }
+
+  function handleAddGstin() {
+    if (!form.gstin || !form.legalName || !form.stateCode) {
+      toast.error("Please fill in GSTIN, legal name, and state.");
+      return;
+    }
+    createGstin.mutate(form, {
+      onSuccess: () => {
+        setShowAddForm(false);
+        setForm({ gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false });
+      },
+    });
+  }
+
+  function handleStateChange(code: string) {
+    const state = states.find((s) => s.code === code);
+    setForm((prev) => ({ ...prev, stateCode: code, stateName: state?.name || "" }));
+  }
+
+  const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  return (
+    <>
+      {/* GST Toggle */}
+      <Section title="GST Status" description="Enable GST to generate tax-compliant invoices for Indian businesses.">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs font-medium text-gray-700 dark:text-gray-300">Enable GST</p>
+            <p className="text-[10px] text-muted-foreground">When enabled, you can register GSTINs and generate GST invoices.</p>
+          </div>
+          <Toggle enabled={gstEnabled} onChange={handleGstToggle} />
+        </div>
+      </Section>
+
+      {/* GSTIN Registrations */}
+      {gstEnabled && (
+        <Section title="GSTIN Registrations" description="Add your GST Identification Numbers for each state where your business is registered.">
+          {/* GSTIN List */}
+          {gstinsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="size-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : activeGstins.length === 0 && !showAddForm ? (
+            <div className="py-8 text-center">
+              <Receipt className="mx-auto size-8 text-muted-foreground/50" />
+              <p className="mt-2 text-xs text-muted-foreground">No GSTIN registered yet.</p>
+              <button
+                onClick={() => setShowAddForm(true)}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] transition-colors"
+              >
+                <Plus className="size-3.5" /> Add GSTIN
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-3">
+                {activeGstins.map((g: OrganizationGstin) => (
+                  <div
+                    key={g.id}
+                    className="flex items-center justify-between rounded-lg border p-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-mono font-semibold text-gray-900 dark:text-gray-100">
+                          {g.gstin}
+                        </p>
+                        {g.isDefault && (
+                          <span className="inline-flex items-center gap-0.5 rounded-full bg-[#cdff8c]/30 px-1.5 py-0.5 text-[9px] font-medium text-[#4d7a00]">
+                            <Star className="size-2.5" /> Default
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {g.legalName} {g.tradeName ? `(${g.tradeName})` : ""}
+                      </p>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <MapPin className="size-2.5 text-muted-foreground" />
+                        <p className="text-[10px] text-muted-foreground">
+                          {g.stateName} ({g.stateCode})
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {!g.isDefault && (
+                        <button
+                          onClick={() => updateGstin.mutate({ id: g.id, data: { isDefault: true } })}
+                          className="rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                          title="Set as default"
+                        >
+                          Set Default
+                        </button>
+                      )}
+                      <button
+                        onClick={() => deleteGstin.mutate(g.id)}
+                        className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors"
+                        title="Deactivate"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Add button */}
+              {!showAddForm && (
+                <button
+                  onClick={() => setShowAddForm(true)}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-3 py-1.5 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                >
+                  <Plus className="size-3.5" /> Add another GSTIN
+                </button>
+              )}
+            </>
+          )}
+
+          {/* Add GSTIN Form */}
+          {showAddForm && (
+            <div className="mt-4 space-y-3 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-4">
+              <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">Add GSTIN Registration</p>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">GSTIN *</label>
+                  <input
+                    value={form.gstin}
+                    onChange={(e) => setForm((prev) => ({ ...prev, gstin: e.target.value.toUpperCase() }))}
+                    placeholder="e.g. 27AABCU9603R1ZM"
+                    maxLength={15}
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">State *</label>
+                  <Select value={form.stateCode} onValueChange={handleStateChange}>
+                    <SelectTrigger className="mt-1 h-9 text-xs">
+                      <SelectValue placeholder="Select state" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {states.map((s) => (
+                        <SelectItem key={s.code} value={s.code} className="text-xs">
+                          {s.code} - {s.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Legal Name *</label>
+                  <input
+                    value={form.legalName}
+                    onChange={(e) => setForm((prev) => ({ ...prev, legalName: e.target.value }))}
+                    placeholder="Registered legal name"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Trade Name</label>
+                  <input
+                    value={form.tradeName || ""}
+                    onChange={(e) => setForm((prev) => ({ ...prev, tradeName: e.target.value }))}
+                    placeholder="Brand/trade name (optional)"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-center gap-2 text-[10px] text-gray-600 dark:text-gray-400">
+                <input
+                  type="checkbox"
+                  checked={form.isDefault || false}
+                  onChange={(e) => setForm((prev) => ({ ...prev, isDefault: e.target.checked }))}
+                  className="rounded border-gray-300"
+                />
+                Set as default GSTIN
+              </label>
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={handleAddGstin}
+                  disabled={createGstin.isPending}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 py-2 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50 transition-colors"
+                >
+                  {createGstin.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
+                  Save GSTIN
+                </button>
+                <button
+                  onClick={() => setShowAddForm(false)}
+                  className="rounded-lg px-4 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </Section>
+      )}
+
+      {/* State Base Tax Rates */}
+      {gstEnabled && (
+        <StateTaxRatesSection />
+      )}
+
+      {/* Collection Tax Overrides */}
+      {gstEnabled && (
+        <CollectionOverridesSection />
+      )}
+    </>
+  );
+}
+
+// ── State Tax Rates Section ─────────────────────────────────────────────────
+
+function StateTaxRatesSection() {
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [stateCode, setStateCode] = useState("");
+  const [gstRate, setGstRate] = useState("");
+  const { data: taxRates = [], isLoading } = useStateTaxRates();
+  const { data: states = [] } = useIndianStates();
+  const createRate = useCreateStateTaxRateMutation();
+  const deleteRate = useDeleteStateTaxRateMutation();
+
+  function handleAdd() {
+    if (!stateCode || !gstRate) { toast.error("Select a state and GST rate."); return; }
+    createRate.mutate({ stateCode, gstRate: parseFloat(gstRate) }, {
+      onSuccess: () => { setShowAddForm(false); setStateCode(""); setGstRate(""); },
+    });
+  }
+
+  // Filter out states that already have rates
+  const existingCodes = new Set(taxRates.map((r: StateTaxRate) => r.stateCode));
+  const availableStates = states.filter((s) => !existingCodes.has(s.code));
+
+  return (
+    <Section title="State Base Tax Rates" description="Set default GST rates per state. Used when no product-level or collection-level rate is configured.">
+      {isLoading ? (
+        <div className="flex justify-center py-6"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
+      ) : taxRates.length === 0 && !showAddForm ? (
+        <div className="py-6 text-center">
+          <p className="text-xs text-muted-foreground">No state tax rates configured.</p>
+          <button onClick={() => setShowAddForm(true)} className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] transition-colors">
+            <Plus className="size-3.5" /> Add State Rate
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2">
+            {taxRates.map((rate: StateTaxRate) => (
+              <div key={rate.id} className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{rate.stateName}</p>
+                  <p className="text-[10px] text-muted-foreground">State Code: {rate.stateCode}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="rounded-full bg-[#cdff8c]/20 px-2 py-0.5 text-xs font-semibold text-[#4d7a00]">{Number(rate.gstRate)}%</span>
+                  <button onClick={() => deleteRate.mutate(rate.id)} className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors">
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {!showAddForm && (
+            <button onClick={() => setShowAddForm(true)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-3 py-1.5 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
+              <Plus className="size-3.5" /> Add State Rate
+            </button>
+          )}
+        </>
+      )}
+
+      {showAddForm && (
+        <div className="mt-3 flex items-end gap-3 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-4">
+          <div className="flex-1">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">State</label>
+            <Select value={stateCode} onValueChange={setStateCode}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Select state" /></SelectTrigger>
+              <SelectContent>
+                {availableStates.map((s) => (
+                  <SelectItem key={s.code} value={s.code} className="text-xs">{s.code} - {s.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="w-28">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">GST Rate</label>
+            <Select value={gstRate} onValueChange={setGstRate}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Rate" /></SelectTrigger>
+              <SelectContent>
+                {GST_RATE_OPTIONS.map((r) => (<SelectItem key={r} value={r} className="text-xs">{r}%</SelectItem>))}
+              </SelectContent>
+            </Select>
+          </div>
+          <button onClick={handleAdd} disabled={createRate.isPending} className="inline-flex h-9 items-center gap-1 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50">
+            {createRate.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} Add
+          </button>
+          <button onClick={() => setShowAddForm(false)} className="h-9 rounded-lg px-3 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ── Collection Tax Overrides Section ────────────────────────────────────────
+
+function CollectionOverridesSection() {
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [collectionId, setCollectionId] = useState("");
+  const [gstRate, setGstRate] = useState("");
+  const { data: collections = [], isLoading: collectionsLoading } = useCollections();
+  const { data: overrides = [], isLoading: overridesLoading } = useCollectionOverrides();
+  const createOverride = useCreateCollectionOverrideMutation();
+  const deleteOverride = useDeleteCollectionOverrideMutation();
+
+  function handleAdd() {
+    if (!collectionId || !gstRate) { toast.error("Select a collection and GST rate."); return; }
+    createOverride.mutate({ collectionId, gstRate: parseFloat(gstRate) }, {
+      onSuccess: () => { setShowAddForm(false); setCollectionId(""); setGstRate(""); },
+    });
+  }
+
+  // Filter out collections that already have overrides
+  const existingIds = new Set(overrides.map((o: CollectionTaxOverride) => o.collectionId));
+  const availableCollections = collections.filter((c: ShopifyCollection) => !existingIds.has(c.id));
+  const isLoading = collectionsLoading || overridesLoading;
+
+  return (
+    <Section title="Collection Tax Overrides" description="Override GST rate for all products in a Shopify collection. Overrides state base rates but not individual product rates.">
+      {isLoading ? (
+        <div className="flex justify-center py-6"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
+      ) : collections.length === 0 ? (
+        <div className="py-6 text-center">
+          <p className="text-xs text-muted-foreground">No Shopify collections synced yet.</p>
+          <p className="mt-1 text-[10px] text-muted-foreground">Sync your collections from the Channels page first.</p>
+        </div>
+      ) : overrides.length === 0 && !showAddForm ? (
+        <div className="py-6 text-center">
+          <p className="text-xs text-muted-foreground">No collection overrides configured.</p>
+          <button onClick={() => setShowAddForm(true)} className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] transition-colors">
+            <Plus className="size-3.5" /> Add Override
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2">
+            {overrides.map((override: CollectionTaxOverride) => (
+              <div key={override.id} className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{override.collection?.title ?? "Unknown"}</p>
+                  <p className="text-[10px] text-muted-foreground">Collection override</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="rounded-full bg-purple-50 dark:bg-purple-900/20 px-2 py-0.5 text-xs font-semibold text-purple-700 dark:text-purple-400">{Number(override.gstRate)}%</span>
+                  <button onClick={() => deleteOverride.mutate(override.id)} className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors">
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {!showAddForm && availableCollections.length > 0 && (
+            <button onClick={() => setShowAddForm(true)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-3 py-1.5 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
+              <Plus className="size-3.5" /> Add Override
+            </button>
+          )}
+        </>
+      )}
+
+      {showAddForm && (
+        <div className="mt-3 flex items-end gap-3 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-4">
+          <div className="flex-1">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Collection</label>
+            <Select value={collectionId} onValueChange={setCollectionId}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Select collection" /></SelectTrigger>
+              <SelectContent>
+                {availableCollections.map((c: ShopifyCollection) => (
+                  <SelectItem key={c.id} value={c.id} className="text-xs">{c.title}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="w-28">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">GST Rate</label>
+            <Select value={gstRate} onValueChange={setGstRate}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Rate" /></SelectTrigger>
+              <SelectContent>
+                {GST_RATE_OPTIONS.map((r) => (<SelectItem key={r} value={r} className="text-xs">{r}%</SelectItem>))}
+              </SelectContent>
+            </Select>
+          </div>
+          <button onClick={handleAdd} disabled={createOverride.isPending} className="inline-flex h-9 items-center gap-1 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50">
+            {createOverride.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} Add
+          </button>
+          <button onClick={() => setShowAddForm(false)} className="h-9 rounded-lg px-3 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 function AppearanceTab() {
   const { theme, setTheme } = useThemeStore();
 
@@ -885,6 +1317,11 @@ export default function SettingsPage() {
                 </button>
               </Section>
             </>
+          )}
+
+          {/* ─── TAX & GST ─── */}
+          {activeTab === "tax-gst" && org && (
+            <TaxGstTab orgId={org.id} gstEnabled={org.gstEnabled ?? false} />
           )}
 
           {/* ─── APPEARANCE ─── */}

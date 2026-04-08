@@ -52,6 +52,9 @@ export class ShopifySyncService {
                         case 'inventory':
                             await this.syncInventory(channelId, orgId, shopDomain, token);
                             break;
+                        case 'collections':
+                            await this.syncCollections(channelId, orgId, shopDomain, token);
+                            break;
                     }
                 } catch (error) {
                     allSucceeded = false;
@@ -216,6 +219,69 @@ export class ShopifySyncService {
                     data: { recordsProcessed: processed, recordsFailed: failed, cursor: page.nextCursor },
                 });
             }
+            await this.completeSyncLog(syncLog.id, processed, failed);
+        } catch (error) {
+            await this.failSyncLog(syncLog.id, processed, failed, error);
+            throw error;
+        }
+    }
+
+    // ─── SYNC COLLECTIONS ───
+    private async syncCollections(channelId: string, orgId: string, shopDomain: string, token: string) {
+        const syncLog = await this.createSyncLog(channelId, orgId, 'collections');
+        let processed = 0;
+        let failed = 0;
+
+        try {
+            // 1. Sync custom collections
+            for await (const page of this.paginatedFetch(shopDomain, token, '/custom_collections.json', 'custom_collections', syncLog.cursor)) {
+                for (const col of page.data) {
+                    try {
+                        await this.upsertCollection(channelId, orgId, col, 'custom');
+                        processed++;
+                    } catch (error) {
+                        failed++;
+                        this.logger.error(`Failed custom collection ${col.id}`, error);
+                    }
+                }
+            }
+
+            // 2. Sync smart collections
+            for await (const page of this.paginatedFetch(shopDomain, token, '/smart_collections.json', 'smart_collections', null)) {
+                for (const col of page.data) {
+                    try {
+                        await this.upsertCollection(channelId, orgId, col, 'smart');
+                        processed++;
+                    } catch (error) {
+                        failed++;
+                        this.logger.error(`Failed smart collection ${col.id}`, error);
+                    }
+                }
+            }
+
+            // 3. Sync collects (product-collection links)
+            for await (const page of this.paginatedFetch(shopDomain, token, '/collects.json', 'collects', null)) {
+                for (const collect of page.data) {
+                    try {
+                        const product = await this.prisma.product.findFirst({
+                            where: { channelId, externalId: String(collect.product_id) },
+                        });
+                        const collection = await this.prisma.collection.findFirst({
+                            where: { channelId, externalId: String(collect.collection_id) },
+                        });
+                        if (product && collection) {
+                            await this.prisma.productCollection.upsert({
+                                where: { productId_collectionId: { productId: product.id, collectionId: collection.id } },
+                                create: { productId: product.id, collectionId: collection.id, position: collect.position ?? 0 },
+                                update: { position: collect.position ?? 0 },
+                            });
+                        }
+                    } catch (error) {
+                        this.logger.error(`Failed collect ${collect.id}`, error);
+                    }
+                }
+            }
+
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
             await this.failSyncLog(syncLog.id, processed, failed, error);
@@ -400,6 +466,24 @@ export class ShopifySyncService {
                 addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
                 externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
                 // NOTE: vipLevel, internalNotes, segments are NOT overwritten (CRM-only fields)
+            },
+        });
+    }
+
+    private async upsertCollection(channelId: string, orgId: string, col: any, collectionType: string) {
+        const externalId = String(col.id);
+        await this.prisma.collection.upsert({
+            where: { channelId_externalId: { channelId, externalId } },
+            create: {
+                organizationId: orgId, channelId, externalId,
+                title: col.title, handle: col.handle, collectionType,
+                sortOrder: col.sort_order,
+                publishedAt: col.published_at ? new Date(col.published_at) : null,
+            },
+            update: {
+                title: col.title, handle: col.handle,
+                sortOrder: col.sort_order,
+                publishedAt: col.published_at ? new Date(col.published_at) : null,
             },
         });
     }

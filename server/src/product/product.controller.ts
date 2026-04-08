@@ -1,8 +1,9 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Controller, Get, Patch, Param, Query, Body } from '@nestjs/common';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
+import { UpdateProductGstDto } from './dto/update-product-gst.dto';
 
 @Controller('products')
 export class ProductController {
@@ -36,5 +37,17 @@ export class ProductController {
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.productService.findOne(id, user.orgId!);
+  }
+
+  // PATCH /api/v1/products/:id/gst — update HSN code and GST rate
+  // Separate from core product data because HSN/GST are CRM-managed,
+  // not synced from Shopify. This avoids conflicts with sync.
+  @Patch(':id/gst')
+  updateGst(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateProductGstDto,
+  ) {
+    return this.productService.updateGst(id, user.orgId!, dto);
   }
 }

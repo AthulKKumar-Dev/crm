@@ -23,6 +23,8 @@ import { OrderModule } from './order/order.module';
 import { ProductModule } from './product/product.module';
 import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { GstModule } from './gst/gst.module';
+import { InvoiceModule } from './invoice/invoice.module';
 
 @Module({
   imports: [
@@ -46,6 +48,8 @@ import { DashboardModule } from './dashboard/dashboard.module';
     ProductModule,
     CustomerModule,
     DashboardModule,
+    GstModule,
+    InvoiceModule,
   ],
   controllers: [AppController],
   providers: [

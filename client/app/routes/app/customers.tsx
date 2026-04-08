@@ -1,11 +1,18 @@
 import { useState } from "react";
-import { Search, UserPlus, ChevronLeft, ChevronRight, Users, UserCheck, UserRoundPlus, DollarSign } from "lucide-react";
+import {
+  Search, UserPlus, ChevronLeft, ChevronRight, Users, UserCheck,
+  UserRoundPlus, DollarSign, X, Loader2, Check,
+} from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { useCustomers, useCustomerStats } from "~/hooks/use-customer-queries";
-import type { VipLevel, CustomerListParams } from "~/types/api";
+import { useUpdateCustomerMutation } from "~/hooks/use-customer-mutations";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useIndianStates } from "~/hooks/use-gst-queries";
+import type { VipLevel, CustomerListParams, Customer } from "~/types/api";
 
 export function meta() {
   return [{ title: "Customers | Collabo CRM" }];
@@ -48,6 +55,10 @@ export default function CustomersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [vipFilter, setVipFilter] = useState<"All" | VipLevel>("All");
   const [currentPage, setCurrentPage] = useState(1);
+  const [editingCustomerId, setEditingCustomerId] = useState<string | null>(null);
+
+  const { data: org } = useCurrentOrg();
+  const gstEnabled = org?.gstEnabled ?? false;
 
   const params: CustomerListParams = {
     page: currentPage,
@@ -99,18 +110,8 @@ export default function CustomersPage() {
           ))
         ) : stats ? (
           <>
-            <StatCard
-              label="Total Customers"
-              value={stats.totalCustomers.toLocaleString()}
-              change={0}
-              icon={<Users className="size-4" />}
-            />
-            <StatCard
-              label="Active Customers"
-              value={stats.activeCustomers.toLocaleString()}
-              change={0}
-              icon={<UserCheck className="size-4" />}
-            />
+            <StatCard label="Total Customers" value={stats.totalCustomers.toLocaleString()} change={0} icon={<Users className="size-4" />} />
+            <StatCard label="Active Customers" value={stats.activeCustomers.toLocaleString()} change={0} icon={<UserCheck className="size-4" />} />
             <StatCard
               label="New This Month"
               value={stats.newCustomers.current.toLocaleString()}
@@ -135,7 +136,7 @@ export default function CustomersPage() {
         )}
       </div>
 
-      {/* Search input and VIP filter pills */}
+      {/* Search and VIP filter */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[200px] max-w-xs">
           <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -182,6 +183,9 @@ export default function CustomersPage() {
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Channel</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Orders</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Total Spent</th>
+                  {gstEnabled && (
+                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">GSTIN</th>
+                  )}
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">VIP Level</th>
                 </tr>
               </thead>
@@ -190,7 +194,11 @@ export default function CustomersPage() {
                   const initials = getInitials(customer.firstName, customer.lastName);
                   const avatarColor = AVATAR_COLORS[rowIndex % AVATAR_COLORS.length];
                   return (
-                    <tr key={customer.id} className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
+                    <tr
+                      key={customer.id}
+                      className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
+                      onClick={() => gstEnabled ? setEditingCustomerId(customer.id) : undefined}
+                    >
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
                           <div className={`flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${avatarColor}`}>
@@ -211,6 +219,11 @@ export default function CustomersPage() {
                       <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
                         ${Number(customer.totalSpent).toLocaleString("en-US", { minimumFractionDigits: 2 })}
                       </td>
+                      {gstEnabled && (
+                        <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
+                          {(customer as any).gstin || <span className="text-gray-400 italic text-[10px]">Not set</span>}
+                        </td>
+                      )}
                       <td className="px-4 py-3">
                         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${VIP_CLASS[customer.vipLevel]}`}>
                           {VIP_LABEL[customer.vipLevel]}
@@ -223,7 +236,7 @@ export default function CustomersPage() {
             </table>
           </div>
 
-          {/* Pagination footer */}
+          {/* Pagination */}
           <div className="flex items-center justify-between border-t px-4 py-3">
             <p className="text-xs text-muted-foreground">
               Showing {customers.length} of {meta?.total ?? 0} customers
@@ -234,21 +247,134 @@ export default function CustomersPage() {
                 disabled={currentPage === 1}
                 className="inline-flex items-center gap-1 h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40 disabled:pointer-events-none"
               >
-                <ChevronLeft className="size-3" />
-                Previous
+                <ChevronLeft className="size-3" />Previous
               </button>
               <button
                 onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
                 disabled={currentPage >= totalPages}
                 className="inline-flex items-center gap-1 h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40 disabled:pointer-events-none"
               >
-                Next
-                <ChevronRight className="size-3" />
+                Next<ChevronRight className="size-3" />
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Edit Customer GST Dialog */}
+      {editingCustomerId && gstEnabled && (
+        <EditCustomerGstDialog
+          customerId={editingCustomerId}
+          customer={customers.find((c) => c.id === editingCustomerId) ?? null}
+          onClose={() => setEditingCustomerId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Edit Customer GST Dialog ────────────────────────────────────────────────
+
+function EditCustomerGstDialog({
+  customerId,
+  customer,
+  onClose,
+}: {
+  customerId: string;
+  customer: Customer | null;
+  onClose: () => void;
+}) {
+  const [gstin, setGstin] = useState((customer as any)?.gstin ?? "");
+  const [billingStateCode, setBillingStateCode] = useState((customer as any)?.billingStateCode ?? "");
+  const { data: states = [] } = useIndianStates();
+  const updateCustomer = useUpdateCustomerMutation(customerId);
+
+  function handleStateChange(code: string) {
+    setBillingStateCode(code);
+  }
+
+  function handleSave() {
+    const selectedState = states.find((s) => s.code === billingStateCode);
+    updateCustomer.mutate(
+      {
+        gstin: gstin || undefined,
+        billingStateCode: billingStateCode || undefined,
+        billingStateName: selectedState?.name || undefined,
+      },
+      { onSuccess: () => onClose() },
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-sm rounded-xl bg-white dark:bg-gray-900 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b px-5 py-4">
+          <div>
+            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Customer GST Details</h2>
+            <p className="text-[10px] text-muted-foreground">
+              {customer?.firstName} {customer?.lastName}
+            </p>
+          </div>
+          <button onClick={onClose} className="rounded-md p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800">
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="space-y-4 px-5 py-4">
+          <div>
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Customer GSTIN</label>
+            <input
+              value={gstin}
+              onChange={(e) => setGstin(e.target.value.toUpperCase())}
+              placeholder="e.g. 29AABCT1332L1ZN (optional for B2C)"
+              maxLength={15}
+              className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-[#cdff8c]"
+            />
+            <p className="mt-0.5 text-[9px] text-muted-foreground">
+              Leave empty for B2C (unregistered) customers. Required for B2B GST invoices.
+            </p>
+          </div>
+
+          <div>
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Billing State</label>
+            <Select value={billingStateCode} onValueChange={handleStateChange}>
+              <SelectTrigger className="mt-1 h-9 text-xs">
+                <SelectValue placeholder="Select billing state" />
+              </SelectTrigger>
+              <SelectContent>
+                {states.map((s) => (
+                  <SelectItem key={s.code} value={s.code} className="text-xs">
+                    {s.code} - {s.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="mt-0.5 text-[9px] text-muted-foreground">
+              Used to determine Place of Supply for GST invoices.
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 border-t px-5 py-4">
+          <button
+            onClick={handleSave}
+            disabled={updateCustomer.isPending}
+            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 py-2 text-xs font-semibold text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50 transition-colors"
+          >
+            {updateCustomer.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
+            Save
+          </button>
+          <button
+            onClick={onClose}
+            className="rounded-lg px-4 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

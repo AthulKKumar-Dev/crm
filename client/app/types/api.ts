@@ -211,6 +211,7 @@ export interface OrgResponse {
   industry: string | null;
   website: string | null;
   lowStockThreshold: number;
+  gstEnabled: boolean;
   billingPlan: "FREE" | "STARTER" | "GROWTH" | "ENTERPRISE";
   onboardingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
   role: UserRole;
@@ -237,6 +238,7 @@ export interface UpdateOrganizationRequest {
   industry?: string;
   website?: string;
   lowStockThreshold?: number;
+  gstEnabled?: boolean;
 }
 
 // ─── Member Types ─────────────────────────────────────────────────────────
@@ -637,6 +639,9 @@ export interface UpdateCustomerRequest {
   internalNotes?: string;
   segments?: string[];
   tags?: string[];
+  gstin?: string;
+  billingStateCode?: string;
+  billingStateName?: string;
 }
 
 // ─── Order Stats Types ──────────────────────────────────────────────────────
@@ -765,4 +770,293 @@ export interface ProductStatsResponse {
   lowStockProducts: number;
   lowStockThreshold: number;
   totalInventoryUnits: number;
+}
+
+// ─── GST Types ──────────────────────────────────────────────────────────────
+
+/** An Indian state with its GST state code. */
+export interface IndianState {
+  code: string;
+  name: string;
+  unionTerritory: boolean;
+}
+
+/** A GSTIN registration for an organization. */
+export interface OrganizationGstin {
+  id: string;
+  organizationId: string;
+  gstin: string;
+  legalName: string;
+  tradeName: string | null;
+  stateCode: string;
+  stateName: string;
+  address: Record<string, unknown> | null;
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Payload for adding a new GSTIN registration. */
+export interface CreateGstinRequest {
+  gstin: string;
+  legalName: string;
+  tradeName?: string;
+  stateCode: string;
+  stateName: string;
+  address?: Record<string, unknown>;
+  isDefault?: boolean;
+}
+
+/** Payload for updating a GSTIN registration. */
+export interface UpdateGstinRequest {
+  gstin?: string;
+  legalName?: string;
+  tradeName?: string;
+  stateCode?: string;
+  stateName?: string;
+  address?: Record<string, unknown>;
+  isDefault?: boolean;
+  isActive?: boolean;
+}
+
+// ─── Invoice Types ──────────────────────────────────────────────────────────
+
+/** GST transaction type. */
+export type GstType = "CGST_SGST" | "IGST";
+
+/** Invoice status. */
+export type InvoiceStatus = "DRAFT" | "ISSUED" | "CANCELLED" | "CREDIT_NOTE";
+
+/** An invoice line item with full tax breakdown. */
+export interface InvoiceLineItem {
+  id: string;
+  orderLineItemId: string | null;
+  description: string;
+  hsnCode: string;
+  quantity: number;
+  unitPrice: number;
+  discount: number;
+  taxableValue: number;
+  gstRate: number;
+  cgstRate: number;
+  cgstAmount: number;
+  sgstRate: number;
+  sgstAmount: number;
+  igstRate: number;
+  igstAmount: number;
+  totalTax: number;
+  totalAmount: number;
+}
+
+/** An invoice in a list response (summary view). */
+export interface Invoice {
+  id: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  financialYear: string;
+  buyerName: string;
+  buyerGstin: string | null;
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  gstType: GstType;
+  subtotal: number;
+  totalCgst: number;
+  totalSgst: number;
+  totalIgst: number;
+  totalTax: number;
+  totalDiscount: number;
+  grandTotal: number;
+  currency: string;
+  status: InvoiceStatus;
+  order: { name: string; orderNumber: number };
+  createdAt: string;
+}
+
+/** Full invoice detail with line items. */
+export interface InvoiceDetail extends Invoice {
+  sellerGstin: string;
+  sellerLegalName: string;
+  sellerAddress: Record<string, unknown> | null;
+  sellerStateCode: string;
+  sellerStateName: string;
+  buyerAddress: Record<string, unknown> | null;
+  buyerStateCode: string;
+  buyerStateName: string;
+  reverseCharge: boolean;
+  notes: string | null;
+  lineItems: InvoiceLineItem[];
+}
+
+/** Payload for generating a new invoice. */
+export interface CreateInvoiceRequest {
+  orderId: string;
+  sellerGstinId?: string;
+  buyerGstin?: string;
+  placeOfSupplyCode?: string;
+  notes?: string;
+}
+
+/** Query parameters for the invoice list endpoint. */
+export interface InvoiceListParams {
+  page?: number;
+  limit?: number;
+  financialYear?: string;
+  status?: InvoiceStatus;
+  search?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  sellerGstinId?: string;
+}
+
+/** Query parameters for the GST return summary endpoint. */
+export interface GstReturnParams {
+  financialYear: string;
+  period: string;
+  returnType?: "GSTR1" | "GSTR3B";
+  sellerGstinId?: string;
+}
+
+// ─── GST Return Types ───────────────────────────────────────────────────────
+
+/** A B2B buyer group in GSTR-1. */
+export interface Gstr1B2bEntry {
+  buyerGstin: string;
+  buyerName: string;
+  invoiceCount: number;
+  invoices: Array<{
+    invoiceNumber: string;
+    invoiceDate: string;
+    gstType: GstType;
+    subtotal: number;
+    cgst: number;
+    sgst: number;
+    igst: number;
+    totalTax: number;
+    grandTotal: number;
+  }>;
+  totalTaxable: number;
+  totalTax: number;
+}
+
+/** A B2C state-wise summary in GSTR-1. */
+export interface Gstr1B2cSummary {
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  invoiceCount: number;
+  totalTaxable: number;
+  totalCgst: number;
+  totalSgst: number;
+  totalIgst: number;
+  totalTax: number;
+}
+
+/** HSN-wise summary in GSTR-1. */
+export interface Gstr1HsnSummary {
+  hsnCode: string;
+  quantity: number;
+  taxable: number;
+  tax: number;
+}
+
+/** Full GSTR-1 return data. */
+export interface GstReturnGstr1 {
+  b2b: Gstr1B2bEntry[];
+  b2cSummary: Gstr1B2cSummary[];
+  hsnSummary: Gstr1HsnSummary[];
+  totals: {
+    totalTaxable: number;
+    totalCgst: number;
+    totalSgst: number;
+    totalIgst: number;
+    totalTax: number;
+    totalInvoices: number;
+  };
+}
+
+/** Outward supply by rate in GSTR-3B. */
+export interface Gstr3bOutwardSupply {
+  gstRate: number;
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  totalTax: number;
+}
+
+/** Full GSTR-3B return data. */
+export interface GstReturnGstr3B {
+  outwardSupplies: Gstr3bOutwardSupply[];
+  interState: {
+    invoiceCount: number;
+    totalTaxable: number;
+    totalIgst: number;
+  };
+  taxPayable: {
+    cgst: number;
+    sgst: number;
+    igst: number;
+    total: number;
+  };
+}
+
+/** Payload for updating a product's HSN code and GST rate. */
+export interface UpdateProductGstRequest {
+  hsnCode?: string;
+  gstRate?: number;
+}
+
+// ─── State Tax Rate Types ───────────────────────────────────────────────────
+
+/** A default GST rate configured for a specific state. */
+export interface StateTaxRate {
+  id: string;
+  organizationId: string;
+  stateCode: string;
+  stateName: string;
+  gstRate: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateStateTaxRateRequest {
+  stateCode: string;
+  gstRate: number;
+}
+
+export interface UpdateStateTaxRateRequest {
+  gstRate: number;
+}
+
+// ─── Collection Types ───────────────────────────────────────────────────────
+
+/** A synced Shopify collection. */
+export interface ShopifyCollection {
+  id: string;
+  organizationId: string;
+  title: string;
+  handle: string | null;
+  collectionType: string;
+  taxOverride: CollectionTaxOverride | null;
+  createdAt: string;
+}
+
+/** A GST rate override for a collection. */
+export interface CollectionTaxOverride {
+  id: string;
+  organizationId: string;
+  collectionId: string;
+  gstRate: number;
+  collection?: { id: string; title: string; handle: string | null };
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCollectionOverrideRequest {
+  collectionId: string;
+  gstRate: number;
+}
+
+export interface UpdateCollectionOverrideRequest {
+  gstRate: number;
 }

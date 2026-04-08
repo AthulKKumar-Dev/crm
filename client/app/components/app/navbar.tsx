@@ -15,6 +15,7 @@ import {
   LogOut,
   User,
   Leaf,
+  Receipt,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -37,6 +38,7 @@ const NAV_LINKS = [
   { label: "Channel", href: "/channel", icon: Layers },
   { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
   { label: "Customers", href: "/customers", icon: Users },
+  { label: "Invoices", href: "/invoices", icon: Receipt },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
 

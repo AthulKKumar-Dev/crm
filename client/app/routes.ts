@@ -30,5 +30,6 @@ export default [
     route("messages",     "routes/app/messages.tsx"),
     route("profile",      "routes/app/profile.tsx"),
     route("settings",     "routes/app/settings.tsx"),
+    route("invoices",     "routes/app/invoices.tsx"),
   ]),
 ] satisfies RouteConfig;

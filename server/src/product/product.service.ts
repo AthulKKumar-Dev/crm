@@ -206,6 +206,31 @@ export class ProductService {
     };
   }
 
+  // ─── UPDATE GST FIELDS ───
+  // Updates HSN code and GST rate for a product.
+  // These are CRM-managed fields, not synced from Shopify.
+  async updateGst(id: string, orgId: string, dto: { hsnCode?: string; gstRate?: number }) {
+    const product = await this.prisma.product.findFirst({
+      where: { id, organizationId: orgId, deletedAt: null },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    return this.prisma.product.update({
+      where: { id },
+      data: {
+        ...(dto.hsnCode !== undefined && { hsnCode: dto.hsnCode }),
+        ...(dto.gstRate !== undefined && { gstRate: dto.gstRate }),
+      },
+      include: {
+        variants: true,
+        images: { orderBy: { position: 'asc' }, take: 1 },
+      },
+    });
+  }
+
   private getPriceRange(variants: Array<{ price: any }>) {
     if (variants.length === 0) return { min: '0', max: '0' };
     const prices = variants.map((v) => parseFloat(String(v.price)));

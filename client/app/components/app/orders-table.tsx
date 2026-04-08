@@ -1,4 +1,4 @@
-import { MoreHorizontal, Package } from "lucide-react";
+import { MoreHorizontal, Package, Receipt } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -11,6 +11,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { cn } from "~/lib/utils";
@@ -55,10 +56,13 @@ type OrderRow = Pick<Order, "id" | "name" | "financialStatus" | "fulfillmentStat
 interface OrdersTableProps {
   orders: OrderRow[];
   showCustomerName?: boolean;
+  onViewDetail?: (orderId: string) => void;
+  onGenerateInvoice?: (orderId: string) => void;
+  gstEnabled?: boolean;
 }
 
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions. */
-export function OrdersTable({ orders, showCustomerName = false }: OrdersTableProps) {
+export function OrdersTable({ orders, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
   return (
     <Table>
       <TableHeader>
@@ -127,8 +131,18 @@ export function OrdersTable({ orders, showCustomerName = false }: OrdersTablePro
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem>View details</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => onViewDetail?.(order.id)}>View details</DropdownMenuItem>
                   <DropdownMenuItem>Edit order</DropdownMenuItem>
+                  {gstEnabled && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => onGenerateInvoice?.(order.id)}>
+                        <Receipt className="mr-1.5 size-3.5" />
+                        Generate GST Invoice
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem variant="destructive">Cancel order</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

@@ -1,4 +1,4 @@
-import { IsInt, IsOptional, IsString, IsUrl, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsInt, IsOptional, IsString, IsUrl, MaxLength, Min, MinLength } from 'class-validator';
 
 // Same fields as create, but all optional (partial update)
 // Plus lowStockThreshold which is a settings field, not a creation field
@@ -16,4 +16,9 @@ export class UpdateOrganizationDto {
     @IsInt()
     @Min(1)
     lowStockThreshold?: number;
+
+    // GST toggle — enables GST features for the organization
+    @IsOptional()
+    @IsBoolean()
+    gstEnabled?: boolean;
 }

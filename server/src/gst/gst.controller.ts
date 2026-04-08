@@ -1,0 +1,116 @@
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+} from '@nestjs/common';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { GstService } from './gst.service';
+import { CreateGstinDto } from './dto/create-gstin.dto';
+import { UpdateGstinDto } from './dto/update-gstin.dto';
+import { CreateStateTaxRateDto } from './dto/create-state-tax-rate.dto';
+import { UpdateStateTaxRateDto } from './dto/update-state-tax-rate.dto';
+import { CreateCollectionOverrideDto } from './dto/create-collection-override.dto';
+import { UpdateCollectionOverrideDto } from './dto/update-collection-override.dto';
+import { INDIAN_STATES } from './constants/indian-states';
+
+@Controller('gst')
+export class GstController {
+  constructor(private readonly gstService: GstService) {}
+
+  // ─── STATES ───
+
+  @Get('states')
+  getStates() {
+    return INDIAN_STATES;
+  }
+
+  // ─── GSTIN MANAGEMENT ───
+
+  @Get('gstins')
+  findAllGstins(@CurrentUser() user: JwtPayload) {
+    return this.gstService.findAll(user.orgId!);
+  }
+
+  @Post('gstins')
+  createGstin(@CurrentUser() user: JwtPayload, @Body() dto: CreateGstinDto) {
+    return this.gstService.create(user.orgId!, dto);
+  }
+
+  @Patch('gstins/:id')
+  updateGstin(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateGstinDto,
+  ) {
+    return this.gstService.update(id, user.orgId!, dto);
+  }
+
+  @Delete('gstins/:id')
+  deactivateGstin(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.gstService.deactivate(id, user.orgId!);
+  }
+
+  // ─── STATE TAX RATES ───
+
+  @Get('state-tax-rates')
+  findAllStateTaxRates(@CurrentUser() user: JwtPayload) {
+    return this.gstService.findAllStateTaxRates(user.orgId!);
+  }
+
+  @Post('state-tax-rates')
+  createStateTaxRate(@CurrentUser() user: JwtPayload, @Body() dto: CreateStateTaxRateDto) {
+    return this.gstService.createStateTaxRate(user.orgId!, dto);
+  }
+
+  @Patch('state-tax-rates/:id')
+  updateStateTaxRate(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateStateTaxRateDto,
+  ) {
+    return this.gstService.updateStateTaxRate(id, user.orgId!, dto);
+  }
+
+  @Delete('state-tax-rates/:id')
+  deleteStateTaxRate(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.gstService.deleteStateTaxRate(id, user.orgId!);
+  }
+
+  // ─── COLLECTIONS ───
+
+  @Get('collections')
+  findAllCollections(@CurrentUser() user: JwtPayload) {
+    return this.gstService.findAllCollections(user.orgId!);
+  }
+
+  // ─── COLLECTION TAX OVERRIDES ───
+
+  @Get('collection-overrides')
+  findAllCollectionOverrides(@CurrentUser() user: JwtPayload) {
+    return this.gstService.findAllCollectionOverrides(user.orgId!);
+  }
+
+  @Post('collection-overrides')
+  createCollectionOverride(@CurrentUser() user: JwtPayload, @Body() dto: CreateCollectionOverrideDto) {
+    return this.gstService.createCollectionOverride(user.orgId!, dto);
+  }
+
+  @Patch('collection-overrides/:id')
+  updateCollectionOverride(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateCollectionOverrideDto,
+  ) {
+    return this.gstService.updateCollectionOverride(id, user.orgId!, dto);
+  }
+
+  @Delete('collection-overrides/:id')
+  deleteCollectionOverride(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.gstService.deleteCollectionOverride(id, user.orgId!);
+  }
+}
