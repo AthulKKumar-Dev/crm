@@ -30,16 +30,16 @@ import { cn } from "~/lib/utils";
 import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 
-const NAV_LINKS = [
+const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Orders", href: "/orders", icon: ShoppingCart },
   { label: "Products", href: "/products", icon: Package },
-  { label: "Marketing", href: "/marketing", icon: Megaphone },
+  // { label: "Marketing", href: "/marketing", icon: Megaphone },
   { label: "Channel", href: "/channel", icon: Layers },
-  { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
+  // { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
   { label: "Customers", href: "/customers", icon: Users },
   { label: "Invoices", href: "/invoices", icon: Receipt },
-  { label: "Analytics", href: "/analytics", icon: BarChart3 },
+  // { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
 
 /** Top navigation bar with pill-style nav links, notification icons, and user/workspace dropdown. */
@@ -136,14 +136,14 @@ export function Navbar() {
         {/* ── Right: icons + user ───────────────────────────────────── */}
         <div className="flex items-center gap-3">
 
-          <button className="flex size-9 items-center justify-center rounded-full bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
+          <button onClick={() => navigate("/settings")} className="flex size-9 items-center justify-center rounded-full bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
             <Settings className="size-4" />
           </button>
-
+          {/* 
           <button className="relative flex size-9 items-center justify-center rounded-full bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
             <Bell className="size-4" />
             <span className="absolute right-2 top-2 size-1.5 rounded-full bg-orange-400 ring-1 ring-white dark:ring-gray-900" />
-          </button>
+          </button> */}
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>

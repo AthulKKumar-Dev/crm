@@ -3,7 +3,10 @@ import type { Request } from 'express';
 
 import { AuthService } from './auth.service';
 import { Public } from './decorators/public.decorator';
+import { CurrentUser } from './decorators/current-user.decorator';
+import type { JwtPayload } from './interfaces/jwt-payload.interface';
 import { SignupDto } from './dto/signup.dto';
+import { SwitchOrgDto } from './dto/switch-org.dto';
 import { LoginDto } from './dto/login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ResendVerificationDto } from './dto/resend-verification.dto';
@@ -49,6 +52,12 @@ export class AuthController {
   @Post('logout')
   logout(@Body() dto: RefreshTokenDto) {
     return this.authService.logout(dto.refreshToken);
+  }
+
+  // Switch to a different organization — requires valid JWT
+  @Post('switch-org')
+  switchOrg(@CurrentUser() user: JwtPayload, @Body() dto: SwitchOrgDto) {
+    return this.authService.switchOrg(user.sub, dto.orgId);
   }
 
   @Public()

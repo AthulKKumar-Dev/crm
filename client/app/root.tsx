@@ -5,13 +5,15 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  useNavigate,
 } from "react-router";
 
 import type { Route } from "./+types/root";
 import { QueryProvider } from "~/providers/query-provider";
 import { Toaster } from "~/components/ui/sonner";
 import { useThemeStore } from "~/stores/theme.store";
-import { useEffect } from "react";
+import { useAuthStore } from "~/stores/auth.store";
+import { useEffect, useRef } from "react";
 import "./app.css";
 
 export const links: Route.LinksFunction = () => [
@@ -59,10 +61,31 @@ function ThemeInit() {
   return null;
 }
 
+/**
+ * Watches for auth state transitions: authenticated → unauthenticated.
+ * Redirects to /auth/login when logout occurs (covers API interceptor logout,
+ * manual sign-out, and token refresh failure).
+ */
+function LogoutRedirect() {
+  const navigate = useNavigate();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const prevAuth = useRef(isAuthenticated);
+
+  useEffect(() => {
+    if (prevAuth.current && !isAuthenticated) {
+      navigate("/auth/login", { replace: true });
+    }
+    prevAuth.current = isAuthenticated;
+  }, [isAuthenticated, navigate]);
+
+  return null;
+}
+
 export default function App() {
   return (
     <QueryProvider>
       <ThemeInit />
+      <LogoutRedirect />
       <Outlet />
     </QueryProvider>
   );

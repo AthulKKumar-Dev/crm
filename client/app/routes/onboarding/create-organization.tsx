@@ -19,6 +19,7 @@ import {
 import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { orgKeys } from "~/hooks/use-org-queries";
+import type { OrganizationMembership } from "~/types/api";
 
 /* ── Select field option lists ───────────────────────────── */
 
@@ -78,6 +79,8 @@ export default function CreateOrganizationPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const setCurrentOrg = useAuthStore((state) => state.setCurrentOrg);
+  const setOrganizations = useAuthStore((state) => state.setOrganizations);
+  const existingOrgs = useAuthStore((state) => state.organizations);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
   const {
@@ -106,9 +109,33 @@ export default function CreateOrganizationPage() {
       }),
     onSuccess: (org) => {
       queryClient.invalidateQueries({ queryKey: orgKeys.list() });
+
+      // Add the new org to the auth store so AuthGuard sees it
+      const newMembership: OrganizationMembership = {
+        id: crypto.randomUUID(),
+        organizationId: org.id,
+        role: "OWNER",
+        isActive: true,
+        organization: {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          type: org.type || "ORGANIZATION",
+          logo: org.logo || null,
+          timezone: org.timezone || "UTC",
+          currency: org.currency || "USD",
+          industry: org.industry || null,
+          website: org.website || null,
+          billingPlan: "FREE",
+          onboardingStatus: "COMPLETED",
+          createdAt: org.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      setOrganizations([...existingOrgs, newMembership]);
       setCurrentOrg(org.id);
+
       toast.success(`${org.name} created!`);
-      // Navigate to invite step instead of dashboard
       navigate(`/onboarding/invite-team?orgId=${org.id}`);
     },
     onError: (error) => {

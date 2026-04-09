@@ -37,11 +37,37 @@ export function useCreatePersonalMutation() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+  const setOrganizations = useAuthStore((s) => s.setOrganizations);
+  const existingOrgs = useAuthStore((s) => s.organizations);
 
   return useMutation({
     mutationFn: () => orgService.createPersonal(),
     onSuccess: (org) => {
       queryClient.invalidateQueries({ queryKey: orgKeys.list() });
+
+      // Add the new personal workspace to auth store so AuthGuard allows dashboard access
+      const newMembership = {
+        id: crypto.randomUUID(),
+        organizationId: org.id,
+        role: "OWNER" as const,
+        isActive: true,
+        organization: {
+          id: org.id,
+          name: org.name,
+          slug: org.slug,
+          type: org.type || ("PERSONAL" as const),
+          logo: org.logo || null,
+          timezone: org.timezone || "UTC",
+          currency: org.currency || "USD",
+          industry: org.industry || null,
+          website: org.website || null,
+          billingPlan: "FREE" as const,
+          onboardingStatus: "COMPLETED" as const,
+          createdAt: org.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      };
+      setOrganizations([...existingOrgs, newMembership]);
       setCurrentOrg(org.id);
       navigate("/dashboard");
     },

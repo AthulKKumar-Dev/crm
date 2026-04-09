@@ -42,13 +42,13 @@ export function meta() {
 // ── Sidebar tabs ─────────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: "general",       label: "General",        icon: Building2 },
-  { id: "tax-gst",       label: "Tax & GST",      icon: Receipt },
-  { id: "security",      label: "Security",        icon: Lock },
-  { id: "notifications", label: "Notifications",   icon: Bell },
-  { id: "members",       label: "Team Members",    icon: Users },
-  { id: "billing",       label: "Billing & Plan",  icon: CreditCard },
-  { id: "appearance",    label: "Appearance",       icon: Palette },
+  { id: "general", label: "General", icon: Building2 },
+  { id: "tax-gst", label: "Tax & GST", icon: Receipt },
+  { id: "security", label: "Security", icon: Lock },
+  // { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "members", label: "Team Members", icon: Users },
+  // { id: "billing",       label: "Billing & Plan",  icon: CreditCard },
+  // { id: "appearance",    label: "Appearance",       icon: Palette },
 ];
 
 const INDUSTRIES = [
@@ -83,10 +83,10 @@ const CURRENCIES = [
 ];
 
 const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
-  { value: "ADMIN",   label: "Admin" },
+  { value: "ADMIN", label: "Admin" },
   { value: "MANAGER", label: "Manager" },
-  { value: "AGENT",   label: "Agent" },
-  { value: "VIEWER",  label: "Viewer" },
+  { value: "AGENT", label: "Agent" },
+  { value: "VIEWER", label: "Viewer" },
 ];
 
 const AVATAR_COLORS = [
@@ -238,8 +238,8 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
 // ── Appearance tab ──────────────────────────────────────────────────────────
 
 const THEME_OPTIONS = [
-  { value: "light"  as const, label: "Light",  icon: Sun,     desc: "Clean light interface with white backgrounds" },
-  { value: "dark"   as const, label: "Dark",   icon: Moon,    desc: "Easy on the eyes with dark backgrounds" },
+  { value: "light" as const, label: "Light", icon: Sun, desc: "Clean light interface with white backgrounds" },
+  { value: "dark" as const, label: "Dark", icon: Moon, desc: "Easy on the eyes with dark backgrounds" },
   { value: "system" as const, label: "System", icon: Monitor, desc: "Automatically match your OS preference" },
 ];
 
@@ -695,8 +695,8 @@ function AppearanceTab() {
                   value === "light"
                     ? "bg-white ring-gray-200"
                     : value === "dark"
-                    ? "bg-gray-900 ring-gray-700"
-                    : "bg-gradient-to-br from-white to-gray-900 ring-gray-300"
+                      ? "bg-gray-900 ring-gray-700"
+                      : "bg-gradient-to-br from-white to-gray-900 ring-gray-300"
                 )}>
                   <Icon className={cn(
                     "size-6",

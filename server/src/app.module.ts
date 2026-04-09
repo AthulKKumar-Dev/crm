@@ -16,6 +16,7 @@ import { RedisModule } from './redis/redis.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
+import { OrgRequiredGuard } from './auth/guards/org-required.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
 import { EmailModule } from './email/email.module';
@@ -59,6 +60,7 @@ import { InvoiceModule } from './invoice/invoice.module';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: OrgRequiredGuard },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
     { provide: APP_FILTER, useClass: PrismaExceptionFilter },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },

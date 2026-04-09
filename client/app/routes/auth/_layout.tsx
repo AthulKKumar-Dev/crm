@@ -1,5 +1,6 @@
 import { Outlet } from "react-router";
 import { Leaf, ShoppingCart, Users, BarChart3, MessageSquare } from "lucide-react";
+import { GuestGuard } from "~/components/guards/guest-guard";
 
 const FEATURES = [
   { icon: ShoppingCart, text: "Manage orders across every channel" },
@@ -14,6 +15,7 @@ const FEATURES = [
  */
 export default function AuthLayout() {
   return (
+    <GuestGuard>
     <div className="flex min-h-svh bg-[#f1f7fa]">
 
       {/* ── Left brand panel ─────────────────────────────────── */}
@@ -99,5 +101,6 @@ export default function AuthLayout() {
         </p>
       </div>
     </div>
+    </GuestGuard>
   );
 }

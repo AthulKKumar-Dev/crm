@@ -1,5 +1,6 @@
 import { Outlet, Link } from "react-router";
 import { Leaf } from "lucide-react";
+import { OnboardingGuard } from "~/components/guards/onboarding-guard";
 
 /**
  * Shared layout for the onboarding flow (account type, create org, invite team).
@@ -7,6 +8,7 @@ import { Leaf } from "lucide-react";
  */
 export default function OnboardingLayout() {
   return (
+    <OnboardingGuard>
     <div className="flex min-h-svh flex-col bg-[#f1f7fa]">
 
       {/* Top bar */}
@@ -39,5 +41,6 @@ export default function OnboardingLayout() {
         &copy; {new Date().getFullYear()} Collabo Digital Network. All rights reserved.
       </footer>
     </div>
+    </OnboardingGuard>
   );
 }

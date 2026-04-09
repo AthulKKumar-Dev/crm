@@ -109,6 +109,7 @@ export class AuthService {
     return {
       message: 'Verification code sent.|',
       nextStep: 'verify-email',
+      code: user?.emailVerifyCode,
     };
   }
 
@@ -207,6 +208,66 @@ export class AuthService {
     };
   }
 
+  async switchOrg(userId: string, orgId: string) {
+    // Verify user is an active member of this org
+    const membership = await this.prisma.organizationMember.findUnique({
+      where: { organizationId_userId: { organizationId: orgId, userId } },
+      include: { organization: true },
+    });
+
+    if (!membership || !membership.isActive) {
+      throw new ForbiddenException('You are not a member of this organization');
+    }
+
+    if (membership.organization.deletedAt) {
+      throw new ForbiddenException('This organization has been deleted');
+    }
+
+    // Get user info + all memberships
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+    });
+
+    if (!user) throw new NotFoundException('User not found');
+
+    // Generate new JWT scoped to the selected org
+    const payload: JwtPayload = {
+      sub: userId,
+      email: user.email,
+      orgId: membership.organizationId,
+      role: membership.role,
+    };
+
+    const tokens = await this.generateTokenPair(payload);
+
+    // Update session cache with new orgId
+    await this.redis.setSession(userId, {
+      sub: userId, email: user.email,
+      orgId: membership.organizationId, role: membership.role,
+      emailVerified: user.emailVerified,
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+    });
+
+    return {
+      ...tokens,
+      currentOrganization: {
+        id: membership.organization.id,
+        name: membership.organization.name,
+        slug: membership.organization.slug,
+        type: membership.organization.type,
+        role: membership.role,
+      },
+      organizations: user.memberships.map((m) => ({
+        id: m.organization.id,
+        name: m.organization.name,
+        slug: m.organization.slug,
+        type: m.organization.type,
+        role: m.role,
+      })),
+    };
+  }
+
   async refresh(refreshToken: string, userAgent?: string, ipAddress?: string) {
     return this.rotateRefreshToken(refreshToken, userAgent, ipAddress);
   }
@@ -290,6 +351,9 @@ export class AuthService {
       data: { status: InviteStatus.ACCEPTED, acceptedAt: new Date() },
     });
 
+    // Invalidate session cache — stale orgId/memberships need to refresh
+    await this.redis.deleteSession(user.id);
+
     const payload: JwtPayload = { sub: user.id, email: user.email, orgId: invite.organizationId, role: invite.role };
     const tokens = await this.generateTokenPair(payload);
 
@@ -317,7 +381,7 @@ export class AuthService {
 
     // Audit trail: DB (fire-and-forget, don't block)
     const expiresAt = this.calculateExpiry(this.refreshExpires);
-    this.prisma.refreshToken.create({ data: { userId, token, userAgent, ipAddress, expiresAt } }).catch(() => {});
+    this.prisma.refreshToken.create({ data: { userId, token, userAgent, ipAddress, expiresAt } }).catch(() => { });
 
     return token;
   }
@@ -339,7 +403,7 @@ export class AuthService {
     await this.redis.deleteRefreshToken(oldToken);
 
     // Audit trail (fire-and-forget)
-    this.prisma.refreshToken.updateMany({ where: { token: oldToken, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
+    this.prisma.refreshToken.updateMany({ where: { token: oldToken, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
 
     const membership = user.memberships[0];
     const payload: JwtPayload = {
@@ -364,14 +428,14 @@ export class AuthService {
   async revokeRefreshToken(token: string): Promise<void> {
     await this.redis.deleteRefreshToken(token);
     // Audit trail (fire-and-forget)
-    this.prisma.refreshToken.updateMany({ where: { token, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
+    this.prisma.refreshToken.updateMany({ where: { token, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
   }
 
   async revokeAllUserTokens(userId: string): Promise<void> {
     await this.redis.deleteAllUserTokens(userId);
     await this.redis.deleteSession(userId);
     // Audit trail (fire-and-forget)
-    this.prisma.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
+    this.prisma.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
   }
 
   private calculateExpiry(duration: string): Date {
