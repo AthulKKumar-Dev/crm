@@ -2,14 +2,16 @@ import { useState } from "react";
 import {
   ShoppingBag, Package, Plus,
   ExternalLink, CheckCircle, AlertCircle, Clock, Search,
-  ArrowRight, Store, Check,
+  ArrowRight, Store, Check, RefreshCw, Loader2,
 } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from "~/components/ui/dialog";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
+import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
 import { useChannels } from "~/hooks/use-channel-queries";
+import { useTriggerSyncMutation, useDisconnectChannelMutation } from "~/hooks/use-channel-mutations";
 import type { ChannelPlatform, ChannelStatus, SyncStatus } from "~/types/api";
 
 export function meta() {
@@ -108,9 +110,12 @@ const INTEGRATIONS: Integration[] = [
 
 export default function ChannelPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [isShopifyDialogOpen, setIsShopifyDialogOpen] = useState(false);
   const [integrationSearch, setIntegrationSearch] = useState("");
 
   const { data: channels, isLoading } = useChannels();
+  const triggerSync = useTriggerSyncMutation();
+  const disconnectChannel = useDisconnectChannelMutation();
 
   const filteredIntegrations = INTEGRATIONS.filter((integration) => {
     return !integrationSearch || integration.name.toLowerCase().includes(integrationSearch.toLowerCase()) || integration.description.toLowerCase().includes(integrationSearch.toLowerCase());
@@ -187,9 +192,33 @@ export default function ChannelPage() {
                       )}
                     </div>
                   </div>
-                  <button className="flex shrink-0 items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
-                    Manage <ExternalLink className="size-3" />
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      onClick={() => triggerSync.mutate({
+                        id: channel.id,
+                        data: { entityTypes: ['products', 'orders', 'customers', 'inventory'] },
+                      })}
+                      disabled={channel.syncStatus === 'IN_PROGRESS' || triggerSync.isPending}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors"
+                    >
+                      {channel.syncStatus === 'IN_PROGRESS' || triggerSync.isPending ? (
+                        <Loader2 className="size-3 animate-spin" />
+                      ) : (
+                        <RefreshCw className="size-3" />
+                      )}
+                      {channel.syncStatus === 'IN_PROGRESS' ? 'Syncing...' : 'Sync Now'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (confirm('Are you sure you want to disconnect this channel?')) {
+                          disconnectChannel.mutate(channel.id);
+                        }
+                      }}
+                      className="text-xs text-muted-foreground hover:text-red-600 transition-colors"
+                    >
+                      Disconnect
+                    </button>
+                  </div>
                 </div>
               );
             })}
@@ -227,7 +256,10 @@ export default function ChannelPage() {
             <IntegrationGrid
               integrations={filteredIntegrations}
               connectedPlatforms={connectedPlatforms}
-              onConnect={() => setIsDialogOpen(false)}
+              onConnect={(integrationId) => {
+                  setIsDialogOpen(false);
+                  if (integrationId === "shopify") setIsShopifyDialogOpen(true);
+                }}
             />
           </div>
 
@@ -242,6 +274,14 @@ export default function ChannelPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Shopify manual connect dialog */}
+      <ShopifyConnectDialog
+        open={isShopifyDialogOpen}
+        onOpenChange={setIsShopifyDialogOpen}
+      />
+
+      {/* WhatsApp dialog will be added when WhatsApp integration is ready */}
     </div>
   );
 }
@@ -255,7 +295,7 @@ function IntegrationGrid({
 }: {
   integrations: Integration[];
   connectedPlatforms: Set<string>;
-  onConnect: () => void;
+  onConnect: (integrationId: string) => void;
 }) {
   if (integrations.length === 0) {
     return (
@@ -277,7 +317,7 @@ function IntegrationGrid({
             disabled={integration.comingSoon}
             onClick={() => {
               if (!integration.comingSoon && !isConnected) {
-                onConnect();
+                onConnect(integration.id);
               }
             }}
             className={`group relative flex flex-col rounded-xl border p-5 text-left transition-all ${

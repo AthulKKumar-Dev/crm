@@ -416,8 +416,25 @@ export interface TriggerSyncRequest {
   entityTypes: string[];
 }
 
-/** Payload for starting Shopify OAuth (the store domain). */
+/** Payload for starting Shopify OAuth with merchant's custom app credentials. */
 export interface ShopifyInstallRequest {
+  shopDomain: string;
+  apiKey: string;
+  apiSecret: string;
+}
+
+/** Payload for manually connecting a Shopify store with custom app credentials. */
+export interface ManualConnectShopifyRequest {
+  shopDomain: string;
+  apiKey: string;
+  apiSecret: string;
+  accessToken: string;
+}
+
+/** Response after manual Shopify connect. */
+export interface ManualConnectShopifyResponse {
+  channelId: string;
+  shopName: string;
   shopDomain: string;
 }
 

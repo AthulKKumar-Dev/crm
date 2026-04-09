@@ -11,6 +11,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { ChannelService } from './channel.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ConnectShopifyDto } from './dto/connect-shopify.dto';
+import { ManualConnectShopifyDto } from './dto/manual-connect-shopify.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import { TriggerSyncDto } from './dto/trigger-sync.dto';
 import { InstagramOAuthService } from './instagram-oauth.service';
@@ -34,6 +35,8 @@ export class ChannelController {
       user.orgId!,
       user.sub,
       dto.shopDomain,
+      dto.apiKey,
+      dto.apiSecret,
     );
     return { authUrl };
   }
@@ -45,9 +48,34 @@ export class ChannelController {
     @Query() query: { code: string; hmac: string; shop: string; state: string; timestamp: string },
     @Res() res: Response,
   ) {
-    console.log("Hello", query);
-    const { redirectUrl } = await this.shopifyOAuth.handleCallback(query);
-    return res.redirect(redirectUrl);
+    const result = await this.shopifyOAuth.handleCallback(query);
+
+    // Auto-trigger initial sync after successful connection
+    try {
+      await this.syncQueue.add('sync', {
+        channelId: result.channelId,
+        organizationId: result.organizationId,
+        entityTypes: ['products', 'orders', 'customers', 'inventory'],
+      } as SyncJobData, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: 100,
+        removeOnFail: 50,
+      });
+    } catch (error) {
+      // Non-fatal: sync can be triggered manually later
+    }
+
+    return res.redirect(result.redirectUrl);
+  }
+
+  // POST /channels/shopify/manual-connect — connect using manually created custom app credentials
+  @Post('shopify/manual-connect')
+  async manualConnectShopify(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ManualConnectShopifyDto,
+  ) {
+    return this.shopifyOAuth.manualConnect(user.orgId!, dto.shopDomain, dto.apiKey, dto.apiSecret, dto.accessToken);
   }
 
   // POST /channels/instagram/install — start Meta OAuth flow

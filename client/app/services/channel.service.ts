@@ -6,6 +6,8 @@ import type {
   TriggerSyncRequest,
   ShopifyInstallRequest,
   OAuthInstallResponse,
+  ManualConnectShopifyRequest,
+  ManualConnectShopifyResponse,
 } from "~/types/api";
 
 /**
@@ -32,6 +34,10 @@ export const channelService = {
 
   installShopify: (data: ShopifyInstallRequest) =>
     apiClient.post<OAuthInstallResponse>("/channels/shopify/install", data).then((response) => response.data),
+
+  /** Manually connect a Shopify store using custom app credentials. */
+  manualConnectShopify: (data: ManualConnectShopifyRequest) =>
+    apiClient.post<ManualConnectShopifyResponse>("/channels/shopify/manual-connect", data).then((response) => response.data),
 
   installInstagram: () =>
     apiClient.post<OAuthInstallResponse>("/channels/instagram/install").then((response) => response.data),

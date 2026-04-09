@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { channelService } from "~/services/channel.service";
 import { channelKeys } from "~/hooks/use-channel-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import type { UpdateChannelRequest, TriggerSyncRequest, ShopifyInstallRequest } from "~/types/api";
+import type { UpdateChannelRequest, TriggerSyncRequest, ShopifyInstallRequest, ManualConnectShopifyRequest } from "~/types/api";
 
 /** Mutation hook for updating a channel's settings. */
 export function useUpdateChannelMutation() {
@@ -57,6 +57,20 @@ export function useInstallShopifyMutation() {
       window.location.href = response.authUrl;
     },
     onError: (error) => handleMutationError(error, "Failed to start Shopify connection."),
+  });
+}
+
+/** Mutation hook for manually connecting a Shopify store with custom app credentials. */
+export function useManualConnectShopifyMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: ManualConnectShopifyRequest) => channelService.manualConnectShopify(data),
+    onSuccess: (response) => {
+      queryClient.invalidateQueries({ queryKey: channelKeys.all });
+      toast.success(`Shopify store "${response.shopName}" connected!`);
+    },
+    onError: (error) => handleMutationError(error, "Failed to connect Shopify store."),
   });
 }
 

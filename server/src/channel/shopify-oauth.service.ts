@@ -33,9 +33,14 @@ export class ShopifyOAuthService {
         this.appUrl = this.config.get<string>('appUrl')!;
     }
 
-    // Step 1: Generate the Shopify authorization URL
-    async getInstallUrl(orgId: string, userId: string, shopDomain: string): Promise<string> {
-        // Check if org already has a Shopify channel
+    // ─── CUSTOM APP OAUTH ───
+    // Merchant creates a custom app in their Shopify Admin, enters API key + secret in CRM,
+    // then gets redirected to Shopify to install the app and grant permissions.
+    // After install, Shopify redirects back with a code that we exchange for an access token
+    // using the merchant's own API key/secret.
+
+    // Step 1: Generate the Shopify authorization URL using merchant's own API key
+    async getInstallUrl(orgId: string, userId: string, shopDomain: string, apiKey?: string, apiSecret?: string): Promise<string> {
         const existing = await this.prisma.channel.findUnique({
             where: { organizationId_platform: { organizationId: orgId, platform: ChannelPlatform.SHOPIFY } },
         });
@@ -43,15 +48,21 @@ export class ShopifyOAuthService {
             throw new ConflictException('This organization already has a Shopify store connected');
         }
 
-        // Generate CSRF state token — stored in Redis with 10-min TTL
+        // Use merchant's API key if provided, otherwise fall back to platform-level credentials
+        const clientId = apiKey || this.clientId;
+        const clientSecret = apiSecret || this.clientSecret;
+
+        // Store state in Redis with merchant's credentials for the callback
         const state = randomBytes(16).toString('hex');
-        await this.redis.set(`oauth:shopify:${state}`, { userId, orgId, shopDomain }, REDIS_TTL.OAUTH_STATE);
+        await this.redis.set(`oauth:shopify:${state}`, {
+            userId, orgId, shopDomain, clientId, clientSecret,
+        }, REDIS_TTL.OAUTH_STATE);
 
         const redirectUri = `${this.appUrl}/api/v1/channels/shopify/callback`;
 
         const authUrl =
             `https://${shopDomain}/admin/oauth/authorize` +
-            `?client_id=${this.clientId}` +
+            `?client_id=${clientId}` +
             `&scope=${this.scopes}` +
             `&redirect_uri=${encodeURIComponent(redirectUri)}` +
             `&state=${state}`;
@@ -66,31 +77,34 @@ export class ShopifyOAuthService {
         shop: string;
         state: string;
         timestamp: string;
-    }): Promise<{ channelId: string; redirectUrl: string }> {
-        // 1. Validate state from Redis (CSRF protection)
-        const stateData = await this.redis.get<{ userId: string; orgId: string; shopDomain: string }>(`oauth:shopify:${query.state}`);
+    }): Promise<{ channelId: string; organizationId: string; redirectUrl: string }> {
+        // 1. Validate state from Redis
+        const stateData = await this.redis.get<{
+            userId: string; orgId: string; shopDomain: string;
+            clientId: string; clientSecret: string;
+        }>(`oauth:shopify:${query.state}`);
         if (!stateData) {
             throw new UnauthorizedException('Invalid or expired state parameter');
         }
         await this.redis.del(`oauth:shopify:${query.state}`);
 
-        // 2. Validate HMAC (verify request is from Shopify)
-        this.verifyHmac(query);
+        // 2. Validate HMAC using the merchant's API secret (stored in state)
+        this.verifyHmacWithSecret(query, stateData.clientSecret);
 
         // 3. Validate shop domain matches
         if (query.shop !== stateData.shopDomain) {
             throw new BadRequestException('Shop domain mismatch');
         }
 
-        // 4. Exchange authorization code for access token
+        // 4. Exchange code for access token using merchant's credentials
         const tokenResponse = await fetch(
             `https://${query.shop}/admin/oauth/access_token`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    client_id: this.clientId,
-                    client_secret: this.clientSecret,
+                    client_id: stateData.clientId,
+                    client_secret: stateData.clientSecret,
                     code: query.code,
                 }),
             },
@@ -107,15 +121,17 @@ export class ShopifyOAuthService {
             scope: string;
         };
 
-        // 5. Get shop info to get the shop ID
+        // 5. Get shop info
         const shopResponse = await fetch(
             `https://${query.shop}/admin/api/2024-01/shop.json`,
             { headers: { 'X-Shopify-Access-Token': tokenData.access_token } },
         );
         const shopData = (await shopResponse.json()) as { shop: { id: number; name: string } };
 
-        // 6. Encrypt and store the access token
+        // 6. Encrypt and store all credentials
         const encryptedToken = this.encryption.encrypt(tokenData.access_token);
+        const encryptedApiKey = this.encryption.encrypt(stateData.clientId);
+        const encryptedApiSecret = this.encryption.encrypt(stateData.clientSecret);
 
         const channel = await this.prisma.channel.create({
             data: {
@@ -123,8 +139,11 @@ export class ShopifyOAuthService {
                 name: shopData.shop.name || query.shop,
                 platform: ChannelPlatform.SHOPIFY,
                 status: ChannelStatus.CONNECTED,
+                isEnabled: true,
                 credentials: {
                     accessToken: encryptedToken,
+                    apiKey: encryptedApiKey,
+                    apiSecret: encryptedApiSecret,
                     shopDomain: query.shop,
                     scopes: tokenData.scope,
                 },
@@ -134,13 +153,80 @@ export class ShopifyOAuthService {
             },
         });
 
-        this.logger.log(`Shopify store connected: ${query.shop} → org ${stateData.orgId}`);
+        this.logger.log(`Shopify store connected via OAuth: ${query.shop} → org ${stateData.orgId}`);
 
-        // 7. Redirect URL for the frontend
         const frontendUrl = this.config.get<string>('frontendUrl');
-        const redirectUrl = `${frontendUrl}/channels?connected=shopify&channelId=${channel.id}`;
+        const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
 
-        return { channelId: channel.id, redirectUrl };
+        return { channelId: channel.id, organizationId: stateData.orgId, redirectUrl };
+    }
+
+    // ─── MANUAL CONNECT ───
+    // For merchants who create a custom app in their Shopify Admin and provide credentials.
+    // Each merchant has their own custom app — no shared Partners app needed.
+    async manualConnect(orgId: string, shopDomain: string, apiKey: string, apiSecret: string, accessToken: string) {
+        // Check if org already has a Shopify channel
+        const existing = await this.prisma.channel.findUnique({
+            where: { organizationId_platform: { organizationId: orgId, platform: ChannelPlatform.SHOPIFY } },
+        });
+        if (existing) {
+            throw new ConflictException('A Shopify store is already connected. Disconnect it first.');
+        }
+
+        // Validate the token by fetching shop info
+        let shopData: any;
+        try {
+            const res = await fetch(`https://${shopDomain}/admin/api/2024-01/shop.json`, {
+                headers: { 'X-Shopify-Access-Token': accessToken },
+            });
+            if (!res.ok) {
+                const errorText = await res.text();
+                this.logger.error(`Shopify API error: ${res.status} ${errorText}`);
+                throw new BadRequestException(
+                    'Invalid credentials. Please check your store URL and access token.',
+                );
+            }
+            shopData = await res.json();
+        } catch (error) {
+            if (error instanceof BadRequestException) throw error;
+            this.logger.error('Failed to connect to Shopify', error);
+            throw new BadRequestException(
+                'Could not connect to Shopify. Please verify your store URL and credentials.',
+            );
+        }
+
+        // Encrypt sensitive credentials before storing
+        const encryptedToken = this.encryption.encrypt(accessToken);
+        const encryptedApiKey = this.encryption.encrypt(apiKey);
+        const encryptedApiSecret = this.encryption.encrypt(apiSecret);
+
+        const channel = await this.prisma.channel.create({
+            data: {
+                organizationId: orgId,
+                name: shopData.shop.name || shopDomain,
+                platform: ChannelPlatform.SHOPIFY,
+                status: ChannelStatus.CONNECTED,
+                isEnabled: true,
+                credentials: {
+                    accessToken: encryptedToken,
+                    apiKey: encryptedApiKey,
+                    apiSecret: encryptedApiSecret,
+                    shopDomain,
+                    scopes: 'custom_app',
+                },
+                externalStoreId: String(shopData.shop.id),
+                externalStoreUrl: `https://${shopDomain}`,
+                syncStatus: SyncStatus.IDLE,
+            },
+        });
+
+        this.logger.log(`Shopify store connected (custom app): ${shopDomain} → org ${orgId}`);
+
+        return {
+            channelId: channel.id,
+            shopName: shopData.shop.name,
+            shopDomain,
+        };
     }
 
     // Get decrypted access token for making API calls
@@ -156,15 +242,15 @@ export class ShopifyOAuthService {
         return { token, shopDomain: creds.shopDomain };
     }
 
-    // Verify Shopify HMAC signature
-    private verifyHmac(query: Record<string, string>): void {
+    // Verify Shopify HMAC signature using a specific secret
+    private verifyHmacWithSecret(query: Record<string, string>, secret: string): void {
         const { hmac, ...params } = query;
         const sortedParams = Object.keys(params)
             .sort()
             .map((key) => `${key}=${params[key]}`)
             .join('&');
 
-        const generatedHmac = createHmac('sha256', this.clientSecret)
+        const generatedHmac = createHmac('sha256', secret)
             .update(sortedParams)
             .digest('hex');
 
@@ -174,5 +260,10 @@ export class ShopifyOAuthService {
         if (hmacBuffer.length !== generatedBuffer.length || !timingSafeEqual(hmacBuffer, generatedBuffer)) {
             throw new UnauthorizedException('Invalid HMAC signature');
         }
+    }
+
+    // Legacy: verify using platform-level client secret
+    private verifyHmac(query: Record<string, string>): void {
+        this.verifyHmacWithSecret(query, this.clientSecret);
     }
 }
