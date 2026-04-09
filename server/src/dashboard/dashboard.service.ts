@@ -197,6 +197,112 @@ export class DashboardService {
     return parser.parse(data);
   }
 
+  // ─── MONTHLY REVENUE & PROFIT (for bar chart) ───
+  async getMonthlySales(orgId: string, query: QueryDashboardDto) {
+    const now = new Date();
+    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
+        externalCreatedAt: { gte: twelveMonthsAgo },
+        ...(query.channelId && { channelId: query.channelId }),
+      },
+      select: {
+        totalPrice: true,
+        totalDiscounts: true,
+        totalShippingPrice: true,
+        externalCreatedAt: true,
+        createdAt: true,
+      },
+    });
+
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthMap = new Map<string, { revenue: number; profit: number }>();
+
+    for (let i = 0; i < 12; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() - 11 + i, 1);
+      monthMap.set(monthNames[d.getMonth()], { revenue: 0, profit: 0 });
+    }
+
+    for (const order of orders) {
+      const date = order.externalCreatedAt || order.createdAt;
+      const key = monthNames[date.getMonth()];
+      const existing = monthMap.get(key);
+      if (existing) {
+        const revenue = parseFloat(order.totalPrice.toString());
+        const costs = parseFloat(order.totalShippingPrice.toString()) + parseFloat(order.totalDiscounts.toString());
+        existing.revenue += revenue;
+        existing.profit += revenue - costs;
+      }
+    }
+
+    const data = Array.from(monthMap.entries()).map(([month, values]) => ({
+      month,
+      revenue: Math.round(values.revenue * 100) / 100,
+      profit: Math.round(values.profit * 100) / 100,
+    }));
+
+    const totalRevenue = data.reduce((s, d) => s + d.revenue, 0);
+    const totalProfit = data.reduce((s, d) => s + d.profit, 0);
+
+    return { data, totalRevenue: Math.round(totalRevenue * 100) / 100, totalProfit: Math.round(totalProfit * 100) / 100 };
+  }
+
+  // ─── SALES BY PRODUCT TYPE (for donut chart) ───
+  async getSalesByCategory(orgId: string, query: QueryDashboardDto) {
+    const dateFilter: Prisma.OrderWhereInput = {};
+    if (query.dateFrom || query.dateTo) {
+      dateFilter.externalCreatedAt = {
+        ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
+        ...(query.dateTo && { lte: new Date(query.dateTo) }),
+      };
+    }
+
+    const lineItems = await this.prisma.orderLineItem.findMany({
+      where: {
+        order: {
+          organizationId: orgId,
+          deletedAt: null,
+          financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
+          ...dateFilter,
+          ...(query.channelId && { channelId: query.channelId }),
+        },
+      },
+      select: {
+        price: true,
+        quantity: true,
+        totalDiscount: true,
+        variant: { select: { product: { select: { productType: true } } } },
+      },
+    });
+
+    const categoryMap = new Map<string, number>();
+    for (const item of lineItems) {
+      const category = item.variant?.product?.productType || 'Other';
+      const amount = parseFloat(item.price.toString()) * item.quantity - parseFloat(item.totalDiscount.toString());
+      categoryMap.set(category, (categoryMap.get(category) || 0) + amount);
+    }
+
+    const sorted = Array.from(categoryMap.entries()).sort(([, a], [, b]) => b - a);
+    const COLORS = ['#a78bfa', '#fbbf24', '#fb923c', '#818cf8', '#34d399', '#f472b6', '#60a5fa', '#f87171'];
+
+    const data = sorted.slice(0, 6).map(([name, value], i) => ({
+      name,
+      value: Math.round(value * 100) / 100,
+      color: COLORS[i % COLORS.length],
+    }));
+
+    const otherTotal = sorted.slice(6).reduce((s, [, v]) => s + v, 0);
+    if (otherTotal > 0) {
+      data.push({ name: 'Other', value: Math.round(otherTotal * 100) / 100, color: '#9ca3af' });
+    }
+
+    return { data, total: Math.round(data.reduce((s, d) => s + d.value, 0) * 100) / 100 };
+  }
+
   private async getTopSellingProducts(orgId: string, query: QueryDashboardDto, limit: number) {
     // Group line items by externalProductId to get total quantity sold per product
     const dateFilter: any = {};

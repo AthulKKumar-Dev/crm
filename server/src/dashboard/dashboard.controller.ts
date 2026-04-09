@@ -15,6 +15,18 @@ export class DashboardController {
     return this.dashboardService.getOverview(user.orgId!, query);
   }
 
+  // GET /api/v1/dashboard/monthly-sales — Monthly revenue & profit for bar chart
+  @Get('monthly-sales')
+  getMonthlySales(@CurrentUser() user: JwtPayload, @Query() query: QueryDashboardDto) {
+    return this.dashboardService.getMonthlySales(user.orgId!, query);
+  }
+
+  // GET /api/v1/dashboard/sales-by-category — Sales breakdown by product type for donut chart
+  @Get('sales-by-category')
+  getSalesByCategory(@CurrentUser() user: JwtPayload, @Query() query: QueryDashboardDto) {
+    return this.dashboardService.getSalesByCategory(user.orgId!, query);
+  }
+
   // GET /api/v1/dashboard/export/csv — Download orders as CSV
   @Get('export/csv')
   async exportCsv(

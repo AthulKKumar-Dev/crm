@@ -8,6 +8,10 @@ export const dashboardKeys = {
   all: ["dashboard"] as const,
   overview: (params?: DashboardQueryParams) =>
     [...dashboardKeys.all, "overview", params] as const,
+  monthlySales: (params?: DashboardQueryParams) =>
+    [...dashboardKeys.all, "monthly-sales", params] as const,
+  salesByCategory: (params?: DashboardQueryParams) =>
+    [...dashboardKeys.all, "sales-by-category", params] as const,
 };
 
 /** Fetch the dashboard overview (stats, top products, recent orders). */
@@ -15,6 +19,22 @@ export function useDashboard(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.overview(params),
     queryFn: () => dashboardService.getOverview(params),
+  });
+}
+
+/** Fetch monthly revenue & profit data for the bar chart. */
+export function useMonthlySales(params?: DashboardQueryParams) {
+  return useQuery({
+    queryKey: dashboardKeys.monthlySales(params),
+    queryFn: () => dashboardService.getMonthlySales(params),
+  });
+}
+
+/** Fetch sales breakdown by product type for the donut chart. */
+export function useSalesByCategory(params?: DashboardQueryParams) {
+  return useQuery({
+    queryKey: dashboardKeys.salesByCategory(params),
+    queryFn: () => dashboardService.getSalesByCategory(params),
   });
 }
 
