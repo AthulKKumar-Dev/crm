@@ -13,7 +13,9 @@ async function bootstrap() {
   const config = app.get(ConfigService);
 
   // Security
-  app.use(helmet());
+  app.use(helmet({
+    contentSecurityPolicy: false, // Vite build injects inline scripts/styles
+  }));
   app.use(cookieParser());
 
   // CORS

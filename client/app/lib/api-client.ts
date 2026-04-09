@@ -9,7 +9,7 @@ import { useAuthStore } from "~/stores/auth.store";
  * - Performs a silent token refresh on 401 responses (once per request).
  */
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:5000/api/v1",
+  baseURL: import.meta.env.VITE_API_BASE_URL || "/api/v1",
   headers: { "Content-Type": "application/json" },
   withCredentials: true,
 });
@@ -47,7 +47,7 @@ apiClient.interceptors.response.use(
         try {
           const baseURL =
             import.meta.env.VITE_API_BASE_URL ||
-            "http://localhost:5000/api/v1";
+            "/api/v1";
 
           // Use a raw axios call to avoid interceptor loops
           const res = await axios.post(`${baseURL}/auth/refresh`, {

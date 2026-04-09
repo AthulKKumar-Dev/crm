@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ServeStaticModule } from '@nestjs/serve-static';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
+import { join } from 'path';
 
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -32,6 +34,10 @@ import { InvoiceModule } from './invoice/invoice.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validationSchema }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
+    ServeStaticModule.forRoot({
+      rootPath: join(__dirname, '..', '..', 'client', 'build', 'client'),
+      exclude: ['/api/v1/(.*)'],
+    }),
     PrismaModule,
     RedisModule,
     BullModule.forRootAsync({
