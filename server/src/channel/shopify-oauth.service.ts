@@ -9,6 +9,8 @@ import { ConfigService } from '@nestjs/config';
 import { ChannelPlatform, ChannelStatus, SyncStatus } from '@prisma/client';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
+import { REDIS_TTL } from '../redis/redis.constants';
 import { EncryptionService } from './encryption.service';
 
 @Injectable()
@@ -19,13 +21,11 @@ export class ShopifyOAuthService {
     private readonly scopes: string;
     private readonly appUrl: string;
 
-    // In-memory store for OAuth state (use Redis in production)
-    private readonly stateStore = new Map<string, { userId: string; orgId: string; shopDomain: string }>();
-
     constructor(
         private readonly prisma: PrismaService,
         private readonly config: ConfigService,
         private readonly encryption: EncryptionService,
+        private readonly redis: RedisService,
     ) {
         this.clientId = this.config.get<string>('shopify.clientId')!;
         this.clientSecret = this.config.get<string>('shopify.clientSecret')!;
@@ -43,12 +43,9 @@ export class ShopifyOAuthService {
             throw new ConflictException('This organization already has a Shopify store connected');
         }
 
-        // Generate CSRF state token
+        // Generate CSRF state token — stored in Redis with 10-min TTL
         const state = randomBytes(16).toString('hex');
-        this.stateStore.set(state, { userId, orgId, shopDomain });
-
-        // Auto-expire state after 10 minutes
-        setTimeout(() => this.stateStore.delete(state), 10 * 60 * 1000);
+        await this.redis.set(`oauth:shopify:${state}`, { userId, orgId, shopDomain }, REDIS_TTL.OAUTH_STATE);
 
         const redirectUri = `${this.appUrl}/api/v1/channels/shopify/callback`;
 
@@ -70,12 +67,12 @@ export class ShopifyOAuthService {
         state: string;
         timestamp: string;
     }): Promise<{ channelId: string; redirectUrl: string }> {
-        // 1. Validate state (CSRF protection)
-        const stateData = this.stateStore.get(query.state);
+        // 1. Validate state from Redis (CSRF protection)
+        const stateData = await this.redis.get<{ userId: string; orgId: string; shopDomain: string }>(`oauth:shopify:${query.state}`);
         if (!stateData) {
             throw new UnauthorizedException('Invalid or expired state parameter');
         }
-        this.stateStore.delete(query.state);
+        await this.redis.del(`oauth:shopify:${query.state}`);
 
         // 2. Validate HMAC (verify request is from Shopify)
         this.verifyHmac(query);

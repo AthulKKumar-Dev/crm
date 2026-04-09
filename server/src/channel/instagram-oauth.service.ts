@@ -9,6 +9,8 @@ import { ConfigService } from '@nestjs/config';
 import { ChannelPlatform, ChannelStatus, SyncStatus } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
+import { REDIS_TTL } from '../redis/redis.constants';
 import { EncryptionService } from './encryption.service';
 
 @Injectable()
@@ -19,12 +21,11 @@ export class InstagramOAuthService {
     private readonly appUrl: string;
     private readonly scopes: string;
 
-    private readonly stateStore = new Map<string, { userId: string; orgId: string }>();
-
     constructor(
         private readonly prisma: PrismaService,
         private readonly config: ConfigService,
         private readonly encryption: EncryptionService,
+        private readonly redis: RedisService,
     ) {
         this.appId = this.config.get<string>('instagram.appId')!;
         this.appSecret = this.config.get<string>('instagram.appSecret')!;
@@ -49,10 +50,9 @@ export class InstagramOAuthService {
             throw new ConflictException('This organization already has an Instagram account connected');
         }
 
-        // Generate CSRF state token
+        // Generate CSRF state token — stored in Redis with 10-min TTL
         const state = randomBytes(16).toString('hex');
-        this.stateStore.set(state, { userId, orgId });
-        setTimeout(() => this.stateStore.delete(state), 10 * 60 * 1000);
+        await this.redis.set(`oauth:instagram:${state}`, { userId, orgId }, REDIS_TTL.OAUTH_STATE);
 
         const redirectUri = `${this.appUrl}/api/v1/channels/instagram/callback`;
 
@@ -68,12 +68,12 @@ export class InstagramOAuthService {
 
     // Step 2: Handle the Facebook OAuth callback
     async handleCallback(query: { code: string; state: string }): Promise<{ channelId: string; redirectUrl: string }> {
-        // 1. Validate state (CSRF protection)
-        const stateData = this.stateStore.get(query.state);
+        // 1. Validate state from Redis (CSRF protection)
+        const stateData = await this.redis.get<{ userId: string; orgId: string }>(`oauth:instagram:${query.state}`);
         if (!stateData) {
             throw new UnauthorizedException('Invalid or expired state parameter');
         }
-        this.stateStore.delete(query.state);
+        await this.redis.del(`oauth:instagram:${query.state}`);
 
         const redirectUri = `${this.appUrl}/api/v1/channels/instagram/callback`;
 

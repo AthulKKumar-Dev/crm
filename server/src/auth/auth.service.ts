@@ -14,6 +14,7 @@ import { randomBytes } from 'crypto';
 import { InviteStatus } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { UserService } from '../user/user.service';
 import { JwtPayload, TokenPair } from './interfaces/jwt-payload.interface';
 import { SignupDto } from './dto/signup.dto';
@@ -33,6 +34,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly userService: UserService,
     private readonly emailService: EmailService,
+    private readonly redis: RedisService,
   ) {
     this.refreshExpires = this.config.get<string>('jwt.refreshExpires') || '7d';
   }
@@ -111,6 +113,12 @@ export class AuthService {
   }
 
   async login(dto: LoginDto, userAgent?: string, ipAddress?: string) {
+    // Rate limit check — block after 5 failed attempts per email
+    const attempts = await this.redis.getLoginAttempts(dto.email);
+    if (this.redis.isLoginBlocked(attempts)) {
+      throw new UnauthorizedException('Too many failed login attempts. Please try again in 15 minutes.');
+    }
+
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
       include: {
@@ -124,6 +132,7 @@ export class AuthService {
 
     const isValid = await bcrypt.compare(dto.password, user.password);
     if (!isValid) {
+      await this.redis.incrementLoginAttempts(dto.email);
       throw new UnauthorizedException('Invalid email or password');
     }
 
@@ -153,6 +162,9 @@ export class AuthService {
       // TODO: Validate TOTP
     }
 
+    // Reset rate limit on successful login
+    await this.redis.resetLoginAttempts(dto.email);
+
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
     const membership = user.memberships[0];
@@ -164,6 +176,14 @@ export class AuthService {
     };
 
     const tokens = await this.generateTokenPair(payload);
+
+    // Cache session in Redis
+    await this.redis.setSession(user.id, {
+      sub: user.id, email: user.email,
+      orgId: membership?.organizationId, role: membership?.role,
+      emailVerified: user.emailVerified,
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+    });
 
     return {
       ...tokens,
@@ -290,40 +310,68 @@ export class AuthService {
 
   async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string): Promise<string> {
     const token = randomBytes(40).toString('hex');
+
+    // Primary: Redis with auto-expiry TTL
+    await this.redis.setRefreshToken(token, { userId, userAgent, ipAddress, createdAt: new Date().toISOString() });
+    await this.redis.trackUserToken(userId, token);
+
+    // Audit trail: DB (fire-and-forget, don't block)
     const expiresAt = this.calculateExpiry(this.refreshExpires);
-    await this.prisma.refreshToken.create({ data: { userId, token, userAgent, ipAddress, expiresAt } });
+    this.prisma.refreshToken.create({ data: { userId, token, userAgent, ipAddress, expiresAt } }).catch(() => {});
+
     return token;
   }
 
   async rotateRefreshToken(oldToken: string, userAgent?: string, ipAddress?: string): Promise<TokenPair> {
-    const existing = await this.prisma.refreshToken.findUnique({
-      where: { token: oldToken },
-      include: { user: { include: { memberships: { where: { isActive: true }, take: 1 } } } },
-    });
-    if (!existing || existing.revokedAt || existing.expiresAt < new Date()) {
+    // Look up in Redis (fast)
+    const tokenData = await this.redis.getRefreshToken<{ userId: string }>(oldToken);
+    if (!tokenData) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
-    if (existing.user.deletedAt) throw new UnauthorizedException('Account has been deactivated');
 
-    await this.prisma.refreshToken.update({ where: { id: existing.id }, data: { revokedAt: new Date() } });
+    const user = await this.prisma.user.findUnique({
+      where: { id: tokenData.userId },
+      include: { memberships: { where: { isActive: true }, take: 1 } },
+    });
+    if (!user || user.deletedAt) throw new UnauthorizedException('Account has been deactivated');
 
-    const membership = existing.user.memberships[0];
+    // Revoke old token in Redis
+    await this.redis.deleteRefreshToken(oldToken);
+
+    // Audit trail (fire-and-forget)
+    this.prisma.refreshToken.updateMany({ where: { token: oldToken, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
+
+    const membership = user.memberships[0];
     const payload: JwtPayload = {
-      sub: existing.userId, email: existing.user.email,
+      sub: user.id, email: user.email,
       orgId: membership?.organizationId, role: membership?.role,
     };
 
     const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(existing.userId, userAgent, ipAddress);
+    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress);
+
+    // Refresh session cache
+    await this.redis.setSession(user.id, {
+      sub: user.id, email: user.email,
+      orgId: membership?.organizationId, role: membership?.role,
+      emailVerified: user.emailVerified,
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+    });
+
     return { accessToken, refreshToken };
   }
 
   async revokeRefreshToken(token: string): Promise<void> {
-    await this.prisma.refreshToken.updateMany({ where: { token, revokedAt: null }, data: { revokedAt: new Date() } });
+    await this.redis.deleteRefreshToken(token);
+    // Audit trail (fire-and-forget)
+    this.prisma.refreshToken.updateMany({ where: { token, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
   }
 
   async revokeAllUserTokens(userId: string): Promise<void> {
-    await this.prisma.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    await this.redis.deleteAllUserTokens(userId);
+    await this.redis.deleteSession(userId);
+    // Audit trail (fire-and-forget)
+    this.prisma.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => {});
   }
 
   private calculateExpiry(duration: string): Date {

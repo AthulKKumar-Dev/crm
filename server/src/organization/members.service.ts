@@ -1,10 +1,14 @@
 import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
 @Injectable()
 export class MembersService {
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        private readonly redis: RedisService,
+    ) { }
 
     // ─── LIST MEMBERS ───
     // Returns all active members with their user profile info.
@@ -51,10 +55,15 @@ export class MembersService {
             throw new ForbiddenException('Cannot assign OWNER role');
         }
 
-        return this.prisma.organizationMember.update({
+        const updated = await this.prisma.organizationMember.update({
             where: { id: memberId },
             data: { role },
         });
+
+        // Invalidate session cache — forces fresh role on next request
+        await this.redis.deleteSession(member.userId);
+
+        return updated;
     }
 
     // ─── REMOVE MEMBER ───
@@ -72,9 +81,14 @@ export class MembersService {
             throw new ForbiddenException('Cannot remove the organization owner');
         }
 
-        return this.prisma.organizationMember.update({
+        const removed = await this.prisma.organizationMember.update({
             where: { id: memberId },
             data: { isActive: false },
         });
+
+        // Invalidate session cache — forces membership refresh on next request
+        await this.redis.deleteSession(member.userId);
+
+        return removed;
     }
 }
