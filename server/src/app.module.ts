@@ -36,7 +36,6 @@ import { InvoiceModule } from './invoice/invoice.module';
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', '..', 'client', 'build', 'client'),
-      exclude: ['/api*'],
     }),
     PrismaModule,
     RedisModule,
