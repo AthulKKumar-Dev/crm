@@ -144,24 +144,28 @@ export function useResetPasswordMutation() {
 export function useAcceptInviteMutation() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((s) => s.setAuth);
+  const existingOrgs = useAuthStore((s) => s.organizations);
+  const existingUser = useAuthStore((s) => s.user);
 
   return useMutation({
     mutationFn: (data: AcceptInviteRequest) =>
       authService.acceptInvite(data),
     onSuccess: (data) => {
-      // Build a minimal User object from the invite response
-      const invitedUser = {
-        id: data.user.id,
-        email: data.user.email,
-        firstName: data.user.firstName,
-        lastName: data.user.lastName,
-        avatarUrl: null,
-        emailVerified: true,
-        twoFactorEnabled: false,
-        lastLoginAt: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
+      // Build user from response (use existing user data if available for richer profile)
+      const user = existingUser
+        ? { ...existingUser, ...data.user }
+        : {
+            id: data.user.id,
+            email: data.user.email,
+            firstName: data.user.firstName,
+            lastName: data.user.lastName,
+            avatarUrl: null,
+            emailVerified: true,
+            twoFactorEnabled: false,
+            lastLoginAt: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
 
       // Build org membership from the invite response
       const invitedOrgMembership = {
@@ -186,7 +190,15 @@ export function useAcceptInviteMutation() {
         },
       };
 
-      setAuth(invitedUser, data.accessToken, data.refreshToken, [invitedOrgMembership]);
+      // Merge with existing orgs (don't replace — user may already belong to other orgs)
+      const alreadyHasOrg = existingOrgs.some(
+        (o) => o.organization.id === data.organization.id,
+      );
+      const mergedOrgs = alreadyHasOrg
+        ? existingOrgs
+        : [...existingOrgs, invitedOrgMembership];
+
+      setAuth(user, data.accessToken, data.refreshToken, mergedOrgs);
       useAuthStore.getState().setCurrentOrg(data.organization.id);
       toast.success(`Joined ${data.organization.name} successfully!`);
       navigate("/dashboard");

@@ -29,6 +29,8 @@ import {
 import { cn } from "~/lib/utils";
 import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
+import { authService } from "~/services/auth.service";
+import { toast } from "sonner";
 
 const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
@@ -46,8 +48,46 @@ const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboa
 export function Navbar() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, organizations, currentOrgId, logout, refreshToken, setCurrentOrg } =
+  const { user, organizations, currentOrgId, logout, refreshToken, setCurrentOrg, setTokens, setOrganizations } =
     useAuthStore();
+
+  async function handleSwitchOrg(orgId: string) {
+    if (orgId === currentOrgId) return;
+    try {
+      const data = await authService.switchOrg({ orgId });
+      // Update tokens (new JWT scoped to selected org)
+      setTokens(data.accessToken, data.refreshToken);
+      // Update org list from backend (freshest data)
+      const normalized = data.organizations.map((o) => ({
+        id: crypto.randomUUID(),
+        organizationId: o.id,
+        role: o.role,
+        isActive: true,
+        organization: {
+          id: o.id,
+          name: o.name,
+          slug: o.slug,
+          type: o.type,
+          logo: null,
+          timezone: "UTC",
+          currency: "USD",
+          industry: null,
+          website: null,
+          billingPlan: "FREE" as const,
+          onboardingStatus: "COMPLETED" as const,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      }));
+      setOrganizations(normalized);
+      setCurrentOrg(orgId);
+      // Reload the page to refetch all data with new org context
+      window.location.reload();
+    } catch {
+      toast.error("Failed to switch organization.");
+    }
+  }
+
   async function handleSignOut() {
     try {
       if (refreshToken) {
@@ -186,7 +226,7 @@ export function Navbar() {
                   {organizations.map((membership) => (
                     <DropdownMenuItem
                       key={membership.organization.id}
-                      onClick={() => setCurrentOrg(membership.organization.id)}
+                      onClick={() => handleSwitchOrg(membership.organization.id)}
                       className={cn(membership.organization.id === currentOrgId && "bg-[#CEF17B]/20 text-[#084734]")}
                     >
                       {membership.organization.name}

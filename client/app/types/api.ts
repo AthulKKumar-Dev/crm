@@ -182,6 +182,21 @@ export interface ResetPasswordResponse {
   message: string;
 }
 
+// ─── Switch Org Types ────────────────────────────────────────────────────
+
+/** Payload for switching to a different organization. */
+export interface SwitchOrgRequest {
+  orgId: string;
+}
+
+/** Response after switching organization — includes new JWT tokens scoped to the selected org. */
+export interface SwitchOrgResponse {
+  accessToken: string;
+  refreshToken: string;
+  currentOrganization: AuthOrganization;
+  organizations: AuthOrganization[];
+}
+
 // ─── User Types ───────────────────────────────────────────────────────────
 
 /** Payload for changing the current user's password (requires current password). */

@@ -15,6 +15,8 @@ import type {
   GetInviteResponse,
   AcceptInviteRequest,
   AcceptInviteResponse,
+  SwitchOrgRequest,
+  SwitchOrgResponse,
 } from "~/types/api";
 
 /**
@@ -58,5 +60,11 @@ export const authService = {
   acceptInvite: (data: AcceptInviteRequest) =>
     apiClient
       .post<AcceptInviteResponse>("/auth/invite/accept", data)
+      .then((response) => response.data),
+
+  /** Switch to a different organization — returns new JWT tokens scoped to the selected org. */
+  switchOrg: (data: SwitchOrgRequest) =>
+    apiClient
+      .post<SwitchOrgResponse>("/auth/switch-org", data)
       .then((response) => response.data),
 };
