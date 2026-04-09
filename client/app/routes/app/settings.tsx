@@ -27,13 +27,15 @@ import {
   useRevokeInviteMutation,
 } from "~/hooks/use-org-mutations";
 import { userService } from "~/services/user.service";
-import { useGstins, useIndianStates, useStateTaxRates, useCollections, useCollectionOverrides } from "~/hooks/use-gst-queries";
+import { useGstins, useIndianStates, useStateTaxRates, useProductTypeTaxRates, useCollections, useCollectionOverrides } from "~/hooks/use-gst-queries";
 import {
   useCreateGstinMutation, useUpdateGstinMutation, useDeleteGstinMutation,
   useCreateStateTaxRateMutation, useDeleteStateTaxRateMutation,
+  useCreateProductTypeTaxRateMutation, useDeleteProductTypeTaxRateMutation,
   useCreateCollectionOverrideMutation, useDeleteCollectionOverrideMutation,
 } from "~/hooks/use-gst-mutations";
-import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, CollectionTaxOverride, ShopifyCollection } from "~/types/api";
+import { useProductTypes } from "~/hooks/use-product-queries";
+import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection } from "~/types/api";
 
 export function meta() {
   return [{ title: "Settings | Collabo CRM" }];
@@ -471,6 +473,11 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
         <StateTaxRatesSection />
       )}
 
+      {/* Product Type Tax Rates */}
+      {gstEnabled && (
+        <ProductTypeTaxRatesSection />
+      )}
+
       {/* Collection Tax Overrides */}
       {gstEnabled && (
         <CollectionOverridesSection />
@@ -549,6 +556,102 @@ function StateTaxRatesSection() {
                 {availableStates.map((s) => (
                   <SelectItem key={s.code} value={s.code} className="text-xs">{s.code} - {s.name}</SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="w-28">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">GST Rate</label>
+            <Select value={gstRate} onValueChange={setGstRate}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Rate" /></SelectTrigger>
+              <SelectContent>
+                {GST_RATE_OPTIONS.map((r) => (<SelectItem key={r} value={r} className="text-xs">{r}%</SelectItem>))}
+              </SelectContent>
+            </Select>
+          </div>
+          <button onClick={handleAdd} disabled={createRate.isPending} className="inline-flex h-9 items-center gap-1 rounded-lg bg-[#cdff8c] px-3 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50">
+            {createRate.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />} Add
+          </button>
+          <button onClick={() => setShowAddForm(false)} className="h-9 rounded-lg px-3 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">Cancel</button>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ── Product Type Tax Rates Section ──────────────────────────────────────────
+
+function ProductTypeTaxRatesSection() {
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [productType, setProductType] = useState("");
+  const [gstRate, setGstRate] = useState("");
+  const { data: taxRates = [], isLoading } = useProductTypeTaxRates();
+  const { data: productTypes = [] } = useProductTypes();
+  const createRate = useCreateProductTypeTaxRateMutation();
+  const deleteRate = useDeleteProductTypeTaxRateMutation();
+
+  function handleAdd() {
+    if (!productType || !gstRate) { toast.error("Select a product type and GST rate."); return; }
+    createRate.mutate({ productType, gstRate: parseFloat(gstRate) }, {
+      onSuccess: () => { setShowAddForm(false); setProductType(""); setGstRate(""); },
+    });
+  }
+
+  // Filter out product types that already have rates
+  const existingTypes = new Set(taxRates.map((r: ProductTypeTaxRate) => r.productType));
+  const availableTypes = (productTypes as string[]).filter((t) => !existingTypes.has(t));
+
+  return (
+    <Section title="Product Type Tax Rates" description="Set default GST rates by product type (e.g., T-Shirts = 12%, Electronics = 18%). Overrides state base rates.">
+      {isLoading ? (
+        <div className="flex justify-center py-6"><Loader2 className="size-5 animate-spin text-muted-foreground" /></div>
+      ) : taxRates.length === 0 && !showAddForm ? (
+        <div className="py-6 text-center">
+          <p className="text-xs text-muted-foreground">No product type tax rates configured.</p>
+          <button onClick={() => setShowAddForm(true)} className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] transition-colors">
+            <Plus className="size-3.5" /> Add Product Type Rate
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-2">
+            {taxRates.map((rate: ProductTypeTaxRate) => (
+              <div key={rate.id} className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{rate.productType}</p>
+                  <p className="text-[10px] text-muted-foreground">Product type</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="rounded-full bg-blue-50 dark:bg-blue-900/20 px-2 py-0.5 text-xs font-semibold text-blue-700 dark:text-blue-400">{Number(rate.gstRate)}%</span>
+                  <button onClick={() => deleteRate.mutate(rate.id)} className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors">
+                    <Trash2 className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {!showAddForm && (
+            <button onClick={() => setShowAddForm(true)} className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-3 py-1.5 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">
+              <Plus className="size-3.5" /> Add Product Type Rate
+            </button>
+          )}
+        </>
+      )}
+
+      {showAddForm && (
+        <div className="mt-3 flex items-end gap-3 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-4">
+          <div className="flex-1">
+            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Product Type</label>
+            <Select value={productType} onValueChange={setProductType}>
+              <SelectTrigger className="mt-1 h-9 text-xs"><SelectValue placeholder="Select product type" /></SelectTrigger>
+              <SelectContent>
+                {availableTypes.length > 0 ? (
+                  availableTypes.map((t) => (
+                    <SelectItem key={t} value={t} className="text-xs">{t}</SelectItem>
+                  ))
+                ) : (
+                  <SelectItem value="_none" disabled className="text-xs text-muted-foreground">No product types available</SelectItem>
+                )}
               </SelectContent>
             </Select>
           </div>

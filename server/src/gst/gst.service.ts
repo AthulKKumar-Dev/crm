@@ -11,6 +11,8 @@ import { CreateStateTaxRateDto } from './dto/create-state-tax-rate.dto';
 import { UpdateStateTaxRateDto } from './dto/update-state-tax-rate.dto';
 import { CreateCollectionOverrideDto } from './dto/create-collection-override.dto';
 import { UpdateCollectionOverrideDto } from './dto/update-collection-override.dto';
+import { CreateProductTypeTaxRateDto } from './dto/create-product-type-tax-rate.dto';
+import { UpdateProductTypeTaxRateDto } from './dto/update-product-type-tax-rate.dto';
 import {
   isValidStateCode,
   getStateName,
@@ -312,5 +314,55 @@ export class GstService {
 
     await this.prisma.collectionTaxOverride.delete({ where: { id } });
     return { message: 'Collection tax override removed' };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRODUCT TYPE TAX RATES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async findAllProductTypeTaxRates(orgId: string) {
+    return this.prisma.productTypeTaxRate.findMany({
+      where: { organizationId: orgId },
+      orderBy: { productType: 'asc' },
+    });
+  }
+
+  async createProductTypeTaxRate(orgId: string, dto: CreateProductTypeTaxRateDto) {
+    try {
+      return await this.prisma.productTypeTaxRate.create({
+        data: {
+          organizationId: orgId,
+          productType: dto.productType,
+          gstRate: dto.gstRate,
+        },
+      });
+    } catch (error: any) {
+      if (error.code === 'P2002') {
+        throw new ConflictException('A tax rate for this product type already exists');
+      }
+      throw error;
+    }
+  }
+
+  async updateProductTypeTaxRate(id: string, orgId: string, dto: UpdateProductTypeTaxRateDto) {
+    const existing = await this.prisma.productTypeTaxRate.findFirst({
+      where: { id, organizationId: orgId },
+    });
+    if (!existing) throw new NotFoundException('Product type tax rate not found');
+
+    return this.prisma.productTypeTaxRate.update({
+      where: { id },
+      data: { gstRate: dto.gstRate },
+    });
+  }
+
+  async deleteProductTypeTaxRate(id: string, orgId: string) {
+    const existing = await this.prisma.productTypeTaxRate.findFirst({
+      where: { id, organizationId: orgId },
+    });
+    if (!existing) throw new NotFoundException('Product type tax rate not found');
+
+    await this.prisma.productTypeTaxRate.delete({ where: { id } });
+    return { message: 'Product type tax rate removed' };
   }
 }

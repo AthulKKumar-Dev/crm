@@ -194,6 +194,7 @@ model Organization {
   gstins                 OrganizationGstin[]
   invoices               Invoice[]
   stateTaxRates          StateTaxRate[]
+  productTypeTaxRates    ProductTypeTaxRate[]
   collections            Collection[]
   collectionTaxOverrides CollectionTaxOverride[]
 
@@ -769,6 +770,21 @@ model StateTaxRate {
   @@unique([organizationId, stateCode])
   @@index([organizationId])
   @@map("state_tax_rates")
+}
+
+model ProductTypeTaxRate {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  productType    String   @map("product_type") // e.g., "T-Shirts", "Electronics"
+  gstRate        Decimal  @map("gst_rate") @db.Decimal(5, 2)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, productType])
+  @@index([organizationId])
+  @@map("product_type_tax_rates")
 }
 
 model Collection {

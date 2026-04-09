@@ -16,6 +16,8 @@ import { CreateStateTaxRateDto } from './dto/create-state-tax-rate.dto';
 import { UpdateStateTaxRateDto } from './dto/update-state-tax-rate.dto';
 import { CreateCollectionOverrideDto } from './dto/create-collection-override.dto';
 import { UpdateCollectionOverrideDto } from './dto/update-collection-override.dto';
+import { CreateProductTypeTaxRateDto } from './dto/create-product-type-tax-rate.dto';
+import { UpdateProductTypeTaxRateDto } from './dto/update-product-type-tax-rate.dto';
 import { INDIAN_STATES } from './constants/indian-states';
 
 @Controller('gst')
@@ -112,5 +114,31 @@ export class GstController {
   @Delete('collection-overrides/:id')
   deleteCollectionOverride(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.gstService.deleteCollectionOverride(id, user.orgId!);
+  }
+
+  // ─── PRODUCT TYPE TAX RATES ───
+
+  @Get('product-type-tax-rates')
+  findAllProductTypeTaxRates(@CurrentUser() user: JwtPayload) {
+    return this.gstService.findAllProductTypeTaxRates(user.orgId!);
+  }
+
+  @Post('product-type-tax-rates')
+  createProductTypeTaxRate(@CurrentUser() user: JwtPayload, @Body() dto: CreateProductTypeTaxRateDto) {
+    return this.gstService.createProductTypeTaxRate(user.orgId!, dto);
+  }
+
+  @Patch('product-type-tax-rates/:id')
+  updateProductTypeTaxRate(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateProductTypeTaxRateDto,
+  ) {
+    return this.gstService.updateProductTypeTaxRate(id, user.orgId!, dto);
+  }
+
+  @Delete('product-type-tax-rates/:id')
+  deleteProductTypeTaxRate(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.gstService.deleteProductTypeTaxRate(id, user.orgId!);
   }
 }

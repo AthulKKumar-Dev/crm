@@ -10,6 +10,8 @@ import type {
   UpdateStateTaxRateRequest,
   CreateCollectionOverrideRequest,
   UpdateCollectionOverrideRequest,
+  CreateProductTypeTaxRateRequest,
+  UpdateProductTypeTaxRateRequest,
 } from "~/types/api";
 
 // ─── GSTIN Mutations ───
@@ -129,5 +131,31 @@ export function useDeleteCollectionOverrideMutation() {
       toast.success("Collection tax override removed.");
     },
     onError: (error) => handleMutationError(error, "Failed to remove collection override."),
+  });
+}
+
+// ─── Product Type Tax Rate Mutations ───
+
+export function useCreateProductTypeTaxRateMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateProductTypeTaxRateRequest) => gstService.createProductTypeTaxRate(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: gstKeys.productTypeTaxRates() });
+      toast.success("Product type tax rate added.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to add product type tax rate."),
+  });
+}
+
+export function useDeleteProductTypeTaxRateMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => gstService.deleteProductTypeTaxRate(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: gstKeys.productTypeTaxRates() });
+      toast.success("Product type tax rate removed.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to remove product type tax rate."),
   });
 }

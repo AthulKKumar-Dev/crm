@@ -1060,6 +1060,27 @@ export interface UpdateStateTaxRateRequest {
   gstRate: number;
 }
 
+// ─── Product Type Tax Rate Types ─────────────────────────────────────────────
+
+/** A default GST rate configured for a specific product type. */
+export interface ProductTypeTaxRate {
+  id: string;
+  organizationId: string;
+  productType: string;
+  gstRate: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateProductTypeTaxRateRequest {
+  productType: string;
+  gstRate: number;
+}
+
+export interface UpdateProductTypeTaxRateRequest {
+  gstRate: number;
+}
+
 // ─── Collection Types ───────────────────────────────────────────────────────
 
 /** A synced Shopify collection. */

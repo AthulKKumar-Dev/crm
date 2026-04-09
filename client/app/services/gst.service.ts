@@ -11,6 +11,9 @@ import type {
   CollectionTaxOverride,
   CreateCollectionOverrideRequest,
   UpdateCollectionOverrideRequest,
+  ProductTypeTaxRate,
+  CreateProductTypeTaxRateRequest,
+  UpdateProductTypeTaxRateRequest,
 } from "~/types/api";
 
 export const gstService = {
@@ -59,4 +62,17 @@ export const gstService = {
 
   deleteCollectionOverride: (id: string) =>
     apiClient.delete(`/gst/collection-overrides/${id}`).then((res) => res.data),
+
+  // ─── Product Type Tax Rates ───
+  listProductTypeTaxRates: () =>
+    apiClient.get<ProductTypeTaxRate[]>("/gst/product-type-tax-rates").then((res) => res.data),
+
+  createProductTypeTaxRate: (data: CreateProductTypeTaxRateRequest) =>
+    apiClient.post<ProductTypeTaxRate>("/gst/product-type-tax-rates", data).then((res) => res.data),
+
+  updateProductTypeTaxRate: (id: string, data: UpdateProductTypeTaxRateRequest) =>
+    apiClient.patch<ProductTypeTaxRate>(`/gst/product-type-tax-rates/${id}`, data).then((res) => res.data),
+
+  deleteProductTypeTaxRate: (id: string) =>
+    apiClient.delete(`/gst/product-type-tax-rates/${id}`).then((res) => res.data),
 };

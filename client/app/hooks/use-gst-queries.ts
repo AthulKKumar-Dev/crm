@@ -8,6 +8,7 @@ export const gstKeys = {
   stateTaxRates: () => [...gstKeys.all, "state-tax-rates"] as const,
   collections: () => [...gstKeys.all, "collections"] as const,
   collectionOverrides: () => [...gstKeys.all, "collection-overrides"] as const,
+  productTypeTaxRates: () => [...gstKeys.all, "product-type-tax-rates"] as const,
 };
 
 export function useGstins() {
@@ -43,5 +44,12 @@ export function useCollectionOverrides() {
   return useQuery({
     queryKey: gstKeys.collectionOverrides(),
     queryFn: () => gstService.listCollectionOverrides(),
+  });
+}
+
+export function useProductTypeTaxRates() {
+  return useQuery({
+    queryKey: gstKeys.productTypeTaxRates(),
+    queryFn: () => gstService.listProductTypeTaxRates(),
   });
 }
