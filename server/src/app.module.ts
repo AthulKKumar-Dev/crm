@@ -35,7 +35,7 @@ import { InvoiceModule } from './invoice/invoice.module';
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validationSchema }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
     ServeStaticModule.forRoot({
-      rootPath: join(__dirname, '..', '..', 'client', 'build', 'client'),
+      rootPath: join(__dirname, '..', '..', '..', 'client', 'build', 'client'),
     }),
     PrismaModule,
     RedisModule,
