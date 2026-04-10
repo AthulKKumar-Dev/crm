@@ -62,12 +62,16 @@ RUN apk add --no-cache openssl
 COPY server/package.json server/package-lock.json ./
 RUN npm ci --legacy-peer-deps --omit=dev --no-audit --no-fund && npm cache clean --force
 
-# Copy compiled server output, Prisma artifacts, and the built client
+# Copy compiled server output, Prisma client, schema, config, and built client
 COPY --from=server-builder /app/server/dist ./dist
 COPY --from=server-builder /app/server/node_modules/.prisma ./node_modules/.prisma
 COPY --from=server-builder /app/server/node_modules/@prisma ./node_modules/@prisma
 COPY --from=server-builder /app/server/prisma ./prisma
+COPY --from=server-builder /app/server/prisma.config.ts ./prisma.config.ts
 COPY --from=client-builder /app/client/build /app/client/build
+
+# Install prisma CLI for 'migrate deploy' at startup
+RUN npm install --no-save --no-audit --no-fund --legacy-peer-deps prisma@6
 
 # Listen on port 80 so Cloudflare proxy can connect directly
 ENV NODE_ENV=production
