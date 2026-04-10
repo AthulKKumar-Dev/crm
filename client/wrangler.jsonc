@@ -1,0 +1,22 @@
+{
+  // Cloudflare Workers + Static Assets config for the Collabo CRM frontend.
+  //
+  // This is a static-assets-only deployment (no `main` field = no Worker script).
+  // Cloudflare serves the built React Router SPA directly from `./build/client`.
+  //
+  // - `assets.directory` is resolved relative to THIS file's location (client/),
+  //   so it points at `client/build/client/` — the output of `react-router build`
+  //   in SPA mode (`ssr: false` in react-router.config.ts).
+  // - `not_found_handling: "single-page-application"` makes Cloudflare serve
+  //   index.html with a 200 status for any unknown route, which is what enables
+  //   client-side routing (e.g. hitting /dashboard directly works).
+  //
+  // Set VITE_API_BASE_URL in Cloudflare → Settings → Variables and Secrets.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "collabo-crm",
+  "compatibility_date": "2025-04-01",
+  "assets": {
+    "directory": "./build/client",
+    "not_found_handling": "single-page-application"
+  }
+}
