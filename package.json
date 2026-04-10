@@ -6,8 +6,8 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "build:client": "cd client && npm ci --include=dev && npm run build",
-    "build:server": "cd server && npm ci --legacy-peer-deps --include=dev && npx prisma generate && npx prisma migrate deploy && npm run build",
+    "build:client": "cd client && npm install --include=dev --no-audit --no-fund && npm run build",
+    "build:server": "cd server && npm install --legacy-peer-deps --include=dev --no-audit --no-fund && npx prisma generate && npx prisma migrate deploy && npm run build",
     "build": "npm run build:client && npm run build:server",
     "start": "cd server && node dist/src/main"
   }
