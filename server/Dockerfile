@@ -44,11 +44,16 @@ RUN apk add --no-cache openssl wget
 COPY package.json package-lock.json ./
 RUN npm ci --legacy-peer-deps --omit=dev --no-audit --no-fund && npm cache clean --force
 
-# Copy compiled output, Prisma artifacts, and the schema (needed for migrate deploy)
+# Copy compiled output, Prisma client, schema, and config
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+
+# Install prisma CLI (small) so 'prisma migrate deploy' works at startup
+# without npx having to download it on every container start.
+RUN npm install --no-save --no-audit --no-fund --legacy-peer-deps prisma@6
 
 ENV NODE_ENV=production
 ENV PORT=80

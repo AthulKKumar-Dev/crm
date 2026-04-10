@@ -43,10 +43,10 @@ const PROFILE_STATS = [
 
 /** Social media links displayed on the profile sidebar. */
 const SOCIAL_LINKS = [
-  { icon: AtSign,    label: "Twitter",  handle: "@collabosteve" },
+  { icon: AtSign, label: "Twitter", handle: "@collabosteve" },
   { icon: Briefcase, label: "LinkedIn", handle: "linkedin.com/in/steverogers" },
-  { icon: GitBranch, label: "GitHub",   handle: "github.com/steverogers" },
-  { icon: Globe,    label: "Website",  handle: "steverogers.io" },
+  { icon: GitBranch, label: "GitHub", handle: "github.com/steverogers" },
+  { icon: Globe, label: "Website", handle: "steverogers.io" },
 ];
 
 /**
@@ -59,9 +59,9 @@ export default function ProfilePage() {
 
   /* ── Derived user fields with fallback defaults ────────────────── */
   const firstName = user?.firstName ?? "Steve";
-  const lastName  = user?.lastName  ?? "Rogers";
-  const email     = user?.email     ?? "steve.rogers@collabo.io";
-  const initials  = `${firstName[0]}${lastName[0]}`.toUpperCase();
+  const lastName = user?.lastName ?? "Rogers";
+  const email = user?.email ?? "steve.rogers@collabo.io";
+  const initials = `${firstName[0]}${lastName[0]}`.toUpperCase();
 
   return (
     <div className="space-y-6">
@@ -101,28 +101,28 @@ export default function ProfilePage() {
               )}
             </div>
             <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">{firstName} {lastName}</h2>
-            <p className="mt-0.5 text-xs text-muted-foreground">Super Admin</p>
-            <span className="mt-2 inline-flex items-center rounded-full bg-[#CEF17B]/30 px-2.5 py-0.5 text-xs font-semibold text-[#084734]">
+            {/* <p className="mt-0.5 text-xs text-muted-foreground">Super Admin</p> */}
+            {/* <span className="mt-2 inline-flex items-center rounded-full bg-[#CEF17B]/30 px-2.5 py-0.5 text-xs font-semibold text-[#084734]">
               Active
-            </span>
+            </span> */}
             <div className="mt-4 border-t pt-4 text-left space-y-2">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Mail className="size-3.5 shrink-0" />
                 <span className="truncate">{email}</span>
               </div>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              {/* <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Phone className="size-3.5 shrink-0" />
                 <span>+1 (555) 012-3456</span>
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <MapPin className="size-3.5 shrink-0" />
                 <span>New York, United States</span>
-              </div>
+              </div> */}
             </div>
           </div>
 
           {/* Activity stats grid */}
-          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+          {/* <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
             <p className="mb-3 text-xs font-semibold text-gray-900 dark:text-gray-100">Activity Stats</p>
             <div className="grid grid-cols-2 gap-3">
               {PROFILE_STATS.map(({ label, value, icon: Icon }) => (
@@ -135,10 +135,10 @@ export default function ProfilePage() {
                 </div>
               ))}
             </div>
-          </div>
+          </div> */}
 
           {/* Social links */}
-          <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+          {/* <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
             <p className="mb-3 text-xs font-semibold text-gray-900 dark:text-gray-100">Social Links</p>
             <div className="space-y-2.5">
               {SOCIAL_LINKS.map(({ icon: Icon, label, handle }) => (
@@ -160,7 +160,7 @@ export default function ProfilePage() {
                 </div>
               ))}
             </div>
-          </div>
+          </div> */}
         </div>
 
         {/* ── Right column — personal details form and activity feed ── */}
@@ -171,13 +171,9 @@ export default function ProfilePage() {
             <p className="mb-5 text-sm font-semibold text-gray-900 dark:text-gray-100">Personal Information</p>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               {[
-                { label: "First Name",    value: firstName,           col: 1 },
-                { label: "Last Name",     value: lastName,            col: 1 },
-                { label: "Email Address", value: email,               col: 2 },
-                { label: "Phone Number",  value: "+1 (555) 012-3456", col: 1 },
-                { label: "Location",      value: "New York, US",      col: 1 },
-                { label: "Timezone",      value: "UTC-5 (EST)",       col: 1 },
-                { label: "Language",      value: "English (US)",      col: 1 },
+                { label: "First Name", value: firstName, col: 1 },
+                { label: "Last Name", value: lastName, col: 1 },
+                { label: "Email Address", value: email, col: 2 },
               ].map(({ label, value, col }) => (
                 <div key={label} className={col === 2 ? "sm:col-span-2" : ""}>
                   <label className="mb-1 block text-xs font-medium text-gray-700 dark:text-gray-300">{label}</label>
@@ -213,7 +209,7 @@ export default function ProfilePage() {
           </div>
 
           {/* Recent activity feed */}
-          <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
+          {/* <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
             <div className="border-b px-6 py-4">
               <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recent Activity</p>
               <p className="text-xs text-muted-foreground">Your latest actions across the platform.</p>
@@ -232,7 +228,7 @@ export default function ProfilePage() {
                 </div>
               ))}
             </div>
-          </div>
+          </div> */}
 
         </div>
       </div>
