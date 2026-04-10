@@ -44,7 +44,9 @@ RUN npm ci --legacy-peer-deps --include=dev --no-audit --no-fund
 COPY server/ ./
 
 # Generate Prisma client + compile NestJS to dist/
-RUN npx prisma generate
+# DATABASE_URL is required by prisma.config.ts but only used at runtime,
+# so we pass a dummy value here just to satisfy the config validator.
+RUN DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy" npx prisma generate
 RUN npm run build
 
 
