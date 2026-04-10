@@ -1,0 +1,31 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Docker Compose for the NestJS API server (server-only deployment).
+#
+# Use this on a DigitalOcean Droplet (or any single-host Docker setup) where
+# the database and Redis are external. The frontend is deployed separately
+# (Cloudflare Pages, etc.) and points at this API via FRONTEND_URL.
+#
+# Usage:
+#   cp .env.example .env       # fill in real values
+#   docker compose up -d --build
+#   docker compose logs -f api
+#   docker compose down
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: collabo-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/api/v1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

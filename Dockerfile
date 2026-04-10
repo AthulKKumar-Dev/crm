@@ -70,6 +70,8 @@ COPY --from=client-builder /app/client/build /app/client/build
 # Listen on port 80 so Cloudflare proxy can connect directly
 ENV NODE_ENV=production
 ENV PORT=80
+# This image bundles the React SPA — enable ServeStaticModule
+ENV SERVE_STATIC=true
 EXPOSE 80
 
 # Run migrations on container startup, then start the NestJS server

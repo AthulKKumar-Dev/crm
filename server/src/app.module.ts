@@ -34,9 +34,17 @@ import { InvoiceModule } from './invoice/invoice.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validationSchema }),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
-    ServeStaticModule.forRoot({
-      rootPath: join(__dirname, '..', '..', '..', 'client', 'build', 'client'),
-    }),
+    // Only mount the static SPA when explicitly enabled.
+    // Set SERVE_STATIC=true on full-stack deploys (Render/Railway).
+    // Leave unset on API-only deploys (DigitalOcean Droplet) so the server
+    // doesn't try to serve a non-existent client/build/client/ directory.
+    ...(process.env.SERVE_STATIC === 'true'
+      ? [
+          ServeStaticModule.forRoot({
+            rootPath: join(__dirname, '..', '..', '..', 'client', 'build', 'client'),
+          }),
+        ]
+      : []),
     PrismaModule,
     RedisModule,
     BullModule.forRootAsync({

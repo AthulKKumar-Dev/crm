@@ -66,6 +66,8 @@ services:
       # Core
       NODE_ENV: production
       PORT: 80
+      # Enable static frontend serving (this stack bundles the React SPA)
+      SERVE_STATIC: "true"
 
       # Database (uses internal Docker network DNS)
       DATABASE_URL: postgresql://${POSTGRES_USER:-collabo}:${POSTGRES_PASSWORD:-collabo_dev_password}@postgres:5432/${POSTGRES_DB:-collabo_crm}
