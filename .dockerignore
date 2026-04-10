@@ -1,0 +1,35 @@
+# Node modules — installed inside the image
+**/node_modules
+
+# Build outputs — regenerated inside the image
+client/build
+client/.react-router
+server/dist
+
+# Local environment files (never bake secrets into images)
+**/.env
+**/.env.*
+
+# Git + IDE
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# Logs / temp
+**/*.log
+**/coverage
+**/.DS_Store
+**/Thumbs.db
+
+# Existing Dockerfiles (we use the new root one)
+client/Dockerfile
+client/.dockerignore
+
+# Worktrees / scratch
+.claude
+
+# Misc
+README.md
+**/*.md
