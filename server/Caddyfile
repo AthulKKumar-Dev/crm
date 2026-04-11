@@ -1,0 +1,30 @@
+# Caddyfile for the Collabo CRM API.
+#
+# $CADDY_DOMAIN is set via docker-compose environment (e.g. 168.144.82.109.sslip.io).
+# $CADDY_ACME_EMAIL is the Let's Encrypt account email for renewal notices.
+#
+# Caddy auto-provisions an HTTPS certificate for $CADDY_DOMAIN on first request
+# via Let's Encrypt HTTP-01 challenge (requires port 80 reachable) and renews
+# it automatically in the background.
+
+{
+	email {$CADDY_ACME_EMAIL}
+}
+
+{$CADDY_DOMAIN} {
+	# Reverse-proxy all traffic to the NestJS api container on the webnet network.
+	reverse_proxy api:5000
+
+	# Standard security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# Log access to stdout (visible via `docker compose logs caddy`)
+	log {
+		output stdout
+		format console
+	}
+}
