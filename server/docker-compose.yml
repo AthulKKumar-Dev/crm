@@ -1,14 +1,18 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Docker Compose for the NestJS API server (server-only deployment).
+# Docker Compose for the NestJS API + Caddy reverse proxy (HTTPS via sslip.io).
 #
-# Use this on a DigitalOcean Droplet (or any single-host Docker setup) where
-# the database and Redis are external. The frontend is deployed separately
-# (Cloudflare Pages, etc.) and points at this API via FRONTEND_URL.
+# The `api` service is internal-only (no host port binding). Caddy publishes
+# 80 and 443 and reverse-proxies to api:5000 over the internal `webnet` docker
+# network. Caddy automatically provisions a Let's Encrypt cert for the domain
+# set in CADDY_DOMAIN (e.g. 168.144.82.109.sslip.io).
+#
+# Required env vars (in server/.env):
+#   CADDY_DOMAIN       — e.g. 168.144.82.109.sslip.io
+#   CADDY_ACME_EMAIL   — for Let's Encrypt renewal notices
 #
 # Usage:
-#   cp .env.example .env       # fill in real values
 #   docker compose up -d --build
-#   docker compose logs -f api
+#   docker compose logs -f caddy     # watch TLS provisioning
 #   docker compose down
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -23,17 +27,42 @@ services:
       - .env
     environment:
       # Pin PORT so it can't drift from Dockerfile's default (80).
-      # Must match the ports + healthcheck below.
       PORT: "5000"
-    ports:
-      # BIND_HOST defaults to 0.0.0.0 for local dev (browser can reach container).
-      # On the droplet, set BIND_HOST=127.0.0.1 in the environment before
-      # `docker compose up` so the port is only reachable from localhost —
-      # cloudflared (running on the host) proxies it publicly.
-      - "${BIND_HOST:-0.0.0.0}:5000:5000"
+    expose:
+      - "5000"   # internal-only, reachable by other services on webnet
+    networks:
+      - webnet
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5000/api/v1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: collabo-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data         # Let's Encrypt certs + account info (persists)
+      - caddy_config:/config     # Caddy's autosaved config
+    environment:
+      # Read by Caddyfile via {$CADDY_DOMAIN} / {$CADDY_ACME_EMAIL}
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-admin@example.com}
+    networks:
+      - webnet
+    depends_on:
+      api:
+        condition: service_healthy
+
+networks:
+  webnet:
+
+volumes:
+  caddy_data:
+  caddy_config:
