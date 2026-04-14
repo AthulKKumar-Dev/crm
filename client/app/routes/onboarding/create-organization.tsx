@@ -20,6 +20,7 @@ import { orgService } from "~/services/org.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { orgKeys } from "~/hooks/use-org-queries";
 import type { OrganizationMembership } from "~/types/api";
+import { authService } from "~/services/auth.service";
 
 /* ── Select field option lists ───────────────────────────── */
 
@@ -80,6 +81,7 @@ export default function CreateOrganizationPage() {
   const queryClient = useQueryClient();
   const setCurrentOrg = useAuthStore((state) => state.setCurrentOrg);
   const setOrganizations = useAuthStore((state) => state.setOrganizations);
+  const setTokens = useAuthStore((state) => state.setTokens);
   const existingOrgs = useAuthStore((state) => state.organizations);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
@@ -107,9 +109,11 @@ export default function CreateOrganizationPage() {
         timezone: data.timezone || undefined,
         currency: data.currency || undefined,
       }),
-    onSuccess: (org) => {
-      queryClient.invalidateQueries({ queryKey: orgKeys.list() });
+    onSuccess: async (org) => {
+      const switchData = await authService.switchOrg({ orgId: org.id });
+      setTokens(switchData.accessToken, switchData.refreshToken);
 
+      queryClient.invalidateQueries({ queryKey: orgKeys.list() });
       // Add the new org to the auth store so AuthGuard sees it
       const newMembership: OrganizationMembership = {
         id: crypto.randomUUID(),
