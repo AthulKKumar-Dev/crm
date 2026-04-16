@@ -75,7 +75,25 @@ export class ChannelController {
     @CurrentUser() user: JwtPayload,
     @Body() dto: ManualConnectShopifyDto,
   ) {
-    return this.shopifyOAuth.manualConnect(user.orgId!, dto.shopDomain, dto.apiKey, dto.apiSecret, dto.accessToken);
+    const result = await this.shopifyOAuth.manualConnect(user.orgId!, dto.shopDomain, dto.apiKey, dto.apiSecret, dto.accessToken);
+
+    // Auto-trigger initial sync after successful connection
+    try {
+      await this.syncQueue.add('sync', {
+        channelId: result.channelId,
+        organizationId: user.orgId!,
+        entityTypes: ['products', 'orders', 'customers', 'inventory'],
+      } satisfies SyncJobData, {
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: { count: 100 },
+        removeOnFail: { count: 50 },
+      });
+    } catch {
+      // Non-fatal: sync can be triggered manually later
+    }
+
+    return result;
   }
 
   // POST /channels/instagram/install — start Meta OAuth flow
