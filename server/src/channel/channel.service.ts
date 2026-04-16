@@ -3,13 +3,14 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { ChannelStatus, UserRole, Prisma } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, UserRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ShopifyOAuthService } from './shopify-oauth.service';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 
 @Injectable()
 export class ChannelService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService, private readonly shopifyOAuth: ShopifyOAuthService) { }
 
   async findAllForOrg(orgId: string) {
     return this.prisma.channel.findMany({
@@ -79,14 +80,21 @@ export class ChannelService {
     });
     if (!channel) throw new NotFoundException('Channel not found');
 
-    // TODO: Unregister webhooks with Shopify before deleting
+    // Unregister webhooks before clearing credentials
+    if (channel.platform === ChannelPlatform.SHOPIFY && channel.credentials) {
+      try {
+        await this.shopifyOAuth.unregisterWebhooks(channelId);
+      } catch {
+        // Best-effort: credentials may already be invalid
+      }
 
-    await this.prisma.channel.update({
-      where: { id: channelId },
-      data: { status: ChannelStatus.DISCONNECTED, credentials: Prisma.JsonNull },
-    });
+      await this.prisma.channel.update({
+        where: { id: channelId },
+        data: { status: ChannelStatus.DISCONNECTED, credentials: Prisma.JsonNull },
+      });
 
-    return { message: 'Channel disconnected' };
+      return { message: 'Channel disconnected' };
+    }
   }
 
   async getSyncLogs(channelId: string, orgId: string) {

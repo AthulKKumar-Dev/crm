@@ -266,4 +266,107 @@ export class ShopifyOAuthService {
     private verifyHmac(query: Record<string, string>): void {
         this.verifyHmacWithSecret(query, this.clientSecret);
     }
+
+    // ─── WEBHOOK MANAGEMENT ───
+
+    private readonly WEBHOOK_TOPICS = [
+        'products/create',
+        'products/update',
+        'products/delete',
+        'orders/create',
+        'orders/updated',
+        'customers/create',
+        'customers/update',
+        'inventory_levels/update',
+    ];
+
+    async registerWebhooks(channelId: string): Promise<void> {
+        const { token, shopDomain } = await this.getAccessToken(channelId);
+        const callbackUrl = `${this.appUrl}api/v1/webhooks/shopify`;
+
+        for (const topic of this.WEBHOOK_TOPICS) {
+            try {
+                const res = await fetch(
+                    `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Shopify-Access-Token': token,
+                        },
+                        body: JSON.stringify({
+                            webhook: { topic, address: callbackUrl, format: 'json' },
+                        }),
+                    },
+                );
+
+                if (!res.ok) {
+                    const error = await res.text();
+                    this.logger.warn(`Failed to register webhook ${topic}: ${error}`);
+                } else {
+                    this.logger.log(`Registered webhook: ${topic} → ${callbackUrl}`);
+                }
+            } catch (error) {
+                this.logger.error(`Error registering webhook ${topic}`, error);
+            }
+        }
+    }
+
+    async unregisterWebhooks(channelId: string): Promise<void> {
+        try {
+            const { token, shopDomain } = await this.getAccessToken(channelId);
+
+            const res = await fetch(
+                `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                { headers: { 'X-Shopify-Access-Token': token } },
+            );
+
+            if (!res.ok) {
+                this.logger.warn(`Failed to list webhooks for unregistration: ${res.status}`);
+                return;
+            }
+
+            const data = (await res.json()) as { webhooks: { id: number }[] };
+
+            for (const webhook of data.webhooks) {
+                try {
+                    await fetch(
+                        `https://${shopDomain}/admin/api/2024-01/webhooks/${webhook.id}.json`,
+                        {
+                            method: 'DELETE',
+                            headers: { 'X-Shopify-Access-Token': token },
+                        },
+                    );
+                    this.logger.log(`Unregistered webhook ${webhook.id}`);
+                } catch (error) {
+                    this.logger.error(`Error unregistering webhook ${webhook.id}`, error);
+                }
+            }
+        } catch (error) {
+            this.logger.warn('Could not unregister webhooks (credentials may already be cleared)', error);
+        }
+    }
+
+    async getCredentials(channelId: string): Promise<{
+        token: string;
+        shopDomain: string;
+        apiSecret: string;
+    }> {
+        const channel = await this.prisma.channel.findUnique({ where: { id: channelId } });
+        if (!channel || !channel.credentials) {
+            throw new BadRequestException('Channel not found or missing credentials');
+        }
+
+        const creds = channel.credentials as {
+            accessToken: string;
+            shopDomain: string;
+            apiSecret: string;
+        };
+
+        return {
+            token: this.encryption.decrypt(creds.accessToken),
+            shopDomain: creds.shopDomain,
+            apiSecret: this.encryption.decrypt(creds.apiSecret),
+        };
+    }
 }

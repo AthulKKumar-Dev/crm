@@ -291,7 +291,7 @@ export class ShopifySyncService {
 
     // ─── UPSERT HELPERS ───
 
-    private async upsertProduct(channelId: string, orgId: string, sp: any) {
+    async upsertProduct(channelId: string, orgId: string, sp: any) {
         const externalId = String(sp.id);
         const tags = sp.tags ? sp.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
 
@@ -346,7 +346,7 @@ export class ShopifySyncService {
         }
     }
 
-    private async upsertOrder(channelId: string, orgId: string, so: any) {
+    async upsertOrder(channelId: string, orgId: string, so: any) {
         const externalId = String(so.id);
 
         let customerId: string | null = null;
@@ -442,7 +442,7 @@ export class ShopifySyncService {
         }
     }
 
-    private async upsertCustomer(channelId: string, orgId: string, sc: any) {
+    async upsertCustomer(channelId: string, orgId: string, sc: any) {
         const externalId = String(sc.id);
         const tags = sc.tags ? sc.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
 
