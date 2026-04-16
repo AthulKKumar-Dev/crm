@@ -282,7 +282,7 @@ export class ShopifyOAuthService {
 
     async registerWebhooks(channelId: string): Promise<void> {
         const { token, shopDomain } = await this.getAccessToken(channelId);
-        const callbackUrl = `${this.appUrl}api/v1/webhooks/shopify`;
+        const callbackUrl = `${this.appUrl}/api/v1/webhooks/shopify`;
 
         for (const topic of this.WEBHOOK_TOPICS) {
             try {
