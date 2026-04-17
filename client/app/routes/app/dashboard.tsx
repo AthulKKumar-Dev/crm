@@ -4,6 +4,7 @@ import { ProfitBarChart } from "~/components/app/profit-bar-chart";
 import { SalesDonutChart } from "~/components/app/sales-donut-chart";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TopProductsPanel } from "~/components/app/top-products-panel";
+import { LowStockProductsPanel } from "~/components/app/low-stock-products-panel";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -136,7 +137,10 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
-        <TopProductsPanel products={dashboard?.topSellingProducts} isLoading={isLoading} currency={orgCurrency} />
+        <div className="flex flex-col gap-4">
+          <TopProductsPanel products={dashboard?.topSellingProducts} isLoading={isLoading} currency={orgCurrency} />
+          <LowStockProductsPanel products={dashboard?.lowStockProducts} isLoading={isLoading} currency={orgCurrency} />
+        </div>
       </div>
     </div>
   );

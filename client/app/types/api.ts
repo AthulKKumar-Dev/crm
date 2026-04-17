@@ -731,6 +731,18 @@ export interface DashboardTopProduct {
   price: string;
 }
 
+/** A low-stock product returned by the dashboard endpoint. */
+export interface DashboardLowStockProduct {
+  id: string;
+  title: string;
+  image: string | null;
+  currentStock: number;
+  lowestVariantStock: number;
+  variantCount: number;
+  price: string;
+  threshold: number;
+}
+
 /** A recent order returned by the dashboard endpoint (subset of full Order). */
 export interface DashboardRecentOrder {
   id: string;
@@ -754,6 +766,7 @@ export interface DashboardOverview {
   totalInventory: number;
   fulfillmentBreakdown: FulfillmentBreakdown;
   topSellingProducts: DashboardTopProduct[];
+  lowStockProducts: DashboardLowStockProduct[];
   recentOrders: DashboardRecentOrder[];
 }
 
