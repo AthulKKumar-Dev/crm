@@ -126,34 +126,54 @@ export class ShopifyOAuthService {
             `https://${query.shop}/admin/api/2024-01/shop.json`,
             { headers: { 'X-Shopify-Access-Token': tokenData.access_token } },
         );
-        const shopData = (await shopResponse.json()) as { shop: { id: number; name: string } };
+        const shopData = (await shopResponse.json()) as {
+            shop: { id: number; name: string; currency: string; iana_timezone?: string };
+        };
 
         // 6. Encrypt and store all credentials
         const encryptedToken = this.encryption.encrypt(tokenData.access_token);
         const encryptedApiKey = this.encryption.encrypt(stateData.clientId);
         const encryptedApiSecret = this.encryption.encrypt(stateData.clientSecret);
 
-        const channel = await this.prisma.channel.create({
-            data: {
-                organizationId: stateData.orgId,
-                name: shopData.shop.name || query.shop,
-                platform: ChannelPlatform.SHOPIFY,
-                status: ChannelStatus.CONNECTED,
-                isEnabled: true,
-                credentials: {
-                    accessToken: encryptedToken,
-                    apiKey: encryptedApiKey,
-                    apiSecret: encryptedApiSecret,
-                    shopDomain: query.shop,
-                    scopes: tokenData.scope,
+        // 7. Create Channel + update Organization currency atomically.
+        // The Shopify shop is the source of truth for the org's currency — merchants
+        // sell in whatever currency their storefront is set to, so we inherit it here
+        // instead of asking during onboarding. Only updates if Shopify returned a
+        // non-empty currency; otherwise leaves the existing org currency alone.
+        const [channel] = await this.prisma.$transaction([
+            this.prisma.channel.create({
+                data: {
+                    organizationId: stateData.orgId,
+                    name: shopData.shop.name || query.shop,
+                    platform: ChannelPlatform.SHOPIFY,
+                    status: ChannelStatus.CONNECTED,
+                    isEnabled: true,
+                    credentials: {
+                        accessToken: encryptedToken,
+                        apiKey: encryptedApiKey,
+                        apiSecret: encryptedApiSecret,
+                        shopDomain: query.shop,
+                        scopes: tokenData.scope,
+                    },
+                    externalStoreId: String(shopData.shop.id),
+                    externalStoreUrl: `https://${query.shop}`,
+                    syncStatus: SyncStatus.IDLE,
                 },
-                externalStoreId: String(shopData.shop.id),
-                externalStoreUrl: `https://${query.shop}`,
-                syncStatus: SyncStatus.IDLE,
-            },
-        });
+            }),
+            ...(shopData.shop.currency
+                ? [
+                    this.prisma.organization.update({
+                        where: { id: stateData.orgId },
+                        data: { currency: shopData.shop.currency },
+                    }),
+                ]
+                : []),
+        ]);
 
-        this.logger.log(`Shopify store connected via OAuth: ${query.shop} → org ${stateData.orgId}`);
+        this.logger.log(
+            `Shopify store connected via OAuth: ${query.shop} → org ${stateData.orgId} ` +
+            `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
+        );
 
         const frontendUrl = this.config.get<string>('frontendUrl');
         const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
@@ -200,27 +220,43 @@ export class ShopifyOAuthService {
         const encryptedApiKey = this.encryption.encrypt(apiKey);
         const encryptedApiSecret = this.encryption.encrypt(apiSecret);
 
-        const channel = await this.prisma.channel.create({
-            data: {
-                organizationId: orgId,
-                name: shopData.shop.name || shopDomain,
-                platform: ChannelPlatform.SHOPIFY,
-                status: ChannelStatus.CONNECTED,
-                isEnabled: true,
-                credentials: {
-                    accessToken: encryptedToken,
-                    apiKey: encryptedApiKey,
-                    apiSecret: encryptedApiSecret,
-                    shopDomain,
-                    scopes: 'custom_app',
+        // Create Channel + update Organization currency atomically.
+        // Same rationale as the OAuth flow: the Shopify shop's currency is the
+        // source of truth for the org's currency.
+        const [channel] = await this.prisma.$transaction([
+            this.prisma.channel.create({
+                data: {
+                    organizationId: orgId,
+                    name: shopData.shop.name || shopDomain,
+                    platform: ChannelPlatform.SHOPIFY,
+                    status: ChannelStatus.CONNECTED,
+                    isEnabled: true,
+                    credentials: {
+                        accessToken: encryptedToken,
+                        apiKey: encryptedApiKey,
+                        apiSecret: encryptedApiSecret,
+                        shopDomain,
+                        scopes: 'custom_app',
+                    },
+                    externalStoreId: String(shopData.shop.id),
+                    externalStoreUrl: `https://${shopDomain}`,
+                    syncStatus: SyncStatus.IDLE,
                 },
-                externalStoreId: String(shopData.shop.id),
-                externalStoreUrl: `https://${shopDomain}`,
-                syncStatus: SyncStatus.IDLE,
-            },
-        });
+            }),
+            ...(shopData.shop.currency
+                ? [
+                    this.prisma.organization.update({
+                        where: { id: orgId },
+                        data: { currency: shopData.shop.currency },
+                    }),
+                ]
+                : []),
+        ]);
 
-        this.logger.log(`Shopify store connected (custom app): ${shopDomain} → org ${orgId}`);
+        this.logger.log(
+            `Shopify store connected (custom app): ${shopDomain} → org ${orgId} ` +
+            `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
+        );
 
         return {
             channelId: channel.id,

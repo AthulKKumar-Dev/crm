@@ -12,6 +12,7 @@ import { useCustomers, useCustomerStats } from "~/hooks/use-customer-queries";
 import { useUpdateCustomerMutation } from "~/hooks/use-customer-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useIndianStates } from "~/hooks/use-gst-queries";
+import { formatCurrency } from "~/lib/utils";
 import type { VipLevel, CustomerListParams, Customer } from "~/types/api";
 
 export function meta() {
@@ -59,6 +60,7 @@ export default function CustomersPage() {
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
+  const orgCurrency = org?.currency ?? "USD";
 
   const params: CustomerListParams = {
     page: currentPage,
@@ -121,7 +123,7 @@ export default function CustomersPage() {
             />
             <StatCard
               label="Avg. Order Value"
-              value={`$${Number(stats.averageOrderValue).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+              value={formatCurrency(stats.averageOrderValue, orgCurrency)}
               change={0}
               icon={<DollarSign className="size-4" />}
             />
@@ -217,7 +219,7 @@ export default function CustomersPage() {
                         {customer.ordersCount}
                       </td>
                       <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
-                        ${Number(customer.totalSpent).toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                        {formatCurrency(customer.totalSpent, orgCurrency)}
                       </td>
                       {gstEnabled && (
                         <td className="px-4 py-3 text-xs font-mono text-muted-foreground">

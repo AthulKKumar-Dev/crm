@@ -1,14 +1,16 @@
 import { useState, useCallback } from "react";
 import { Package, ChevronLeft, ChevronRight, TrendingUp, ShoppingCart, BarChart3, Trophy } from "lucide-react";
 import { Skeleton } from "~/components/ui/skeleton";
+import { formatCurrency } from "~/lib/utils";
 import type { DashboardTopProduct } from "~/types/api";
 
 interface TopProductsPanelProps {
   products?: DashboardTopProduct[];
   isLoading?: boolean;
+  currency: string;
 }
 
-export function TopProductsPanel({ products, isLoading }: TopProductsPanelProps) {
+export function TopProductsPanel({ products, isLoading, currency }: TopProductsPanelProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const total = products?.length ?? 0;
 
@@ -106,7 +108,7 @@ export function TopProductsPanel({ products, isLoading }: TopProductsPanelProps)
           {product.title}
         </h3>
         <p className="text-lg font-bold text-[#CEF17B] mb-4">
-          ${parseFloat(product.price).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          {formatCurrency(product.price, currency)}
         </p>
 
         {/* Stats grid — glassmorphism cards */}
@@ -124,7 +126,9 @@ export function TopProductsPanel({ products, isLoading }: TopProductsPanelProps)
           <div className="rounded-xl bg-white/[0.08] backdrop-blur-sm ring-1 ring-white/10 p-3 text-center">
             <BarChart3 className="size-3.5 text-[#CEF17B] mx-auto mb-1" />
             <p className="text-base font-bold text-white leading-none">
-              ${revenue >= 1000 ? `${(revenue / 1000).toFixed(1)}k` : revenue.toFixed(0)}
+              {revenue >= 1000
+                ? `${formatCurrency(revenue / 1000, currency, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}k`
+                : formatCurrency(revenue, currency, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
             </p>
             <p className="text-[10px] text-white/50 mt-0.5">Revenue</p>
           </div>

@@ -1,9 +1,10 @@
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { Loader2 } from "lucide-react";
 import { useSalesByCategory } from "~/hooks/use-dashboard-queries";
+import { formatCurrency } from "~/lib/utils";
 
 /** Donut chart card showing sales breakdown by product type from real API data. */
-export function SalesDonutChart() {
+export function SalesDonutChart({ currency }: { currency: string }) {
   const { data: salesData, isLoading } = useSalesByCategory();
 
   const chartData = salesData?.data ?? [];
@@ -43,12 +44,12 @@ export function SalesDonutChart() {
                     <Cell key={entry.name} fill={entry.color} />
                   ))}
                 </Pie>
-                <Tooltip formatter={(value) => [`$${Number(value).toLocaleString()}`, ""]} />
+                <Tooltip formatter={(value) => [formatCurrency(Number(value), currency), ""]} />
               </PieChart>
             </ResponsiveContainer>
             <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
               <p className="text-base font-bold text-gray-900 dark:text-gray-100 leading-tight">
-                ${total.toLocaleString()}
+                {formatCurrency(total, currency, { minimumFractionDigits: 0 })}
               </p>
               <p className="text-[10px] text-muted-foreground leading-tight">Total Sales</p>
             </div>
@@ -58,7 +59,7 @@ export function SalesDonutChart() {
             <div>
               <p className="text-[10px] text-muted-foreground">Total Sales</p>
               <p className="text-lg font-bold text-gray-900 dark:text-gray-100">
-                ${total.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                {formatCurrency(total, currency)}
               </p>
             </div>
 
@@ -70,7 +71,7 @@ export function SalesDonutChart() {
                     <span className="text-xs text-muted-foreground">{entry.name}</span>
                   </div>
                   <p className="mt-0.5 pl-4 text-xs font-semibold text-gray-900 dark:text-gray-100">
-                    ${entry.value.toLocaleString()}
+                    {formatCurrency(entry.value, currency, { minimumFractionDigits: 0 })}
                   </p>
                 </div>
               ))}

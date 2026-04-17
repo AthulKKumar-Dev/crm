@@ -8,7 +8,7 @@ import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
-import { cn } from "~/lib/utils";
+import { cn, formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -45,6 +45,7 @@ export default function ProductsPage() {
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
+  const orgCurrency = org?.currency ?? "USD";
 
   const params: ProductListParams = {
     page: currentPage,
@@ -206,8 +207,8 @@ export default function ProductsPage() {
                     <td className="px-4 py-3 text-xs text-muted-foreground">{product.vendor ?? "—"}</td>
                     <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
                       {product.priceRange.min === product.priceRange.max
-                        ? `$${Number(product.priceRange.min).toFixed(2)}`
-                        : `$${Number(product.priceRange.min).toFixed(2)} – $${Number(product.priceRange.max).toFixed(2)}`}
+                        ? formatCurrency(product.priceRange.min, orgCurrency)
+                        : `${formatCurrency(product.priceRange.min, orgCurrency)} – ${formatCurrency(product.priceRange.max, orgCurrency)}`}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <span className={`text-xs font-medium ${product.totalStock === 0 ? "text-red-600" : product.totalStock < 100 ? "text-orange-600" : "text-gray-900 dark:text-gray-100"}`}>

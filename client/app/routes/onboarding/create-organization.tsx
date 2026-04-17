@@ -43,19 +43,12 @@ const TIMEZONES = [
   { label: "Australia/Sydney (AEST/AEDT)", value: "Australia/Sydney" },
 ];
 
-const CURRENCIES = [
-  { label: "USD — US Dollar", value: "USD" },
-  { label: "EUR — Euro", value: "EUR" },
-  { label: "GBP — British Pound", value: "GBP" },
-  { label: "INR — Indian Rupee", value: "INR" },
-  { label: "JPY — Japanese Yen", value: "JPY" },
-  { label: "CAD — Canadian Dollar", value: "CAD" },
-  { label: "AUD — Australian Dollar", value: "AUD" },
-  { label: "NGN — Nigerian Naira", value: "NGN" },
-  { label: "AED — UAE Dirham", value: "AED" },
-];
-
 /* ── Form validation schema ─────────────────────────────── */
+//
+// Note: `currency` is intentionally NOT collected here. It gets auto-populated
+// from the Shopify shop's currency when the user connects their Shopify store
+// (see server/src/channel/shopify-oauth.service.ts). Users without Shopify
+// keep the backend default ("USD") and can change it in Settings → General.
 
 const createOrganizationSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters").max(100),
@@ -63,7 +56,6 @@ const createOrganizationSchema = z.object({
   website: z.string().url("Please enter a valid URL").optional().or(z.literal("")),
   logo: z.string().url("Please enter a valid logo URL").optional().or(z.literal("")),
   timezone: z.string().optional(),
-  currency: z.string().optional(),
 });
 
 type CreateOrganizationFormValues = z.infer<typeof createOrganizationSchema>;
@@ -74,7 +66,8 @@ export function meta() {
 
 /**
  * Onboarding step 2: organization creation form.
- * Collects org name, logo, industry, website, timezone, and currency.
+ * Collects org name, logo, industry, website, and timezone. Currency is
+ * auto-populated from the Shopify shop on channel connect (not asked here).
  */
 export default function CreateOrganizationPage() {
   const navigate = useNavigate();
@@ -93,7 +86,7 @@ export default function CreateOrganizationPage() {
     formState: { errors },
   } = useForm<CreateOrganizationFormValues>({
     resolver: zodResolver(createOrganizationSchema),
-    defaultValues: { name: "", industry: "", website: "", logo: "", timezone: "UTC", currency: "USD" },
+    defaultValues: { name: "", industry: "", website: "", logo: "", timezone: "UTC" },
   });
 
   const logoValue = watch("logo");
@@ -107,7 +100,8 @@ export default function CreateOrganizationPage() {
         website: data.website || undefined,
         logo: data.logo || undefined,
         timezone: data.timezone || undefined,
-        currency: data.currency || undefined,
+        // currency is auto-synced from Shopify on channel connect; backend
+        // default ("USD") covers users who haven't connected a store yet.
       }),
     onSuccess: async (org) => {
       const switchData = await authService.switchOrg({ orgId: org.id });
@@ -305,8 +299,8 @@ export default function CreateOrganizationPage() {
             </div>
           </div>
 
-          {/* Timezone + Currency */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          {/* Timezone (currency is auto-synced from Shopify on channel connect) */}
+          <div className="grid grid-cols-1 gap-4">
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-gray-700">Timezone</label>
               <Select defaultValue="UTC" onValueChange={(selectedTimezone) => setValue("timezone", selectedTimezone)}>
@@ -316,20 +310,6 @@ export default function CreateOrganizationPage() {
                 <SelectContent>
                   {TIMEZONES.map((timezone) => (
                     <SelectItem key={timezone.value} value={timezone.value}>{timezone.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-sm font-medium text-gray-700">Currency</label>
-              <Select defaultValue="USD" onValueChange={(selectedCurrency) => setValue("currency", selectedCurrency)}>
-                <SelectTrigger className="w-full border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 dark:text-gray-100 shadow-sm focus:ring-[#CEF17B]/40">
-                  <SelectValue placeholder="Select currency" />
-                </SelectTrigger>
-                <SelectContent>
-                  {CURRENCIES.map((currency) => (
-                    <SelectItem key={currency.value} value={currency.value}>{currency.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

@@ -10,11 +10,12 @@ import { toast } from "sonner";
 import { EmptyState } from "~/components/app/empty-state";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { Skeleton } from "~/components/ui/skeleton";
-import { cn } from "~/lib/utils";
+import { cn, formatCurrency as fmtCurrency } from "~/lib/utils";
 import { useInvoices, useInvoice, useGstReturn } from "~/hooks/use-invoice-queries";
 import { useCancelInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { invoiceService } from "~/services/invoice.service";
 import { useGstins } from "~/hooks/use-gst-queries";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
 import type {
   InvoiceListParams,
   GstReturnParams,
@@ -59,12 +60,15 @@ const MONTHS = [
   { value: "03", label: "March" },
 ];
 
-function formatCurrency(amount: number, currency = "INR"): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format(amount);
+/**
+ * Hook-backed currency formatter: binds the active org's currency (synced from
+ * Shopify on channel connect) so call sites stay one-arg. Falls back to "INR"
+ * since this page is GST-specific.
+ */
+function useCurrencyFormatter() {
+  const { data: org } = useCurrentOrg();
+  const currency = org?.currency ?? "INR";
+  return (amount: number) => fmtCurrency(amount, currency);
 }
 
 // ── Status badge ────────────────────────────────────────────────────────────
@@ -101,6 +105,7 @@ function GstTypeBadge({ type }: { type: string }) {
 // ── Main Page ───────────────────────────────────────────────────────────────
 
 export default function InvoicesPage() {
+  const formatCurrency = useCurrencyFormatter();
   const [activeView, setActiveView] = useState<"invoices" | "gstr1" | "gstr3b">("invoices");
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -315,6 +320,7 @@ export default function InvoicesPage() {
 // ── Invoice Detail Modal ────────────────────────────────────────────────────
 
 function InvoiceDetailModal({ invoiceId, onClose }: { invoiceId: string; onClose: () => void }) {
+  const formatCurrency = useCurrencyFormatter();
   const { data: invoice, isLoading } = useInvoice(invoiceId);
   const cancelInvoice = useCancelInvoiceMutation();
 
@@ -560,6 +566,7 @@ function GstReturnView({
 // ── GSTR-1 Tables ───────────────────────────────────────────────────────────
 
 function Gstr1Tables({ data }: { data: GstReturnGstr1 }) {
+  const formatCurrency = useCurrencyFormatter();
   return (
     <div className="space-y-6">
       {/* Totals summary */}
@@ -677,6 +684,7 @@ function Gstr1Tables({ data }: { data: GstReturnGstr1 }) {
 // ── GSTR-3B Tables ──────────────────────────────────────────────────────────
 
 function Gstr3bTables({ data }: { data: GstReturnGstr3B }) {
+  const formatCurrency = useCurrencyFormatter();
   return (
     <div className="space-y-6">
       {/* Tax Payable Summary */}

@@ -8,6 +8,8 @@ import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { useDashboard, useExportDashboard } from "~/hooks/use-dashboard-queries";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { formatCurrency } from "~/lib/utils";
 
 export function meta() {
   return [
@@ -19,6 +21,8 @@ export function meta() {
 export default function DashboardPage() {
   const { data: dashboard, isLoading } = useDashboard();
   const { exportCsv, exportJson } = useExportDashboard();
+  const { data: org } = useCurrentOrg();
+  const orgCurrency = org?.currency ?? "USD";
   const recentOrders = dashboard?.recentOrders ?? [];
 
   return (
@@ -65,7 +69,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           label="Total Sales"
-          value={dashboard ? `$${dashboard.totalSales.toLocaleString()}` : undefined}
+          value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
           icon={<Target className="size-4" />}
           linkTo="/orders"
           linkLabel="View Sales"
@@ -99,8 +103,8 @@ export default function DashboardPage() {
 
       {/* Charts row — 2 equal columns */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <ProfitBarChart />
-        <SalesDonutChart />
+        <ProfitBarChart currency={orgCurrency} />
+        <SalesDonutChart currency={orgCurrency} />
       </div>
 
       {/* Bottom row — recent orders table and top products */}
@@ -128,11 +132,11 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <OrdersTable orders={recentOrders} />
+              <OrdersTable orders={recentOrders} currency={orgCurrency} />
             </div>
           )}
         </div>
-        <TopProductsPanel products={dashboard?.topSellingProducts} isLoading={isLoading} />
+        <TopProductsPanel products={dashboard?.topSellingProducts} isLoading={isLoading} currency={orgCurrency} />
       </div>
     </div>
   );
