@@ -93,6 +93,12 @@ export class ChannelController {
       // Non-fatal: sync can be triggered manually later
     }
 
+    try {
+      await this.shopifyOAuth.registerWebhooks(result.channelId);
+    } catch {
+      // Non-fatal: data still syncs via manual/scheduled sync
+    }
+
     return result;
   }
 

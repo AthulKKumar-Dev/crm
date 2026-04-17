@@ -126,34 +126,54 @@ export class ShopifyOAuthService {
             `https://${query.shop}/admin/api/2024-01/shop.json`,
             { headers: { 'X-Shopify-Access-Token': tokenData.access_token } },
         );
-        const shopData = (await shopResponse.json()) as { shop: { id: number; name: string } };
+        const shopData = (await shopResponse.json()) as {
+            shop: { id: number; name: string; currency: string; iana_timezone?: string };
+        };
 
         // 6. Encrypt and store all credentials
         const encryptedToken = this.encryption.encrypt(tokenData.access_token);
         const encryptedApiKey = this.encryption.encrypt(stateData.clientId);
         const encryptedApiSecret = this.encryption.encrypt(stateData.clientSecret);
 
-        const channel = await this.prisma.channel.create({
-            data: {
-                organizationId: stateData.orgId,
-                name: shopData.shop.name || query.shop,
-                platform: ChannelPlatform.SHOPIFY,
-                status: ChannelStatus.CONNECTED,
-                isEnabled: true,
-                credentials: {
-                    accessToken: encryptedToken,
-                    apiKey: encryptedApiKey,
-                    apiSecret: encryptedApiSecret,
-                    shopDomain: query.shop,
-                    scopes: tokenData.scope,
+        // 7. Create Channel + update Organization currency atomically.
+        // The Shopify shop is the source of truth for the org's currency — merchants
+        // sell in whatever currency their storefront is set to, so we inherit it here
+        // instead of asking during onboarding. Only updates if Shopify returned a
+        // non-empty currency; otherwise leaves the existing org currency alone.
+        const [channel] = await this.prisma.$transaction([
+            this.prisma.channel.create({
+                data: {
+                    organizationId: stateData.orgId,
+                    name: shopData.shop.name || query.shop,
+                    platform: ChannelPlatform.SHOPIFY,
+                    status: ChannelStatus.CONNECTED,
+                    isEnabled: true,
+                    credentials: {
+                        accessToken: encryptedToken,
+                        apiKey: encryptedApiKey,
+                        apiSecret: encryptedApiSecret,
+                        shopDomain: query.shop,
+                        scopes: tokenData.scope,
+                    },
+                    externalStoreId: String(shopData.shop.id),
+                    externalStoreUrl: `https://${query.shop}`,
+                    syncStatus: SyncStatus.IDLE,
                 },
-                externalStoreId: String(shopData.shop.id),
-                externalStoreUrl: `https://${query.shop}`,
-                syncStatus: SyncStatus.IDLE,
-            },
-        });
+            }),
+            ...(shopData.shop.currency
+                ? [
+                    this.prisma.organization.update({
+                        where: { id: stateData.orgId },
+                        data: { currency: shopData.shop.currency },
+                    }),
+                ]
+                : []),
+        ]);
 
-        this.logger.log(`Shopify store connected via OAuth: ${query.shop} → org ${stateData.orgId}`);
+        this.logger.log(
+            `Shopify store connected via OAuth: ${query.shop} → org ${stateData.orgId} ` +
+            `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
+        );
 
         const frontendUrl = this.config.get<string>('frontendUrl');
         const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
@@ -200,27 +220,43 @@ export class ShopifyOAuthService {
         const encryptedApiKey = this.encryption.encrypt(apiKey);
         const encryptedApiSecret = this.encryption.encrypt(apiSecret);
 
-        const channel = await this.prisma.channel.create({
-            data: {
-                organizationId: orgId,
-                name: shopData.shop.name || shopDomain,
-                platform: ChannelPlatform.SHOPIFY,
-                status: ChannelStatus.CONNECTED,
-                isEnabled: true,
-                credentials: {
-                    accessToken: encryptedToken,
-                    apiKey: encryptedApiKey,
-                    apiSecret: encryptedApiSecret,
-                    shopDomain,
-                    scopes: 'custom_app',
+        // Create Channel + update Organization currency atomically.
+        // Same rationale as the OAuth flow: the Shopify shop's currency is the
+        // source of truth for the org's currency.
+        const [channel] = await this.prisma.$transaction([
+            this.prisma.channel.create({
+                data: {
+                    organizationId: orgId,
+                    name: shopData.shop.name || shopDomain,
+                    platform: ChannelPlatform.SHOPIFY,
+                    status: ChannelStatus.CONNECTED,
+                    isEnabled: true,
+                    credentials: {
+                        accessToken: encryptedToken,
+                        apiKey: encryptedApiKey,
+                        apiSecret: encryptedApiSecret,
+                        shopDomain,
+                        scopes: 'custom_app',
+                    },
+                    externalStoreId: String(shopData.shop.id),
+                    externalStoreUrl: `https://${shopDomain}`,
+                    syncStatus: SyncStatus.IDLE,
                 },
-                externalStoreId: String(shopData.shop.id),
-                externalStoreUrl: `https://${shopDomain}`,
-                syncStatus: SyncStatus.IDLE,
-            },
-        });
+            }),
+            ...(shopData.shop.currency
+                ? [
+                    this.prisma.organization.update({
+                        where: { id: orgId },
+                        data: { currency: shopData.shop.currency },
+                    }),
+                ]
+                : []),
+        ]);
 
-        this.logger.log(`Shopify store connected (custom app): ${shopDomain} → org ${orgId}`);
+        this.logger.log(
+            `Shopify store connected (custom app): ${shopDomain} → org ${orgId} ` +
+            `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
+        );
 
         return {
             channelId: channel.id,
@@ -265,5 +301,108 @@ export class ShopifyOAuthService {
     // Legacy: verify using platform-level client secret
     private verifyHmac(query: Record<string, string>): void {
         this.verifyHmacWithSecret(query, this.clientSecret);
+    }
+
+    // ─── WEBHOOK MANAGEMENT ───
+
+    private readonly WEBHOOK_TOPICS = [
+        'products/create',
+        'products/update',
+        'products/delete',
+        'orders/create',
+        'orders/updated',
+        'customers/create',
+        'customers/update',
+        'inventory_levels/update',
+    ];
+
+    async registerWebhooks(channelId: string): Promise<void> {
+        const { token, shopDomain } = await this.getAccessToken(channelId);
+        const callbackUrl = `${this.appUrl}/api/v1/webhooks/shopify`;
+
+        for (const topic of this.WEBHOOK_TOPICS) {
+            try {
+                const res = await fetch(
+                    `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Shopify-Access-Token': token,
+                        },
+                        body: JSON.stringify({
+                            webhook: { topic, address: callbackUrl, format: 'json' },
+                        }),
+                    },
+                );
+
+                if (!res.ok) {
+                    const error = await res.text();
+                    this.logger.warn(`Failed to register webhook ${topic}: ${error}`);
+                } else {
+                    this.logger.log(`Registered webhook: ${topic} → ${callbackUrl}`);
+                }
+            } catch (error) {
+                this.logger.error(`Error registering webhook ${topic}`, error);
+            }
+        }
+    }
+
+    async unregisterWebhooks(channelId: string): Promise<void> {
+        try {
+            const { token, shopDomain } = await this.getAccessToken(channelId);
+
+            const res = await fetch(
+                `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                { headers: { 'X-Shopify-Access-Token': token } },
+            );
+
+            if (!res.ok) {
+                this.logger.warn(`Failed to list webhooks for unregistration: ${res.status}`);
+                return;
+            }
+
+            const data = (await res.json()) as { webhooks: { id: number }[] };
+
+            for (const webhook of data.webhooks) {
+                try {
+                    await fetch(
+                        `https://${shopDomain}/admin/api/2024-01/webhooks/${webhook.id}.json`,
+                        {
+                            method: 'DELETE',
+                            headers: { 'X-Shopify-Access-Token': token },
+                        },
+                    );
+                    this.logger.log(`Unregistered webhook ${webhook.id}`);
+                } catch (error) {
+                    this.logger.error(`Error unregistering webhook ${webhook.id}`, error);
+                }
+            }
+        } catch (error) {
+            this.logger.warn('Could not unregister webhooks (credentials may already be cleared)', error);
+        }
+    }
+
+    async getCredentials(channelId: string): Promise<{
+        token: string;
+        shopDomain: string;
+        apiSecret: string;
+    }> {
+        const channel = await this.prisma.channel.findUnique({ where: { id: channelId } });
+        if (!channel || !channel.credentials) {
+            throw new BadRequestException('Channel not found or missing credentials');
+        }
+
+        const creds = channel.credentials as {
+            accessToken: string;
+            shopDomain: string;
+            apiSecret: string;
+        };
+
+        return {
+            token: this.encryption.decrypt(creds.accessToken),
+            shopDomain: creds.shopDomain,
+            apiSecret: this.encryption.decrypt(creds.apiSecret),
+        };
     }
 }

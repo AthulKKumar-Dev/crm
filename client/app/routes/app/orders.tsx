@@ -9,7 +9,7 @@ import { OrdersTable } from "~/components/app/orders-table";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
-import { cn } from "~/lib/utils";
+import { cn, formatCurrency } from "~/lib/utils";
 import { useOrders, useOrderStats, useOrder } from "~/hooks/use-order-queries";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
@@ -35,14 +35,6 @@ function daysAgo(days: number): string {
 
 const DATE_RANGE_MAP: Record<string, number | null> = { all: null, "7d": 7, "30d": 30, "90d": 90 };
 
-function formatCurrency(amount: number, currency = "INR"): string {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format(amount);
-}
-
 export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -52,6 +44,7 @@ export default function OrdersPage() {
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
+  const orgCurrency = org?.currency ?? "USD";
 
   const daysBack = DATE_RANGE_MAP[dateRange];
   const dateFrom = daysBack != null ? daysAgo(daysBack) : undefined;
@@ -161,7 +154,7 @@ export default function OrdersPage() {
             />
             <StatCard
               label="Total Sales"
-              value={`$${Number(stats.totalSales.current).toLocaleString()}`}
+              value={formatCurrency(Number(stats.totalSales.current), orgCurrency)}
               change={formatChange(stats.totalSales.change.direction, stats.totalSales.change.percentage)}
               changeLabel="vs previous period"
               icon={<Target className="size-4" />}
@@ -223,6 +216,7 @@ export default function OrdersPage() {
           <div className="overflow-x-auto">
             <OrdersTable
               orders={orders}
+              currency={orgCurrency}
               showCustomerName
               gstEnabled={gstEnabled}
               onViewDetail={(id) => setSelectedOrderId(id)}
@@ -262,6 +256,7 @@ export default function OrdersPage() {
         <OrderDetailDrawer
           orderId={selectedOrderId}
           gstEnabled={gstEnabled}
+          currency={orgCurrency}
           onClose={() => setSelectedOrderId(null)}
           onGenerateInvoice={(id) => { setSelectedOrderId(null); setInvoiceOrderId(id); }}
         />
@@ -271,6 +266,7 @@ export default function OrdersPage() {
       {invoiceOrderId && (
         <GenerateInvoiceDialog
           orderId={invoiceOrderId}
+          currency={orgCurrency}
           onClose={() => setInvoiceOrderId(null)}
         />
       )}
@@ -283,11 +279,13 @@ export default function OrdersPage() {
 function OrderDetailDrawer({
   orderId,
   gstEnabled,
+  currency,
   onClose,
   onGenerateInvoice,
 }: {
   orderId: string;
   gstEnabled: boolean;
+  currency: string;
   onClose: () => void;
   onGenerateInvoice: (id: string) => void;
 }) {
@@ -355,7 +353,7 @@ function OrderDetailDrawer({
                       <p className="text-[10px] text-muted-foreground">Qty: {item.quantity}</p>
                     </div>
                     <p className="text-xs font-semibold tabular-nums">
-                      {order.currency} {(Number(item.price) * item.quantity).toFixed(2)}
+                      {formatCurrency(Number(item.price) * item.quantity, currency)}
                     </p>
                   </div>
                 ))}
@@ -367,25 +365,25 @@ function OrderDetailDrawer({
               <div className="space-y-1 text-xs">
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Subtotal</span>
-                  <span className="tabular-nums">{order.currency} {Number(order.subtotalPrice).toFixed(2)}</span>
+                  <span className="tabular-nums">{formatCurrency(order.subtotalPrice, currency)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Tax</span>
-                  <span className="tabular-nums">{order.currency} {Number(order.totalTax).toFixed(2)}</span>
+                  <span className="tabular-nums">{formatCurrency(order.totalTax, currency)}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Shipping</span>
-                  <span className="tabular-nums">{order.currency} {Number(order.totalShippingPrice).toFixed(2)}</span>
+                  <span className="tabular-nums">{formatCurrency(order.totalShippingPrice, currency)}</span>
                 </div>
                 {Number(order.totalDiscounts) > 0 && (
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Discounts</span>
-                    <span className="tabular-nums text-red-600">-{order.currency} {Number(order.totalDiscounts).toFixed(2)}</span>
+                    <span className="tabular-nums text-red-600">-{formatCurrency(order.totalDiscounts, currency)}</span>
                   </div>
                 )}
                 <div className="flex justify-between border-t pt-1 font-semibold text-gray-900 dark:text-gray-100">
                   <span>Total</span>
-                  <span className="tabular-nums">{order.currency} {Number(order.totalPrice).toFixed(2)}</span>
+                  <span className="tabular-nums">{formatCurrency(order.totalPrice, currency)}</span>
                 </div>
               </div>
             </div>
@@ -411,7 +409,7 @@ function OrderDetailDrawer({
 
 // ── Generate Invoice Dialog ─────────────────────────────────────────────────
 
-function GenerateInvoiceDialog({ orderId, onClose }: { orderId: string; onClose: () => void }) {
+function GenerateInvoiceDialog({ orderId, currency, onClose }: { orderId: string; currency: string; onClose: () => void }) {
   const { data: order, isLoading: orderLoading } = useOrder(orderId);
   const { data: gstins = [] } = useGstins();
   const { data: states = [] } = useIndianStates();
@@ -524,11 +522,11 @@ function GenerateInvoiceDialog({ orderId, onClose }: { orderId: string; onClose:
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">Subtotal</span>
-                    <span className="tabular-nums">{order.currency} {Number(order.subtotalPrice).toFixed(2)}</span>
+                    <span className="tabular-nums">{formatCurrency(order.subtotalPrice, currency)}</span>
                   </div>
                   <div className="flex justify-between font-semibold text-gray-900 dark:text-gray-100">
                     <span>Total</span>
-                    <span className="tabular-nums">{order.currency} {Number(order.totalPrice).toFixed(2)}</span>
+                    <span className="tabular-nums">{formatCurrency(order.totalPrice, currency)}</span>
                   </div>
                 </div>
               </div>

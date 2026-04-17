@@ -13,6 +13,8 @@ import {
 import { Download, Upload } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { formatCurrency } from "~/lib/utils";
 import {
   ANALYTICS_STATS,
   ANALYTICS_TREND_DATA,
@@ -38,6 +40,9 @@ const CHANNEL_COLOR: Record<string, string> = {
  * traffic by channel, and orders-vs-sessions over time.
  */
 export default function AnalyticsPage() {
+  const { data: org } = useCurrentOrg();
+  const orgCurrency = org?.currency ?? "USD";
+
   return (
     <div className="space-y-6">
       {/* Page header */}
@@ -105,10 +110,10 @@ export default function AnalyticsPage() {
             </defs>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} />
-            <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} tickFormatter={(rawValue) => `$${(rawValue / 1000).toFixed(0)}k`} />
+            <YAxis tick={{ fontSize: 11, fill: "#6b7280" }} axisLine={false} tickLine={false} tickFormatter={(rawValue) => `${formatCurrency(rawValue / 1000, orgCurrency, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}k`} />
             <Tooltip
               contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}
-              formatter={(value) => [`$${Number(value).toLocaleString()}`, "Revenue"]}
+              formatter={(value) => [formatCurrency(Number(value), orgCurrency), "Revenue"]}
             />
             <Area
               type="monotone"
@@ -164,7 +169,7 @@ export default function AnalyticsPage() {
                     <p className="text-xs text-muted-foreground">{channelRow.sessions.toLocaleString()} sessions</p>
                   </div>
                   <div className="text-right shrink-0">
-                    <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">${channelRow.revenue.toLocaleString()}</p>
+                    <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">{formatCurrency(channelRow.revenue, orgCurrency, { minimumFractionDigits: 0 })}</p>
                     <p className="text-xs text-muted-foreground">{conversionRate}% conv.</p>
                   </div>
                 </div>

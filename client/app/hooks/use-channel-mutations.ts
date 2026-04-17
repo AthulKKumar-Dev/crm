@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { channelService } from "~/services/channel.service";
 import { channelKeys } from "~/hooks/use-channel-queries";
+import { orgKeys } from "~/hooks/use-org-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type { UpdateChannelRequest, TriggerSyncRequest, ShopifyInstallRequest, ManualConnectShopifyRequest } from "~/types/api";
 
@@ -68,6 +69,8 @@ export function useManualConnectShopifyMutation() {
     mutationFn: (data: ManualConnectShopifyRequest) => channelService.manualConnectShopify(data),
     onSuccess: (response) => {
       queryClient.invalidateQueries({ queryKey: channelKeys.all });
+      // Org currency is auto-synced from the Shopify shop on connect — refresh org queries so the UI picks it up.
+      queryClient.invalidateQueries({ queryKey: orgKeys.all });
       toast.success(`Shopify store "${response.shopName}" connected!`);
     },
     onError: (error) => handleMutationError(error, "Failed to connect Shopify store."),

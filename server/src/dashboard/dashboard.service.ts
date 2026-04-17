@@ -40,6 +40,7 @@ export class DashboardService {
       topSellingProducts,
       recentOrders,
       totalCustomers,
+      lowStockProducts,
     ] = await Promise.all([
       // 1. Total sales (sum of totalPrice for paid orders)
       this.prisma.order.aggregate({
@@ -97,6 +98,9 @@ export class DashboardService {
           ...(query.channelId && { channelId: query.channelId }),
         },
       }),
+
+      // 9. Top 5 low-stock products (stock > 0 and <= org threshold)
+      this.getLowStockProducts(orgId, query.channelId, 5),
     ]);
 
     // Format fulfillment status breakdown
@@ -125,6 +129,9 @@ export class DashboardService {
 
       // Top 5 selling products
       topSellingProducts,
+
+      // Top 5 low-stock products
+      lowStockProducts,
 
       // Recent 5 orders
       recentOrders: recentOrders.map((order) => ({
@@ -370,6 +377,51 @@ export class DashboardService {
         price: prices.length > 0 ? Math.min(...prices).toFixed(2) : '0.00',
       };
     });
+  }
+
+  // Top N products with the lowest (non-zero) stock, flagged by the org's lowStockThreshold.
+  // Sort by lowest-stock variant ascending so the most urgent items surface first.
+  private async getLowStockProducts(orgId: string, channelId: string | undefined, limit: number) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { lowStockThreshold: true },
+    });
+    const threshold = org?.lowStockThreshold ?? 10;
+
+    const products = await this.prisma.product.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        status: 'ACTIVE',
+        ...(channelId && { channelId }),
+        variants: { some: { inventoryQuantity: { gt: 0, lte: threshold } } },
+      },
+      include: {
+        images: { take: 1, orderBy: { position: 'asc' } },
+        variants: { select: { price: true, inventoryQuantity: true } },
+      },
+    });
+
+    return products
+      .map((product) => {
+        const stocks = product.variants.map((v) => v.inventoryQuantity);
+        const totalStock = stocks.reduce((sum, s) => sum + s, 0);
+        const lowestVariantStock = stocks.length > 0 ? Math.min(...stocks) : 0;
+        const prices = product.variants.map((v) => parseFloat(String(v.price)));
+
+        return {
+          id: product.id,
+          title: product.title,
+          image: product.images[0]?.src ?? null,
+          currentStock: totalStock,
+          lowestVariantStock,
+          variantCount: product.variants.length,
+          price: prices.length > 0 ? Math.min(...prices).toFixed(2) : '0.00',
+          threshold,
+        };
+      })
+      .sort((a, b) => a.lowestVariantStock - b.lowestVariantStock)
+      .slice(0, limit);
   }
 }
 

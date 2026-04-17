@@ -14,7 +14,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
-import { cn } from "~/lib/utils";
+import { cn, formatCurrency } from "~/lib/utils";
 import type { Order, FinancialStatus, FulfillmentStatus } from "~/types/api";
 
 const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
@@ -55,6 +55,7 @@ type OrderRow = Pick<Order, "id" | "name" | "financialStatus" | "fulfillmentStat
 
 interface OrdersTableProps {
   orders: OrderRow[];
+  currency: string;
   showCustomerName?: boolean;
   onViewDetail?: (orderId: string) => void;
   onGenerateInvoice?: (orderId: string) => void;
@@ -62,7 +63,7 @@ interface OrdersTableProps {
 }
 
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions. */
-export function OrdersTable({ orders, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
+export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
   return (
     <Table>
       <TableHeader>
@@ -111,7 +112,7 @@ export function OrdersTable({ orders, showCustomerName = false, onViewDetail, on
               {new Date(order.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
             </TableCell>
             <TableCell className="text-sm font-medium">
-              {order.currency} {Number(order.totalPrice).toFixed(2)}
+              {formatCurrency(order.totalPrice, currency)}
             </TableCell>
             <TableCell>
               <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium", FINANCIAL_CLASSES[order.financialStatus])}>

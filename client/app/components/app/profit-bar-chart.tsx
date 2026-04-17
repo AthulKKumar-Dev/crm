@@ -9,14 +9,16 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown, MoreHorizontal, Loader2 } from "lucide-react";
 import { useMonthlySales } from "~/hooks/use-dashboard-queries";
+import { formatCurrency } from "~/lib/utils";
 
 interface CustomTooltipProps {
   active?: boolean;
   payload?: Array<{ value: number; name: string }>;
   label?: string;
+  currency: string;
 }
 
-function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
+function CustomTooltip({ active, payload, label, currency }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
   return (
     <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-md">
@@ -25,7 +27,7 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
         <p key={entry.name} className="text-muted-foreground">
           {entry.name === "profit" ? "Profit" : "Revenue"}:{" "}
           <span className="font-semibold text-popover-foreground">
-            ${entry.value.toLocaleString()}
+            {formatCurrency(entry.value, currency)}
           </span>
         </p>
       ))}
@@ -34,7 +36,7 @@ function CustomTooltip({ active, payload, label }: CustomTooltipProps) {
 }
 
 /** Bar chart card showing monthly revenue vs. profit from real API data. */
-export function ProfitBarChart() {
+export function ProfitBarChart({ currency }: { currency: string }) {
   const { data: monthlySales, isLoading } = useMonthlySales();
 
   const chartData = monthlySales?.data ?? [];
@@ -59,7 +61,7 @@ export function ProfitBarChart() {
         <>
           <div className="mb-3 flex items-center gap-2">
             <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-              ${totalProfit.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {formatCurrency(totalProfit, currency)}
             </p>
             {profitMargin !== 0 && (
               <span className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-xs font-semibold text-[#084734]">
@@ -91,7 +93,7 @@ export function ProfitBarChart() {
                   tickLine={false}
                 />
                 <YAxis hide />
-                <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
+                <Tooltip content={<CustomTooltip currency={currency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
                 <Bar dataKey="revenue" fill="#e5e7eb" radius={[4, 4, 0, 0]} />
                 <Bar dataKey="profit" fill="#fb923c" radius={[4, 4, 0, 0]} />
               </BarChart>
