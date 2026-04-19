@@ -1,38 +1,118 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Resend } from 'resend';
+import * as nodemailer from 'nodemailer';
+import type { Transporter, SendMailOptions } from 'nodemailer';
 
 @Injectable()
-export class EmailService {
+export class EmailService implements OnModuleInit {
     private readonly logger = new Logger(EmailService.name);
-    private readonly resend: Resend;
+    private readonly transporter: Transporter | null;
     private readonly fromEmail: string;
     private readonly fromName: string;
+    private readonly replyTo: string | undefined;
     private readonly frontendUrl: string;
     private readonly isDev: boolean;
 
     constructor(private readonly config: ConfigService) {
-        this.resend = new Resend(this.config.get<string>('resend.apiKey'));
-        this.fromEmail = this.config.get<string>('resend.fromEmail')!;
-        this.fromName = this.config.get<string>('resend.fromName')!;
+        this.fromEmail = this.config.get<string>('smtp.fromEmail')!;
+        this.fromName = this.config.get<string>('smtp.fromName')!;
+        this.replyTo = this.config.get<string>('smtp.replyTo');
         this.frontendUrl = this.config.get<string>('frontendUrl')!;
         this.isDev = this.config.get('nodeEnv') !== 'production';
+
+        const host = this.config.get<string>('smtp.host');
+        const user = this.config.get<string>('smtp.user');
+        const pass = this.config.get<string>('smtp.pass');
+
+        // if (!host || !user || !pass) {
+        //     this.transporter = null;
+        //     if (!this.isDev) {
+        //         this.logger.error(
+        //             'SMTP is not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing). Emails will fail in production.',
+        //         );
+        //     }
+        //     return;
+        // }
+
+        this.transporter = nodemailer.createTransport({
+            host,
+            port: this.config.get<number>('smtp.port')!,
+            secure: this.config.get<boolean>('smtp.secure')!,
+            auth: { user, pass },
+            pool: true,
+            maxConnections: 5,
+            maxMessages: 100,
+            connectionTimeout: 10_000,
+            greetingTimeout: 10_000,
+            socketTimeout: 20_000,
+        });
+    }
+
+    async onModuleInit(): Promise<void> {
+        if (!this.transporter || this.isDev) return;
+        try {
+            await this.transporter.verify();
+            this.logger.log('SMTP transporter verified — ready to send mail.');
+        } catch (err) {
+            this.logger.error('SMTP verification failed at startup.', err as Error);
+        }
     }
 
     private get from(): string {
         return `${this.fromName} <${this.fromEmail}>`;
     }
 
+    private htmlToText(html: string): string {
+        return html
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private async send(options: SendMailOptions, context: string): Promise<void> {
+        if (!this.transporter) {
+            this.logger.warn(`[${context}] Skipped — SMTP not configured.`);
+            return;
+        }
+        console.log(options);
+        console.log(this.from);
+        console.log(this.replyTo);
+        // console.log(this.htmlToText(options.html));\
+        console.log("Sending email...");
+        const payload: SendMailOptions = {
+            ...options,
+            from: options.from ?? this.from,
+            replyTo: options.replyTo ?? this.replyTo,
+            text:
+                options.text ??
+                (typeof options.html === 'string' ? this.htmlToText(options.html) : undefined),
+        };
+        try {
+            await this.transporter.sendMail(payload);
+            this.logger.log(`[${context}] Email sent to ${payload.to}`);
+        } catch (err) {
+            this.logger.warn(`[${context}] First attempt failed, retrying once...`, err as Error);
+            try {
+                await this.transporter.sendMail(payload);
+                this.logger.log(`[${context}] Email sent to ${payload.to} (after retry)`);
+            } catch (retryErr) {
+                this.logger.error(
+                    `[${context}] Failed to send email to ${payload.to}`,
+                    retryErr as Error,
+                );
+            }
+        }
+    }
+
     async sendVerificationCode(email: string, code: string): Promise<void> {
-        // In development, just log to console (no real email sent)
+        console.log("Sending verification code...", email, code);
         if (this.isDev) {
             this.logger.log(`[DEV] Verification code for ${email}: ${code}`);
             return;
         }
-
-        try {
-            await this.resend.emails.send({
-                from: this.from,
+        await this.send(
+            {
                 to: email,
                 subject: 'Your verification code',
                 html: `
@@ -42,12 +122,9 @@ export class EmailService {
                     <p>This code expires in 10 minutes.</p>
                     <p>If you didn't create an account, you can safely ignore this email.</p>
                 `,
-            });
-            this.logger.log(`Verification email sent to ${email}`);
-        } catch (error) {
-            this.logger.error(`Failed to send verification email to ${email}`, error);
-            // Don't throw — email failure shouldn't block signup
-        }
+            },
+            'verification',
+        );
     }
 
     async sendPasswordResetLink(email: string, token: string): Promise<void> {
@@ -58,9 +135,8 @@ export class EmailService {
             return;
         }
 
-        try {
-            await this.resend.emails.send({
-                from: this.from,
+        await this.send(
+            {
                 to: email,
                 subject: 'Reset your password',
                 html: `
@@ -70,11 +146,9 @@ export class EmailService {
                     <p>This link expires in 1 hour.</p>
                     <p>If you didn't request this, you can safely ignore this email.</p>
                 `,
-            });
-            this.logger.log(`Password reset email sent to ${email}`);
-        } catch (error) {
-            this.logger.error(`Failed to send password reset email to ${email}`, error);
-        }
+            },
+            'password-reset',
+        );
     }
 
     async sendTeamInvite(email: string, orgName: string, token: string): Promise<void> {
@@ -85,9 +159,8 @@ export class EmailService {
             return;
         }
 
-        try {
-            await this.resend.emails.send({
-                from: this.from,
+        await this.send(
+            {
                 to: email,
                 subject: `You're invited to join ${orgName}`,
                 html: `
@@ -97,10 +170,8 @@ export class EmailService {
                     <p>This invite expires in 7 days.</p>
                     <p>If you don't recognize this organization, you can safely ignore this email.</p>
                 `,
-            });
-            this.logger.log(`Invite email sent to ${email} for ${orgName}`);
-        } catch (error) {
-            this.logger.error(`Failed to send invite email to ${email}`, error);
-        }
+            },
+            'team-invite',
+        );
     }
 }

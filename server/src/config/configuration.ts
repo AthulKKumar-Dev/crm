@@ -13,10 +13,15 @@ export default () => ({
         accessExpires: process.env.JWT_ACCESS_EXPIRES,
         refreshExpires: process.env.JWT_REFRESH_EXPIRES,
     },
-    resend: {
-        apiKey: process.env.RESEND_API_KEY,
+    smtp: {
+        host: process.env.SMTP_HOST,
+        port: parseInt(process.env.SMTP_PORT ?? '587', 10),
+        secure: process.env.SMTP_SECURE === 'true',
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
         fromEmail: process.env.FROM_EMAIL || 'noreply@yourcrm.com',
         fromName: process.env.FROM_NAME || 'YourCRM',
+        replyTo: process.env.REPLY_TO_EMAIL || undefined,
     },
     shopify: {
         clientId: process.env.SHOPIFY_CLIENT_ID,
