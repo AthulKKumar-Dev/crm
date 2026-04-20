@@ -41,6 +41,9 @@ export interface User {
   updatedAt: string;
 }
 
+/** Metric used to decide a customer's loyalty tier. */
+export type LoyaltyMetric = "ORDERS" | "TOTAL_SPENT";
+
 /** Full organization entity used throughout the frontend. */
 export interface Organization {
   id: string;
@@ -54,6 +57,14 @@ export interface Organization {
   website: string | null;
   billingPlan: "FREE" | "STARTER" | "GROWTH" | "ENTERPRISE";
   onboardingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
+  // Loyalty fields: optional here because the auth-store membership can be
+  // assembled client-side from a trimmed onboarding response. The full
+  // `OrgResponse` from GET /organizations/{id} always has them.
+  loyaltyMetric?: LoyaltyMetric;
+  loyaltyBronzeMin?: number;
+  loyaltySilverMin?: number;
+  loyaltyGoldMin?: number;
+  loyaltyPlatinumMin?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -227,6 +238,11 @@ export interface OrgResponse {
   website: string | null;
   lowStockThreshold: number;
   gstEnabled: boolean;
+  loyaltyMetric: LoyaltyMetric;
+  loyaltyBronzeMin: number;
+  loyaltySilverMin: number;
+  loyaltyGoldMin: number;
+  loyaltyPlatinumMin: number;
   billingPlan: "FREE" | "STARTER" | "GROWTH" | "ENTERPRISE";
   onboardingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
   role: UserRole;
@@ -254,6 +270,18 @@ export interface UpdateOrganizationRequest {
   website?: string;
   lowStockThreshold?: number;
   gstEnabled?: boolean;
+  // Loyalty thresholds: send all four together (monotonic ascending > 0).
+  loyaltyMetric?: LoyaltyMetric;
+  loyaltyBronzeMin?: number;
+  loyaltySilverMin?: number;
+  loyaltyGoldMin?: number;
+  loyaltyPlatinumMin?: number;
+}
+
+/** Response from POST /loyalty/recompute. */
+export interface RecomputeLoyaltyResponse {
+  updated: number;
+  total: number;
 }
 
 // ─── Member Types ─────────────────────────────────────────────────────────

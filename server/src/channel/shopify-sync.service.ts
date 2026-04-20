@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 
 const API_VERSION = '2024-01';
 const PAGE_LIMIT = 250;
@@ -21,6 +22,7 @@ export class ShopifySyncService {
     constructor(
         private readonly prisma: PrismaService,
         private readonly shopifyOAuth: ShopifyOAuthService,
+        private readonly loyalty: LoyaltyService,
     ) { }
 
     async runSync(channelId: string, orgId: string, entityTypes: string[]): Promise<void> {
@@ -446,7 +448,7 @@ export class ShopifySyncService {
         const externalId = String(sc.id);
         const tags = sc.tags ? sc.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
 
-        await this.prisma.customer.upsert({
+        const customer = await this.prisma.customer.upsert({
             where: { channelId_externalId: { channelId, externalId } },
             create: {
                 organizationId: orgId, channelId, externalId,
@@ -465,8 +467,16 @@ export class ShopifySyncService {
                 totalSpent: sc.total_spent || '0', tags, note: sc.note,
                 addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
                 externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
-                // NOTE: vipLevel, internalNotes, segments are NOT overwritten (CRM-only fields)
+                // NOTE: vipLevel is auto-assigned by LoyaltyService below (based on org thresholds).
+                // internalNotes, segments are still NOT overwritten (CRM-only fields).
             },
+            select: { id: true },
+        });
+
+        // Auto-tier the customer against the org's loyalty thresholds.
+        // Failures here must not fail the whole customer sync.
+        await this.loyalty.recomputeForCustomer(customer.id, orgId).catch((err) => {
+            this.logger.warn(`Loyalty recompute failed for customer ${customer.id}: ${err?.message ?? err}`);
         });
     }
 

@@ -10,10 +10,12 @@ import { ShopifySyncService } from './shopify-sync.service';
 import { SyncProcessor } from './sync.processor';
 import { EncryptionService } from './encryption.service';
 import { SYNC_QUEUE } from './sync.queue';
+import { LoyaltyModule } from '../loyalty/loyalty.module';
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: SYNC_QUEUE }),
+    LoyaltyModule,
   ],
   controllers: [ChannelController, ShopifyWebhookController, InstagramWebhookController],
   providers: [

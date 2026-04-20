@@ -24,15 +24,15 @@ export class EmailService implements OnModuleInit {
         const user = this.config.get<string>('smtp.user');
         const pass = this.config.get<string>('smtp.pass');
 
-        // if (!host || !user || !pass) {
-        //     this.transporter = null;
-        //     if (!this.isDev) {
-        //         this.logger.error(
-        //             'SMTP is not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing). Emails will fail in production.',
-        //         );
-        //     }
-        //     return;
-        // }
+        if (!host || !user || !pass) {
+            this.transporter = null;
+            if (!this.isDev) {
+                this.logger.error(
+                    'SMTP is not configured (SMTP_HOST/SMTP_USER/SMTP_PASS missing). Emails will fail in production.',
+                );
+            }
+            return;
+        }
 
         this.transporter = nodemailer.createTransport({
             host,

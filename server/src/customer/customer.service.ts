@@ -1,12 +1,16 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import { QueryCustomersDto } from './dto/query-customers.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 
 @Injectable()
 export class CustomerService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly loyalty: LoyaltyService,
+  ) { }
 
   async findAll(orgId: string, query: QueryCustomersDto) {
     const where: Prisma.CustomerWhereInput = { organizationId: orgId, deletedAt: null };
@@ -88,7 +92,18 @@ export class CustomerService {
       });
     }
 
-    return this.prisma.customer.update({ where: { id }, data: dto });
+    const updated = await this.prisma.customer.update({ where: { id }, data: dto });
+
+    // Defensive: if a future change to UpdateCustomerDto exposes ordersCount
+    // or totalSpent, the tier needs to stay in sync. Cheap to call and a no-op
+    // when the computed tier matches the current value.
+    const touchedMetricField =
+      (dto as any).ordersCount !== undefined || (dto as any).totalSpent !== undefined;
+    if (touchedMetricField) {
+      await this.loyalty.recomputeForCustomer(id, orgId).catch(() => undefined);
+    }
+
+    return updated;
   }
 
   async getTags(orgId: string) {
