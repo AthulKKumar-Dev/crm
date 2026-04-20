@@ -128,7 +128,7 @@ export class EmailService implements OnModuleInit {
     }
 
     async sendPasswordResetLink(email: string, token: string): Promise<void> {
-        const resetLink = `${this.frontendUrl}/reset-password?token=${token}`;
+        const resetLink = `${this.frontendUrl}/auth/reset-password?token=${token}`;
 
         if (this.isDev) {
             this.logger.log(`[DEV] Password reset for ${email}: ${resetLink}`);
@@ -152,7 +152,7 @@ export class EmailService implements OnModuleInit {
     }
 
     async sendTeamInvite(email: string, orgName: string, token: string): Promise<void> {
-        const inviteLink = `${this.frontendUrl}/invite?token=${token}`;
+        const inviteLink = `${this.frontendUrl}/auth/invite?token=${token}`;
 
         if (this.isDev) {
             this.logger.log(`[DEV] Team invite for ${email} to join ${orgName}: ${inviteLink}`);
