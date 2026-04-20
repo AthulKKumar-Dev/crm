@@ -35,7 +35,9 @@ import {
   useCreateCollectionOverrideMutation, useDeleteCollectionOverrideMutation,
 } from "~/hooks/use-gst-mutations";
 import { useProductTypes } from "~/hooks/use-product-queries";
-import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection } from "~/types/api";
+import { useRecomputeLoyaltyMutation } from "~/hooks/use-loyalty-mutations";
+import { formatCurrency } from "~/lib/utils";
+import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
 
 export function meta() {
   return [{ title: "Settings | Collabo CRM" }];
@@ -46,6 +48,7 @@ export function meta() {
 const TABS = [
   { id: "general", label: "General", icon: Building2 },
   { id: "tax-gst", label: "Tax & GST", icon: Receipt },
+  { id: "loyalty", label: "Loyalty Tiers", icon: Star },
   { id: "security", label: "Security", icon: Lock },
   // { id: "notifications", label: "Notifications", icon: Bell },
   { id: "members", label: "Team Members", icon: Users },
@@ -234,6 +237,182 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
         <X className="size-4" />
       </button>
     </div>
+  );
+}
+
+// ── Loyalty Tiers Tab ───────────────────────────────────────────────────────
+
+const loyaltySchema = z.object({
+  loyaltyMetric: z.enum(["ORDERS", "TOTAL_SPENT"]),
+  loyaltyBronzeMin: z.coerce.number().positive("Must be greater than 0"),
+  loyaltySilverMin: z.coerce.number().positive("Must be greater than 0"),
+  loyaltyGoldMin: z.coerce.number().positive("Must be greater than 0"),
+  loyaltyPlatinumMin: z.coerce.number().positive("Must be greater than 0"),
+}).refine((v) => v.loyaltyBronzeMin < v.loyaltySilverMin, {
+  path: ["loyaltySilverMin"], message: "Silver must be greater than Bronze",
+}).refine((v) => v.loyaltySilverMin < v.loyaltyGoldMin, {
+  path: ["loyaltyGoldMin"], message: "Gold must be greater than Silver",
+}).refine((v) => v.loyaltyGoldMin < v.loyaltyPlatinumMin, {
+  path: ["loyaltyPlatinumMin"], message: "Platinum must be greater than Gold",
+});
+
+type LoyaltyForm = z.infer<typeof loyaltySchema>;
+
+function LoyaltyTab({ org }: { org: OrgResponse }) {
+  const updateOrg = useUpdateOrganizationMutation(org.id);
+  const recompute = useRecomputeLoyaltyMutation();
+  const [confirmRecompute, setConfirmRecompute] = useState(false);
+
+  const {
+    register, handleSubmit, watch, reset,
+    formState: { errors, isDirty },
+  } = useForm<LoyaltyForm>({
+    resolver: zodResolver(loyaltySchema),
+    defaultValues: {
+      loyaltyMetric: (org.loyaltyMetric ?? "ORDERS") as LoyaltyMetric,
+      loyaltyBronzeMin: Number(org.loyaltyBronzeMin ?? 1),
+      loyaltySilverMin: Number(org.loyaltySilverMin ?? 5),
+      loyaltyGoldMin: Number(org.loyaltyGoldMin ?? 15),
+      loyaltyPlatinumMin: Number(org.loyaltyPlatinumMin ?? 30),
+    },
+  });
+
+  const metric = watch("loyaltyMetric");
+  const unitLabel = metric === "ORDERS" ? "orders" : `${org.currency} spent`;
+  const exampleValue = metric === "ORDERS" ? "5" : formatCurrency(500, org.currency, { minimumFractionDigits: 0 });
+
+  function onSubmit(values: LoyaltyForm) {
+    updateOrg.mutate(values, {
+      onSuccess: () => reset(values),
+    });
+  }
+
+  function handleRecompute() {
+    setConfirmRecompute(false);
+    recompute.mutate();
+  }
+
+  return (
+    <>
+      <Section
+        title="Loyalty Tiers"
+        description="Auto-categorize customers into Bronze / Silver / Gold / Platinum based on how much they've ordered."
+      >
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+          <Field
+            label="Tier metric"
+            hint="Which customer metric decides their tier?"
+          >
+            <Select
+              value={metric}
+              onValueChange={(value) => {
+                // react-hook-form's setValue via register doesn't hook into a ui Select
+                // so write through the form ref.
+                reset({ ...watch(), loyaltyMetric: value as LoyaltyMetric }, { keepDirty: true });
+              }}
+            >
+              <SelectTrigger className="h-9 w-full border-input bg-white dark:bg-gray-900 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ORDERS">Orders placed</SelectItem>
+                <SelectItem value="TOTAL_SPENT">Total spent</SelectItem>
+              </SelectContent>
+            </Select>
+            {metric === "TOTAL_SPENT" && (
+              <p className="mt-1.5 text-[10px] text-orange-600">
+                Total spent is in each customer's original order currency. For multi-currency orgs, prefer Orders.
+              </p>
+            )}
+          </Field>
+
+          {(["loyaltyBronzeMin", "loyaltySilverMin", "loyaltyGoldMin", "loyaltyPlatinumMin"] as const).map((name) => {
+            const tierLabel = name.replace("loyalty", "").replace("Min", "");
+            return (
+              <Field
+                key={name}
+                label={`${tierLabel} minimum`}
+                hint={`Customers at or above this ${unitLabel} become ${tierLabel}. (e.g. ${exampleValue})`}
+              >
+                <input
+                  type="number"
+                  // step={metric === "ORDERS" ? "1" : "0.01"}
+                  min="1"
+                  {...register(name, { valueAsNumber: true })}
+                  className="h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs text-gray-900 dark:text-gray-100 shadow-sm focus:border-[#CEF17B] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/40"
+                />
+                {errors[name] && (
+                  <p className="mt-1 text-[10px] text-red-500">{errors[name]?.message as string}</p>
+                )}
+              </Field>
+            );
+          })}
+
+          <div className="flex items-center justify-between gap-3 border-t pt-4">
+            <p className="text-[10px] text-muted-foreground">
+              Saving changes only stores the new thresholds — click "Recompute tiers" to apply them to existing customers.
+            </p>
+            <button
+              type="submit"
+              disabled={!isDirty || updateOrg.isPending}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {updateOrg.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Check className="size-3.5" />}
+              Save thresholds
+            </button>
+          </div>
+        </form>
+      </Section>
+
+      <Section
+        title="Recompute all customer tiers"
+        description="Re-evaluates every customer's tier against the current thresholds. Run this after changing thresholds or the metric."
+      >
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-[10px] text-muted-foreground">
+            {isDirty
+              ? "Save your thresholds first before recomputing."
+              : "New orders sync their customer's tier automatically. Use this for a one-time catch-up across all customers."}
+          </p>
+          <button
+            type="button"
+            onClick={() => setConfirmRecompute(true)}
+            disabled={isDirty || recompute.isPending}
+            className="shrink-0 inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {recompute.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <Star className="size-3.5" />}
+            Recompute tiers
+          </button>
+        </div>
+      </Section>
+
+      {confirmRecompute && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setConfirmRecompute(false)}>
+          <div className="w-full max-w-sm rounded-xl bg-white dark:bg-gray-900 p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recompute customer tiers?</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Every customer will be re-evaluated against the current thresholds. Manual VIP overrides will be replaced.
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmRecompute(false)}
+                className="inline-flex h-8 items-center rounded-lg px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRecompute}
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors"
+              >
+                <Check className="size-3.5" /> Recompute
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1203,7 +1382,7 @@ export default function SettingsPage() {
                 </form>
               </Section>
 
-              <Section title="Two-Factor Authentication" description="Add an extra layer of security.">
+              {/* <Section title="Two-Factor Authentication" description="Add an extra layer of security.">
                 <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3">
                     <div className="flex size-10 items-center justify-center rounded-full bg-[#CEF17B]/25">
@@ -1220,7 +1399,7 @@ export default function SettingsPage() {
                     {authUser?.twoFactorEnabled ? "Disable 2FA" : "Enable 2FA"}
                   </button>
                 </div>
-              </Section>
+              </Section> */}
 
               <div className="rounded-xl bg-white dark:bg-gray-900 p-6 shadow-sm ring-1 ring-red-100">
                 <div className="flex items-start gap-3">
@@ -1425,6 +1604,11 @@ export default function SettingsPage() {
           {/* ─── TAX & GST ─── */}
           {activeTab === "tax-gst" && org && (
             <TaxGstTab orgId={org.id} gstEnabled={org.gstEnabled ?? false} />
+          )}
+
+          {/* ─── LOYALTY TIERS ─── */}
+          {activeTab === "loyalty" && org && (
+            <LoyaltyTab org={org} />
           )}
 
           {/* ─── APPEARANCE ─── */}

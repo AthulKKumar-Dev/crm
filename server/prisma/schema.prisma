@@ -134,6 +134,11 @@ enum VipLevel {
   PLATINUM
 }
 
+enum LoyaltyMetric {
+  ORDERS
+  TOTAL_SPENT
+}
+
 model User {
   id                 String    @id @default(cuid())
   email              String    @unique
@@ -176,6 +181,11 @@ model Organization {
   stripeSubscriptionId String?          @unique @map("stripe_subscription_id")
   lowStockThreshold    Int              @default(10) @map("low_stock_threshold")
   gstEnabled           Boolean          @default(false) @map("gst_enabled")
+  loyaltyMetric        LoyaltyMetric    @default(ORDERS) @map("loyalty_metric")
+  loyaltyBronzeMin     Decimal          @default(1) @db.Decimal(12, 2) @map("loyalty_bronze_min")
+  loyaltySilverMin     Decimal          @default(5) @db.Decimal(12, 2) @map("loyalty_silver_min")
+  loyaltyGoldMin       Decimal          @default(15) @db.Decimal(12, 2) @map("loyalty_gold_min")
+  loyaltyPlatinumMin   Decimal          @default(30) @db.Decimal(12, 2) @map("loyalty_platinum_min")
   onboardingStatus     OnboardingStatus @default(PENDING) @map("onboarding_status")
   onboardingData       Json?            @map("onboarding_data") @db.JsonB
   metadata             Json?            @db.JsonB

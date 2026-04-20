@@ -87,9 +87,14 @@ services:
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
 
       # Optional integrations
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
       FROM_EMAIL: ${FROM_EMAIL:-noreply@yourcrm.com}
       FROM_NAME: ${FROM_NAME:-Collabo CRM}
+      REPLY_TO_EMAIL: ${REPLY_TO_EMAIL:-}
       SHOPIFY_CLIENT_ID: ${SHOPIFY_CLIENT_ID:-}
       SHOPIFY_CLIENT_SECRET: ${SHOPIFY_CLIENT_SECRET:-}
       META_APP_ID: ${META_APP_ID:-}

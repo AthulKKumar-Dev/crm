@@ -29,6 +29,7 @@ import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { GstModule } from './gst/gst.module';
 import { InvoiceModule } from './invoice/invoice.module';
+import { LoyaltyModule } from './loyalty/loyalty.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { InvoiceModule } from './invoice/invoice.module';
     DashboardModule,
     GstModule,
     InvoiceModule,
+    LoyaltyModule,
   ],
   controllers: [AppController],
   providers: [
