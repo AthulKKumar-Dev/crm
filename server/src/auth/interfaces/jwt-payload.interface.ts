@@ -5,6 +5,10 @@ export interface JwtPayload {
     email: string;
     orgId?: string;
     role?: UserRole;
+    /** Global Collabo-team flag. Present and `true` only for super admins. */
+    isSuperAdmin?: boolean;
+    /** During impersonation, this is the super admin's user ID. Absent otherwise. */
+    impersonatedBy?: string;
 }
 
 export interface SessionPayload extends JwtPayload {

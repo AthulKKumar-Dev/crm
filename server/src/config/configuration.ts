@@ -34,4 +34,8 @@ export default () => ({
         webhookVerifyToken: process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN,
     },
     encryptionKey: process.env.ENCRYPTION_KEY || undefined,
+    superAdminEmails: (process.env.SUPER_ADMIN_EMAILS || '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean),
 });

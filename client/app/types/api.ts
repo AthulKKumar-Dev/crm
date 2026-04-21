@@ -39,6 +39,8 @@ export interface User {
   lastLoginAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Collabo-team-only global admin flag. Controlled server-side via SUPER_ADMIN_EMAILS env. */
+  isSuperAdmin?: boolean;
 }
 
 /** Metric used to decide a customer's loyalty tier. */

@@ -154,15 +154,39 @@ model User {
   twoFactorSecret    String?   @map("two_factor_secret") // TOTP secret, encrypted
   lastLoginAt        DateTime? @map("last_login_at")
   deletedAt          DateTime? @map("deleted_at")
+  isSuperAdmin       Boolean   @default(false) @map("is_super_admin") // Collabo-team-only global flag
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
   memberships         OrganizationMember[]
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  impersonationsMade  ImpersonationLog[]   @relation("ImpersonatorLogs")
+  impersonationsOn    ImpersonationLog[]   @relation("ImpersonatedLogs")
 
   @@index([email])
+  @@index([isSuperAdmin])
   @@map("users")
+}
+
+/// Audit log of super-admin impersonation sessions.
+model ImpersonationLog {
+  id           String    @id @default(cuid())
+  superAdminId String    @map("super_admin_id")
+  targetUserId String    @map("target_user_id")
+  targetOrgId  String?   @map("target_org_id")
+  startedAt    DateTime  @default(now()) @map("started_at")
+  endedAt      DateTime? @map("ended_at")
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
+
+  superAdmin User @relation("ImpersonatorLogs", fields: [superAdminId], references: [id])
+  targetUser User @relation("ImpersonatedLogs", fields: [targetUserId], references: [id])
+
+  @@index([superAdminId])
+  @@index([targetUserId])
+  @@index([startedAt])
+  @@map("impersonation_logs")
 }
 
 model Organization {

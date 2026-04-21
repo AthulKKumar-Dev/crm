@@ -19,6 +19,7 @@ import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { OrgRequiredGuard } from './auth/guards/org-required.guard';
+import { SuperAdminGuard } from './auth/guards/super-admin.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
 import { EmailModule } from './email/email.module';
@@ -30,6 +31,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { GstModule } from './gst/gst.module';
 import { InvoiceModule } from './invoice/invoice.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -68,6 +70,7 @@ import { LoyaltyModule } from './loyalty/loyalty.module';
     GstModule,
     InvoiceModule,
     LoyaltyModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [
@@ -76,6 +79,7 @@ import { LoyaltyModule } from './loyalty/loyalty.module';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: OrgRequiredGuard },
+    { provide: APP_GUARD, useClass: SuperAdminGuard },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
     { provide: APP_FILTER, useClass: PrismaExceptionFilter },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },

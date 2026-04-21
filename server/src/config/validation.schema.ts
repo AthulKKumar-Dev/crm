@@ -16,4 +16,5 @@ export const validationSchema = Joi.object({
     INSTAGRAM_WEBHOOK_VERIFY_TOKEN: Joi.string().optional(),
     WHATSAPP_WEBHOOK_VERIFY_TOKEN: Joi.string().optional(),
     WHATSAPP_CONFIG_ID: Joi.string().optional(),
+    SUPER_ADMIN_EMAILS: Joi.string().allow('').optional(),
 });
