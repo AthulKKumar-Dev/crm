@@ -10,6 +10,7 @@ import {
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
+import { WhatsAppConnectDialog } from "~/components/app/whatsapp-connect-dialog";
 import { useChannels } from "~/hooks/use-channel-queries";
 import { useTriggerSyncMutation, useDisconnectChannelMutation } from "~/hooks/use-channel-mutations";
 import type { ChannelPlatform, ChannelStatus, SyncStatus } from "~/types/api";
@@ -111,6 +112,7 @@ const INTEGRATIONS: Integration[] = [
 export default function ChannelPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isShopifyDialogOpen, setIsShopifyDialogOpen] = useState(false);
+  const [isWhatsAppDialogOpen, setIsWhatsAppDialogOpen] = useState(false);
   const [integrationSearch, setIntegrationSearch] = useState("");
 
   const { data: channels, isLoading } = useChannels();
@@ -259,6 +261,7 @@ export default function ChannelPage() {
               onConnect={(integrationId) => {
                   setIsDialogOpen(false);
                   if (integrationId === "shopify") setIsShopifyDialogOpen(true);
+                  if (integrationId === "whatsapp") setIsWhatsAppDialogOpen(true);
                 }}
             />
           </div>
@@ -281,7 +284,11 @@ export default function ChannelPage() {
         onOpenChange={setIsShopifyDialogOpen}
       />
 
-      {/* WhatsApp dialog will be added when WhatsApp integration is ready */}
+      {/* WhatsApp Embedded Signup dialog */}
+      <WhatsAppConnectDialog
+        open={isWhatsAppDialogOpen}
+        onOpenChange={setIsWhatsAppDialogOpen}
+      />
     </div>
   );
 }

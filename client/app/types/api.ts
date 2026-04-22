@@ -39,6 +39,8 @@ export interface User {
   lastLoginAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Collabo-team-only global admin flag. Controlled server-side via SUPER_ADMIN_EMAILS env. */
+  isSuperAdmin?: boolean;
 }
 
 /** Metric used to decide a customer's loyalty tier. */
@@ -469,6 +471,24 @@ export interface ManualConnectShopifyResponse {
 /** Response containing the OAuth redirect URL. */
 export interface OAuthInstallResponse {
   authUrl: string;
+}
+
+/** Response from POST /channels/whatsapp/install — config for the Meta JS SDK. */
+export interface WhatsAppInstallResponse {
+  configId: string;
+  state: string;
+}
+
+/** Payload for POST /channels/whatsapp/callback — the code returned by FB.login. */
+export interface WhatsAppCallbackRequest {
+  code: string;
+  state: string;
+}
+
+/** Response from POST /channels/whatsapp/callback after the channel is created. */
+export interface WhatsAppCallbackResponse {
+  channelId: string;
+  redirectUrl: string;
 }
 
 // ─── Product Types ───────────────────────────────────────────────────────────

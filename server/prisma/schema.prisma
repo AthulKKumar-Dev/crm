@@ -154,15 +154,39 @@ model User {
   twoFactorSecret    String?   @map("two_factor_secret") // TOTP secret, encrypted
   lastLoginAt        DateTime? @map("last_login_at")
   deletedAt          DateTime? @map("deleted_at")
+  isSuperAdmin       Boolean   @default(false) @map("is_super_admin") // Collabo-team-only global flag
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
   memberships         OrganizationMember[]
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  impersonationsMade  ImpersonationLog[]   @relation("ImpersonatorLogs")
+  impersonationsOn    ImpersonationLog[]   @relation("ImpersonatedLogs")
 
   @@index([email])
+  @@index([isSuperAdmin])
   @@map("users")
+}
+
+/// Audit log of super-admin impersonation sessions.
+model ImpersonationLog {
+  id           String    @id @default(cuid())
+  superAdminId String    @map("super_admin_id")
+  targetUserId String    @map("target_user_id")
+  targetOrgId  String?   @map("target_org_id")
+  startedAt    DateTime  @default(now()) @map("started_at")
+  endedAt      DateTime? @map("ended_at")
+  ipAddress    String?   @map("ip_address")
+  userAgent    String?   @map("user_agent")
+
+  superAdmin User @relation("ImpersonatorLogs", fields: [superAdminId], references: [id])
+  targetUser User @relation("ImpersonatedLogs", fields: [targetUserId], references: [id])
+
+  @@index([superAdminId])
+  @@index([targetUserId])
+  @@index([startedAt])
+  @@map("impersonation_logs")
 }
 
 model Organization {
@@ -207,6 +231,7 @@ model Organization {
   productTypeTaxRates    ProductTypeTaxRate[]
   collections            Collection[]
   collectionTaxOverrides CollectionTaxOverride[]
+  whatsappMessages       WhatsAppMessageLog[]
 
   @@map("organizations")
 }
@@ -300,12 +325,13 @@ model Channel {
   createdAt        DateTime        @default(now()) @map("created_at")
   updatedAt        DateTime        @updatedAt @map("updated_at")
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  syncLogs     SyncLog[]
-  products     Product[]
-  customers    Customer[]
-  orders       Order[]
-  collections  Collection[]
+  organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  syncLogs         SyncLog[]
+  products         Product[]
+  customers        Customer[]
+  orders           Order[]
+  collections      Collection[]
+  whatsappMessages WhatsAppMessageLog[]
 
   @@unique([organizationId, platform]) // ← ONE store per platform per org
   @@index([organizationId])
@@ -461,10 +487,11 @@ model Customer {
   externalCreatedAt DateTime? @map("external_created_at")
   externalUpdatedAt DateTime? @map("external_updated_at")
 
-  organization Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  channel      Channel               @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  orders       Order[]
-  activityLogs CustomerActivityLog[]
+  organization     Organization          @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel          Channel               @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  orders           Order[]
+  activityLogs     CustomerActivityLog[]
+  whatsappMessages WhatsAppMessageLog[]
 
   @@unique([channelId, externalId])
   @@unique([organizationId, email])
@@ -525,14 +552,15 @@ model Order {
   externalCreatedAt  DateTime?              @map("external_created_at")
   externalUpdatedAt  DateTime?              @map("external_updated_at")
 
-  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  channel      Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  customer     Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  lineItems    OrderLineItem[]
-  fulfillments OrderFulfillment[]
-  refunds      OrderRefund[]
-  timeline     OrderTimelineEvent[]
-  invoices     Invoice[]
+  organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel          Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  customer         Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  lineItems        OrderLineItem[]
+  fulfillments     OrderFulfillment[]
+  refunds          OrderRefund[]
+  timeline         OrderTimelineEvent[]
+  invoices         Invoice[]
+  whatsappMessages WhatsAppMessageLog[]
 
   @@unique([channelId, externalId])
   @@index([organizationId])
@@ -854,4 +882,41 @@ model CollectionTaxOverride {
 
   @@index([organizationId])
   @@map("collection_tax_overrides")
+}
+
+// Audit trail of every WhatsApp message our app tries to send on behalf of a
+// merchant. One row per send attempt. Status transitions:
+//   queued → sent → delivered → read     (happy path; delivered/read arrive via webhooks later)
+//   queued → failed                      (Meta rejected the send)
+model WhatsAppMessageLog {
+  id               String    @id @default(cuid())
+  organizationId   String    @map("organization_id")
+  channelId        String    @map("channel_id")
+  customerId       String?   @map("customer_id")
+  orderId          String?   @map("order_id")
+  templateName     String    @map("template_name") // e.g., "hello_world"
+  templateLanguage String    @default("en_US") @map("template_language")
+  triggerType      String?   @map("trigger_type") // "order_placed", "manual", etc.
+  toPhone          String    @map("to_phone") // E.164 format
+  externalId       String?   @map("external_id") // WhatsApp message id (wamid.*)
+  status           String // queued | sent | delivered | read | failed
+  errorCode        String?   @map("error_code")
+  errorMessage     String?   @map("error_message")
+  requestPayload   Json      @map("request_payload") @db.JsonB
+  responsePayload  Json?     @map("response_payload") @db.JsonB
+  sentAt           DateTime? @map("sent_at")
+  deliveredAt      DateTime? @map("delivered_at")
+  readAt           DateTime? @map("read_at")
+  failedAt         DateTime? @map("failed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  customer     Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  order        Order?       @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([orderId])
+  @@index([externalId])
+  @@map("whatsapp_message_logs")
 }

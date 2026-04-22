@@ -10,6 +10,12 @@ interface AuthState {
   isAuthenticated: boolean;
   organizations: OrganizationMembership[];
   currentOrgId: string | null;
+  /**
+   * When a super admin is impersonating another user, this is the super admin's userId.
+   * `null` in all other cases. Drives the impersonation banner and the
+   * "Switch back to my account" item in the profile dropdown.
+   */
+  impersonatedBy: string | null;
 }
 
 /** Actions available on the auth store. */
@@ -23,6 +29,7 @@ interface AuthActions {
   setTokens: (accessToken: string, refreshToken: string) => void;
   setOrganizations: (organizations: OrganizationMembership[]) => void;
   setCurrentOrg: (orgId: string) => void;
+  setImpersonation: (impersonatedBy: string | null) => void;
   logout: () => void;
 }
 
@@ -33,6 +40,7 @@ const initialState: AuthState = {
   isAuthenticated: false,
   organizations: [],
   currentOrgId: null,
+  impersonatedBy: null,
 };
 
 /**
@@ -121,6 +129,8 @@ export const useAuthStore = create<AuthState & AuthActions>()(
 
       setCurrentOrg: (orgId) => set({ currentOrgId: orgId }),
 
+      setImpersonation: (impersonatedBy) => set({ impersonatedBy }),
+
       logout: () => set(initialState),
     }),
     {
@@ -133,6 +143,7 @@ export const useAuthStore = create<AuthState & AuthActions>()(
         isAuthenticated: state.isAuthenticated,
         organizations: state.organizations,
         currentOrgId: state.currentOrgId,
+        impersonatedBy: state.impersonatedBy,
       }),
     }
   )

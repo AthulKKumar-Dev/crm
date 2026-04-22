@@ -8,6 +8,9 @@ import type {
   OAuthInstallResponse,
   ManualConnectShopifyRequest,
   ManualConnectShopifyResponse,
+  WhatsAppInstallResponse,
+  WhatsAppCallbackRequest,
+  WhatsAppCallbackResponse,
 } from "~/types/api";
 
 /**
@@ -41,4 +44,12 @@ export const channelService = {
 
   installInstagram: () =>
     apiClient.post<OAuthInstallResponse>("/channels/instagram/install").then((response) => response.data),
+
+  /** Step 1 of WhatsApp Embedded Signup: get the configId + CSRF state to feed into FB.login. */
+  installWhatsApp: () =>
+    apiClient.post<WhatsAppInstallResponse>("/channels/whatsapp/install").then((response) => response.data),
+
+  /** Step 2 of WhatsApp Embedded Signup: forward the code Meta returned to the backend. */
+  completeWhatsAppInstall: (data: WhatsAppCallbackRequest) =>
+    apiClient.post<WhatsAppCallbackResponse>("/channels/whatsapp/callback", data).then((response) => response.data),
 };

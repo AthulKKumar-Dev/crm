@@ -16,6 +16,8 @@ import {
   User,
   Leaf,
   Receipt,
+  ShieldCheck,
+  ArrowLeftRight,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -30,6 +32,7 @@ import { cn } from "~/lib/utils";
 import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
+import { useStopImpersonating } from "~/hooks/use-admin-queries";
 import { toast } from "sonner";
 
 const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
@@ -48,8 +51,15 @@ const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboa
 export function Navbar() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, organizations, currentOrgId, logout, refreshToken, setCurrentOrg, setTokens, setOrganizations } =
+  const { user, organizations, currentOrgId, impersonatedBy, logout, refreshToken, setCurrentOrg, setTokens, setOrganizations } =
     useAuthStore();
+  const stopImpersonating = useStopImpersonating();
+
+  // Extra nav link visible only to real Collabo-team super admins (never while
+  // they're impersonating another user — the impersonation token has isSuperAdmin=false).
+  const navLinks = user?.isSuperAdmin && !impersonatedBy
+    ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+    : NAV_LINKS;
 
   async function handleSwitchOrg(orgId: string) {
     if (orgId === currentOrgId) return;
@@ -119,7 +129,7 @@ export function Navbar() {
         {/* ── Nav — pill container ─────────────────────────────── */}
         <LayoutGroup id="navbar">
           <nav className="hidden md:flex items-center gap-0.5 rounded-full bg-white dark:bg-gray-900 px-2 py-1.5 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700">
-            {NAV_LINKS.map(({ label, href, icon: Icon, badge }) => {
+            {navLinks.map(({ label, href, icon: Icon, badge }) => {
               const isActive = location.pathname === href;
               return (
                 <Link
@@ -199,9 +209,13 @@ export function Navbar() {
                     {user?.firstName ?? "Steve"} {user?.lastName ?? "Rogers"}
                   </span>
                   <span className="text-[10px] text-gray-400 leading-tight">
-                    {currentOrg?.role === "OWNER"
+                    {impersonatedBy
+                      ? "Impersonating"
+                      : user?.isSuperAdmin
                       ? "Super Admin"
-                      : currentOrg?.role?.toLowerCase() ?? "Super Admin"}
+                      : currentOrg?.role === "OWNER"
+                      ? "Owner"
+                      : currentOrg?.role?.toLowerCase() ?? "Member"}
                   </span>
                 </div>
                 <ChevronDown className="size-3.5 text-gray-400" />
@@ -209,6 +223,19 @@ export function Navbar() {
             </DropdownMenuTrigger>
 
             <DropdownMenuContent align="end" className="w-56">
+              {impersonatedBy && (
+                <>
+                  <DropdownMenuItem
+                    onClick={() => stopImpersonating.mutate()}
+                    disabled={stopImpersonating.isPending}
+                    className="font-semibold text-amber-700 focus:text-amber-800"
+                  >
+                    <ArrowLeftRight className="size-4" />
+                    {stopImpersonating.isPending ? "Switching back..." : "Switch back to my account"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               {currentOrg && (
                 <>
                   <DropdownMenuLabel className="font-normal">

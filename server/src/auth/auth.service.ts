@@ -65,6 +65,14 @@ export class AuthService {
   async verifyEmail(userId: string, code: string) {
     const user = await this.userService.verifyEmail(userId, code);
 
+    // Pull a typed row so the super-admin flag has the right type without any casts.
+    const fullUser = await this.prisma.user.findUniqueOrThrow({
+      where: { id: user.id },
+      select: { id: true, email: true, isSuperAdmin: true },
+    });
+    await this.syncSuperAdminFlag(fullUser);
+    const isSuperAdmin = fullUser.isSuperAdmin;
+
     const userWithMemberships = await this.userService.findByIdWithMemberships(user.id);
     const membership = userWithMemberships?.memberships[0];
 
@@ -73,6 +81,7 @@ export class AuthService {
       email: user.email,
       orgId: membership?.organizationId,
       role: membership?.role,
+      isSuperAdmin,
     };
 
     const tokens = await this.generateTokenPair(payload);
@@ -88,6 +97,7 @@ export class AuthService {
         lastName: user.lastName,
         avatarUrl: user.avatarUrl,
         emailVerified: true,
+        isSuperAdmin,
       },
       organizations: (userWithMemberships?.memberships ?? []).map((m) => ({
         id: m.organization.id,
@@ -166,6 +176,9 @@ export class AuthService {
     // Reset rate limit on successful login
     await this.redis.resetLoginAttempts(dto.email);
 
+    // Sync the Collabo-team super-admin flag against the env allowlist before issuing a token.
+    await this.syncSuperAdminFlag(user);
+
     await this.prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
     const membership = user.memberships[0];
@@ -174,6 +187,7 @@ export class AuthService {
       email: user.email,
       orgId: membership?.organizationId,
       role: membership?.role,
+      isSuperAdmin: user.isSuperAdmin,
     };
 
     const tokens = await this.generateTokenPair(payload);
@@ -184,6 +198,7 @@ export class AuthService {
       orgId: membership?.organizationId, role: membership?.role,
       emailVerified: user.emailVerified,
       memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      isSuperAdmin: user.isSuperAdmin,
     });
 
     return {
@@ -196,6 +211,7 @@ export class AuthService {
         avatarUrl: user.avatarUrl,
         emailVerified: user.emailVerified,
         twoFactorEnabled: user.twoFactorEnabled,
+        isSuperAdmin: user.isSuperAdmin,
       },
       organizations: user.memberships.map((m) => ({
         id: m.organization.id,
@@ -237,6 +253,7 @@ export class AuthService {
       email: user.email,
       orgId: membership.organizationId,
       role: membership.role,
+      isSuperAdmin: user.isSuperAdmin,
     };
 
     const tokens = await this.generateTokenPair(payload);
@@ -247,6 +264,7 @@ export class AuthService {
       orgId: membership.organizationId, role: membership.role,
       emailVerified: user.emailVerified,
       memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      isSuperAdmin: user.isSuperAdmin,
     });
 
     return {
@@ -409,6 +427,7 @@ export class AuthService {
     const payload: JwtPayload = {
       sub: user.id, email: user.email,
       orgId: membership?.organizationId, role: membership?.role,
+      isSuperAdmin: user.isSuperAdmin,
     };
 
     const accessToken = this.jwt.sign(payload);
@@ -420,6 +439,7 @@ export class AuthService {
       orgId: membership?.organizationId, role: membership?.role,
       emailVerified: user.emailVerified,
       memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      isSuperAdmin: user.isSuperAdmin,
     });
 
     return { accessToken, refreshToken };
@@ -445,5 +465,203 @@ export class AuthService {
     const value = parseInt(match[1], 10);
     const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[match[2]]!;
     return new Date(now.getTime() + value * ms);
+  }
+
+  // ─── SUPER ADMIN + IMPERSONATION ───
+
+  /**
+   * Compare the user's email against the SUPER_ADMIN_EMAILS env allowlist and
+   * flip `User.isSuperAdmin` if they disagree. Called on login/verifyEmail so
+   * adding/removing someone from the allowlist just requires them to log in
+   * again (or be force-logged-out) for the flag to sync.
+   *
+   * Mutates the passed-in object so callers can use the refreshed value without
+   * a reload.
+   */
+  private async syncSuperAdminFlag(
+    user: { id: string; email: string; isSuperAdmin: boolean },
+  ): Promise<void> {
+    const allow = this.config.get<string[]>('superAdminEmails') || [];
+    const shouldBe = allow.includes(user.email.toLowerCase());
+    if (shouldBe !== user.isSuperAdmin) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { isSuperAdmin: shouldBe },
+      });
+      user.isSuperAdmin = shouldBe;
+    }
+  }
+
+  /**
+   * Issue an impersonation token pair: the super admin temporarily becomes the
+   * target user. The resulting JWT carries `isSuperAdmin: false` + `impersonatedBy`
+   * so guards treat the caller as the target user, but the client can still show
+   * a banner / offer an exit button.
+   */
+  async startImpersonation(
+    superAdminId: string,
+    targetUserId: string,
+    targetOrgId: string | undefined,
+    userAgent?: string,
+    ipAddress?: string,
+  ) {
+    const superAdmin = await this.prisma.user.findUnique({ where: { id: superAdminId } });
+    if (!superAdmin?.isSuperAdmin) {
+      throw new ForbiddenException('Only super admins can impersonate users');
+    }
+    if (superAdmin.id === targetUserId) {
+      throw new BadRequestException('Cannot impersonate yourself');
+    }
+
+    const target = await this.prisma.user.findUnique({
+      where: { id: targetUserId },
+      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+    });
+    if (!target || target.deletedAt) throw new NotFoundException('User not found');
+    if (target.isSuperAdmin) {
+      throw new BadRequestException('Cannot impersonate another super admin');
+    }
+
+    const membership =
+      (targetOrgId && target.memberships.find((m) => m.organizationId === targetOrgId)) ||
+      target.memberships[0];
+
+    const payload: JwtPayload = {
+      sub: target.id,
+      email: target.email,
+      orgId: membership?.organizationId,
+      role: membership?.role,
+      isSuperAdmin: false,
+      impersonatedBy: superAdminId,
+    };
+
+    const tokens = await this.generateTokenPair(payload);
+
+    await this.redis.setSession(target.id, {
+      sub: target.id,
+      email: target.email,
+      orgId: membership?.organizationId,
+      role: membership?.role,
+      emailVerified: target.emailVerified,
+      memberships: target.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      isSuperAdmin: false,
+      impersonatedBy: superAdminId,
+    });
+
+    // Write audit row (best-effort — don't block token issue on audit failures).
+    this.prisma.impersonationLog
+      .create({
+        data: {
+          superAdminId,
+          targetUserId: target.id,
+          targetOrgId: membership?.organizationId,
+          userAgent,
+          ipAddress,
+        },
+      })
+      .catch((err) => this.logger.error('Failed to write impersonation log', err));
+
+    return {
+      ...tokens,
+      user: {
+        id: target.id,
+        email: target.email,
+        firstName: target.firstName,
+        lastName: target.lastName,
+        avatarUrl: target.avatarUrl,
+        emailVerified: target.emailVerified,
+        twoFactorEnabled: target.twoFactorEnabled,
+        isSuperAdmin: false,
+      },
+      organizations: target.memberships.map((m) => ({
+        id: m.organization.id,
+        name: m.organization.name,
+        slug: m.organization.slug,
+        type: m.organization.type,
+        role: m.role,
+      })),
+      currentOrganization: membership
+        ? {
+            id: membership.organization.id,
+            name: membership.organization.name,
+            slug: membership.organization.slug,
+            type: membership.organization.type,
+            role: membership.role,
+          }
+        : null,
+      impersonatedBy: superAdminId,
+    };
+  }
+
+  /**
+   * Terminate an impersonation session and restore the super admin's own token.
+   * Called with the super admin's user ID (read from the caller's `impersonatedBy`
+   * claim by the controller).
+   */
+  async stopImpersonation(impersonatedByUserId: string) {
+    const superAdmin = await this.prisma.user.findUnique({
+      where: { id: impersonatedByUserId },
+      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+    });
+    if (!superAdmin?.isSuperAdmin) {
+      throw new ForbiddenException('Impersonation can only be stopped by a super admin');
+    }
+
+    // Close any open log rows for this super admin (there should be exactly one).
+    await this.prisma.impersonationLog.updateMany({
+      where: { superAdminId: superAdmin.id, endedAt: null },
+      data: { endedAt: new Date() },
+    });
+
+    const membership = superAdmin.memberships[0];
+    const payload: JwtPayload = {
+      sub: superAdmin.id,
+      email: superAdmin.email,
+      orgId: membership?.organizationId,
+      role: membership?.role,
+      isSuperAdmin: true,
+    };
+
+    const tokens = await this.generateTokenPair(payload);
+
+    await this.redis.setSession(superAdmin.id, {
+      sub: superAdmin.id,
+      email: superAdmin.email,
+      orgId: membership?.organizationId,
+      role: membership?.role,
+      emailVerified: superAdmin.emailVerified,
+      memberships: superAdmin.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      isSuperAdmin: true,
+    });
+
+    return {
+      ...tokens,
+      user: {
+        id: superAdmin.id,
+        email: superAdmin.email,
+        firstName: superAdmin.firstName,
+        lastName: superAdmin.lastName,
+        avatarUrl: superAdmin.avatarUrl,
+        emailVerified: superAdmin.emailVerified,
+        twoFactorEnabled: superAdmin.twoFactorEnabled,
+        isSuperAdmin: true,
+      },
+      organizations: superAdmin.memberships.map((m) => ({
+        id: m.organization.id,
+        name: m.organization.name,
+        slug: m.organization.slug,
+        type: m.organization.type,
+        role: m.role,
+      })),
+      currentOrganization: membership
+        ? {
+            id: membership.organization.id,
+            name: membership.organization.name,
+            slug: membership.organization.slug,
+            type: membership.organization.type,
+            role: membership.role,
+          }
+        : null,
+    };
   }
 }

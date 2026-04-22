@@ -33,5 +33,15 @@ export default () => ({
         appSecret: process.env.META_APP_SECRET,
         webhookVerifyToken: process.env.INSTAGRAM_WEBHOOK_VERIFY_TOKEN,
     },
+    whatsapp: {
+        appId: process.env.META_APP_ID,
+        appSecret: process.env.META_APP_SECRET,
+        configId: process.env.WHATSAPP_CONFIG_ID,
+        graphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? 'v21.0',
+    },
     encryptionKey: process.env.ENCRYPTION_KEY || undefined,
+    superAdminEmails: (process.env.SUPER_ADMIN_EMAILS || '')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean),
 });

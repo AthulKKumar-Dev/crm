@@ -7,6 +7,7 @@ import { Public } from '../auth/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from './encryption.service';
 import { ShopifySyncService } from './shopify-sync.service';
+import { WhatsAppTriggerService } from './whatsapp-trigger.service';
 
 @Controller('webhooks')
 export class ShopifyWebhookController {
@@ -16,6 +17,7 @@ export class ShopifyWebhookController {
         private readonly prisma: PrismaService,
         private readonly encryption: EncryptionService,
         private readonly syncService: ShopifySyncService,
+        private readonly whatsappTrigger: WhatsAppTriggerService,
     ) { }
 
     @Public()
@@ -91,6 +93,24 @@ export class ShopifyWebhookController {
                         channel.organizationId,
                         body,
                     );
+                    // Fire WhatsApp trigger only on NEW orders. Wrapped in
+                    // try/catch so a messaging failure never bubbles up as a 5xx
+                    // (which would make Shopify retry the whole webhook and
+                    // potentially duplicate work).
+                    if (topic === 'orders/create') {
+                        try {
+                            console.log('body whatsapp trigger', body);
+                            await this.whatsappTrigger.onOrderPlaced(
+                                channel.organizationId,
+                                channel.id,
+                                body,
+                            );
+                        } catch (err) {
+                            this.logger.warn(
+                                `WhatsApp trigger failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+                            );
+                        }
+                    }
                     break;
 
                 case 'customers/create':

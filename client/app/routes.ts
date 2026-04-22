@@ -31,5 +31,8 @@ export default [
     route("profile", "routes/app/profile.tsx"),
     route("settings", "routes/app/settings.tsx"),
     route("invoices", "routes/app/invoices.tsx"),
+    // Super admin (Collabo team only) — guarded inside the route components.
+    route("admin/users", "routes/app/admin/users.tsx"),
+    route("admin/users/:userId", "routes/app/admin/user-detail.tsx"),
   ]),
 ] satisfies RouteConfig;
