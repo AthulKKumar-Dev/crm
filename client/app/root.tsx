@@ -48,6 +48,52 @@ export function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Loads and initializes the Meta JS SDK for WhatsApp Embedded Signup.
+ * Runs once on app mount. Idempotent — if the script tag is already present
+ * (e.g., after hot reload) it reuses it.
+ */
+function MetaSdkInit() {
+  useEffect(() => {
+    const appId = import.meta.env.VITE_META_APP_ID;
+    if (!appId) {
+      console.warn(
+        "[Meta SDK] VITE_META_APP_ID is not set — WhatsApp Embedded Signup will not work.",
+      );
+      return;
+    }
+
+    // Tell the SDK what to do once it finishes loading.
+    window.fbAsyncInit = () => {
+      window.FB?.init({
+        appId,
+        cookie: true,
+        xfbml: false,
+        version: "v21.0",
+      });
+    };
+
+    // If it's already loaded (hot reload), re-init with the current appId.
+    if (window.FB) {
+      window.fbAsyncInit();
+      return;
+    }
+
+    // Skip if the script tag already exists (avoid duplicates on HMR).
+    if (document.getElementById("facebook-jssdk")) return;
+
+    const script = document.createElement("script");
+    script.id = "facebook-jssdk";
+    script.src = "https://connect.facebook.net/en_US/sdk.js";
+    script.async = true;
+    script.defer = true;
+    script.crossOrigin = "anonymous";
+    document.body.appendChild(script);
+  }, []);
+
+  return null;
+}
+
 /** Syncs the theme store state to the document root class on mount and theme changes. */
 function ThemeInit() {
   const theme = useThemeStore((s) => s.theme);
@@ -86,6 +132,7 @@ export default function App() {
     <QueryProvider>
       <ThemeInit />
       <LogoutRedirect />
+      <MetaSdkInit />
       <Outlet />
     </QueryProvider>
   );

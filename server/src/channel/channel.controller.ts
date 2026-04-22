@@ -15,6 +15,8 @@ import { ManualConnectShopifyDto } from './dto/manual-connect-shopify.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import { TriggerSyncDto } from './dto/trigger-sync.dto';
 import { InstagramOAuthService } from './instagram-oauth.service';
+import { WhatsAppOAuthService } from './whatsapp-oauth.service';
+import { WhatsAppCallbackDto } from './dto/whatsapp-callback.dto';
 
 @Controller('channels')
 export class ChannelController {
@@ -22,6 +24,7 @@ export class ChannelController {
     private readonly channelService: ChannelService,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly instagramOAuth: InstagramOAuthService,
+    private readonly whatsappOAuth: WhatsAppOAuthService,
     @InjectQueue(SYNC_QUEUE) private readonly syncQueue: Queue,
   ) { }
 
@@ -118,6 +121,19 @@ export class ChannelController {
   ) {
     const { redirectUrl } = await this.instagramOAuth.handleCallback(query);
     return res.redirect(redirectUrl);
+  }
+
+  // POST /channels/whatsapp/install — returns configId + state for the Meta JS SDK
+  // (Embedded Signup runs in a popup launched by the frontend, not a browser redirect)
+  @Post('whatsapp/install')
+  async installWhatsApp(@CurrentUser() user: JwtPayload) {
+    return this.whatsappOAuth.getSignupConfig(user.orgId!, user.sub);
+  }
+
+  // POST /channels/whatsapp/callback — frontend forwards the code returned by FB.login
+  @Post('whatsapp/callback')
+  async whatsappCallback(@Body() dto: WhatsAppCallbackDto) {
+    return this.whatsappOAuth.handleSignupCallback(dto.code, dto.state);
   }
 
   // GET /channels — list org's channels
