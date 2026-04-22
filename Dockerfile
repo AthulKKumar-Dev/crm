@@ -19,6 +19,9 @@ FROM node:20-alpine AS client-builder
 
 WORKDIR /app/client
 
+ARG VITE_META_APP_ID
+ENV VITE_META_APP_ID=$VITE_META_APP_ID
+
 # Install build deps (including devDependencies — needed for Vite/Tailwind)
 COPY client/package.json client/package-lock.json ./
 RUN npm ci --include=dev --no-audit --no-fund

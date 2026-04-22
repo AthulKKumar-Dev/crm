@@ -55,6 +55,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        VITE_META_APP_ID: ${META_APP_ID}
     container_name: collabo-app
     restart: unless-stopped
     depends_on:
@@ -102,6 +104,7 @@ services:
       INSTAGRAM_WEBHOOK_VERIFY_TOKEN: ${INSTAGRAM_WEBHOOK_VERIFY_TOKEN:-}
       WHATSAPP_WEBHOOK_VERIFY_TOKEN: ${WHATSAPP_WEBHOOK_VERIFY_TOKEN:-}
       WHATSAPP_CONFIG_ID: ${WHATSAPP_CONFIG_ID:-}
+      WHATSAPP_GRAPH_VERSION: ${WHATSAPP_GRAPH_VERSION:-v21.0}
     ports:
       - "${APP_PORT:-80}:80"
     networks:
