@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { User, OrganizationMembership, AuthOrganization } from "~/types/api";
+import type {
+  User,
+  OrganizationMembership,
+  AuthOrganization,
+  BillingPlan,
+  BillingInterval,
+} from "~/types/api";
 
 /** Persisted authentication state for the current user session. */
 interface AuthState {
@@ -16,6 +22,13 @@ interface AuthState {
    * "Switch back to my account" item in the profile dropdown.
    */
   impersonatedBy: string | null;
+  /**
+   * Plan selection captured at the onboarding choose-plan step. Held here
+   * because the Organization row (which owns billingPlan) is created later
+   * in the flow. Applied to the new org on create, then cleared.
+   */
+  pendingPlan: BillingPlan | null;
+  pendingBillingInterval: BillingInterval | null;
 }
 
 /** Actions available on the auth store. */
@@ -30,6 +43,8 @@ interface AuthActions {
   setOrganizations: (organizations: OrganizationMembership[]) => void;
   setCurrentOrg: (orgId: string) => void;
   setImpersonation: (impersonatedBy: string | null) => void;
+  setPendingPlan: (plan: BillingPlan, interval: BillingInterval) => void;
+  clearPendingPlan: () => void;
   logout: () => void;
 }
 
@@ -41,6 +56,8 @@ const initialState: AuthState = {
   organizations: [],
   currentOrgId: null,
   impersonatedBy: null,
+  pendingPlan: null,
+  pendingBillingInterval: null,
 };
 
 /**
@@ -77,7 +94,8 @@ function normalizeOrganizations(
       currency: "USD",
       industry: null,
       website: null,
-      billingPlan: "FREE" as const,
+      billingPlan: "BASIC" as const,
+      billingInterval: null,
       onboardingStatus: "COMPLETED" as const,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -131,6 +149,12 @@ export const useAuthStore = create<AuthState & AuthActions>()(
 
       setImpersonation: (impersonatedBy) => set({ impersonatedBy }),
 
+      setPendingPlan: (plan, interval) =>
+        set({ pendingPlan: plan, pendingBillingInterval: interval }),
+
+      clearPendingPlan: () =>
+        set({ pendingPlan: null, pendingBillingInterval: null }),
+
       logout: () => set(initialState),
     }),
     {
@@ -144,6 +168,8 @@ export const useAuthStore = create<AuthState & AuthActions>()(
         organizations: state.organizations,
         currentOrgId: state.currentOrgId,
         impersonatedBy: state.impersonatedBy,
+        pendingPlan: state.pendingPlan,
+        pendingBillingInterval: state.pendingBillingInterval,
       }),
     }
   )

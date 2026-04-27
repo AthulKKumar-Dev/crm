@@ -2,6 +2,7 @@ import { apiClient } from "~/lib/api-client";
 import type {
   OrgResponse,
   CreateOrganizationRequest,
+  CreatePersonalRequest,
   UpdateOrganizationRequest,
   OrgMember,
   UpdateMemberRoleRequest,
@@ -21,8 +22,10 @@ export const orgService = {
   create: (data: CreateOrganizationRequest) =>
     apiClient.post<OrgResponse>("/organizations", data).then((response) => response.data),
 
-  createPersonal: () =>
-    apiClient.post<OrgResponse>("/organizations/personal").then((response) => response.data),
+  createPersonal: (data: CreatePersonalRequest) =>
+    apiClient
+      .post<OrgResponse>("/organizations/personal", data)
+      .then((response) => response.data),
 
   list: () =>
     apiClient.get<OrgResponse[]>("/organizations").then((response) => response.data),

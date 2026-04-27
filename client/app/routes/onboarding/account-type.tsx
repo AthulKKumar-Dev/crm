@@ -10,19 +10,29 @@ export function meta() {
 }
 
 /**
- * Onboarding step 1: account type selection.
+ * Onboarding step 2: account type selection.
  * Users choose between a personal (solo) workspace or a team organization.
  */
 export default function AccountTypePage() {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<"personal" | "organization" | null>(null);
   const user = useAuthStore((state) => state.user);
+  const pendingPlan = useAuthStore((state) => state.pendingPlan);
+  const pendingBillingInterval = useAuthStore((state) => state.pendingBillingInterval);
   const createPersonal = useCreatePersonalMutation();
 
   function handleSelect(type: "personal" | "organization") {
     setSelected(type);
     if (type === "personal") {
-      createPersonal.mutate();
+      // Guard should have redirected us if these were missing, but double-check.
+      if (!pendingPlan || !pendingBillingInterval) {
+        navigate("/onboarding/choose-plan");
+        return;
+      }
+      createPersonal.mutate({
+        billingPlan: pendingPlan,
+        billingInterval: pendingBillingInterval,
+      });
     } else {
       navigate("/onboarding/create-organization");
     }
@@ -35,13 +45,15 @@ export default function AccountTypePage() {
       {/* Step indicator */}
       <div className="mb-8 flex items-center justify-center gap-2">
         <div className="flex items-center gap-1.5">
+          <div className="size-2 rounded-full bg-gray-300" />
+          <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-[#CEF17B]" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
         </div>
-        <span className="ml-2 text-xs text-gray-400">Step 1 of 3</span>
+        <span className="ml-2 text-xs text-gray-400">Step 2 of 4</span>
       </div>
 
       {/* Heading */}

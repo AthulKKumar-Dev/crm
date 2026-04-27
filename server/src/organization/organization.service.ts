@@ -8,40 +8,53 @@ import slugify from 'slugify';
 import { randomBytes } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { BillingService } from '../billing/billing.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
+import { CreatePersonalDto } from './dto/create-personal.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 
 @Injectable()
 export class OrganizationService {
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly billing: BillingService,
+  ) { }
 
   // ─── CREATE ORGANIZATION ───
-  // Creates a team org (type: ORGANIZATION) with the current user as OWNER.
-  // WHY Prisma nested create? We create the org AND the membership in one query.
-  // This is atomic — if either fails, neither is saved.
+  // Creates a team org (type: ORGANIZATION) with the current user as OWNER,
+  // wrapped in a transaction that also copies the User's pending Razorpay
+  // subscription onto the new Organization. If no ACTIVE subscription exists,
+  // billing.applyPendingSubscriptionToOrg throws and the org is rolled back —
+  // server-side hard gate against bypassing payment.
   async create(userId: string, dto: CreateOrganizationDto) {
-    // Generate slug from name if not provided
-    // slugify("Acme Store") → "acme-store"
-    // We add a random suffix to prevent slug collisions
     const slug = dto.slug || this.generateSlug(dto.name);
 
-    const org = await this.prisma.organization.create({
-      data: {
-        name: dto.name,
-        slug,
-        type: OrganizationType.ORGANIZATION,
-        logo: dto.logo,
-        timezone: dto.timezone,
-        currency: dto.currency,
-        industry: dto.industry,
-        website: dto.website,
-        // Nested create: automatically creates an OrganizationMember row
-        // linking this user to this org with OWNER role
-        members: {
-          create: { userId, role: UserRole.OWNER },
+    const org = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.organization.create({
+        data: {
+          name: dto.name,
+          slug,
+          type: OrganizationType.ORGANIZATION,
+          logo: dto.logo,
+          timezone: dto.timezone,
+          currency: dto.currency,
+          industry: dto.industry,
+          website: dto.website,
+          billingPlan: dto.billingPlan,
+          billingInterval: dto.billingInterval,
+          members: { create: { userId, role: UserRole.OWNER } },
         },
-      },
-      include: { members: true },
+        include: { members: true },
+      });
+
+      await this.billing.applyPendingSubscriptionToOrg(tx, userId, created.id);
+
+      // Re-fetch so the returned object reflects the billing fields populated
+      // by applyPendingSubscriptionToOrg.
+      return tx.organization.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { members: true },
+      });
     });
 
     return this.formatOrg(org, UserRole.OWNER);
@@ -49,8 +62,8 @@ export class OrganizationService {
 
   // ─── CREATE PERSONAL WORKSPACE ───
   // Creates a solo workspace (type: PERSONAL) — one member, no team features.
-  // WHY check for existing? Each user can only have ONE personal workspace.
-  async createPersonal(userId: string, firstName: string) {
+  // Same payment gate as create() above.
+  async createPersonal(userId: string, firstName: string, dto: CreatePersonalDto) {
     const existing = await this.prisma.organization.findFirst({
       where: {
         type: OrganizationType.PERSONAL,
@@ -63,19 +76,27 @@ export class OrganizationService {
       throw new ConflictException('You already have a personal workspace');
     }
 
-    // Auto-generate name and slug — user doesn't need to input anything
     const slug = `${firstName.toLowerCase()}-${randomBytes(4).toString('hex')}`;
 
-    const org = await this.prisma.organization.create({
-      data: {
-        name: `${firstName}'s Workspace`,
-        slug,
-        type: OrganizationType.PERSONAL,
-        members: {
-          create: { userId, role: UserRole.OWNER },
+    const org = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.organization.create({
+        data: {
+          name: `${firstName}'s Workspace`,
+          slug,
+          type: OrganizationType.PERSONAL,
+          billingPlan: dto.billingPlan,
+          billingInterval: dto.billingInterval,
+          members: { create: { userId, role: UserRole.OWNER } },
         },
-      },
-      include: { members: true },
+        include: { members: true },
+      });
+
+      await this.billing.applyPendingSubscriptionToOrg(tx, userId, created.id);
+
+      return tx.organization.findUniqueOrThrow({
+        where: { id: created.id },
+        include: { members: true },
+      });
     });
 
     return this.formatOrg(org, UserRole.OWNER);
@@ -175,6 +196,8 @@ export class OrganizationService {
       currency: org.currency,
       industry: org.industry,
       website: org.website,
+      billingPlan: org.billingPlan,
+      billingInterval: org.billingInterval,
       lowStockThreshold: org.lowStockThreshold,
       gstEnabled: org.gstEnabled,
       loyaltyMetric: org.loyaltyMetric,

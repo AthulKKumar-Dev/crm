@@ -13,6 +13,7 @@ export default [
   ]),
 
   layout("routes/onboarding/_layout.tsx", [
+    route("onboarding/choose-plan", "routes/onboarding/choose-plan.tsx"),
     route("onboarding/account-type", "routes/onboarding/account-type.tsx"),
     route("onboarding/create-organization", "routes/onboarding/create-organization.tsx"),
     route("onboarding/invite-team", "routes/onboarding/invite-team.tsx"),

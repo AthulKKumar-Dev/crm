@@ -19,15 +19,29 @@ enum OrganizationType {
 }
 
 enum BillingPlan {
-  FREE
-  STARTER
-  GROWTH
-  ENTERPRISE
+  BASIC
+  ADVANCE
 }
 
 enum BillingInterval {
   MONTHLY
   YEARLY
+}
+
+enum BillingProvider {
+  RAZORPAY
+  MANUAL // wire transfer / enterprise / comped
+}
+
+enum SubscriptionStatus {
+  CREATED // subscription created on Razorpay, not yet paid
+  AUTHENTICATED // first payment authorized, awaiting capture
+  ACTIVE
+  PAUSED
+  HALTED
+  CANCELLED
+  COMPLETED
+  EXPIRED
 }
 
 enum OnboardingStatus {
@@ -155,6 +169,15 @@ model User {
   lastLoginAt        DateTime? @map("last_login_at")
   deletedAt          DateTime? @map("deleted_at")
   isSuperAdmin       Boolean   @default(false) @map("is_super_admin") // Collabo-team-only global flag
+  // ─── Pending subscription captured at onboarding's choose-plan step ───
+  // Held here because the Organization (which owns the live billing fields)
+  // doesn't exist yet. Copied to Organization on org creation and cleared.
+  pendingBillingPlan            BillingPlan?        @map("pending_billing_plan")
+  pendingBillingInterval        BillingInterval?    @map("pending_billing_interval")
+  pendingExternalCustomerId     String?             @map("pending_external_customer_id")
+  pendingExternalSubscriptionId String?             @map("pending_external_subscription_id")
+  pendingSubscriptionStatus     SubscriptionStatus? @map("pending_subscription_status")
+  pendingCurrentPeriodEnd       DateTime?           @map("pending_current_period_end")
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
@@ -199,10 +222,13 @@ model Organization {
   currency             String           @default("USD")
   industry             String? // e.g., "Fashion", "Electronics"
   website              String? // Business website URL
-  billingPlan          BillingPlan      @default(FREE) @map("billing_plan")
-  billingInterval      BillingInterval? @map("billing_interval")
-  stripeCustomerId     String?          @unique @map("stripe_customer_id")
-  stripeSubscriptionId String?          @unique @map("stripe_subscription_id")
+  billingPlan            BillingPlan         @default(BASIC) @map("billing_plan")
+  billingInterval        BillingInterval?    @map("billing_interval")
+  externalCustomerId     String?             @map("external_customer_id")
+  externalSubscriptionId String?             @unique @map("external_subscription_id")
+  billingProvider        BillingProvider?    @map("billing_provider")
+  subscriptionStatus     SubscriptionStatus? @map("subscription_status")
+  currentPeriodEnd       DateTime?           @map("current_period_end")
   lowStockThreshold    Int              @default(10) @map("low_stock_threshold")
   gstEnabled           Boolean          @default(false) @map("gst_enabled")
   loyaltyMetric        LoyaltyMetric    @default(ORDERS) @map("loyalty_metric")

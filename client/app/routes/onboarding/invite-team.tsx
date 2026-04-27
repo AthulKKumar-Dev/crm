@@ -154,9 +154,11 @@ export default function InviteTeamPage() {
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-300" />
           <div className="h-px w-6 bg-gray-200" />
+          <div className="size-2 rounded-full bg-gray-300" />
+          <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-[#CEF17B]" />
         </div>
-        <span className="ml-2 text-xs text-gray-400">Step 3 of 3</span>
+        <span className="ml-2 text-xs text-gray-400">Step 4 of 4</span>
       </div>
 
       {/* Heading */}

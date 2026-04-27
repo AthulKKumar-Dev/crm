@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { UserModule } from '../user/user.module';
+import { BillingModule } from '../billing/billing.module';
 import { OrganizationService } from './organization.service';
 import { MembersService } from './members.service';
 import { InvitesService } from './invites.service';
@@ -9,12 +10,12 @@ import { InvitesController } from './invites.controller';
 
 // WHY import UserModule?
 // OrganizationController needs UserService.findById() to get firstName for personal workspace.
-// UserModule exports UserService, so we import the module to make it available.
 //
-// WHY export OrganizationService and MembersService?
-// Other modules may need to check org membership or roles in the future.
+// WHY import BillingModule?
+// OrganizationService.create()/createPersonal() call BillingService.applyPendingSubscriptionToOrg
+// inside a transaction to gate org creation behind a paid subscription.
 @Module({
-  imports: [UserModule],
+  imports: [UserModule, BillingModule],
   controllers: [OrganizationController, MembersController, InvitesController],
   providers: [OrganizationService, MembersService, InvitesService],
   exports: [OrganizationService, MembersService],
