@@ -46,6 +46,51 @@ export interface User {
 /** Metric used to decide a customer's loyalty tier. */
 export type LoyaltyMetric = "ORDERS" | "TOTAL_SPENT";
 
+/** Available pricing plan tiers. Mirrors the Prisma `BillingPlan` enum. */
+export type BillingPlan = "BASIC" | "ADVANCE";
+
+/** Billing cadence for a plan. Mirrors the Prisma `BillingInterval` enum. */
+export type BillingInterval = "MONTHLY" | "YEARLY";
+
+/** Razorpay subscription lifecycle. Mirrors the Prisma `SubscriptionStatus` enum. */
+export type SubscriptionStatus =
+  | "CREATED"
+  | "AUTHENTICATED"
+  | "ACTIVE"
+  | "PAUSED"
+  | "HALTED"
+  | "CANCELLED"
+  | "COMPLETED"
+  | "EXPIRED";
+
+// ─── Billing Request/Response Types ────────────────────────────────────────
+
+/** Response from GET /billing/config — used to initialize Razorpay Checkout.js. */
+export interface BillingConfigResponse {
+  razorpayKeyId: string | null;
+}
+
+/** Payload for POST /billing/onboarding-checkout. */
+export interface StartOnboardingCheckoutRequest {
+  billingPlan: BillingPlan;
+  billingInterval: BillingInterval;
+}
+
+/** Response from POST /billing/onboarding-checkout. */
+export interface StartOnboardingCheckoutResponse {
+  subscriptionId: string;
+  razorpayKeyId: string;
+  currency: "INR" | "USD";
+}
+
+/** Response from GET /billing/pending-status — polled while waiting for the webhook. */
+export interface PendingStatusResponse {
+  status: SubscriptionStatus | null;
+  plan: BillingPlan | null;
+  interval: BillingInterval | null;
+  subscriptionId: string | null;
+}
+
 /** Full organization entity used throughout the frontend. */
 export interface Organization {
   id: string;
@@ -57,7 +102,8 @@ export interface Organization {
   currency: string;
   industry: string | null;
   website: string | null;
-  billingPlan: "FREE" | "STARTER" | "GROWTH" | "ENTERPRISE";
+  billingPlan: BillingPlan;
+  billingInterval: BillingInterval | null;
   onboardingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
   // Loyalty fields: optional here because the auth-store membership can be
   // assembled client-side from a trimmed onboarding response. The full
@@ -146,7 +192,7 @@ export interface LoginResponse {
     twoFactorEnabled: boolean;
   };
   organizations: AuthOrganization[];
-  nextStep: "choose-account-type" | null;
+  nextStep: "choose-plan" | null;
 }
 
 /** Response returned after successful email verification. */
@@ -162,7 +208,7 @@ export interface VerifyEmailResponse {
     emailVerified: boolean;
   };
   organizations: AuthOrganization[];
-  nextStep: "choose-account-type" | null;
+  nextStep: "choose-plan" | null;
   message: string;
 }
 
@@ -245,13 +291,14 @@ export interface OrgResponse {
   loyaltySilverMin: number;
   loyaltyGoldMin: number;
   loyaltyPlatinumMin: number;
-  billingPlan: "FREE" | "STARTER" | "GROWTH" | "ENTERPRISE";
+  billingPlan: BillingPlan;
+  billingInterval: BillingInterval | null;
   onboardingStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "SKIPPED";
   role: UserRole;
   createdAt: string;
 }
 
-/** Payload for creating a new organization. */
+/** Payload for creating a new team organization. */
 export interface CreateOrganizationRequest {
   name: string;
   slug?: string;
@@ -260,6 +307,14 @@ export interface CreateOrganizationRequest {
   currency?: string;
   industry?: string;
   website?: string;
+  billingPlan: BillingPlan;
+  billingInterval: BillingInterval;
+}
+
+/** Payload for creating a personal workspace. */
+export interface CreatePersonalRequest {
+  billingPlan: BillingPlan;
+  billingInterval: BillingInterval;
 }
 
 /** Payload for updating an existing organization's settings. */

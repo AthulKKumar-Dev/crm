@@ -1,7 +1,8 @@
-import { IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength } from 'class-validator';
+import { BillingInterval, BillingPlan } from '@prisma/client';
+import { IsEnum, IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength } from 'class-validator';
 
 // Used for creating an ORGANIZATION type org.
-// Personal workspace creation uses POST /organizations/personal with no body.
+// Personal workspace creation uses POST /organizations/personal (see CreatePersonalDto).
 export class CreateOrganizationDto {
     // Organization display name — shown in the dashboard header
     @IsString()
@@ -41,4 +42,11 @@ export class CreateOrganizationDto {
     @IsOptional()
     @IsUrl()
     website?: string;
+
+    // Selected during onboarding's choose-plan step.
+    @IsEnum(BillingPlan)
+    billingPlan: BillingPlan;
+
+    @IsEnum(BillingInterval)
+    billingInterval: BillingInterval;
 }

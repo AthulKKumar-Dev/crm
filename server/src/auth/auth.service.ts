@@ -106,7 +106,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
       })),
-      nextStep: hasOrgs ? null : 'choose-account-type',
+      nextStep: hasOrgs ? null : 'choose-plan',
       message: 'Email verified successfully.',
     };
   }
@@ -220,7 +220,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
       })),
-      nextStep: user.memberships.length === 0 ? 'choose-account-type' : null,
+      nextStep: user.memberships.length === 0 ? 'choose-plan' : null,
     };
   }
 

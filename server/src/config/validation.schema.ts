@@ -17,4 +17,7 @@ export const validationSchema = Joi.object({
     WHATSAPP_WEBHOOK_VERIFY_TOKEN: Joi.string().optional(),
     WHATSAPP_CONFIG_ID: Joi.string().optional(),
     SUPER_ADMIN_EMAILS: Joi.string().allow('').optional(),
+    RAZORPAY_KEY_ID: Joi.string().optional(),
+    RAZORPAY_KEY_SECRET: Joi.string().optional(),
+    RAZORPAY_WEBHOOK_SECRET: Joi.string().optional(),
 });

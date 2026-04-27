@@ -36,6 +36,7 @@ import {
 } from "~/hooks/use-gst-mutations";
 import { useProductTypes } from "~/hooks/use-product-queries";
 import { useRecomputeLoyaltyMutation } from "~/hooks/use-loyalty-mutations";
+import { getPricingPlan } from "~/data/pricing-plans";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
 
@@ -1570,28 +1571,45 @@ export default function SettingsPage() {
           {/* ─── BILLING ─── */}
           {activeTab === "billing" && (
             <>
-              <Section title="Current Plan" description={`You are on the ${org?.billingPlan?.toLowerCase() ?? "free"} plan.`}>
-                <div className="flex items-center justify-between gap-4 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 p-4">
-                  <div>
-                    <p className="text-sm font-bold text-gray-900 dark:text-gray-100 capitalize">
-                      {org?.billingPlan ?? "Free"} Plan
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {org?.billingPlan === "FREE" ? "No charge — upgrade to unlock more features." : "Managed via Stripe."}
-                    </p>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {["Unlimited orders", `${members?.length ?? 1} team member${(members?.length ?? 1) !== 1 ? "s" : ""}`, "Analytics", "Email support"].map((feature) => (
-                        <span key={feature} className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-[10px] font-medium text-[#084734]">
-                          <Check className="size-2.5" /> {feature}
-                        </span>
-                      ))}
+              {(() => {
+                const plan = org ? getPricingPlan(org.billingPlan) : null;
+                const interval = org?.billingInterval ?? null;
+                return (
+                  <Section
+                    title="Current Plan"
+                    description={plan ? `You are on the ${plan.name} plan.` : ""}
+                  >
+                    <div className="flex items-center justify-between gap-4 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 p-4">
+                      <div>
+                        <p className="text-sm font-bold text-gray-900 dark:text-gray-100">
+                          {plan?.name ?? "—"} Plan
+                          {interval && (
+                            <span className="ml-2 text-xs font-normal text-gray-500">
+                              ({interval.toLowerCase()})
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Billing managed via Stripe.
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {plan?.features.map((feature) => (
+                            <span
+                              key={feature}
+                              className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-[10px] font-medium text-[#084734]"
+                            >
+                              <Check className="size-2.5" /> {feature}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                      <button className="shrink-0 inline-flex h-8 items-center rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors">
+                        Change plan
+                      </button>
                     </div>
-                  </div>
-                  <button className="shrink-0 inline-flex h-8 items-center rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors">
-                    Upgrade
-                  </button>
-                </div>
-              </Section>
+                  </Section>
+                );
+              })()}
 
               <Section title="Payment Method" description="Manage your billing information.">
                 <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-dashed border-input px-3 text-xs text-muted-foreground hover:border-[#CEF17B] hover:text-gray-900 dark:hover:text-gray-100 transition-colors">

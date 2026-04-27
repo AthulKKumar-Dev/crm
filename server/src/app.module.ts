@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ServeStaticModule } from '@nestjs/serve-static';
+import { ScheduleModule } from '@nestjs/schedule';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { BullModule } from '@nestjs/bullmq';
 import { join } from 'path';
@@ -32,10 +33,12 @@ import { GstModule } from './gst/gst.module';
 import { InvoiceModule } from './invoice/invoice.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
 import { AdminModule } from './admin/admin.module';
+import { BillingModule } from './billing/billing.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration], validationSchema }),
+    ScheduleModule.forRoot(),
     ThrottlerModule.forRoot([{ ttl: 60000, limit: 60 }]),
     // Only mount the static SPA when explicitly enabled.
     // Set SERVE_STATIC=true on full-stack deploys (Render/Railway).
@@ -71,6 +74,7 @@ import { AdminModule } from './admin/admin.module';
     InvoiceModule,
     LoyaltyModule,
     AdminModule,
+    BillingModule,
   ],
   controllers: [AppController],
   providers: [

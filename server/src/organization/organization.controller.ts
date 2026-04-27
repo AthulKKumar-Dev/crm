@@ -5,6 +5,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { UserService } from '../user/user.service';
 import { OrganizationService } from './organization.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
+import { CreatePersonalDto } from './dto/create-personal.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 
 // All routes require JWT (no @Public()) — user must be logged in
@@ -22,11 +23,15 @@ export class OrganizationController {
   }
 
   // POST /api/v1/organizations/personal — create personal workspace
-  // WHY we need UserService? To get the user's firstName for the workspace name
+  // WHY we need UserService? To get the user's firstName for the workspace name.
+  // The body carries the plan chosen during onboarding.
   @Post('personal')
-  async createPersonal(@CurrentUser() user: JwtPayload) {
+  async createPersonal(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreatePersonalDto,
+  ) {
     const fullUser = await this.userService.findById(user.sub);
-    return this.orgService.createPersonal(user.sub, fullUser!.firstName);
+    return this.orgService.createPersonal(user.sub, fullUser!.firstName, dto);
   }
 
   // GET /api/v1/organizations — list user's orgs (for org switcher UI)

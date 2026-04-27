@@ -7,6 +7,7 @@ import { orgKeys } from "~/hooks/use-org-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   CreateOrganizationRequest,
+  CreatePersonalRequest,
   UpdateOrganizationRequest,
   UpdateMemberRoleRequest,
   SendInviteRequest,
@@ -19,12 +20,14 @@ export function useCreateOrganizationMutation() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+  const clearPendingPlan = useAuthStore((s) => s.clearPendingPlan);
 
   return useMutation({
     mutationFn: (data: CreateOrganizationRequest) => orgService.create(data),
     onSuccess: (org) => {
       queryClient.invalidateQueries({ queryKey: orgKeys.list() });
       setCurrentOrg(org.id);
+      clearPendingPlan();
       toast.success(`${org.name} created successfully!`);
       navigate("/dashboard");
     },
@@ -39,9 +42,10 @@ export function useCreatePersonalMutation() {
   const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
   const setOrganizations = useAuthStore((s) => s.setOrganizations);
   const existingOrgs = useAuthStore((s) => s.organizations);
+  const clearPendingPlan = useAuthStore((s) => s.clearPendingPlan);
 
   return useMutation({
-    mutationFn: () => orgService.createPersonal(),
+    mutationFn: (data: CreatePersonalRequest) => orgService.createPersonal(data),
     onSuccess: (org) => {
       queryClient.invalidateQueries({ queryKey: orgKeys.list() });
 
@@ -61,7 +65,8 @@ export function useCreatePersonalMutation() {
           currency: org.currency || "USD",
           industry: org.industry || null,
           website: org.website || null,
-          billingPlan: "FREE" as const,
+          billingPlan: org.billingPlan,
+          billingInterval: org.billingInterval,
           onboardingStatus: "COMPLETED" as const,
           createdAt: org.createdAt || new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -69,6 +74,7 @@ export function useCreatePersonalMutation() {
       };
       setOrganizations([...existingOrgs, newMembership]);
       setCurrentOrg(org.id);
+      clearPendingPlan();
       navigate("/dashboard");
     },
     onError: (error) => handleMutationError(error, "Failed to create workspace."),

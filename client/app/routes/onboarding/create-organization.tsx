@@ -76,6 +76,9 @@ export default function CreateOrganizationPage() {
   const setOrganizations = useAuthStore((state) => state.setOrganizations);
   const setTokens = useAuthStore((state) => state.setTokens);
   const existingOrgs = useAuthStore((state) => state.organizations);
+  const pendingPlan = useAuthStore((state) => state.pendingPlan);
+  const pendingBillingInterval = useAuthStore((state) => state.pendingBillingInterval);
+  const clearPendingPlan = useAuthStore((state) => state.clearPendingPlan);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
 
   const {
@@ -93,8 +96,12 @@ export default function CreateOrganizationPage() {
 
   /* ── Mutation: create the organization ────────────────── */
   const createOrg = useMutation({
-    mutationFn: (data: CreateOrganizationFormValues) =>
-      orgService.create({
+    mutationFn: (data: CreateOrganizationFormValues) => {
+      if (!pendingPlan || !pendingBillingInterval) {
+        // Guard should have redirected us; throw so the error surfaces clearly.
+        throw new Error("Please pick a plan before creating your organization.");
+      }
+      return orgService.create({
         name: data.name,
         industry: data.industry || undefined,
         website: data.website || undefined,
@@ -102,7 +109,10 @@ export default function CreateOrganizationPage() {
         timezone: data.timezone || undefined,
         // currency is auto-synced from Shopify on channel connect; backend
         // default ("USD") covers users who haven't connected a store yet.
-      }),
+        billingPlan: pendingPlan,
+        billingInterval: pendingBillingInterval,
+      });
+    },
     onSuccess: async (org) => {
       const switchData = await authService.switchOrg({ orgId: org.id });
       setTokens(switchData.accessToken, switchData.refreshToken);
@@ -124,7 +134,8 @@ export default function CreateOrganizationPage() {
           currency: org.currency || "USD",
           industry: org.industry || null,
           website: org.website || null,
-          billingPlan: "FREE",
+          billingPlan: org.billingPlan,
+          billingInterval: org.billingInterval,
           onboardingStatus: "COMPLETED",
           createdAt: org.createdAt || new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -132,6 +143,7 @@ export default function CreateOrganizationPage() {
       };
       setOrganizations([...existingOrgs, newMembership]);
       setCurrentOrg(org.id);
+      clearPendingPlan();
 
       toast.success(`${org.name} created!`);
       navigate(`/onboarding/invite-team?orgId=${org.id}`);
@@ -139,6 +151,8 @@ export default function CreateOrganizationPage() {
     onError: (error) => {
       if (isAxiosError(error)) {
         toast.error(error.response?.data?.message || "Failed to create organization.");
+      } else if (error instanceof Error) {
+        toast.error(error.message);
       } else {
         toast.error("Something went wrong. Please try again.");
       }
@@ -177,11 +191,13 @@ export default function CreateOrganizationPage() {
         <div className="flex items-center gap-1.5">
           <div className="size-2 rounded-full bg-gray-300" />
           <div className="h-px w-6 bg-gray-200" />
+          <div className="size-2 rounded-full bg-gray-300" />
+          <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-[#CEF17B]" />
           <div className="h-px w-6 bg-gray-200" />
           <div className="size-2 rounded-full bg-gray-200" />
         </div>
-        <span className="ml-2 text-xs text-gray-400">Step 2 of 3</span>
+        <span className="ml-2 text-xs text-gray-400">Step 3 of 4</span>
       </div>
 
       {/* Heading */}

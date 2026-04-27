@@ -18,7 +18,11 @@ import type {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function resolvePostAuthRoute(nextStep: string | null): string {
-  return nextStep === "choose-account-type" ? "/onboarding/account-type" : "/dashboard";
+  if (nextStep !== "choose-plan") return "/dashboard";
+  // Users who pick a plan but close the tab before creating their org can log
+  // back in without re-picking — skip ahead to account-type.
+  const { pendingPlan } = useAuthStore.getState();
+  return pendingPlan ? "/onboarding/account-type" : "/onboarding/choose-plan";
 }
 
 // ─── Signup ──────────────────────────────────────────────────────────────────
@@ -183,7 +187,8 @@ export function useAcceptInviteMutation() {
           currency: "USD",
           industry: null,
           website: null,
-          billingPlan: "FREE" as const,
+          billingPlan: "BASIC" as const,
+          billingInterval: null,
           onboardingStatus: "COMPLETED" as const,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
