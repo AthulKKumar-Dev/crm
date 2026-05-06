@@ -719,6 +719,49 @@ export interface OrderListParams {
   dateTo?: string;
 }
 
+/** Payment method for offline / in-store sales. */
+export type OfflinePaymentMethod = "CASH" | "CARD" | "UPI" | "OTHER";
+
+/** Customer block on a create-offline-order request. */
+export interface OfflineCustomerInput {
+  customerId?: string;
+  email?: string;
+  phone?: string;
+  firstName?: string;
+  lastName?: string;
+  gstin?: string;
+  billingStateCode?: string;
+  address?: Record<string, unknown>;
+}
+
+/** A line item on a create-offline-order request. */
+export interface OfflineLineItemInput {
+  productVariantId: string;
+  quantity: number;
+  unitPriceOverride?: number;
+  discount?: number;
+}
+
+/** Payload for creating an offline (in-store) order. */
+export interface CreateOfflineOrderRequest {
+  customer: OfflineCustomerInput;
+  lineItems: OfflineLineItemInput[];
+  sellerGstinId?: string;
+  placeOfSupplyCode?: string;
+  paymentMethod: OfflinePaymentMethod;
+  note?: string;
+  financialStatus?: FinancialStatus;
+  fulfillmentStatus?: FulfillmentStatus;
+  generateInvoice?: boolean;
+}
+
+/** Server response from POST /orders/offline. */
+export interface CreateOfflineOrderResponse {
+  order: OrderDetail;
+  invoice: InvoiceDetail | null;
+  invoiceError: string | null;
+}
+
 // ─── Customer Types ──────────────────────────────────────────────────────────
 
 /** VIP tier for a customer. */

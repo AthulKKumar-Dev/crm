@@ -1,7 +1,8 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package,
-  Target, Box, X, Loader2, Receipt, MapPin, Check,
+  Target, Box, X, Loader2, Receipt, MapPin, Check, Plus,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
@@ -89,6 +90,13 @@ export default function OrdersPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to="/orders/new"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-gray-900 dark:bg-gray-100 px-3 text-xs font-medium text-white dark:text-gray-900 shadow-sm hover:bg-gray-800 dark:hover:bg-white"
+          >
+            <Plus className="size-3.5" />
+            Create Order
+          </Link>
           <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 shadow-sm hover:bg-gray-50 dark:hover:bg-gray-800/60">
             <Upload className="size-3.5" />
             Export CSV

@@ -1,13 +1,36 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  ChannelPlatform,
+  ChannelStatus,
+  OrderFinancialStatus,
+  OrderFulfillmentStatus,
+  Prisma,
+} from '@prisma/client';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryOrdersDto } from './dto/query-orders.dto';
+import { CreateOfflineOrderDto } from './dto/create-offline-order.dto';
 import { QueryDashboardDto } from '../dashboard/dto/query-dashboard.dto';
 import { Parser } from 'json2csv';
+import { GstCalculatorService } from '../gst/gst-calculator.service';
+import { TaxResolverService } from '../gst/tax-resolver.service';
+import { InvoiceService } from '../invoice/invoice.service';
 
 @Injectable()
 export class OrderService {
-  constructor(private readonly prisma: PrismaService) { }
+  private readonly logger = new Logger(OrderService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly calculator: GstCalculatorService,
+    private readonly taxResolver: TaxResolverService,
+    private readonly invoiceService: InvoiceService,
+  ) {}
 
   async findAll(orgId: string, query: QueryOrdersDto) {
     const where: Prisma.OrderWhereInput = {
@@ -344,5 +367,378 @@ export class OrderService {
       percentage: Math.abs(percentage),
       direction: percentage > 0 ? 'up' : percentage < 0 ? 'down' : 'same',
     };
+  }
+
+  // ─── OFFLINE / IN-STORE ORDER CREATION ───
+  // Creates a manual order from a merchant's physical counter sale:
+  // resolves/creates customer, validates and decrements stock, snapshots
+  // line items, computes GST, and (when configured) generates the invoice
+  // — all in a single Serializable transaction so a partial failure rolls
+  // back cleanly.
+  async createOfflineOrder(
+    orgId: string,
+    userId: string,
+    dto: CreateOfflineOrderDto,
+  ) {
+    const variantIds = dto.lineItems.map((li) => li.productVariantId);
+    if (new Set(variantIds).size !== variantIds.length) {
+      throw new BadRequestException(
+        'Duplicate variant IDs are not allowed; merge them into a single line item.',
+      );
+    }
+
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Resolve or lazy-create the org's MANUAL channel.
+        const channel = await tx.channel.upsert({
+          where: {
+            organizationId_platform: {
+              organizationId: orgId,
+              platform: ChannelPlatform.MANUAL,
+            },
+          },
+          create: {
+            organizationId: orgId,
+            platform: ChannelPlatform.MANUAL,
+            name: 'In-Store / Manual',
+            status: ChannelStatus.CONNECTED,
+            isEnabled: true,
+          },
+          update: {},
+        });
+
+        // 2. Resolve customer (existing by id/email/phone, else create).
+        const customer = await this.resolveCustomer(tx, orgId, channel.id, dto);
+
+        // 3. Fetch variants. Stock validation/decrement is intentionally NOT
+        //    done here yet — that will be added in a follow-up. For now, we
+        //    only need product info for line-item snapshots and tax math.
+        const variants = await tx.productVariant.findMany({
+          where: {
+            id: { in: variantIds },
+            product: { organizationId: orgId },
+          },
+          include: { product: true },
+        });
+
+        const variantById = new Map(variants.map((v) => [v.id, v]));
+        const missing = variantIds.filter((id) => !variantById.has(id));
+        if (missing.length > 0) {
+          throw new NotFoundException(
+            `Product variants not found: ${missing.join(', ')}`,
+          );
+        }
+
+        // 4. Resolve seller GSTIN (only required when invoice generation is on).
+        const generateInvoice = dto.generateInvoice !== false;
+        const org = await tx.organization.findUnique({
+          where: { id: orgId },
+          select: { gstEnabled: true, currency: true },
+        });
+        if (!org) {
+          throw new NotFoundException('Organization not found');
+        }
+
+        let sellerGstin: { stateCode: string } | null = null;
+        if (generateInvoice && org.gstEnabled) {
+          if (dto.sellerGstinId) {
+            sellerGstin = await tx.organizationGstin.findFirst({
+              where: {
+                id: dto.sellerGstinId,
+                organizationId: orgId,
+                isActive: true,
+              },
+              select: { stateCode: true },
+            });
+          } else {
+            sellerGstin = await tx.organizationGstin.findFirst({
+              where: { organizationId: orgId, isDefault: true, isActive: true },
+              select: { stateCode: true },
+            });
+          }
+        }
+
+        // 5. Compute pricing per line item.
+        const placeOfSupplyCode =
+          dto.placeOfSupplyCode ||
+          dto.customer.billingStateCode ||
+          customer.billingStateCode ||
+          sellerGstin?.stateCode ||
+          '00';
+
+        const isIntraState = sellerGstin
+          ? this.calculator.isIntraState(
+              sellerGstin.stateCode,
+              placeOfSupplyCode,
+            )
+          : true;
+
+        const lineItemsToCreate: Array<{
+          variantId: string;
+          title: string;
+          variantTitle: string | null;
+          sku: string | null;
+          quantity: number;
+          unitPrice: number;
+          totalDiscount: number;
+          lineTotal: number;
+          taxAmount: number;
+        }> = [];
+
+        let subtotal = 0;
+        let totalTax = 0;
+
+        for (const li of dto.lineItems) {
+          const v = variantById.get(li.productVariantId)!;
+          const unitPrice =
+            li.unitPriceOverride ?? this.calculator.toNumber(v.price);
+          const discount = li.discount ?? 0;
+
+          const productGstRate = this.calculator.toNumber(v.product.gstRate);
+          const gstRate = sellerGstin
+            ? await this.taxResolver.resolveGstRate(
+                orgId,
+                v.product.id,
+                productGstRate || null,
+                placeOfSupplyCode,
+              )
+            : 0;
+
+          const calc = this.calculator.calculateLineItem(
+            { unitPrice, quantity: li.quantity, discount, gstRate },
+            isIntraState,
+          );
+
+          subtotal += calc.taxableValue;
+          totalTax += calc.totalTax;
+
+          lineItemsToCreate.push({
+            variantId: v.id,
+            title: v.product.title,
+            variantTitle: v.title || null,
+            sku: v.sku ?? null,
+            quantity: li.quantity,
+            unitPrice,
+            totalDiscount: discount,
+            lineTotal: calc.totalAmount,
+            taxAmount: calc.totalTax,
+          });
+        }
+
+        const round = (n: number) => Math.round(n * 100) / 100;
+        subtotal = round(subtotal);
+        totalTax = round(totalTax);
+        const grandTotal = round(subtotal + totalTax);
+
+        // 6. Generate next sequential orderNumber. Serializable isolation +
+        //    @@unique([channelId, externalId]) keep this collision-free under
+        //    concurrency; the runtime will retry on serialization conflict.
+        const last = await tx.order.findFirst({
+          where: { organizationId: orgId },
+          orderBy: { orderNumber: 'desc' },
+          select: { orderNumber: true },
+        });
+        const nextNumber = (last?.orderNumber ?? 1000) + 1;
+
+        // 7. Create the order with line items in a nested write.
+        const now = new Date();
+        const order = await tx.order.create({
+          data: {
+            organizationId: orgId,
+            channelId: channel.id,
+            customerId: customer.id,
+            externalId: `manual_${randomUUID()}`,
+            orderNumber: nextNumber,
+            name: `#${nextNumber}`,
+            financialStatus:
+              dto.financialStatus ?? OrderFinancialStatus.PAID,
+            fulfillmentStatus:
+              dto.fulfillmentStatus ?? OrderFulfillmentStatus.FULFILLED,
+            currency: org.currency || 'INR',
+            subtotalPrice: subtotal,
+            totalPrice: grandTotal,
+            totalTax,
+            totalDiscounts: 0,
+            totalShippingPrice: 0,
+            note: dto.note,
+            metadata: {
+              source: 'offline',
+              paymentMethod: dto.paymentMethod,
+              createdByUserId: userId,
+            },
+            externalCreatedAt: now,
+            lineItems: {
+              create: lineItemsToCreate.map((li) => ({
+                variantId: li.variantId,
+                externalId: `manual_${randomUUID()}`,
+                title: li.title,
+                variantTitle: li.variantTitle,
+                sku: li.sku,
+                quantity: li.quantity,
+                price: li.unitPrice,
+                totalDiscount: li.totalDiscount,
+                taxable: true,
+                requiresShipping: false,
+              })),
+            },
+          },
+          include: { lineItems: true },
+        });
+
+        // 8. (Inventory decrement intentionally deferred — see step 3 note.)
+
+        // 9. Update customer denormalized counters.
+        await tx.customer.update({
+          where: { id: customer.id },
+          data: {
+            ordersCount: { increment: 1 },
+            totalSpent: { increment: grandTotal },
+          },
+        });
+
+        // 10. Timeline event.
+        await tx.orderTimelineEvent.create({
+          data: {
+            orderId: order.id,
+            actorId: userId,
+            action: 'created',
+            message: `Offline order created (${dto.paymentMethod})`,
+          },
+        });
+
+        // 11. Generate invoice inline (soft-fail if GST isn't configured).
+        let invoice: Awaited<
+          ReturnType<typeof this.invoiceService.createForOrderTx>
+        > | null = null;
+        let invoiceError: string | null = null;
+
+        if (generateInvoice && org.gstEnabled && sellerGstin) {
+          try {
+            invoice = await this.invoiceService.createForOrderTx(
+              tx,
+              orgId,
+              order.id,
+              {
+                sellerGstinId: dto.sellerGstinId,
+                placeOfSupplyCode: dto.placeOfSupplyCode,
+                notes: dto.note,
+              },
+            );
+          } catch (err) {
+            // Soft-fail: a missing GST detail (no seller GSTIN, etc.) must not
+            // block a walk-in sale. Log it and proceed; the merchant can issue
+            // the invoice later from the order detail page.
+            invoiceError =
+              err instanceof Error ? err.message : 'Invoice generation failed.';
+            this.logger.warn(
+              `Invoice soft-fail for offline order ${order.id}: ${invoiceError}`,
+            );
+            invoice = null;
+          }
+        } else if (generateInvoice && org.gstEnabled && !sellerGstin) {
+          invoiceError =
+            'No GSTIN registration found. Add one in Settings → Tax & GST.';
+        } else if (generateInvoice && !org.gstEnabled) {
+          invoiceError = 'GST is not enabled for this organization.';
+        }
+
+        return { order, invoice, invoiceError };
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        timeout: 15000,
+      },
+    );
+
+    return result;
+  }
+
+  private async resolveCustomer(
+    tx: Prisma.TransactionClient,
+    orgId: string,
+    manualChannelId: string,
+    dto: CreateOfflineOrderDto,
+  ) {
+    const input = dto.customer;
+
+    if (input.customerId) {
+      const existing = await tx.customer.findFirst({
+        where: { id: input.customerId, organizationId: orgId },
+      });
+      if (!existing) {
+        throw new NotFoundException('Customer not found');
+      }
+      return existing;
+    }
+
+    if (input.email) {
+      const byEmail = await tx.customer.findFirst({
+        where: { organizationId: orgId, email: input.email },
+      });
+      if (byEmail) {
+        return this.fillMissingCustomerFields(tx, byEmail, input);
+      }
+    }
+
+    if (input.phone) {
+      const byPhone = await tx.customer.findFirst({
+        where: { organizationId: orgId, phone: input.phone },
+      });
+      if (byPhone) {
+        return this.fillMissingCustomerFields(tx, byPhone, input);
+      }
+    }
+
+    if (!input.email && !input.phone && !input.firstName && !input.lastName) {
+      throw new BadRequestException(
+        'Customer details required: provide at least one of customerId, email, phone, or a name.',
+      );
+    }
+
+    return tx.customer.create({
+      data: {
+        organizationId: orgId,
+        channelId: manualChannelId,
+        externalId: `manual_${randomUUID()}`,
+        email: input.email ?? null,
+        firstName: input.firstName ?? null,
+        lastName: input.lastName ?? null,
+        phone: input.phone ?? null,
+        gstin: input.gstin ?? null,
+        billingStateCode: input.billingStateCode ?? null,
+        ...(input.address
+          ? {
+              addresses: [input.address] as Prisma.InputJsonValue,
+              defaultAddress: input.address as Prisma.InputJsonValue,
+            }
+          : {}),
+      },
+    });
+  }
+
+  private async fillMissingCustomerFields(
+    tx: Prisma.TransactionClient,
+    existing: {
+      id: string;
+      firstName: string | null;
+      lastName: string | null;
+      gstin: string | null;
+      billingStateCode: string | null;
+    },
+    input: CreateOfflineOrderDto['customer'],
+  ) {
+    const patch: Prisma.CustomerUpdateInput = {};
+    if (!existing.firstName && input.firstName) patch.firstName = input.firstName;
+    if (!existing.lastName && input.lastName) patch.lastName = input.lastName;
+    if (!existing.gstin && input.gstin) patch.gstin = input.gstin;
+    if (!existing.billingStateCode && input.billingStateCode) {
+      patch.billingStateCode = input.billingStateCode;
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return existing;
+    }
+
+    return tx.customer.update({ where: { id: existing.id }, data: patch });
   }
 }
