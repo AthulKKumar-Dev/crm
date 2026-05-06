@@ -231,6 +231,14 @@ export class BillingService {
         });
 
         const status = user.pendingSubscriptionStatus;
+
+        // TEMP: pricing/billing step is hidden from users during onboarding.
+        // Allow orgs to be created without a paid subscription. When billing
+        // ships, remove this early-return to restore the payment gate below.
+        if (!status) {
+            return;
+        }
+
         const isPaid =
             status === SubscriptionStatus.ACTIVE ||
             status === SubscriptionStatus.AUTHENTICATED;

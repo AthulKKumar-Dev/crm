@@ -21,20 +21,10 @@ import {
   choosePlanSchema,
   type ChoosePlanFormValues,
 } from "~/lib/schemas/onboarding.schemas";
-import type { BillingInterval } from "~/types/api";
 
 const RAZORPAY_SCRIPT_URL = "https://checkout.razorpay.com/v1/checkout.js";
 const POLL_INTERVAL_MS = 2_000;
 const POLL_TIMEOUT_MS = 30_000;
-
-const BILLING_INTERVAL_TABS: readonly {
-  value: BillingInterval;
-  label: string;
-  hint?: string;
-}[] = [
-  { value: "MONTHLY", label: "Monthly" },
-  { value: "YEARLY", label: "Yearly", hint: "Save ~16%" },
-];
 
 export function meta() {
   return [{ title: "Choose Your Plan | Collabo CRM" }];
@@ -86,12 +76,13 @@ export default function ChoosePlanPage() {
     mode: "onChange",
     defaultValues: {
       billingPlan: pendingPlan ?? undefined,
+      // Yearly plans aren't configured in Razorpay yet, so we lock the form
+      // to MONTHLY. The toggle UI is hidden below.
       billingInterval: pendingBillingInterval ?? "MONTHLY",
     },
   });
 
   const selectedPlan = watch("billingPlan");
-  const selectedInterval = watch("billingInterval");
 
   /**
    * Polls /billing/pending-status until status flips to ACTIVE/AUTHENTICATED
@@ -208,54 +199,7 @@ export default function ChoosePlanPage() {
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
-        {/* Billing interval toggle */}
-        <Controller
-          control={control}
-          name="billingInterval"
-          render={({ field }) => (
-            <div
-              role="radiogroup"
-              aria-label="Billing cadence"
-              className="mx-auto flex w-fit items-center gap-1 rounded-full bg-gray-100 p-1"
-            >
-              {BILLING_INTERVAL_TABS.map((tab) => {
-                const active = field.value === tab.value;
-                return (
-                  <button
-                    key={tab.value}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    onClick={() => field.onChange(tab.value)}
-                    className={cn(
-                      "inline-flex items-center gap-2 rounded-full px-4 py-1.5 text-sm font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#CEF17B]/60",
-                      active
-                        ? "bg-white text-gray-900 shadow-sm"
-                        : "text-gray-500 hover:text-gray-700",
-                    )}
-                  >
-                    {tab.label}
-                    {tab.hint && (
-                      <span
-                        className={cn(
-                          "rounded-full px-2 py-0.5 text-[10px] font-semibold",
-                          active
-                            ? "bg-[#CEF17B]/40 text-[#084734]"
-                            : "bg-gray-200 text-gray-500",
-                        )}
-                      >
-                        {tab.hint}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        />
-
-        {/* Plan cards */}
+        {/* Plan cards — 3 plans (Basic / Growth / Advance), monthly billing only */}
         <Controller
           control={control}
           name="billingPlan"
@@ -263,13 +207,12 @@ export default function ChoosePlanPage() {
             <div
               role="radiogroup"
               aria-label="Pricing plan"
-              className="grid grid-cols-1 gap-4 sm:grid-cols-2"
+              className="grid grid-cols-1 gap-4 sm:grid-cols-3"
             >
               {PRICING_PLANS.map((plan) => (
                 <PlanCard
                   key={plan.id}
                   plan={plan}
-                  interval={selectedInterval}
                   selected={field.value === plan.id}
                   onSelect={() => field.onChange(plan.id)}
                 />
@@ -308,16 +251,12 @@ export default function ChoosePlanPage() {
 
 interface PlanCardProps {
   plan: (typeof PRICING_PLANS)[number];
-  interval: BillingInterval;
   selected: boolean;
   onSelect: () => void;
 }
 
-function PlanCard({ plan, interval, selected, onSelect }: PlanCardProps) {
-  const price =
-    interval === "YEARLY" ? plan.priceYearlyInr : plan.priceMonthlyInr;
-  const per = interval === "YEARLY" ? "year" : "month";
-  const formattedPrice = price.toLocaleString("en-IN");
+function PlanCard({ plan, selected, onSelect }: PlanCardProps) {
+  const formattedPrice = plan.priceMonthlyInr.toLocaleString("en-IN");
 
   return (
     <button
@@ -351,7 +290,7 @@ function PlanCard({ plan, interval, selected, onSelect }: PlanCardProps) {
 
       <div className="flex items-baseline gap-1">
         <span className="text-3xl font-bold text-gray-900">₹{formattedPrice}</span>
-        <span className="text-sm text-gray-500">/{per}</span>
+        <span className="text-sm text-gray-500">/month</span>
       </div>
 
       <ul className="space-y-2">

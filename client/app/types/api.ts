@@ -47,7 +47,7 @@ export interface User {
 export type LoyaltyMetric = "ORDERS" | "TOTAL_SPENT";
 
 /** Available pricing plan tiers. Mirrors the Prisma `BillingPlan` enum. */
-export type BillingPlan = "BASIC" | "ADVANCE";
+export type BillingPlan = "BASIC" | "GROWTH" | "ADVANCE";
 
 /** Billing cadence for a plan. Mirrors the Prisma `BillingInterval` enum. */
 export type BillingInterval = "MONTHLY" | "YEARLY";
