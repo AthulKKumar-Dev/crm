@@ -11,13 +11,16 @@ import type { BillingPlan } from "~/types/api";
  * Prices are in INR (Razorpay's primary currency for this app). The matching
  * Razorpay Plans must be created with the same amounts in INR — see
  * server/src/billing/razorpay-plans.ts for the Plan IDs.
+ *
+ * Currently only monthly billing is configured. Yearly support can be added
+ * later by creating yearly Plans in the Razorpay dashboard, then re-enabling
+ * the toggle in choose-plan.tsx.
  */
 export interface PricingPlan {
   id: BillingPlan;
   name: string;
   tagline: string;
   priceMonthlyInr: number;
-  priceYearlyInr: number;
   features: readonly string[];
   /** Marks the recommended plan (rendered with a "Popular" ribbon in the UI). */
   highlighted?: boolean;
@@ -29,7 +32,6 @@ export const PRICING_PLANS: readonly PricingPlan[] = [
     name: "Basic",
     tagline: "Everything a small team needs to manage customers and orders.",
     priceMonthlyInr: 999,
-    priceYearlyInr: 9999,
     features: [
       "Features",
       "Features",
@@ -37,11 +39,10 @@ export const PRICING_PLANS: readonly PricingPlan[] = [
     ],
   },
   {
-    id: "ADVANCE",
-    name: "Advance",
-    tagline: "For growing teams that need automation, integrations, and insights.",
-    priceMonthlyInr: 2999,
-    priceYearlyInr: 29999,
+    id: "GROWTH",
+    name: "Growth",
+    tagline: "For growing teams that need automation and integrations.",
+    priceMonthlyInr: 4999,
     features: [
       "Features",
       "Features",
@@ -49,6 +50,19 @@ export const PRICING_PLANS: readonly PricingPlan[] = [
       "Features",
     ],
     highlighted: true,
+  },
+  {
+    id: "ADVANCE",
+    name: "Advance",
+    tagline: "Power tools, full automation, and priority support for scale.",
+    priceMonthlyInr: 9999,
+    features: [
+      "Features",
+      "Features",
+      "Features",
+      "Features",
+      "Features",
+    ],
   },
 ] as const;
 

@@ -24,14 +24,9 @@ export default function AccountTypePage() {
   function handleSelect(type: "personal" | "organization") {
     setSelected(type);
     if (type === "personal") {
-      // Guard should have redirected us if these were missing, but double-check.
-      if (!pendingPlan || !pendingBillingInterval) {
-        navigate("/onboarding/choose-plan");
-        return;
-      }
       createPersonal.mutate({
-        billingPlan: pendingPlan,
-        billingInterval: pendingBillingInterval,
+        billingPlan: pendingPlan ?? "BASIC",
+        billingInterval: pendingBillingInterval ?? "MONTHLY",
       });
     } else {
       navigate("/onboarding/create-organization");

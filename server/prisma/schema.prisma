@@ -20,6 +20,7 @@ enum OrganizationType {
 
 enum BillingPlan {
   BASIC
+  GROWTH
   ADVANCE
 }
 

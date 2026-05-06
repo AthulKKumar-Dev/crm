@@ -97,10 +97,6 @@ export default function CreateOrganizationPage() {
   /* ── Mutation: create the organization ────────────────── */
   const createOrg = useMutation({
     mutationFn: (data: CreateOrganizationFormValues) => {
-      if (!pendingPlan || !pendingBillingInterval) {
-        // Guard should have redirected us; throw so the error surfaces clearly.
-        throw new Error("Please pick a plan before creating your organization.");
-      }
       return orgService.create({
         name: data.name,
         industry: data.industry || undefined,
@@ -109,8 +105,8 @@ export default function CreateOrganizationPage() {
         timezone: data.timezone || undefined,
         // currency is auto-synced from Shopify on channel connect; backend
         // default ("USD") covers users who haven't connected a store yet.
-        billingPlan: pendingPlan,
-        billingInterval: pendingBillingInterval,
+        billingPlan: pendingPlan ?? "BASIC",
+        billingInterval: pendingBillingInterval ?? "MONTHLY",
       });
     },
     onSuccess: async (org) => {

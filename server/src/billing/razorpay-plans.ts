@@ -5,9 +5,10 @@ export type SupportedCurrency = 'INR' | 'USD';
 /**
  * Razorpay Plan IDs created in the Razorpay dashboard.
  *
- * One Plan per (currency, plan, interval) combination — 8 total. Replace the
- * `plan_REPLACE_*` placeholders with real Plan IDs after creating them in
- * https://dashboard.razorpay.com/app/subscriptions/plans.
+ * Currently only INR monthly plans are configured. Yearly + USD slots remain
+ * placeholders — `resolvePlanId` will throw if any of them is requested,
+ * which is the desired behavior until those Plans are created in the
+ * Razorpay dashboard.
  *
  * This file is server-side only — never trust a Plan ID sent from the client.
  */
@@ -17,18 +18,26 @@ export const RAZORPAY_PLAN_IDS: Record<
 > = {
     INR: {
         BASIC: {
-            MONTHLY: 'plan_SiRxjIEEXLXNi7',
-            YEARLY: 'plan_SiRzQDryp03aJ8',
+            MONTHLY: 'plan_SlznJFDuxEUtqi',
+            YEARLY: 'plan_REPLACE_basic_inr_yearly',
+        },
+        GROWTH: {
+            MONTHLY: 'plan_Slznfo1TiLMZjP',
+            YEARLY: 'plan_REPLACE_growth_inr_yearly',
         },
         ADVANCE: {
-            MONTHLY: 'plan_SiS0GUroFwvmfc',
-            YEARLY: 'plan_SiS1vtdbIwb4Vm',
+            MONTHLY: 'plan_Slzo2QbClGIEPL',
+            YEARLY: 'plan_REPLACE_advance_inr_yearly',
         },
     },
     USD: {
         BASIC: {
             MONTHLY: 'plan_REPLACE_basic_usd_monthly',
             YEARLY: 'plan_REPLACE_basic_usd_yearly',
+        },
+        GROWTH: {
+            MONTHLY: 'plan_REPLACE_growth_usd_monthly',
+            YEARLY: 'plan_REPLACE_growth_usd_yearly',
         },
         ADVANCE: {
             MONTHLY: 'plan_REPLACE_advance_usd_monthly',
