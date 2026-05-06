@@ -1,9 +1,10 @@
-import { Controller, Get, Param, Query, Res } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Res } from '@nestjs/common';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { OrderService } from './order.service';
 import { QueryDashboardDto } from '../dashboard/dto/query-dashboard.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
+import { CreateOfflineOrderDto } from './dto/create-offline-order.dto';
 import type { Response } from 'express';
 
 @Controller('orders')
@@ -14,6 +15,16 @@ export class OrderController {
   @Get()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryOrdersDto) {
     return this.orderService.findAll(user.orgId!, query);
+  }
+
+  // POST /api/v1/orders/offline — create an offline (in-store) order with
+  // optional auto-invoice and inventory decrement.
+  @Post('offline')
+  createOffline(
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreateOfflineOrderDto,
+  ) {
+    return this.orderService.createOfflineOrder(user.orgId!, user.sub, dto);
   }
 
   // GET /api/v1/orders/stats — MUST be before :id route

@@ -22,6 +22,8 @@ export default [
   layout("routes/app/_layout.tsx", [
     route("dashboard", "routes/app/dashboard.tsx"),
     route("orders", "routes/app/orders.tsx"),
+    route("orders/new", "routes/app/orders/new.tsx"),
+    route("invoices/:id/print", "routes/app/invoices/print.tsx"),
     route("products", "routes/app/products.tsx"),
     route("marketing", "routes/app/marketing.tsx"),
     route("channel", "routes/app/channel.tsx"),

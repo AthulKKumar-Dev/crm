@@ -6,6 +6,8 @@ import type {
   OrderListParams,
   OrderStatsResponse,
   DashboardQueryParams,
+  CreateOfflineOrderRequest,
+  CreateOfflineOrderResponse,
 } from "~/types/api";
 
 /**
@@ -23,4 +25,7 @@ export const orderService = {
 
   stats: (params?: DashboardQueryParams) =>
     apiClient.get<OrderStatsResponse>("/orders/stats", { params }).then((response) => response.data),
+
+  createOffline: (data: CreateOfflineOrderRequest) =>
+    apiClient.post<CreateOfflineOrderResponse>("/orders/offline", data).then((response) => response.data),
 };

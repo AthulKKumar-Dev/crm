@@ -4,7 +4,7 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
-import { GstType, InvoiceStatus } from '@prisma/client';
+import { GstType, InvoiceStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { GstService } from '../gst/gst.service';
 import {
@@ -33,9 +33,33 @@ export class InvoiceService {
   // Creates a GST-compliant invoice for an order.
   // Snapshots all seller/buyer data at creation time.
   async create(orgId: string, dto: CreateInvoiceDto) {
+    return this.prisma.$transaction((tx) =>
+      this.createForOrderTx(tx, orgId, dto.orderId, dto),
+    );
+  }
+
+  /**
+   * Transaction-scoped invoice creation. Used by:
+   *   - the public `create()` (which opens its own tx)
+   *   - the offline-order flow (which already holds an outer tx)
+   *
+   * Caller is responsible for verifying the org owns the order. We re-validate
+   * defensively here to keep this safe to expose.
+   */
+  async createForOrderTx(
+    tx: Prisma.TransactionClient,
+    orgId: string,
+    orderId: string,
+    dto: {
+      sellerGstinId?: string;
+      buyerGstin?: string;
+      placeOfSupplyCode?: string;
+      notes?: string;
+    },
+  ) {
     // 1. Fetch the order with line items and customer
-    const order = await this.prisma.order.findFirst({
-      where: { id: dto.orderId, organizationId: orgId },
+    const order = await tx.order.findFirst({
+      where: { id: orderId, organizationId: orgId },
       include: {
         lineItems: {
           include: {
@@ -53,7 +77,7 @@ export class InvoiceService {
     }
 
     // 2. Check if GST is enabled for the org
-    const org = await this.prisma.organization.findUnique({
+    const org = await tx.organization.findUnique({
       where: { id: orgId },
       select: { gstEnabled: true },
     });
@@ -67,13 +91,19 @@ export class InvoiceService {
     // 3. Determine the seller GSTIN
     let sellerGstin;
     if (dto.sellerGstinId) {
-      sellerGstin = await this.gstService.findOne(dto.sellerGstinId, orgId);
+      sellerGstin = await tx.organizationGstin.findFirst({
+        where: { id: dto.sellerGstinId, organizationId: orgId },
+      });
     } else {
       // Auto-select: try matching place of supply first, then default
       const placeOfSupply = this.resolvePlaceOfSupply(dto, order);
-      sellerGstin = await this.gstService.findByState(orgId, placeOfSupply);
+      sellerGstin = await tx.organizationGstin.findFirst({
+        where: { organizationId: orgId, stateCode: placeOfSupply, isActive: true },
+      });
       if (!sellerGstin) {
-        sellerGstin = await this.gstService.findDefault(orgId);
+        sellerGstin = await tx.organizationGstin.findFirst({
+          where: { organizationId: orgId, isDefault: true, isActive: true },
+        });
       }
     }
 
@@ -134,12 +164,13 @@ export class InvoiceService {
       this.calculator.toNumber(order.totalDiscounts),
     );
 
-    // 8. Generate invoice number
+    // 8. Generate invoice number (passes the same tx so it's atomic with the create below)
     const invoiceDate = new Date();
     const financialYear = this.calculator.getFinancialYear(invoiceDate);
     const invoiceNum = await this.invoiceNumber.getNextInvoiceNumber(
       orgId,
       financialYear,
+      tx,
     );
 
     // 9. Resolve buyer info
@@ -153,8 +184,8 @@ export class InvoiceService {
       placeOfSupplyCode;
     const buyerStateName = getStateName(buyerStateCode) || buyerStateCode;
 
-    // 10. Create the invoice with line items in one transaction
-    const invoice = await this.prisma.invoice.create({
+    // 10. Create the invoice with line items
+    const invoice = await tx.invoice.create({
       data: {
         organizationId: orgId,
         orderId: order.id,
@@ -629,7 +660,10 @@ export class InvoiceService {
   }
 
   // ─── HELPER: Resolve place of supply ───
-  private resolvePlaceOfSupply(dto: CreateInvoiceDto, order: any): string {
+  private resolvePlaceOfSupply(
+    dto: { placeOfSupplyCode?: string; buyerGstin?: string },
+    order: any,
+  ): string {
     // Priority: explicit > shipping address > billing address > customer > fallback
     if (dto.placeOfSupplyCode && isValidStateCode(dto.placeOfSupplyCode)) {
       return dto.placeOfSupplyCode;
