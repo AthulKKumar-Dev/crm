@@ -20,6 +20,8 @@ import { Parser } from 'json2csv';
 import { GstCalculatorService } from '../gst/gst-calculator.service';
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceService } from '../invoice/invoice.service';
+import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
+import { ShopifyPushService } from '../channel/shopify-push.service';
 
 @Injectable()
 export class OrderService {
@@ -30,6 +32,8 @@ export class OrderService {
     private readonly calculator: GstCalculatorService,
     private readonly taxResolver: TaxResolverService,
     private readonly invoiceService: InvoiceService,
+    private readonly shopifyPushEnqueuer: ShopifyPushEnqueuer,
+    private readonly shopifyPushService: ShopifyPushService,
   ) {}
 
   async findAll(orgId: string, query: QueryOrdersDto) {
@@ -650,7 +654,53 @@ export class OrderService {
       },
     );
 
+    // After the local order commits, enqueue a Shopify push if the org has a
+    // connected Shopify channel. We do this OUTSIDE the transaction so a
+    // queue/Redis hiccup never rolls back the local sale. The job runs in
+    // the background; failures are recorded on `order.metadata.shopifySync`
+    // and retried with exponential backoff (5 attempts).
+    try {
+      const shopifyChannel = await this.shopifyPushService.findShopifyChannel(
+        orgId,
+      );
+      if (shopifyChannel?.status === 'CONNECTED') {
+        // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
+        // even before the worker picks the job up.
+        await this.markPendingSync(result.order.id);
+        await this.shopifyPushEnqueuer.enqueueOrderPush({
+          type: 'order',
+          orderId: result.order.id,
+          organizationId: orgId,
+        });
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Skipping Shopify push enqueue for order ${result.order.id}: ${err}`,
+      );
+    }
+
     return result;
+  }
+
+  /** Stamp metadata.shopifySync = { status: 'PENDING', attempts: 0 }. */
+  private async markPendingSync(orderId: string): Promise<void> {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      select: { metadata: true },
+    });
+    const meta =
+      order?.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
+        ? (order.metadata as Prisma.JsonObject)
+        : {};
+    await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        metadata: {
+          ...meta,
+          shopifySync: { status: 'PENDING', attempts: 0 },
+        } as Prisma.InputJsonObject,
+      },
+    });
   }
 
   private async resolveCustomer(

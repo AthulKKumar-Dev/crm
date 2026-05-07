@@ -581,6 +581,15 @@ export interface ChannelRef {
   platform: string;
 }
 
+/** Per-product Shopify sync status (sub-object of `Product.metadata.shopifySync`). */
+export interface ProductShopifySync {
+  status: "PENDING" | "SYNCED" | "FAILED";
+  shopifyProductId?: string;
+  error?: string;
+  syncedAt?: string;
+  attempts: number;
+}
+
 /** A product in a list response (summary view). */
 export interface Product {
   id: string;
@@ -596,12 +605,42 @@ export interface Product {
   channel: ChannelRef;
   createdAt: string;
   variants: ProductVariant[];
+  /** Set when the product has been pushed (or attempted to be pushed) to Shopify. */
+  shopifySync: ProductShopifySync | null;
 }
 
 /** A product detail response with all variants and images. */
 export interface ProductDetail extends Product {
   images: ProductImage[];
 }
+
+/** Variant block on a create-product / update-product request. */
+export interface ProductVariantInput {
+  price: number;
+  sku?: string;
+  compareAtPrice?: number;
+  inventoryQuantity?: number;
+}
+
+/** Payload for creating a CRM-native product (single default variant). */
+export interface CreateProductRequest {
+  title: string;
+  vendor?: string;
+  productType?: string;
+  status?: ProductStatus;
+  tags?: string[];
+  bodyHtml?: string;
+  hsnCode?: string;
+  gstRate?: number;
+  variant: ProductVariantInput;
+}
+
+/** Payload for editing a MANUAL-channel product. All fields optional. */
+export type UpdateProductRequest = Partial<
+  Omit<CreateProductRequest, "variant">
+> & {
+  variant?: Partial<ProductVariantInput>;
+};
 
 /** Query parameters for the product list endpoint. */
 export interface ProductListParams {

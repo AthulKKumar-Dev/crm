@@ -5,6 +5,8 @@ import type {
   ProductDetail,
   ProductListParams,
   ProductStatsResponse,
+  CreateProductRequest,
+  UpdateProductRequest,
 } from "~/types/api";
 
 /**
@@ -28,4 +30,18 @@ export const productService = {
 
   stats: (params?: { channelId?: string }) =>
     apiClient.get<ProductStatsResponse>("/products/stats", { params }).then((response) => response.data),
+
+  /** Create a CRM-native product on the MANUAL channel. */
+  create: (data: CreateProductRequest) =>
+    apiClient.post<ProductDetail>("/products", data).then((response) => response.data),
+
+  /** Edit a MANUAL-channel product. Server returns 403 for SHOPIFY products. */
+  update: (id: string, data: UpdateProductRequest) =>
+    apiClient.patch<ProductDetail>(`/products/${id}`, data).then((response) => response.data),
+
+  /** Soft-delete (archive) a MANUAL-channel product. */
+  softDelete: (id: string) =>
+    apiClient
+      .delete<{ id: string; deletedAt: string }>(`/products/${id}`)
+      .then((response) => response.data),
 };
