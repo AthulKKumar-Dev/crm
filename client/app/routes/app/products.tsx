@@ -1,15 +1,17 @@
 import { useState } from "react";
 import {
   Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
-  PackageX, AlertTriangle, X, Loader2, Check, FileText,
+  PackageX, AlertTriangle, X, Loader2, Check, FileText, Pencil, Trash2,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
+import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
 import { cn, formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
+import { useDeleteProductMutation } from "~/hooks/use-product-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -42,6 +44,12 @@ export default function ProductsPage() {
   const [selectedType, setSelectedType] = useState("All");
   const [currentPage, setCurrentPage] = useState(1);
   const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  // Full edit/create dialog state. `creatingProduct` toggles the create form;
+  // `editingFullProductId` opens the edit form for a MANUAL-channel product.
+  const [creatingProduct, setCreatingProduct] = useState(false);
+  const [editingFullProductId, setEditingFullProductId] = useState<string | null>(null);
+
+  const deleteProduct = useDeleteProductMutation();
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
@@ -83,7 +91,10 @@ export default function ProductsPage() {
             Manage your product catalog, inventory, and pricing.
           </p>
         </div>
-        <button className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]">
+        <button
+          onClick={() => setCreatingProduct(true)}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
+        >
           <Plus className="size-3.5" />
           Add Product
         </button>
@@ -171,6 +182,7 @@ export default function ProductsPage() {
                     </>
                   )}
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Status</th>
+                  <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -178,7 +190,15 @@ export default function ProductsPage() {
                   <tr
                     key={product.id}
                     className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
-                    onClick={() => gstEnabled ? setEditingProductId(product.id) : undefined}
+                    onClick={() => {
+                      // MANUAL products → full edit dialog (includes GST fields)
+                      // Synced products → GST-only dialog (since other fields are read-only)
+                      if (product.channel?.platform === "MANUAL") {
+                        setEditingFullProductId(product.id);
+                      } else if (gstEnabled) {
+                        setEditingProductId(product.id);
+                      }
+                    }}
                   >
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -230,6 +250,17 @@ export default function ProductsPage() {
                         {product.totalStock === 0 && product.status === "ACTIVE" ? "Out of Stock" : STATUS_LABEL[product.status]}
                       </span>
                     </td>
+                    <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                      <ProductRowActions
+                        product={product}
+                        onEdit={() => setEditingFullProductId(product.id)}
+                        onArchive={() => {
+                          if (confirm(`Archive "${product.title}"? Existing orders will keep their record.`)) {
+                            deleteProduct.mutate(product.id);
+                          }
+                        }}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -261,6 +292,19 @@ export default function ProductsPage() {
         </div>
       )}
 
+      {/* Create Product Dialog */}
+      {creatingProduct && (
+        <ProductFormDialog onClose={() => setCreatingProduct(false)} />
+      )}
+
+      {/* Full Edit Product Dialog (MANUAL-channel products only) */}
+      {editingFullProductId && (
+        <ProductFormDialog
+          productId={editingFullProductId}
+          onClose={() => setEditingFullProductId(null)}
+        />
+      )}
+
       {/* Edit Product GST Dialog */}
       {editingProductId && gstEnabled && (
         <EditProductGstDialog
@@ -269,6 +313,84 @@ export default function ProductsPage() {
           onClose={() => setEditingProductId(null)}
         />
       )}
+    </div>
+  );
+}
+
+// ── Product Row Actions ─────────────────────────────────────────────────────
+// Renders the right-most cell of each product row. Four states:
+//   1. Synced to Shopify (channel.platform === SHOPIFY)        → green badge
+//   2. Currently syncing (shopifySync.status === PENDING)     → spinner badge
+//   3. Sync failed (shopifySync.status === FAILED)            → red badge + edit/archive
+//   4. CRM-only, no sync attempted yet (MANUAL, no shopifySync) → edit/archive
+
+function ProductRowActions({
+  product,
+  onEdit,
+  onArchive,
+}: {
+  product: Product;
+  onEdit: () => void;
+  onArchive: () => void;
+}) {
+  const isSynced = product.channel?.platform === "SHOPIFY";
+  const sync = product.shopifySync;
+
+  if (isSynced) {
+    return (
+      <span
+        title={
+          sync?.shopifyProductId
+            ? `Shopify product ID: ${sync.shopifyProductId}`
+            : "Synced to Shopify"
+        }
+        className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300"
+      >
+        <Check className="size-3" />
+        Synced
+      </span>
+    );
+  }
+
+  if (sync?.status === "PENDING") {
+    return (
+      <span
+        title="Syncing to Shopify in the background…"
+        className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300"
+      >
+        <Loader2 className="size-3 animate-spin" />
+        Syncing
+      </span>
+    );
+  }
+
+  return (
+    <div className="inline-flex items-center gap-1">
+      {sync?.status === "FAILED" && (
+        <span
+          title={`Shopify sync failed: ${sync.error ?? "unknown"}`}
+          className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300"
+        >
+          <AlertTriangle className="size-3" />
+          Sync failed
+        </span>
+      )}
+      <button
+        type="button"
+        title="Edit product"
+        onClick={onEdit}
+        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"
+      >
+        <Pencil className="size-3.5" />
+      </button>
+      <button
+        type="button"
+        title="Archive product"
+        onClick={onArchive}
+        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-red-600"
+      >
+        <Trash2 className="size-3.5" />
+      </button>
     </div>
   );
 }

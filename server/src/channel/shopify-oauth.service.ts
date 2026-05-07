@@ -12,6 +12,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { REDIS_TTL } from '../redis/redis.constants';
 import { EncryptionService } from './encryption.service';
+import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 
 @Injectable()
 export class ShopifyOAuthService {
@@ -26,6 +27,7 @@ export class ShopifyOAuthService {
         private readonly config: ConfigService,
         private readonly encryption: EncryptionService,
         private readonly redis: RedisService,
+        private readonly shopifyPushEnqueuer: ShopifyPushEnqueuer,
     ) {
         this.clientId = this.config.get<string>('shopify.clientId')!;
         this.clientSecret = this.config.get<string>('shopify.clientSecret')!;
@@ -175,6 +177,14 @@ export class ShopifyOAuthService {
             `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
         );
 
+        // Push every CRM-only product up to the new store. Async — runs in
+        // the background, retried on failure. Safe to call before/after the
+        // redirect; merchant sees the products land in Shopify shortly after.
+        await this.shopifyPushEnqueuer.enqueueBulkProductPush({
+            type: 'bulk-products',
+            organizationId: stateData.orgId,
+        });
+
         const frontendUrl = this.config.get<string>('frontendUrl');
         const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
 
@@ -257,6 +267,13 @@ export class ShopifyOAuthService {
             `Shopify store connected (custom app): ${shopDomain} → org ${orgId} ` +
             `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
         );
+
+        // Push every CRM-only product up to the new store. Async — runs in
+        // the background, retried on failure.
+        await this.shopifyPushEnqueuer.enqueueBulkProductPush({
+            type: 'bulk-products',
+            organizationId: orgId,
+        });
 
         return {
             channelId: channel.id,
