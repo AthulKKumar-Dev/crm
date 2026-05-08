@@ -12,6 +12,11 @@ export class QueryOrdersDto {
     @IsOptional() @IsEnum(OrderFulfillmentStatus) fulfillmentStatus?: OrderFulfillmentStatus;
     @IsOptional() @IsString() channelId?: string;
 
+    // Filter to orders that contain a line item from the given product
+    // (used by the product detail page to show "Recent sales").
+    @IsOptional() @IsString() productId?: string;
+    @IsOptional() @IsString() customerId?: string;
+
     // Search (by order number, customer name, or customer email)
     @IsOptional() @IsString() search?: string;
 

@@ -57,6 +57,20 @@ export class OrderService {
       where.channelId = query.channelId;
     }
 
+    // Filter to orders containing a line item from a specific product
+    // (drives "Recent sales" on the product detail page).
+    if (query.productId) {
+      where.lineItems = {
+        some: { variant: { productId: query.productId } },
+      };
+    }
+
+    // Filter to orders for a specific customer (drives the customer detail
+    // page's order history if/when that lands).
+    if (query.customerId) {
+      where.customerId = query.customerId;
+    }
+
     // Search by order number, customer name, or email
     if (query.search) {
       const searchTerm = query.search.trim();

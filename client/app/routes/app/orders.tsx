@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package,
-  Target, Box, X, Loader2, Receipt, MapPin, Check, Plus,
+  Target, Box, Plus,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
@@ -10,14 +10,12 @@ import { OrdersTable } from "~/components/app/orders-table";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
-import { cn, formatCurrency } from "~/lib/utils";
-import { useOrders, useOrderStats, useOrder } from "~/hooks/use-order-queries";
-import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
+import { formatCurrency } from "~/lib/utils";
+import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { invoiceService } from "~/services/invoice.service";
 import { toast } from "sonner";
-import type { OrderListParams, DashboardQueryParams, OrderDetail, OrganizationGstin } from "~/types/api";
+import type { OrderListParams, DashboardQueryParams } from "~/types/api";
 
 export function meta() {
   return [
@@ -40,8 +38,6 @@ export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [dateRange, setDateRange] = useState("all");
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
-  const [invoiceOrderId, setInvoiceOrderId] = useState<string | null>(null);
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
@@ -227,8 +223,6 @@ export default function OrdersPage() {
               currency={orgCurrency}
               showCustomerName
               gstEnabled={gstEnabled}
-              onViewDetail={(id) => setSelectedOrderId(id)}
-              onGenerateInvoice={(id) => setInvoiceOrderId(id)}
             />
           </div>
         )}
@@ -257,312 +251,6 @@ export default function OrdersPage() {
             </button>
           </div>
         )}
-      </div>
-
-      {/* Order Detail Drawer */}
-      {selectedOrderId && (
-        <OrderDetailDrawer
-          orderId={selectedOrderId}
-          gstEnabled={gstEnabled}
-          currency={orgCurrency}
-          onClose={() => setSelectedOrderId(null)}
-          onGenerateInvoice={(id) => { setSelectedOrderId(null); setInvoiceOrderId(id); }}
-        />
-      )}
-
-      {/* Generate Invoice Dialog */}
-      {invoiceOrderId && (
-        <GenerateInvoiceDialog
-          orderId={invoiceOrderId}
-          currency={orgCurrency}
-          onClose={() => setInvoiceOrderId(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── Order Detail Drawer ─────────────────────────────────────────────────────
-
-function OrderDetailDrawer({
-  orderId,
-  gstEnabled,
-  currency,
-  onClose,
-  onGenerateInvoice,
-}: {
-  orderId: string;
-  gstEnabled: boolean;
-  currency: string;
-  onClose: () => void;
-  onGenerateInvoice: (id: string) => void;
-}) {
-  const { data: order, isLoading } = useOrder(orderId);
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/50" onClick={onClose}>
-      <div
-        className="h-full w-full max-w-lg overflow-y-auto bg-white dark:bg-gray-900 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {isLoading || !order ? (
-          <div className="flex h-full items-center justify-center">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <>
-            {/* Header */}
-            <div className="flex items-center justify-between border-b px-6 py-4">
-              <div>
-                <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Order {order.name}</h2>
-                <p className="text-[10px] text-muted-foreground">
-                  {new Date(order.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}
-                </p>
-              </div>
-              <button onClick={onClose} className="rounded-md p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800">
-                <X className="size-4" />
-              </button>
-            </div>
-
-            {/* Status badges */}
-            <div className="flex items-center gap-2 px-6 py-3 border-b">
-              <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-medium",
-                order.financialStatus === "PAID" ? "bg-green-50 text-green-700" : "bg-orange-50 text-orange-600"
-              )}>
-                {order.financialStatus}
-              </span>
-              <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-medium",
-                order.fulfillmentStatus === "FULFILLED" ? "bg-green-50 text-green-700" : "bg-orange-50 text-orange-600"
-              )}>
-                {order.fulfillmentStatus}
-              </span>
-            </div>
-
-            {/* Customer */}
-            <div className="border-b px-6 py-3">
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Customer</p>
-              <p className="text-xs font-medium text-gray-900 dark:text-gray-100">
-                {order.customer?.firstName} {order.customer?.lastName}
-              </p>
-              <p className="text-[10px] text-muted-foreground">{order.customer?.email}</p>
-            </div>
-
-            {/* Line Items */}
-            <div className="px-6 py-4">
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">Items</p>
-              <div className="space-y-2">
-                {order.lineItems?.map((item) => (
-                  <div key={item.id} className="flex items-center justify-between rounded-lg border p-3">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{item.title}</p>
-                      {item.variantTitle && (
-                        <p className="text-[10px] text-muted-foreground">{item.variantTitle}</p>
-                      )}
-                      <p className="text-[10px] text-muted-foreground">Qty: {item.quantity}</p>
-                    </div>
-                    <p className="text-xs font-semibold tabular-nums">
-                      {formatCurrency(Number(item.price) * item.quantity, currency)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Totals */}
-            <div className="border-t px-6 py-4">
-              <div className="space-y-1 text-xs">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Subtotal</span>
-                  <span className="tabular-nums">{formatCurrency(order.subtotalPrice, currency)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Tax</span>
-                  <span className="tabular-nums">{formatCurrency(order.totalTax, currency)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Shipping</span>
-                  <span className="tabular-nums">{formatCurrency(order.totalShippingPrice, currency)}</span>
-                </div>
-                {Number(order.totalDiscounts) > 0 && (
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Discounts</span>
-                    <span className="tabular-nums text-red-600">-{formatCurrency(order.totalDiscounts, currency)}</span>
-                  </div>
-                )}
-                <div className="flex justify-between border-t pt-1 font-semibold text-gray-900 dark:text-gray-100">
-                  <span>Total</span>
-                  <span className="tabular-nums">{formatCurrency(order.totalPrice, currency)}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* GST Invoice Button */}
-            {gstEnabled && (
-              <div className="border-t px-6 py-4">
-                <button
-                  onClick={() => onGenerateInvoice(orderId)}
-                  className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-[#cdff8c] px-4 py-2.5 text-xs font-semibold text-gray-900 hover:bg-[#b8e67d] transition-colors"
-                >
-                  <Receipt className="size-4" />
-                  Generate GST Invoice
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Generate Invoice Dialog ─────────────────────────────────────────────────
-
-function GenerateInvoiceDialog({ orderId, currency, onClose }: { orderId: string; currency: string; onClose: () => void }) {
-  const { data: order, isLoading: orderLoading } = useOrder(orderId);
-  const { data: gstins = [] } = useGstins();
-  const { data: states = [] } = useIndianStates();
-  const createInvoice = useCreateInvoiceMutation();
-
-  const [sellerGstinId, setSellerGstinId] = useState("");
-  const [buyerGstin, setBuyerGstin] = useState("");
-  const [placeOfSupplyCode, setPlaceOfSupplyCode] = useState("");
-
-  // Auto-fill buyer GSTIN from customer when order loads
-  const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
-
-  function handleGenerate() {
-    createInvoice.mutate(
-      {
-        orderId,
-        sellerGstinId: sellerGstinId || undefined,
-        buyerGstin: buyerGstin || undefined,
-        placeOfSupplyCode: placeOfSupplyCode || undefined,
-      },
-      { onSuccess: () => onClose() },
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-md rounded-xl bg-white dark:bg-gray-900 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between border-b px-6 py-4">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">Generate GST Invoice</h2>
-            <p className="text-[10px] text-muted-foreground">
-              {order ? `Order ${order.name}` : "Loading..."}
-            </p>
-          </div>
-          <button onClick={onClose} className="rounded-md p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800">
-            <X className="size-4" />
-          </button>
-        </div>
-
-        {orderLoading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <div className="space-y-4 px-6 py-4">
-            {/* Seller GSTIN */}
-            <div>
-              <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
-                Seller GSTIN {activeGstins.length === 0 && "(No GSTINs registered)"}
-              </label>
-              <Select value={sellerGstinId} onValueChange={setSellerGstinId}>
-                <SelectTrigger className="mt-1 h-9 text-xs">
-                  <SelectValue placeholder="Auto-select based on place of supply" />
-                </SelectTrigger>
-                <SelectContent>
-                  {activeGstins.map((g: OrganizationGstin) => (
-                    <SelectItem key={g.id} value={g.id} className="text-xs">
-                      {g.gstin} — {g.stateName} {g.isDefault ? "(Default)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Buyer GSTIN */}
-            <div>
-              <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
-                Buyer GSTIN (optional — leave empty for B2C)
-              </label>
-              <input
-                value={buyerGstin}
-                onChange={(e) => setBuyerGstin(e.target.value.toUpperCase())}
-                placeholder="e.g. 29AABCT1332L1ZN"
-                maxLength={15}
-                className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-[#cdff8c]"
-              />
-            </div>
-
-            {/* Place of Supply */}
-            <div>
-              <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
-                Place of Supply (auto-derived from order address if empty)
-              </label>
-              <Select value={placeOfSupplyCode} onValueChange={setPlaceOfSupplyCode}>
-                <SelectTrigger className="mt-1 h-9 text-xs">
-                  <SelectValue placeholder="Auto-detect from shipping address" />
-                </SelectTrigger>
-                <SelectContent>
-                  {states.map((s) => (
-                    <SelectItem key={s.code} value={s.code} className="text-xs">
-                      {s.code} - {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            {/* Order summary */}
-            {order && (
-              <div className="rounded-lg border bg-gray-50 dark:bg-gray-800 p-3">
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Order Summary</p>
-                <div className="text-xs space-y-0.5">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Items</span>
-                    <span>{order.itemCount}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Subtotal</span>
-                    <span className="tabular-nums">{formatCurrency(order.subtotalPrice, currency)}</span>
-                  </div>
-                  <div className="flex justify-between font-semibold text-gray-900 dark:text-gray-100">
-                    <span>Total</span>
-                    <span className="tabular-nums">{formatCurrency(order.totalPrice, currency)}</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="flex items-center gap-2 border-t px-6 py-4">
-          <button
-            onClick={handleGenerate}
-            disabled={createInvoice.isPending || activeGstins.length === 0}
-            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 py-2 text-xs font-semibold text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50 transition-colors"
-          >
-            {createInvoice.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Check className="size-3.5" />
-            )}
-            Generate Invoice
-          </button>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
       </div>
     </div>
   );
