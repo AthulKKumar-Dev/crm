@@ -105,7 +105,9 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
             </TableCell>
             {showCustomerName && (
               <TableCell className="text-sm">
-                {order.customer.firstName} {order.customer.lastName}
+                {order.customer
+                  ? `${order.customer.firstName ?? ""} ${order.customer.lastName ?? ""}`.trim() || "Guest"
+                  : <span className="text-muted-foreground">Guest</span>}
               </TableCell>
             )}
             <TableCell className="text-sm text-muted-foreground">

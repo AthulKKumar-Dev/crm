@@ -696,7 +696,7 @@ export interface Order {
   note: string | null;
   cancelReason: string | null;
   cancelledAt: string | null;
-  customer: OrderCustomer;
+  customer: OrderCustomer | null;
   channel: ChannelRef;
   itemCount: number;
   createdAt: string;
@@ -937,7 +937,7 @@ export interface DashboardRecentOrder {
   currency: string;
   financialStatus: FinancialStatus;
   fulfillmentStatus: FulfillmentStatus;
-  customer: OrderCustomer;
+  customer: OrderCustomer | null;
   itemCount: number;
   createdAt: string;
 }

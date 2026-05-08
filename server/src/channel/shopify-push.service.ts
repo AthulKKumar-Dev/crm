@@ -28,7 +28,7 @@ export class ShopifyPushService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shopifyOAuth: ShopifyOAuthService,
-  ) {}
+  ) { }
 
   /** Resolve the org's connected SHOPIFY channel (if any). Null = nothing to push. */
   async findShopifyChannel(orgId: string) {
@@ -116,6 +116,9 @@ export class ShopifyPushService {
         tags: 'offline,collabo-crm,pos',
         note: order.note ?? undefined,
         line_items: lineItems,
+        source_name: 'collabo-crm',
+        source_identifier: String(order.id || ''),
+        source_url: `${process.env.APP_URL}/orders/${order.id}`,
         ...(customerBlock ? { customer: customerBlock } : {}),
         transactions: [
           {
@@ -125,15 +128,22 @@ export class ShopifyPushService {
             gateway: this.resolveGateway(order.metadata),
           },
         ],
-        // Mirror the local PAID + FULFILLED state by attaching a fulfillment
-        // at the resolved location.
-        fulfillments: [
-          {
-            location_id: locationId,
-            tracking_info: null,
-            notify_customer: false,
-          },
-        ],
+        // Attach a fulfillment at the resolved location to mirror the local
+        // PAID + FULFILLED state. If locations couldn't be read (403 missing
+        // read_locations), we skip this block — the order still lands paid,
+        // but unfulfilled. Merchant can mark fulfilled manually or add the
+        // scope and retry.
+        ...(locationId
+          ? {
+            fulfillments: [
+              {
+                location_id: locationId,
+                tracking_info: null,
+                notify_customer: false,
+              },
+            ],
+          }
+          : {}),
       },
     };
 
@@ -156,12 +166,17 @@ export class ShopifyPushService {
     );
   }
 
-  /** Look up the shop's primary location once and cache on channel.metadata. */
+  /**
+   * Look up the shop's primary location once and cache on channel.metadata.
+   * Returns null when the merchant's token lacks `read_locations` (so the
+   * caller can degrade gracefully — order push without fulfillments,
+   * product push without inventory seed).
+   */
   private async resolveLocationId(
     channelId: string,
     shopDomain: string,
     token: string,
-  ): Promise<number> {
+  ): Promise<number | null> {
     const channel = await this.prisma.channel.findUnique({
       where: { id: channelId },
       select: { metadata: true },
@@ -173,6 +188,14 @@ export class ShopifyPushService {
       `https://${shopDomain}/admin/api/${API_VERSION}/locations.json`,
       { headers: { 'X-Shopify-Access-Token': token } },
     );
+    if (res.status === 403) {
+      this.logger.warn(
+        `Cannot read Shopify locations for channel ${channelId} (403). ` +
+        `Add 'read_locations' scope to your Shopify app to enable fulfillment at the primary location. ` +
+        `Order/product push will continue without an explicit location.`,
+      );
+      return null;
+    }
     if (!res.ok) {
       throw new Error(`Failed to fetch Shopify locations: ${res.status}`);
     }
@@ -184,7 +207,8 @@ export class ShopifyPushService {
       data.locations.find((l) => l.active) ??
       data.locations[0];
     if (!primary) {
-      throw new Error('Shop has no active locations');
+      this.logger.warn(`Shop ${shopDomain} has no active locations`);
+      return null;
     }
 
     // Cache for next time
@@ -347,11 +371,34 @@ export class ShopifyPushService {
         body: JSON.stringify(body),
       },
     );
+    if (res.status === 403) {
+      const text = await res.text();
+      const scopeNeeded = this.scopeForEndpoint(endpoint);
+      throw new Error(
+        `Shopify denied this request (403)` +
+        (scopeNeeded
+          ? `: your Shopify app is missing the '${scopeNeeded}' scope. ` +
+          `Open Shopify Admin → Apps → your custom app → API access and enable it. `
+          : '. ') +
+        `Details: ${text}`,
+      );
+    }
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`Shopify ${res.status} on ${endpoint}: ${text}`);
     }
     return res.json() as Promise<T>;
+  }
+
+  /** Map our REST endpoints back to the Shopify OAuth scope they need.
+   *  Used to turn 403s into actionable error messages stamped on
+   *  `metadata.shopifySync.error`. */
+  private scopeForEndpoint(endpoint: string): string | null {
+    if (endpoint.startsWith('/orders')) return 'write_orders';
+    if (endpoint.startsWith('/products')) return 'write_products';
+    if (endpoint.startsWith('/inventory_levels')) return 'write_inventory';
+    if (endpoint.startsWith('/locations')) return 'read_locations';
+    return null;
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -464,12 +511,13 @@ export class ShopifyPushService {
 
     // Optionally seed initial inventory at the primary location. This is a
     // best-effort step — failure is logged but not propagated, since the
-    // rebadge already succeeded.
+    // rebadge already succeeded. Skipped when read_locations isn't granted
+    // (resolveLocationId returns null) or the variant has 0 stock.
     if (variant.inventoryQuantity > 0) {
       try {
         const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
         const inventoryItemId = result.product.variants[0]?.inventory_item_id;
-        if (inventoryItemId) {
+        if (locationId && inventoryItemId) {
           await this.postShopify(shopDomain, token, '/inventory_levels/set.json', {
             location_id: locationId,
             inventory_item_id: inventoryItemId,

@@ -31,7 +31,18 @@ export class ShopifyOAuthService {
     ) {
         this.clientId = this.config.get<string>('shopify.clientId')!;
         this.clientSecret = this.config.get<string>('shopify.clientSecret')!;
-        this.scopes = 'read_products,read_orders,read_all_orders,read_customers,read_inventory,read_locations';
+        // Both read AND write scopes — write_* are needed because the CRM
+        // now pushes data INTO Shopify (orders from the offline-order flow,
+        // products created in the CRM, inventory levels for new products).
+        // Existing tokens are pinned to the scopes they were issued with;
+        // merchants must re-grant on the custom-app side or reconnect.
+        this.scopes = [
+            'read_products', 'write_products',
+            'read_orders', 'write_orders', 'read_all_orders',
+            'read_customers',
+            'read_inventory', 'write_inventory',
+            'read_locations',
+        ].join(',');
         this.appUrl = this.config.get<string>('appUrl')!;
     }
 
@@ -336,6 +347,18 @@ export class ShopifyOAuthService {
     async registerWebhooks(channelId: string): Promise<void> {
         const { token, shopDomain } = await this.getAccessToken(channelId);
         const callbackUrl = `${this.appUrl}/api/v1/webhooks/shopify`;
+
+        // Shopify only accepts public HTTPS URLs for webhook destinations.
+        // Localhost / HTTP fails 8 times (once per topic) with the same
+        // error — short-circuit and log one clear actionable line instead.
+        if (!callbackUrl.startsWith('https://')) {
+            this.logger.warn(
+                `Skipping webhook registration for channel ${channelId}: APP_URL is not HTTPS (${this.appUrl}). ` +
+                `Shopify requires public HTTPS webhook URLs. Use ngrok or a public tunnel for local dev, ` +
+                `or set APP_URL to your production HTTPS URL.`,
+            );
+            return;
+        }
 
         for (const topic of this.WEBHOOK_TOPICS) {
             try {
