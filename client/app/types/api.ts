@@ -700,6 +700,8 @@ export interface Order {
   channel: ChannelRef;
   itemCount: number;
   createdAt: string;
+  /** Free-form metadata, includes `source`, `paymentMethod`, `shopifySync`, etc. */
+  metadata?: Record<string, unknown> | null;
 }
 
 /** A line item within an order detail. */
@@ -751,6 +753,8 @@ export interface OrderListParams {
   financialStatus?: FinancialStatus;
   fulfillmentStatus?: FulfillmentStatus;
   channelId?: string;
+  productId?: string;
+  customerId?: string;
   search?: string;
   sortBy?: string;
   sortOrder?: "asc" | "desc";

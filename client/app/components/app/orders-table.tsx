@@ -1,3 +1,4 @@
+import { useNavigate } from "react-router";
 import { MoreHorizontal, Package, Receipt } from "lucide-react";
 import {
   Table,
@@ -62,8 +63,11 @@ interface OrdersTableProps {
   gstEnabled?: boolean;
 }
 
-/** Renders a data table of orders with financial/fulfillment status badges and row-level actions. */
+/** Renders a data table of orders with financial/fulfillment status badges and row-level actions.
+ *  Row click navigates to /orders/:id. Cells with their own click handlers
+ *  (checkbox, dropdown menu) stop propagation. */
 export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
+  const navigate = useNavigate();
   return (
     <Table>
       <TableHeader>
@@ -83,8 +87,18 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
       </TableHeader>
       <TableBody>
         {orders.map((order) => (
-          <TableRow key={order.id}>
-            <TableCell>
+          <TableRow
+            key={order.id}
+            className="cursor-pointer"
+            onClick={() => {
+              if (onViewDetail) {
+                onViewDetail(order.id);
+              } else {
+                navigate(`/orders/${order.id}`);
+              }
+            }}
+          >
+            <TableCell onClick={(e) => e.stopPropagation()}>
               <input type="checkbox" className="rounded border-border" />
             </TableCell>
             <TableCell className="font-medium text-gray-900 dark:text-gray-100">
@@ -126,7 +140,7 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                 {FULFILLMENT_LABELS[order.fulfillmentStatus]}
               </span>
             </TableCell>
-            <TableCell>
+            <TableCell onClick={(e) => e.stopPropagation()}>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button className="flex size-7 items-center justify-center rounded-md hover:bg-gray-100 dark:hover:bg-gray-800">
@@ -134,19 +148,26 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => onViewDetail?.(order.id)}>View details</DropdownMenuItem>
-                  <DropdownMenuItem>Edit order</DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => (onViewDetail ? onViewDetail(order.id) : navigate(`/orders/${order.id}`))}
+                  >
+                    View details
+                  </DropdownMenuItem>
                   {gstEnabled && (
                     <>
                       <DropdownMenuSeparator />
-                      <DropdownMenuItem onClick={() => onGenerateInvoice?.(order.id)}>
+                      <DropdownMenuItem
+                        onClick={() =>
+                          onGenerateInvoice
+                            ? onGenerateInvoice(order.id)
+                            : navigate(`/orders/${order.id}`)
+                        }
+                      >
                         <Receipt className="mr-1.5 size-3.5" />
                         Generate GST Invoice
                       </DropdownMenuItem>
                     </>
                   )}
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem variant="destructive">Cancel order</DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </TableCell>

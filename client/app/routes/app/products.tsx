@@ -1,22 +1,18 @@
 import { useState } from "react";
+import { useNavigate } from "react-router";
 import {
   Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
-  PackageX, AlertTriangle, X, Loader2, Check, FileText, Pencil, Trash2,
+  PackageX, AlertTriangle, Check, Loader2, Pencil, Trash2,
 } from "lucide-react";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
-import { cn, formatCurrency } from "~/lib/utils";
+import { formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
 import { useDeleteProductMutation } from "~/hooks/use-product-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { toast } from "sonner";
-import { apiClient } from "~/lib/api-client";
-import { handleMutationError } from "~/lib/handle-mutation-error";
 import type { ProductStatus, ProductListParams, Product } from "~/types/api";
 
 export function meta() {
@@ -35,17 +31,16 @@ const STATUS_CLASS: Record<ProductStatus, string> = {
   ARCHIVED: "bg-orange-100 text-orange-700",
 };
 
-const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
-
 const PAGE_SIZE = 12;
 
 export default function ProductsPage() {
+  const navigate = useNavigate();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedType, setSelectedType] = useState("All");
   const [currentPage, setCurrentPage] = useState(1);
-  const [editingProductId, setEditingProductId] = useState<string | null>(null);
   // Full edit/create dialog state. `creatingProduct` toggles the create form;
-  // `editingFullProductId` opens the edit form for a MANUAL-channel product.
+  // `editingFullProductId` opens the edit form for a MANUAL-channel product
+  // (also reachable from the detail page).
   const [creatingProduct, setCreatingProduct] = useState(false);
   const [editingFullProductId, setEditingFullProductId] = useState<string | null>(null);
 
@@ -190,15 +185,7 @@ export default function ProductsPage() {
                   <tr
                     key={product.id}
                     className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
-                    onClick={() => {
-                      // MANUAL products → full edit dialog (includes GST fields)
-                      // Synced products → GST-only dialog (since other fields are read-only)
-                      if (product.channel?.platform === "MANUAL") {
-                        setEditingFullProductId(product.id);
-                      } else if (gstEnabled) {
-                        setEditingProductId(product.id);
-                      }
-                    }}
+                    onClick={() => navigate(`/products/${product.id}`)}
                   >
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
@@ -305,14 +292,6 @@ export default function ProductsPage() {
         />
       )}
 
-      {/* Edit Product GST Dialog */}
-      {editingProductId && gstEnabled && (
-        <EditProductGstDialog
-          productId={editingProductId}
-          product={products.find((p) => p.id === editingProductId) ?? null}
-          onClose={() => setEditingProductId(null)}
-        />
-      )}
     </div>
   );
 }
@@ -395,104 +374,3 @@ function ProductRowActions({
   );
 }
 
-// ── Edit Product GST Dialog ─────────────────────────────────────────────────
-
-function EditProductGstDialog({
-  productId,
-  product,
-  onClose,
-}: {
-  productId: string;
-  product: Product | null;
-  onClose: () => void;
-}) {
-  const [hsnCode, setHsnCode] = useState((product as any)?.hsnCode ?? "");
-  const [gstRate, setGstRate] = useState((product as any)?.gstRate?.toString() ?? "");
-  const queryClient = useQueryClient();
-
-  const updateGst = useMutation({
-    mutationFn: (data: { hsnCode?: string; gstRate?: number }) =>
-      apiClient.patch(`/products/${productId}/gst`, data).then((r) => r.data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["products"] });
-      toast.success("Product GST info updated.");
-      onClose();
-    },
-    onError: (error) => handleMutationError(error, "Failed to update product GST."),
-  });
-
-  function handleSave() {
-    updateGst.mutate({
-      hsnCode: hsnCode || undefined,
-      gstRate: gstRate ? parseFloat(gstRate) : undefined,
-    });
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-sm rounded-xl bg-white dark:bg-gray-900 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b px-5 py-4">
-          <div>
-            <h2 className="text-sm font-bold text-gray-900 dark:text-gray-100">GST Details</h2>
-            <p className="text-[10px] text-muted-foreground line-clamp-1">{product?.title}</p>
-          </div>
-          <button onClick={onClose} className="rounded-md p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800">
-            <X className="size-4" />
-          </button>
-        </div>
-
-        <div className="space-y-4 px-5 py-4">
-          <div>
-            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">HSN/SAC Code</label>
-            <input
-              value={hsnCode}
-              onChange={(e) => setHsnCode(e.target.value)}
-              placeholder="e.g. 6109 (T-Shirts)"
-              maxLength={10}
-              className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-[#cdff8c]"
-            />
-            <p className="mt-0.5 text-[9px] text-muted-foreground">
-              The Harmonized System code that determines the GST rate for this product.
-            </p>
-          </div>
-
-          <div>
-            <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">GST Rate (%)</label>
-            <Select value={gstRate} onValueChange={setGstRate}>
-              <SelectTrigger className="mt-1 h-9 text-xs">
-                <SelectValue placeholder="Select GST rate" />
-              </SelectTrigger>
-              <SelectContent>
-                {GST_RATE_OPTIONS.map((rate) => (
-                  <SelectItem key={rate} value={rate} className="text-xs">
-                    {rate}% {rate === "0" ? "(Exempt)" : rate === "5" ? "(Essential)" : rate === "18" ? "(Standard)" : rate === "28" ? "(Luxury)" : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 border-t px-5 py-4">
-          <button
-            onClick={handleSave}
-            disabled={updateGst.isPending}
-            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 py-2 text-xs font-semibold text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50 transition-colors"
-          >
-            {updateGst.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
-            Save
-          </button>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
