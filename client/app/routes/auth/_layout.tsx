@@ -26,7 +26,7 @@ export default function AuthLayout() {
         </div>
 
         {/* ── Right form panel ─────────────────────────────────── */}
-        <div className="flex flex-1 flex-col items-center justify-center px-6 py-12">
+        <div className="flex flex-1 flex-col items-center justify-center px-6 py-6">
           {/* Mobile logo */}
           <div className="mb-8 flex items-center gap-2 lg:hidden">
             <div className="flex size-8 items-center justify-center rounded-xl bg-[#CEF17B]">

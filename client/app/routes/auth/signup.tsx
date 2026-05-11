@@ -58,7 +58,7 @@ export default function SignupPage() {
         {/* Name row */}
         <div className="grid grid-cols-2 gap-3">
           <div className="">
-            <label htmlFor="firstName" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="firstName" className="block text-sm font-medium text-gray-700 mb-1.5">
               First name
             </label>
             <input
@@ -74,7 +74,7 @@ export default function SignupPage() {
             )}
           </div>
           <div className="">
-            <label htmlFor="lastName" className="block text-sm font-medium text-gray-700">
+            <label htmlFor="lastName" className="block text-sm font-medium text-gray-700 mb-1.5">
               Last name
             </label>
             <input
@@ -93,7 +93,7 @@ export default function SignupPage() {
 
         {/* Email */}
         <div className="">
-          <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+          <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1.5">
             Email address
           </label>
           <input
@@ -112,7 +112,7 @@ export default function SignupPage() {
 
         {/* Password */}
         <div className="">
-          <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+          <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1.5">
             Password
           </label>
           <div className="relative">
