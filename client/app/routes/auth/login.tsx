@@ -46,16 +46,18 @@ export default function LoginPage() {
     <div>
       {/* Heading */}
       <div className="mb-7">
-        <h2 className="text-2xl font-bold text-gray-900">Welcome back</h2>
-        <p className="mt-1.5 text-sm text-gray-500">
+
+        <span className="font-baumans text-[28px] font-bold text-[#084734]">collabo</span>
+        <p className="text-[38px] font-bold text-gray-900">Welcome back</p>
+        <p className="mt-1.5 text-[14px] text-sm text-gray-500">
           Sign in to your Collabo account to continue.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
         {/* Email */}
-        <div className="space-y-1.5">
-          <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+        <div className="">
+          <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2.5">
             Email address
           </label>
           <input
@@ -73,17 +75,12 @@ export default function LoginPage() {
         </div>
 
         {/* Password */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
+        <div className="">
+          <div className="flex items-center justify-between mb-2.5">
             <label htmlFor="password" className="block text-sm font-medium text-gray-700">
               Password
             </label>
-            <Link
-              to="/auth/forgot-password"
-              className="text-xs font-medium text-[#084734] hover:text-[#3d6000] transition-colors"
-            >
-              Forgot password?
-            </Link>
+
           </div>
           <div className="relative">
             <input
@@ -104,10 +101,19 @@ export default function LoginPage() {
             >
               {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
             </button>
+
           </div>
           {errors.password && (
             <p className="text-xs text-red-500">{errors.password.message}</p>
           )}
+          <div className="flex justify-end mt-4">
+            <Link
+              to="/auth/forgot-password"
+              className="text-xs font-medium text-[#084734] hover:text-[#3d6000] transition-colors"
+            >
+              Forgot password?
+            </Link>
+          </div>
         </div>
 
         {/* Server error */}
@@ -121,7 +127,7 @@ export default function LoginPage() {
         <button
           type="submit"
           disabled={login.isPending}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#000000] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#2e2e2e] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {login.isPending ? (
             <>
@@ -143,6 +149,9 @@ export default function LoginPage() {
         >
           Create one
         </Link>
+      </p>
+      <p className="mt-6 text-center text-[14px] text-gray-500 ">
+        By logging , you agree to  <Link to="https://grow100x.app/terms-and-conditions.html" className="text-[#084734] hover:text-[#3d6000] transition-colors">Terms of service</Link> and <Link to="https://grow100x.app/privacy-policy.html" className="text-[#084734] hover:text-[#3d6000] transition-colors">Privacy policy</Link>
       </p>
     </div>
   );
