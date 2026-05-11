@@ -46,16 +46,18 @@ export default function SignupPage() {
     <div>
       {/* Heading */}
       <div className="mb-7">
-        <h2 className="text-2xl font-bold text-gray-900">Create an account</h2>
-        <p className="mt-1.5 text-sm text-gray-500">
-          Start your free trial — no credit card required.
+        <span className="font-baumans text-[28px] font-bold text-[#084734]">collabo</span>
+        <h2 className="text-[38px] font-bold text-gray-900">Create an account</h2>
+        <p className="mt-1.5 text-[14px] text-gray-500">
+          Start managing your commerce operations
+          from one unified platform.
         </p>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
         {/* Name row */}
         <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
+          <div className="">
             <label htmlFor="firstName" className="block text-sm font-medium text-gray-700">
               First name
             </label>
@@ -71,7 +73,7 @@ export default function SignupPage() {
               <p className="text-xs text-red-500">{errors.firstName.message}</p>
             )}
           </div>
-          <div className="space-y-1.5">
+          <div className="">
             <label htmlFor="lastName" className="block text-sm font-medium text-gray-700">
               Last name
             </label>
@@ -90,7 +92,7 @@ export default function SignupPage() {
         </div>
 
         {/* Email */}
-        <div className="space-y-1.5">
+        <div className="">
           <label htmlFor="email" className="block text-sm font-medium text-gray-700">
             Email address
           </label>
@@ -109,7 +111,7 @@ export default function SignupPage() {
         </div>
 
         {/* Password */}
-        <div className="space-y-1.5">
+        <div className="">
           <label htmlFor="password" className="block text-sm font-medium text-gray-700">
             Password
           </label>
@@ -146,18 +148,18 @@ export default function SignupPage() {
         )}
 
         {/* T&C note */}
-        <p className="text-[11px] text-gray-400">
+        {/* <p className="text-[11px] text-gray-400">
           By creating an account you agree to our{" "}
           <a href="#" className="underline hover:text-gray-600">Terms of Service</a>
           {" "}and{" "}
           <a href="#" className="underline hover:text-gray-600">Privacy Policy</a>.
-        </p>
+        </p> */}
 
         {/* Submit */}
         <button
           type="submit"
           disabled={signup.isPending}
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#000000] px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-[#2e2e2e] disabled:cursor-not-allowed disabled:opacity-60 mt-4"
         >
           {signup.isPending ? (
             <>
@@ -171,7 +173,7 @@ export default function SignupPage() {
       </form>
 
       {/* Footer */}
-      <p className="mt-6 text-center text-sm text-gray-500">
+      <p className="mt-3 text-center text-sm text-gray-500">
         Already have an account?{" "}
         <Link
           to="/auth/login"
@@ -179,6 +181,10 @@ export default function SignupPage() {
         >
           Sign in
         </Link>
+      </p>
+
+      <p className="mt-3 text-center text-[14px] text-gray-500 ">
+        By creating an account, you agree to  <Link to="https://grow100x.app/terms-and-conditions.html" className="text-[#084734] hover:text-[#3d6000] transition-colors">Terms of service</Link> and <Link to="https://grow100x.app/privacy-policy.html" className="text-[#084734] hover:text-[#3d6000] transition-colors">Privacy policy</Link>
       </p>
     </div>
   );
