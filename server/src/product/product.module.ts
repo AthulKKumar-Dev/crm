@@ -2,12 +2,13 @@ import { Module } from '@nestjs/common';
 import { ProductService } from './product.service';
 import { ProductController } from './product.controller';
 import { ChannelModule } from '../channel/channel.module';
+import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
 
-// WHY ChannelModule?
-// ProductService.create needs ShopifyPushEnqueuer to fire a push job after
-// committing a CRM-native product (when a Shopify channel is connected).
+// WHY these imports?
+//   ChannelModule              — ShopifyPushEnqueuer for fire-and-forget push.
+//   OrganizationSettingsModule — gating auto-push on productSettings.autoSyncToShopify.
 @Module({
-  imports: [ChannelModule],
+  imports: [ChannelModule, OrganizationSettingsModule],
   controllers: [ProductController],
   providers: [ProductService],
   exports: [ProductService],

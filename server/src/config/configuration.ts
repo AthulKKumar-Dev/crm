@@ -27,6 +27,7 @@ export default () => ({
         clientId: process.env.SHOPIFY_CLIENT_ID,
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
         webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || undefined,
+        apiVersion: process.env.SHOPIFY_API_VERSION || '2026-01',
     },
     instagram: {
         appId: process.env.META_APP_ID,

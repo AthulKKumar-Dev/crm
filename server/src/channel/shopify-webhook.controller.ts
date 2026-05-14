@@ -88,6 +88,15 @@ export class ShopifyWebhookController {
 
                 case 'orders/create':
                 case 'orders/updated':
+                case 'orders/cancelled':
+                case 'orders/fulfilled':
+                case 'orders/partially_fulfilled':
+                    // `upsertOrder` already reads `cancel_reason` / `cancelled_at`
+                    // and the `fulfillments` array from the payload, so a
+                    // cancellation/fulfillment webhook reconciles the local row
+                    // by going through the same code path. Optimistic local
+                    // updates from the service actions run before this webhook
+                    // arrives — this is the authoritative reconcile.
                     await this.syncService.upsertOrder(
                         channel.id,
                         channel.organizationId,
@@ -124,6 +133,33 @@ export class ShopifyWebhookController {
 
                 case 'inventory_levels/update':
                     await this.handleInventoryUpdate(
+                        channel.id,
+                        channel.organizationId,
+                        body,
+                    );
+                    break;
+
+                case 'fulfillments/create':
+                case 'fulfillments/update':
+                    // Shopify also fires orders/fulfilled / orders/partially_fulfilled
+                    // / orders/updated with the parent order (including the updated
+                    // fulfillments array) for the same actions, and those flow
+                    // through upsertOrder which is the authoritative reconcile.
+                    // We subscribe to fulfillments/* topics for observability and
+                    // future per-fulfillment fast paths.
+                    this.logger.log(
+                        `Fulfillment webhook ${topic}: fulfillment ${body?.id} on order ${body?.order_id}`,
+                    );
+                    break;
+
+                case 'draft_orders/create':
+                case 'draft_orders/update':
+                    // Mirrors changes made on the Shopify side back into our
+                    // DraftOrder row. Local optimistic updates (from our own
+                    // service paths) usually arrive first; this is the
+                    // authoritative reconcile if the merchant edited the draft
+                    // in Shopify admin directly.
+                    await this.syncService.upsertDraftOrder(
                         channel.id,
                         channel.organizationId,
                         body,

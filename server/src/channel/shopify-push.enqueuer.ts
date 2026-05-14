@@ -51,9 +51,10 @@ export class ShopifyPushEnqueuer {
   }
 
   /**
-   * Push every CRM-native (MANUAL channel) product up to a newly-connected
-   * Shopify store. Fired from the OAuth / manual-connect flows once the
-   * Channel row is committed.
+   * Push every CRM-native (MANUAL channel) product up to the connected
+   * Shopify store. Fired by the channels-page Sync action (or via the
+   * post-pull step in `ShopifySyncService.runSync`). No longer fires
+   * automatically on Shopify connect — merchants opt in.
    */
   async enqueueBulkProductPush(
     data: Extract<ShopifyPushJobData, { type: 'bulk-products' }>,
@@ -63,6 +64,23 @@ export class ShopifyPushEnqueuer {
     } catch (err) {
       this.logger.error(
         `Failed to enqueue Shopify bulk product push for org ${data.organizationId}: ${err}`,
+      );
+    }
+  }
+
+  /**
+   * Push every unsynced offline (MANUAL channel) order up to the connected
+   * Shopify store. Fired by the channels-page Sync action via the post-pull
+   * step in `ShopifySyncService.runSync`.
+   */
+  async enqueueBulkOrderPush(
+    data: Extract<ShopifyPushJobData, { type: 'bulk-orders' }>,
+  ): Promise<void> {
+    try {
+      await this.queue.add('push-orders-bulk', data, DEFAULT_JOB_OPTS);
+    } catch (err) {
+      this.logger.error(
+        `Failed to enqueue Shopify bulk order push for org ${data.organizationId}: ${err}`,
       );
     }
   }

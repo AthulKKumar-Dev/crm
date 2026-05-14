@@ -83,4 +83,12 @@ export class ProductController {
   softDelete(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.productService.softDelete(id, user.orgId!);
   }
+
+  // POST /api/v1/products/:id/sync — manually push a MANUAL product to the
+  // connected Shopify store. Idempotent; returns { status, productId } where
+  // status is one of: ALREADY_SYNCED | ALREADY_QUEUED | QUEUED.
+  @Post(':id/sync')
+  syncToShopify(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.productService.syncToShopify(id, user.orgId!);
+  }
 }

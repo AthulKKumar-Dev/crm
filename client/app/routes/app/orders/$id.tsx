@@ -17,6 +17,8 @@ import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { useInvoices } from "~/hooks/use-invoice-queries";
+import { OrderActionsMenu } from "~/components/app/order-actions";
+import { OrderFulfillmentsSection } from "~/components/app/order-fulfillments";
 import {
   Select,
   SelectContent,
@@ -142,6 +144,7 @@ export default function OrderDetailPage() {
               Generate GST Invoice
             </button>
           )}
+          <OrderActionsMenu order={order} />
         </div>
       </div>
 
@@ -228,6 +231,9 @@ export default function OrderDetailPage() {
               </div>
             </div>
           </Section>
+
+          {/* Fulfillments */}
+          <OrderFulfillmentsSection order={order} />
 
           {/* Timeline */}
           {order.timeline.length > 0 && (

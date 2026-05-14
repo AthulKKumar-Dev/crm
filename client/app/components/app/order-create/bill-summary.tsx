@@ -13,6 +13,14 @@ export function BillSummary({
   canSubmit,
   disabledReason,
   onSubmit,
+  onSaveDraft,
+  isSavingDraft,
+  /**
+   * When true, the primary "Create order" button is hidden and the draft
+   * button becomes the primary action. Used by the standalone /drafts/new
+   * route where the only path forward is to save a draft.
+   */
+  draftOnly = false,
 }: {
   lines: CartLine[];
   currency: string;
@@ -24,6 +32,9 @@ export function BillSummary({
   canSubmit: boolean;
   disabledReason: string | null;
   onSubmit: () => void;
+  onSaveDraft?: () => void;
+  isSavingDraft?: boolean;
+  draftOnly?: boolean;
 }) {
   const subtotal = lines.reduce((s, l) => s + l.unitPrice * l.quantity, 0);
   // Server-authoritative tax — UI estimate: assume 0 if gstRate unknown.
@@ -99,14 +110,34 @@ export function BillSummary({
         </label>
       </div>
 
-      <button
-        type="button"
-        onClick={onSubmit}
-        disabled={!canSubmit || isSubmitting}
-        className="inline-flex w-full items-center justify-center rounded-lg bg-[#CEF17B] px-4 py-2.5 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F] disabled:pointer-events-none disabled:opacity-40"
-      >
-        {isSubmitting ? "Creating order…" : "Create order & generate bill"}
-      </button>
+      {!draftOnly && (
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={!canSubmit || isSubmitting || isSavingDraft}
+          className="inline-flex w-full items-center justify-center rounded-lg bg-[#CEF17B] px-4 py-2.5 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F] disabled:pointer-events-none disabled:opacity-40"
+        >
+          {isSubmitting ? "Creating order…" : "Create order & generate bill"}
+        </button>
+      )}
+
+      {/* Optional secondary action: persist as a draft instead of finalizing.
+          Style differs based on whether this is the primary action or not. */}
+      {onSaveDraft && (
+        <button
+          type="button"
+          onClick={onSaveDraft}
+          disabled={!canSubmit || isSubmitting || isSavingDraft}
+          className={
+            draftOnly
+              ? "inline-flex w-full items-center justify-center rounded-lg bg-[#CEF17B] px-4 py-2.5 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F] disabled:pointer-events-none disabled:opacity-40"
+              : "inline-flex w-full items-center justify-center rounded-lg border border-input bg-white dark:bg-gray-900 px-4 py-2 text-xs font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:pointer-events-none disabled:opacity-40"
+          }
+        >
+          {isSavingDraft ? "Saving draft…" : "Save as draft"}
+        </button>
+      )}
+
       {!canSubmit && disabledReason && (
         <p className="text-center text-[10px] text-amber-700 dark:text-amber-400">
           {disabledReason}

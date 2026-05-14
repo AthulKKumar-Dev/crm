@@ -21,6 +21,7 @@ export class ShopifyOAuthService {
     private readonly clientSecret: string;
     private readonly scopes: string;
     private readonly appUrl: string;
+    private readonly apiVersion: string;
 
     constructor(
         private readonly prisma: PrismaService,
@@ -44,6 +45,7 @@ export class ShopifyOAuthService {
             'read_locations',
         ].join(',');
         this.appUrl = this.config.get<string>('appUrl')!;
+        this.apiVersion = this.config.get<string>('shopify.apiVersion') ?? '2026-01';
     }
 
     // ─── CUSTOM APP OAUTH ───
@@ -136,7 +138,7 @@ export class ShopifyOAuthService {
 
         // 5. Get shop info
         const shopResponse = await fetch(
-            `https://${query.shop}/admin/api/2024-01/shop.json`,
+            `https://${query.shop}/admin/api/${this.apiVersion}/shop.json`,
             { headers: { 'X-Shopify-Access-Token': tokenData.access_token } },
         );
         const shopData = (await shopResponse.json()) as {
@@ -188,13 +190,10 @@ export class ShopifyOAuthService {
             `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
         );
 
-        // Push every CRM-only product up to the new store. Async — runs in
-        // the background, retried on failure. Safe to call before/after the
-        // redirect; merchant sees the products land in Shopify shortly after.
-        await this.shopifyPushEnqueuer.enqueueBulkProductPush({
-            type: 'bulk-products',
-            organizationId: stateData.orgId,
-        });
+        // Removed: automatic bulk-push of CRM-only products on Shopify connect.
+        // Merchants now decide what crosses the line — they can push individual
+        // items via the per-row Sync action, or run a one-click bulk push from
+        // the Channels page Sync button (which now also pushes unsynced data).
 
         const frontendUrl = this.config.get<string>('frontendUrl');
         const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
@@ -217,7 +216,7 @@ export class ShopifyOAuthService {
         // Validate the token by fetching shop info
         let shopData: any;
         try {
-            const res = await fetch(`https://${shopDomain}/admin/api/2024-01/shop.json`, {
+            const res = await fetch(`https://${shopDomain}/admin/api/${this.apiVersion}/shop.json`, {
                 headers: { 'X-Shopify-Access-Token': accessToken },
             });
             if (!res.ok) {
@@ -279,12 +278,8 @@ export class ShopifyOAuthService {
             `(currency: ${shopData.shop.currency ?? 'unchanged'})`,
         );
 
-        // Push every CRM-only product up to the new store. Async — runs in
-        // the background, retried on failure.
-        await this.shopifyPushEnqueuer.enqueueBulkProductPush({
-            type: 'bulk-products',
-            organizationId: orgId,
-        });
+        // Removed: automatic bulk-push of CRM-only products on Shopify connect.
+        // See note in the OAuth callback flow above — merchants now opt in.
 
         return {
             channelId: channel.id,
@@ -293,11 +288,37 @@ export class ShopifyOAuthService {
         };
     }
 
-    // Get decrypted access token for making API calls
+    // Get decrypted access token for making API calls.
+    //
+    // Strict on platform — only SHOPIFY channels carry credentials. Calling this
+    // on a MANUAL / INSTAGRAM / WHATSAPP channel is a caller bug (e.g. someone
+    // enqueued a Shopify sync job for the wrong channel id); fail fast with a
+    // clear message so the caller can be fixed, instead of silently flipping
+    // unrelated channels to DISCONNECTED.
     async getAccessToken(channelId: string): Promise<{ token: string; shopDomain: string }> {
         const channel = await this.prisma.channel.findUnique({ where: { id: channelId } });
-        if (!channel || !channel.credentials) {
-            throw new BadRequestException('Channel not found or missing credentials');
+        if (!channel) {
+            throw new BadRequestException(`Channel ${channelId} not found`);
+        }
+        if (channel.platform !== ChannelPlatform.SHOPIFY) {
+            throw new BadRequestException(
+                `Channel "${channel.name}" is on platform ${channel.platform}, not SHOPIFY. ` +
+                `Shopify-only operations cannot run against it.`,
+            );
+        }
+        if (!channel.credentials) {
+            // Genuinely broken state for a Shopify channel — flip to DISCONNECTED
+            // so the UI surfaces a "Reconnect" affordance instead of looping retries.
+            if (channel.status !== ChannelStatus.DISCONNECTED) {
+                await this.prisma.channel.update({
+                    where: { id: channelId },
+                    data: { status: ChannelStatus.DISCONNECTED },
+                });
+            }
+            throw new BadRequestException(
+                `Shopify channel "${channel.name}" has no stored credentials. ` +
+                `Reconnect the store from Settings → Channels to restore sync.`,
+            );
         }
 
         const creds = channel.credentials as { accessToken: string; shopDomain: string };
@@ -339,6 +360,13 @@ export class ShopifyOAuthService {
         'products/delete',
         'orders/create',
         'orders/updated',
+        'orders/cancelled',
+        'orders/fulfilled',
+        'orders/partially_fulfilled',
+        'fulfillments/create',
+        'fulfillments/update',
+        'draft_orders/create',
+        'draft_orders/update',
         'customers/create',
         'customers/update',
         'inventory_levels/update',
@@ -363,7 +391,7 @@ export class ShopifyOAuthService {
         for (const topic of this.WEBHOOK_TOPICS) {
             try {
                 const res = await fetch(
-                    `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                    `https://${shopDomain}/admin/api/${this.apiVersion}/webhooks.json`,
                     {
                         method: 'POST',
                         headers: {
@@ -393,7 +421,7 @@ export class ShopifyOAuthService {
             const { token, shopDomain } = await this.getAccessToken(channelId);
 
             const res = await fetch(
-                `https://${shopDomain}/admin/api/2024-01/webhooks.json`,
+                `https://${shopDomain}/admin/api/${this.apiVersion}/webhooks.json`,
                 { headers: { 'X-Shopify-Access-Token': token } },
             );
 
@@ -407,7 +435,7 @@ export class ShopifyOAuthService {
             for (const webhook of data.webhooks) {
                 try {
                     await fetch(
-                        `https://${shopDomain}/admin/api/2024-01/webhooks/${webhook.id}.json`,
+                        `https://${shopDomain}/admin/api/${this.apiVersion}/webhooks/${webhook.id}.json`,
                         {
                             method: 'DELETE',
                             headers: { 'X-Shopify-Access-Token': token },

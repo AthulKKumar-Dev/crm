@@ -23,9 +23,11 @@ import { OrgRequiredGuard } from './auth/guards/org-required.guard';
 import { SuperAdminGuard } from './auth/guards/super-admin.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
+import { OrganizationSettingsModule } from './organization-settings/organization-settings.module';
 import { EmailModule } from './email/email.module';
 import { ChannelModule } from './channel/channel.module';
 import { OrderModule } from './order/order.module';
+import { DraftOrderModule } from './draft-order/draft-order.module';
 import { ProductModule } from './product/product.module';
 import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
@@ -65,8 +67,10 @@ import { BillingModule } from './billing/billing.module';
     AuthModule,
     UserModule,
     OrganizationModule,
+    OrganizationSettingsModule,
     ChannelModule,
     OrderModule,
+    DraftOrderModule,
     ProductModule,
     CustomerModule,
     DashboardModule,

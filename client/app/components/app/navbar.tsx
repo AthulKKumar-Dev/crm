@@ -18,6 +18,7 @@ import {
   Receipt,
   ShieldCheck,
   ArrowLeftRight,
+  FileText,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -38,6 +39,7 @@ import { toast } from "sonner";
 const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Orders", href: "/orders", icon: ShoppingCart },
+  { label: "Drafts", href: "/drafts", icon: FileText },
   { label: "Products", href: "/products", icon: Package },
   // { label: "Marketing", href: "/marketing", icon: Megaphone },
   { label: "Channel", href: "/channel", icon: Layers },

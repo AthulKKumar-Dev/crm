@@ -7,6 +7,7 @@ import type {
   ProductStatsResponse,
   CreateProductRequest,
   UpdateProductRequest,
+  ManualSyncResponse,
 } from "~/types/api";
 
 /**
@@ -43,5 +44,11 @@ export const productService = {
   softDelete: (id: string) =>
     apiClient
       .delete<{ id: string; deletedAt: string }>(`/products/${id}`)
+      .then((response) => response.data),
+
+  /** Manually push a MANUAL product to the connected Shopify store. */
+  syncToShopify: (id: string) =>
+    apiClient
+      .post<ManualSyncResponse>(`/products/${id}/sync`)
       .then((response) => response.data),
 };

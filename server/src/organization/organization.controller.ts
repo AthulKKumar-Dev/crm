@@ -7,6 +7,7 @@ import { OrganizationService } from './organization.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { CreatePersonalDto } from './dto/create-personal.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+import { UpgradeToOrganizationDto } from './dto/upgrade-to-organization.dto';
 
 // All routes require JWT (no @Public()) — user must be logged in
 @Controller('organizations')
@@ -54,6 +55,18 @@ export class OrganizationController {
     @Body() dto: UpdateOrganizationDto,
   ) {
     return this.orgService.update(orgId, user.sub, dto);
+  }
+
+  // POST /api/v1/organizations/:orgId/upgrade-to-organization
+  // Flips a PERSONAL workspace to ORGANIZATION in place. OWNER only.
+  // Body collects the onboarding fields (name + logo + industry + website + timezone).
+  @Post(':orgId/upgrade-to-organization')
+  upgradeToOrganization(
+    @Param('orgId') orgId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpgradeToOrganizationDto,
+  ) {
+    return this.orgService.upgradeToOrganization(orgId, user.sub, dto);
   }
 
   // DELETE /api/v1/organizations/:orgId — soft delete (OWNER only)

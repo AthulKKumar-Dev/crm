@@ -2,12 +2,14 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCreateOfflineOrderMutation } from "~/hooks/use-order-mutations";
+import { useCreateDraftOrderMutation } from "~/hooks/use-draft-order-mutations";
 import { CustomerPickerOrCreate } from "./customer-picker-or-create";
 import { ProductPicker, type CartLineSeed } from "./product-picker";
 import { OrderCart, type CartLine } from "./order-cart";
 import { BillSummary } from "./bill-summary";
 import type {
   CreateOfflineOrderRequest,
+  CreateDraftOrderRequest,
   OfflineCustomerInput,
   OfflinePaymentMethod,
 } from "~/types/api";
@@ -17,11 +19,28 @@ type CustomerSelection = {
   newCustomer?: OfflineCustomerInput;
 };
 
-export function OfflineOrderForm() {
+/**
+ * Shared form for both:
+ *   - "Create order now" path (default, used by /orders/new)
+ *   - "Save as draft" path (toggle visible when `allowDraft` is true)
+ *
+ * The two paths share validation; only the final submit differs.
+ * `draftOnly` flips the form into draft-mode where the Save as draft button
+ * is the primary action and the immediate-create button is hidden — used by
+ * the dedicated /drafts/new route.
+ */
+export function OfflineOrderForm({
+  allowDraft = true,
+  draftOnly = false,
+}: {
+  allowDraft?: boolean;
+  draftOnly?: boolean;
+} = {}) {
   const navigate = useNavigate();
   const { data: org } = useCurrentOrg();
   const currency = org?.currency ?? "INR";
   const createOrder = useCreateOfflineOrderMutation();
+  const createDraft = useCreateDraftOrderMutation();
 
   const [customer, setCustomer] = useState<CustomerSelection>({});
   const [lines, setLines] = useState<CartLine[]>([]);
@@ -94,19 +113,19 @@ export function OfflineOrderForm() {
     disabledReason = "Add at least one product with a quantity of 1 or more.";
   }
 
-  function handleSubmit() {
-    if (!canSubmit) return;
-
-    const customerBlock: OfflineCustomerInput = customer.customerId
+  function buildCustomerBlock(): OfflineCustomerInput {
+    return customer.customerId
       ? { customerId: customer.customerId }
       : customer.newCustomer ?? {};
+  }
 
+  function handleSubmit() {
+    if (!canSubmit) return;
     const payload: CreateOfflineOrderRequest = {
-      customer: customerBlock,
+      customer: buildCustomerBlock(),
       lineItems: lines.map((l) => ({
         productVariantId: l.variantId,
         quantity: l.quantity,
-        // Server treats this as a price snapshot; harmless to always send.
         unitPriceOverride: l.unitPrice,
       })),
       paymentMethod,
@@ -115,14 +134,41 @@ export function OfflineOrderForm() {
 
     createOrder.mutate(payload, {
       onSuccess: (result) => {
-        // Same-tab navigate avoids popup-blocker issues with window.open.
-        // The print view auto-fires window.print() and the merchant can hit
-        // Back to return to the orders list.
         if (result.invoice) {
           navigate(`/invoices/${result.invoice.id}/print`);
         } else {
           navigate("/orders");
         }
+      },
+    });
+  }
+
+  function handleSaveDraft() {
+    if (!canSubmit) return;
+    const customerBlock = buildCustomerBlock();
+    // Drop empty customer blocks — backend treats `customer: undefined` as
+    // an anonymous draft, which is more permissive than the offline-order
+    // path that requires identifiers.
+    const customerOmit =
+      !customerBlock.customerId &&
+      !customerBlock.email &&
+      !customerBlock.phone &&
+      !customerBlock.firstName &&
+      !customerBlock.lastName;
+
+    const payload: CreateDraftOrderRequest = {
+      customer: customerOmit ? undefined : customerBlock,
+      lineItems: lines.map((l) => ({
+        productVariantId: l.variantId,
+        quantity: l.quantity,
+        unitPriceOverride: l.unitPrice,
+      })),
+      note: note || undefined,
+    };
+
+    createDraft.mutate(payload, {
+      onSuccess: (draft) => {
+        navigate(`/drafts/${draft.id}`);
       },
     });
   }
@@ -174,6 +220,9 @@ export function OfflineOrderForm() {
             canSubmit={canSubmit}
             disabledReason={disabledReason}
             onSubmit={handleSubmit}
+            onSaveDraft={allowDraft ? handleSaveDraft : undefined}
+            isSavingDraft={createDraft.isPending}
+            draftOnly={draftOnly}
           />
         </div>
       </div>

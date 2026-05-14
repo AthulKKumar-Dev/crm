@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router";
 import {
   Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
-  PackageX, AlertTriangle, Check, Loader2, Pencil, Trash2,
+  PackageX, AlertTriangle, Check, Loader2, Pencil, Trash2, UploadCloud,
 } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
@@ -11,7 +11,10 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
 import { formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
-import { useDeleteProductMutation } from "~/hooks/use-product-mutations";
+import {
+  useDeleteProductMutation,
+  useSyncProductMutation,
+} from "~/hooks/use-product-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import type { ProductStatus, ProductListParams, Product } from "~/types/api";
 
@@ -314,6 +317,7 @@ function ProductRowActions({
 }) {
   const isSynced = product.channel?.platform === "SHOPIFY";
   const sync = product.shopifySync;
+  const syncMutation = useSyncProductMutation();
 
   if (isSynced) {
     return (
@@ -343,6 +347,8 @@ function ProductRowActions({
     );
   }
 
+  // Show "Sync" for MANUAL-only products (no sync attempted) or FAILED ones
+  // so the merchant can push them on demand without leaving the list.
   return (
     <div className="inline-flex items-center gap-1">
       {sync?.status === "FAILED" && (
@@ -354,6 +360,19 @@ function ProductRowActions({
           Sync failed
         </span>
       )}
+      <button
+        type="button"
+        title={sync?.status === "FAILED" ? "Retry sync to Shopify" : "Sync to Shopify"}
+        disabled={syncMutation.isPending}
+        onClick={() => syncMutation.mutate(product.id)}
+        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-[#084734] disabled:opacity-50"
+      >
+        {syncMutation.isPending && syncMutation.variables === product.id ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : (
+          <UploadCloud className="size-3.5" />
+        )}
+      </button>
       <button
         type="button"
         title="Edit product"

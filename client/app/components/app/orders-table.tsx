@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router";
-import { MoreHorizontal, Package, Receipt } from "lucide-react";
+import { MoreHorizontal, Package, Receipt, UploadCloud } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { cn, formatCurrency } from "~/lib/utils";
+import { useSyncOrderMutation } from "~/hooks/use-order-mutations";
 import type { Order, FinancialStatus, FulfillmentStatus } from "~/types/api";
 
 const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
@@ -52,7 +53,10 @@ const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
   RESTOCKED: "Restocked",
 };
 
-type OrderRow = Pick<Order, "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer">;
+type OrderRow = Pick<
+  Order,
+  "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer" | "channel" | "metadata"
+>;
 
 interface OrdersTableProps {
   orders: OrderRow[];
@@ -69,6 +73,9 @@ interface OrdersTableProps {
 export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
   const navigate = useNavigate();
   return (
+    // NOTE: the row-level Sync-to-Shopify dropdown item is wired per-row
+    // below via `OrderRowSyncItem` (so each row can own its own mutation
+    // hook). Top-level hooks like `useSyncOrderMutation` are not called here.
     <Table>
       <TableHeader>
         <TableRow className="hover:bg-transparent">
@@ -153,6 +160,7 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                   >
                     View details
                   </DropdownMenuItem>
+                  <OrderRowSyncItem order={order} />
                   {gstEnabled && (
                     <>
                       <DropdownMenuSeparator />
@@ -175,5 +183,28 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+/**
+ * Per-row "Sync to Shopify" menu item. Only renders for MANUAL-channel
+ * orders that haven't been synced yet (or where the previous sync failed).
+ * Owns its own mutation hook so each row can show its own loading state.
+ */
+function OrderRowSyncItem({ order }: { order: OrderRow }) {
+  const mutation = useSyncOrderMutation(order.id);
+  const isManual = order.channel?.platform === "MANUAL";
+  const sync = (order.metadata as { shopifySync?: { status?: string } } | undefined)
+    ?.shopifySync;
+  const eligible = isManual && (!sync || sync.status === "FAILED");
+  if (!eligible) return null;
+  return (
+    <DropdownMenuItem
+      disabled={mutation.isPending}
+      onClick={() => mutation.mutate()}
+    >
+      <UploadCloud className="mr-1.5 size-3.5" />
+      {sync?.status === "FAILED" ? "Retry sync to Shopify" : "Sync to Shopify"}
+    </DropdownMenuItem>
   );
 }
