@@ -18,4 +18,8 @@ export type ShopifyPushJobData =
   | {
       type: 'bulk-products';
       organizationId: string;
+    }
+  | {
+      type: 'bulk-orders';
+      organizationId: string;
     };

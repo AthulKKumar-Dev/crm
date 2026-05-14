@@ -4,6 +4,7 @@ import type {
   CreateOrganizationRequest,
   CreatePersonalRequest,
   UpdateOrganizationRequest,
+  UpgradeToOrganizationRequest,
   OrgMember,
   UpdateMemberRoleRequest,
   SendInviteRequest,
@@ -35,6 +36,12 @@ export const orgService = {
 
   update: (orgId: string, data: UpdateOrganizationRequest) =>
     apiClient.patch<OrgResponse>(`/organizations/${orgId}`, data).then((response) => response.data),
+
+  /** Flip a PERSONAL workspace to ORGANIZATION in place. OWNER only. */
+  upgradeToOrganization: (orgId: string, data: UpgradeToOrganizationRequest) =>
+    apiClient
+      .post<OrgResponse>(`/organizations/${orgId}/upgrade-to-organization`, data)
+      .then((response) => response.data),
 
   delete: (orgId: string) =>
     apiClient.delete<{ message: string }>(`/organizations/${orgId}`).then((response) => response.data),

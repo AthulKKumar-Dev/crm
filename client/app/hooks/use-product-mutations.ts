@@ -32,8 +32,12 @@ export function useCreateProductMutation() {
           queryClient.invalidateQueries({ queryKey: productKeys.all });
         }, 8000);
       } else {
+        // Auto-sync is OFF (default) — product stays local. The merchant can
+        // push it from the product list/edit UI or via the channels-page
+        // bulk Sync. Toast copy reflects this so we don't promise a sync
+        // that won't happen.
         toast.success(
-          "Product created. It will sync to Shopify the next time you connect.",
+          "Product created. Sync to Shopify manually when you're ready.",
         );
       }
     },
@@ -70,5 +74,27 @@ export function useDeleteProductMutation() {
     },
     onError: (error) =>
       handleMutationError(error, "Failed to archive product."),
+  });
+}
+
+/**
+ * POST /products/:id/sync — manually push a MANUAL product to Shopify.
+ * Idempotent; the toast reflects the server's status.
+ */
+export function useSyncProductMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => productService.syncToShopify(id),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: productKeys.all });
+      if (result.status === "ALREADY_SYNCED") {
+        toast.info("Product already synced to Shopify.");
+      } else if (result.status === "ALREADY_QUEUED") {
+        toast.info("Sync already in progress.");
+      } else {
+        toast.success("Sync to Shopify queued.");
+      }
+    },
+    onError: (error) => handleMutationError(error, "Failed to sync product."),
   });
 }

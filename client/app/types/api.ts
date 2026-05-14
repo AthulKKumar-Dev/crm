@@ -335,6 +335,19 @@ export interface UpdateOrganizationRequest {
   loyaltyPlatinumMin?: number;
 }
 
+/**
+ * Payload for POST /organizations/:orgId/upgrade-to-organization.
+ * Flips a PERSONAL workspace to ORGANIZATION in place. Fields mirror the
+ * onboarding form (minus billing — the existing subscription stays put).
+ */
+export interface UpgradeToOrganizationRequest {
+  name: string;
+  logo?: string;
+  industry?: string;
+  website?: string;
+  timezone?: string;
+}
+
 /** Response from POST /loyalty/recompute. */
 export interface RecomputeLoyaltyResponse {
   updated: number;
@@ -696,6 +709,16 @@ export interface Order {
   note: string | null;
   cancelReason: string | null;
   cancelledAt: string | null;
+  /** Present on detail responses; absent on list responses. */
+  closedAt?: string | null;
+  /** Present on detail responses; absent on list responses. */
+  email?: string | null;
+  /** Present on detail responses; absent on list responses. */
+  phone?: string | null;
+  /** Present on detail responses; absent on list responses. */
+  shippingAddress?: Record<string, unknown> | null;
+  /** Present on detail responses; absent on list responses. */
+  billingAddress?: Record<string, unknown> | null;
   customer: OrderCustomer | null;
   channel: ChannelRef;
   itemCount: number;
@@ -800,6 +823,267 @@ export interface CreateOfflineOrderRequest {
 
 /** Server response from POST /orders/offline. */
 export interface CreateOfflineOrderResponse {
+  order: OrderDetail;
+  invoice: InvoiceDetail | null;
+  invoiceError: string | null;
+}
+
+// ─── Phase 1: Order Lifecycle & Metadata ────────────────────────────────────
+
+/** Reasons accepted by POST /orders/:id/cancel. Mirrors the Prisma enum. */
+export type OrderCancelReason =
+  | "CUSTOMER"
+  | "FRAUD"
+  | "INVENTORY"
+  | "DECLINED"
+  | "OTHER";
+
+/** Payload for PATCH /orders/:id. Every field is optional; only sent fields update. */
+export interface UpdateOrderRequest {
+  tags?: string[];
+  note?: string;
+  email?: string;
+  phone?: string;
+  poNumber?: string;
+  shippingAddress?: Record<string, unknown>;
+  billingAddress?: Record<string, unknown>;
+  customAttributes?: { key: string; value: string }[];
+}
+
+/** Payload for POST /orders/:id/cancel. */
+export interface CancelOrderRequest {
+  reason: OrderCancelReason;
+  refund?: boolean;
+  restock?: boolean;
+  notifyCustomer?: boolean;
+  staffNote?: string;
+}
+
+/** Payload for POST /orders/:id/capture. Shopify-only; amount defaults to full balance. */
+export interface CapturePaymentRequest {
+  amount?: number;
+  currency?: string;
+  finalCapture?: boolean;
+}
+
+// ─── Phase 2: Fulfillment & Tracking ────────────────────────────────────────
+
+/** Tracking info sent on create / update — number, URL, carrier. All optional. */
+export interface TrackingInfoInput {
+  number?: string;
+  url?: string;
+  company?: string;
+}
+
+/** One line item in a create-fulfillment request. */
+export interface FulfillmentLineItemInput {
+  /** OrderLineItem ID — numeric Shopify ID for SHOPIFY orders, local cuid for MANUAL. */
+  lineItemId: string;
+  /** Defaults to the full remaining quantity when omitted. */
+  quantity?: number;
+}
+
+/** Payload for POST /orders/:id/fulfillments. */
+export interface CreateFulfillmentRequest {
+  lineItems: FulfillmentLineItemInput[];
+  tracking?: TrackingInfoInput;
+  /** SHOPIFY only — sends shipping confirmation email when true. */
+  notifyCustomer?: boolean;
+}
+
+/** Payload for PATCH /orders/:id/fulfillments/:fid/tracking. */
+export interface UpdateTrackingRequest {
+  tracking: TrackingInfoInput;
+  notifyCustomer?: boolean;
+}
+
+/** One line item on a fulfillment order, returned by the fulfillable query. */
+export interface FulfillableLineItem {
+  lineItemId: string;
+  title: string;
+  variantTitle: string | null;
+  sku: string | null;
+  remainingQuantity: number;
+  totalQuantity: number;
+}
+
+/** One fulfillment-order bucket of line items still eligible for fulfillment. */
+export interface FulfillableFulfillmentOrder {
+  id: string;
+  status: string;
+  locationName: string | null;
+  lineItems: FulfillableLineItem[];
+}
+
+/** Response from GET /orders/:id/fulfillable-line-items. */
+export interface FulfillableLineItemsResponse {
+  source: "shopify" | "manual";
+  fulfillmentOrders: FulfillableFulfillmentOrder[];
+}
+
+// ─── Organization Settings ──────────────────────────────────────────────────
+
+/** Product-domain settings stored as JSONB on OrganizationSettings.productSettings. */
+export interface ProductSettings {
+  /** When true, products created in the CRM are auto-pushed to Shopify. Default false. */
+  autoSyncToShopify: boolean;
+}
+
+/** Order-domain settings stored as JSONB on OrganizationSettings.orderSettings. */
+export interface OrderSettings {
+  /** When true, offline orders created in the CRM are auto-pushed to Shopify. Default false. */
+  autoSyncToShopify: boolean;
+}
+
+/** Response from GET /organization/settings — every domain returned together. */
+export interface OrganizationSettingsResponse {
+  productSettings: ProductSettings;
+  orderSettings: OrderSettings;
+}
+
+/** Patch payload for PATCH /organization/settings/products. */
+export type UpdateProductSettingsRequest = Partial<ProductSettings>;
+
+/** Patch payload for PATCH /organization/settings/orders. */
+export type UpdateOrderSettingsRequest = Partial<OrderSettings>;
+
+// ─── Manual sync endpoints ──────────────────────────────────────────────────
+
+/** Response from POST /products/:id/sync or POST /orders/:id/sync. */
+export interface ManualSyncResponse {
+  /** ALREADY_SYNCED: no-op, was already on Shopify. ALREADY_QUEUED: a push job
+   * is already in-flight. QUEUED: a new push job was enqueued just now. */
+  status: "ALREADY_SYNCED" | "ALREADY_QUEUED" | "QUEUED";
+  productId?: string;
+  orderId?: string;
+}
+
+// ─── Draft Orders ───────────────────────────────────────────────────────────
+
+export type DraftOrderStatus = "OPEN" | "INVOICE_SENT" | "COMPLETED";
+
+/** Customer block on a create / update draft request. */
+export interface DraftCustomerInput {
+  customerId?: string;
+  email?: string;
+  phone?: string;
+  firstName?: string;
+  lastName?: string;
+  gstin?: string;
+  billingStateCode?: string;
+  address?: Record<string, unknown>;
+}
+
+/** Line item on a create / update draft request. */
+export interface DraftLineItemInput {
+  productVariantId: string;
+  quantity: number;
+  unitPriceOverride?: number;
+  discount?: number;
+}
+
+/** Payload for POST /draft-orders. Customer block is optional (anonymous drafts allowed). */
+export interface CreateDraftOrderRequest {
+  customer?: DraftCustomerInput;
+  lineItems: DraftLineItemInput[];
+  note?: string;
+  tags?: string[];
+  shippingAddress?: Record<string, unknown>;
+  billingAddress?: Record<string, unknown>;
+  placeOfSupplyCode?: string;
+}
+
+/** Payload for PATCH /draft-orders/:id. */
+export type UpdateDraftOrderRequest = Partial<CreateDraftOrderRequest>;
+
+/** Payload for POST /draft-orders/:id/complete. */
+export interface CompleteDraftRequest {
+  paymentMethod?: OfflinePaymentMethod;
+  paymentPending?: boolean;
+  generateInvoice?: boolean;
+  sellerGstinId?: string;
+}
+
+/** Payload for POST /draft-orders/:id/send-invoice. */
+export interface SendDraftInvoiceRequest {
+  to?: string;
+  subject?: string;
+  customMessage?: string;
+  bcc?: string[];
+}
+
+/** Customer summary embedded in a draft order list/detail response. */
+export interface DraftOrderCustomer {
+  id: string;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+}
+
+/** Draft list row. */
+export interface DraftOrder {
+  id: string;
+  name: string | null;
+  status: DraftOrderStatus;
+  currency: string;
+  totalPrice: number;
+  subtotalPrice: number;
+  totalTax: number;
+  totalDiscounts: number;
+  totalShippingPrice: number;
+  customerEmail: string | null;
+  note: string | null;
+  tags: string[];
+  invoiceUrl: string | null;
+  invoiceSentAt: string | null;
+  completedAt: string | null;
+  completedOrder: { id: string; name: string } | null;
+  createdAt: string;
+  updatedAt: string;
+  customer: DraftOrderCustomer | null;
+  channel: ChannelRef;
+  itemCount: number;
+}
+
+/** Line item on a draft order detail response. */
+export interface DraftOrderLineItem {
+  id: string;
+  variantId: string | null;
+  title: string;
+  variantTitle: string | null;
+  sku: string | null;
+  quantity: number;
+  price: number;
+  totalDiscount: number;
+  taxable: boolean;
+  requiresShipping: boolean;
+  variant: { id: string; title: string; sku: string | null; price: number } | null;
+}
+
+/** Full draft detail. */
+export interface DraftOrderDetail extends DraftOrder {
+  lineItems: DraftOrderLineItem[];
+  shippingAddress: Record<string, unknown> | null;
+  billingAddress: Record<string, unknown> | null;
+}
+
+/** Query parameters for the draft list endpoint. */
+export interface DraftOrderListParams {
+  page?: number;
+  limit?: number;
+  status?: DraftOrderStatus;
+  customerId?: string;
+  channelId?: string;
+  search?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  sortBy?: string;
+  sortOrder?: "asc" | "desc";
+}
+
+/** Response from POST /draft-orders/:id/complete. */
+export interface CompleteDraftResponse {
+  draftId: string;
   order: OrderDetail;
   invoice: InvoiceDetail | null;
   invoiceError: string | null;

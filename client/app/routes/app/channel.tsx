@@ -195,21 +195,42 @@ export default function ChannelPage() {
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <button
-                      onClick={() => triggerSync.mutate({
-                        id: channel.id,
-                        data: { entityTypes: ['products', 'orders', 'customers', 'inventory'] },
-                      })}
-                      disabled={channel.syncStatus === 'IN_PROGRESS' || triggerSync.isPending}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors"
-                    >
-                      {channel.syncStatus === 'IN_PROGRESS' || triggerSync.isPending ? (
-                        <Loader2 className="size-3 animate-spin" />
-                      ) : (
-                        <RefreshCw className="size-3" />
-                      )}
-                      {channel.syncStatus === 'IN_PROGRESS' ? 'Syncing...' : 'Sync Now'}
-                    </button>
+                    {/* Sync button:
+                        • SHOPIFY  → "Sync Now"        (pull from Shopify + bulk-push local items)
+                        • MANUAL   → "Push to Shopify" (no pull; bulk-push products/orders/drafts created in the CRM)
+                        • Others   → hidden            (no push/pull semantics for IG/WA in this queue) */}
+                    {(channel.platform === 'SHOPIFY' || channel.platform === 'MANUAL') && (
+                      <button
+                        onClick={() => triggerSync.mutate({
+                          id: channel.id,
+                          data: { entityTypes: ['products', 'orders', 'customers', 'inventory'] },
+                        })}
+                        // Only block on the local mutation being mid-flight.
+                        // We deliberately do NOT block on `syncStatus === IN_PROGRESS`:
+                        // the server self-heals stuck rows when the trigger fires
+                        // again, so allowing re-clicks is the recovery path.
+                        disabled={triggerSync.isPending}
+                        title={
+                          channel.platform === 'MANUAL'
+                            ? 'Push every CRM-created product, offline order and draft to your connected Shopify store.'
+                            : 'Pull latest data from Shopify and push any unsynced local items.'
+                        }
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 transition-colors"
+                      >
+                        {channel.syncStatus === 'IN_PROGRESS' || triggerSync.isPending ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <RefreshCw className="size-3" />
+                        )}
+                        {triggerSync.isPending
+                          ? 'Starting…'
+                          : channel.syncStatus === 'IN_PROGRESS'
+                            ? 'Syncing… click to retry'
+                            : channel.platform === 'MANUAL'
+                              ? 'Push to Shopify'
+                              : 'Sync Now'}
+                      </button>
+                    )}
                     <button
                       onClick={() => {
                         if (confirm('Are you sure you want to disconnect this channel?')) {

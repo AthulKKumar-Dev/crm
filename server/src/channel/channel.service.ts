@@ -3,7 +3,7 @@ import {
   ForbiddenException,
   NotFoundException,
 } from '@nestjs/common';
-import { ChannelPlatform, ChannelStatus, UserRole, Prisma } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, SyncStatus, UserRole, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { UpdateChannelDto } from './dto/update-channel.dto';
@@ -13,6 +13,26 @@ export class ChannelService {
   constructor(private readonly prisma: PrismaService, private readonly shopifyOAuth: ShopifyOAuthService) { }
 
   async findAllForOrg(orgId: string) {
+    // Auto-heal MANUAL channels stuck in ERROR / SYNCING / IN_PROGRESS state.
+    // MANUAL channels have no remote to sync with, so any non-CONNECTED state
+    // is stale (left over from misrouted sync jobs). Without this the UI
+    // shows a red "Error" badge that the user can't clear because the Sync
+    // button is correctly hidden for MANUAL channels.
+    await this.prisma.channel.updateMany({
+      where: {
+        organizationId: orgId,
+        platform: ChannelPlatform.MANUAL,
+        OR: [
+          { status: { not: ChannelStatus.CONNECTED } },
+          { syncStatus: { not: SyncStatus.IDLE } },
+        ],
+      },
+      data: {
+        status: ChannelStatus.CONNECTED,
+        syncStatus: SyncStatus.IDLE,
+      },
+    });
+
     return this.prisma.channel.findMany({
       where: { organizationId: orgId },
       orderBy: { createdAt: 'desc' },

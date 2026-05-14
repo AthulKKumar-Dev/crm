@@ -30,6 +30,9 @@ export class ShopifyPushProcessor extends WorkerHost {
         case 'bulk-products':
           await this.pushService.bulkPushManualProducts(data.organizationId);
           break;
+        case 'bulk-orders':
+          await this.pushService.bulkPushUnsyncedOrders(data.organizationId);
+          break;
         default: {
           // Exhaustiveness check — if a new job type is added without a
           // case here, TS will flag it.

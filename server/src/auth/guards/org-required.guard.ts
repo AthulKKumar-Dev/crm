@@ -39,6 +39,8 @@ export class OrgRequiredGuard implements CanActivate {
             'OrderController', 'ProductController', 'CustomerController',
             'DashboardController', 'ChannelController', 'InvitesController',
             'MembersController',
+            'OrganizationSettingsController',
+            'DraftOrderController',
         ];
 
         if (!orgScopedControllers.includes(controller)) {

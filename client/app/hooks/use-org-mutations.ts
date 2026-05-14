@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { orgService } from "~/services/org.service";
+import { authService } from "~/services/auth.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { orgKeys } from "~/hooks/use-org-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
@@ -9,6 +10,7 @@ import type {
   CreateOrganizationRequest,
   CreatePersonalRequest,
   UpdateOrganizationRequest,
+  UpgradeToOrganizationRequest,
   UpdateMemberRoleRequest,
   SendInviteRequest,
 } from "~/types/api";
@@ -93,6 +95,65 @@ export function useUpdateOrganizationMutation(orgId: string) {
       toast.success("Organization updated successfully.");
     },
     onError: (error) => handleMutationError(error, "Failed to update organization."),
+  });
+}
+
+/**
+ * POST /organizations/:orgId/upgrade-to-organization — flip the personal
+ * workspace to an organization. The auth store's current org reflects the
+ * change after the queries invalidate; data on the workspace is preserved.
+ */
+export function useUpgradeToOrganizationMutation(orgId: string) {
+  const queryClient = useQueryClient();
+  const setCurrentOrg = useAuthStore((state) => state.setCurrentOrg);
+
+  return useMutation({
+    mutationFn: (data: UpgradeToOrganizationRequest) =>
+      orgService.upgradeToOrganization(orgId, data),
+    onSuccess: (org) => {
+      setCurrentOrg(org.id);
+      queryClient.invalidateQueries({ queryKey: orgKeys.detail(orgId) });
+      queryClient.invalidateQueries({ queryKey: orgKeys.list() });
+      toast.success("Workspace upgraded to an organization.");
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to upgrade workspace."),
+  });
+}
+
+/**
+ * Settings-flow variant of useCreateOrganizationMutation. Same backend call,
+ * but:
+ *   - does NOT navigate (the user stays in Settings),
+ *   - switches the active org via auth/switch-org to get fresh JWT tokens
+ *     scoped to the new org,
+ *   - updates the auth store so the org switcher and AuthGuard reflect the
+ *     new state immediately.
+ *
+ * Used by the "Create new organization" path in the settings upgrade sheet
+ * — the path that previously redirected to /onboarding/choose-plan (which
+ * was a dead end thanks to OnboardingGuard bouncing already-onboarded users).
+ */
+export function useCreateOrganizationInSettingsMutation() {
+  const queryClient = useQueryClient();
+  const setTokens = useAuthStore((s) => s.setTokens);
+  const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+
+  return useMutation({
+    mutationFn: async (data: CreateOrganizationRequest) => {
+      const org = await orgService.create(data);
+      const switched = await authService.switchOrg({ orgId: org.id });
+      return { org, tokens: switched };
+    },
+    onSuccess: ({ org, tokens }) => {
+      setTokens(tokens.accessToken, tokens.refreshToken);
+      setCurrentOrg(org.id);
+      queryClient.invalidateQueries({ queryKey: orgKeys.list() });
+      queryClient.invalidateQueries({ queryKey: orgKeys.detail(org.id) });
+      toast.success(`Switched to ${org.name}.`);
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to create organization."),
   });
 }
 

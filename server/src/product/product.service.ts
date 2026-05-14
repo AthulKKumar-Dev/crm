@@ -16,6 +16,7 @@ import { QueryProductsDto } from './dto/query-products.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
+import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 
 @Injectable()
 export class ProductService {
@@ -24,6 +25,7 @@ export class ProductService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly shopifyPushEnqueuer: ShopifyPushEnqueuer,
+    private readonly settings: OrganizationSettingsService,
   ) {}
 
   async findAll(orgId: string, query: QueryProductsDto) {
@@ -343,36 +345,41 @@ export class ProductService {
       return created;
     });
 
-    // 3. Enqueue Shopify push if a SHOPIFY channel is connected. Done outside
-    //    the transaction so a queue/Redis hiccup never breaks the local create.
+    // 3. Auto-push to Shopify — only if the org has opted in via
+    //    productSettings.autoSyncToShopify. Default is OFF: products stay
+    //    local and must be pushed manually (POST /products/:id/sync) or in
+    //    bulk via the channels-page Sync action.
     let shopifyPushQueued = false;
     try {
-      const shopify = await this.prisma.channel.findUnique({
-        where: {
-          organizationId_platform: {
+      const productSettings = await this.settings.getProductSettings(orgId);
+      if (productSettings.autoSyncToShopify) {
+        const shopify = await this.prisma.channel.findUnique({
+          where: {
+            organizationId_platform: {
+              organizationId: orgId,
+              platform: ChannelPlatform.SHOPIFY,
+            },
+          },
+        });
+        if (shopify?.status === ChannelStatus.CONNECTED) {
+          await this.shopifyPushEnqueuer.enqueueProductPush({
+            type: 'product',
+            productId: product.id,
             organizationId: orgId,
-            platform: ChannelPlatform.SHOPIFY,
-          },
-        },
-      });
-      if (shopify?.status === ChannelStatus.CONNECTED) {
-        await this.shopifyPushEnqueuer.enqueueProductPush({
-          type: 'product',
-          productId: product.id,
-          organizationId: orgId,
-        });
-        shopifyPushQueued = true;
-        // Stamp PENDING immediately so the UI can show "Syncing…" before the
-        // worker picks the job up.
-        await this.prisma.product.update({
-          where: { id: product.id },
-          data: {
-            metadata: {
-              ...((product.metadata as Prisma.JsonObject) ?? {}),
-              shopifySync: { status: 'PENDING', attempts: 0 },
-            } as Prisma.InputJsonObject,
-          },
-        });
+          });
+          shopifyPushQueued = true;
+          // Stamp PENDING immediately so the UI can show "Syncing…" before
+          // the worker picks the job up.
+          await this.prisma.product.update({
+            where: { id: product.id },
+            data: {
+              metadata: {
+                ...((product.metadata as Prisma.JsonObject) ?? {}),
+                shopifySync: { status: 'PENDING', attempts: 0 },
+              } as Prisma.InputJsonObject,
+            },
+          });
+        }
       }
     } catch (err) {
       this.logger.warn(
@@ -381,6 +388,66 @@ export class ProductService {
     }
 
     return { ...product, shopifyPushQueued };
+  }
+
+  // ─── MANUAL SYNC TO SHOPIFY ───
+  // Push a single MANUAL-channel product to the connected Shopify store on
+  // demand. Idempotent — already-synced products return early; already-queued
+  // ones don't re-enqueue; failed pushes are retried.
+  async syncToShopify(id: string, orgId: string) {
+    const product = await this.prisma.product.findFirst({
+      where: { id, organizationId: orgId, deletedAt: null },
+      include: { channel: true },
+    });
+    if (!product) throw new NotFoundException('Product not found');
+
+    if (product.channel.platform !== ChannelPlatform.MANUAL) {
+      throw new ForbiddenException(
+        'Only CRM-native (MANUAL) products can be synced to Shopify. This product originated in Shopify.',
+      );
+    }
+
+    const shopify = await this.prisma.channel.findUnique({
+      where: {
+        organizationId_platform: {
+          organizationId: orgId,
+          platform: ChannelPlatform.SHOPIFY,
+        },
+      },
+    });
+    if (!shopify || shopify.status !== ChannelStatus.CONNECTED) {
+      throw new ForbiddenException(
+        'No connected Shopify channel. Connect Shopify first, then sync.',
+      );
+    }
+
+    const meta = (product.metadata as Prisma.JsonObject) ?? {};
+    const sync = (meta.shopifySync ?? null) as
+      | { status: 'PENDING' | 'SYNCED' | 'FAILED' }
+      | null;
+
+    if (sync?.status === 'SYNCED') {
+      return { status: 'ALREADY_SYNCED' as const, productId: product.id };
+    }
+    if (sync?.status === 'PENDING') {
+      return { status: 'ALREADY_QUEUED' as const, productId: product.id };
+    }
+
+    await this.shopifyPushEnqueuer.enqueueProductPush({
+      type: 'product',
+      productId: product.id,
+      organizationId: orgId,
+    });
+    await this.prisma.product.update({
+      where: { id: product.id },
+      data: {
+        metadata: {
+          ...meta,
+          shopifySync: { status: 'PENDING', attempts: 0 },
+        } as Prisma.InputJsonObject,
+      },
+    });
+    return { status: 'QUEUED' as const, productId: product.id };
   }
 
   // ─── UPDATE PRODUCT ───

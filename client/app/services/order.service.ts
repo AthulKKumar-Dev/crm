@@ -3,11 +3,19 @@ import type {
   PaginatedResponse,
   Order,
   OrderDetail,
+  OrderFulfillment,
   OrderListParams,
   OrderStatsResponse,
   DashboardQueryParams,
   CreateOfflineOrderRequest,
   CreateOfflineOrderResponse,
+  UpdateOrderRequest,
+  CancelOrderRequest,
+  CapturePaymentRequest,
+  CreateFulfillmentRequest,
+  UpdateTrackingRequest,
+  FulfillableLineItemsResponse,
+  ManualSyncResponse,
 } from "~/types/api";
 
 /**
@@ -28,4 +36,52 @@ export const orderService = {
 
   createOffline: (data: CreateOfflineOrderRequest) =>
     apiClient.post<CreateOfflineOrderResponse>("/orders/offline", data).then((response) => response.data),
+
+  // ─── Phase 1: Lifecycle & metadata ─────────────────────────────────────
+
+  update: (id: string, data: UpdateOrderRequest) =>
+    apiClient.patch<Order>(`/orders/${id}`, data).then((response) => response.data),
+
+  cancel: (id: string, data: CancelOrderRequest) =>
+    apiClient.post<Order>(`/orders/${id}/cancel`, data).then((response) => response.data),
+
+  close: (id: string) =>
+    apiClient.post<Order>(`/orders/${id}/close`).then((response) => response.data),
+
+  open: (id: string) =>
+    apiClient.post<Order>(`/orders/${id}/open`).then((response) => response.data),
+
+  markPaid: (id: string) =>
+    apiClient.post<Order>(`/orders/${id}/mark-paid`).then((response) => response.data),
+
+  capture: (id: string, data: CapturePaymentRequest) =>
+    apiClient.post<Order>(`/orders/${id}/capture`, data).then((response) => response.data),
+
+  // ─── Phase 2: Fulfillment & tracking ───────────────────────────────────
+
+  fulfillableLineItems: (id: string) =>
+    apiClient
+      .get<FulfillableLineItemsResponse>(`/orders/${id}/fulfillable-line-items`)
+      .then((response) => response.data),
+
+  createFulfillment: (id: string, data: CreateFulfillmentRequest) =>
+    apiClient
+      .post<OrderFulfillment>(`/orders/${id}/fulfillments`, data)
+      .then((response) => response.data),
+
+  updateTracking: (id: string, fid: string, data: UpdateTrackingRequest) =>
+    apiClient
+      .patch<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/tracking`, data)
+      .then((response) => response.data),
+
+  cancelFulfillment: (id: string, fid: string) =>
+    apiClient
+      .post<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/cancel`)
+      .then((response) => response.data),
+
+  // Manual sync — push an offline (MANUAL) order to Shopify on demand.
+  syncToShopify: (id: string) =>
+    apiClient
+      .post<ManualSyncResponse>(`/orders/${id}/sync`)
+      .then((response) => response.data),
 };

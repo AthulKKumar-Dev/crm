@@ -15,6 +15,11 @@ import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryOrdersDto } from './dto/query-orders.dto';
 import { CreateOfflineOrderDto } from './dto/create-offline-order.dto';
+import { UpdateOrderDto } from './dto/update-order.dto';
+import { CancelOrderDto } from './dto/cancel-order.dto';
+import { CapturePaymentDto } from './dto/capture-payment.dto';
+import { CreateFulfillmentDto } from './dto/create-fulfillment.dto';
+import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { QueryDashboardDto } from '../dashboard/dto/query-dashboard.dto';
 import { Parser } from 'json2csv';
 import { GstCalculatorService } from '../gst/gst-calculator.service';
@@ -22,6 +27,44 @@ import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
 import { ShopifyPushService } from '../channel/shopify-push.service';
+import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
+import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
+import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import {
+  FulfillmentCancelResponse,
+  FulfillmentCancelVariables,
+  FulfillmentCreateResponse,
+  FulfillmentCreateVariables,
+  FulfillmentTrackingInfoUpdateResponse,
+  FulfillmentTrackingInfoUpdateVariables,
+  MailingAddressInput,
+  OrderCancelResponse,
+  OrderCancelVariables,
+  OrderCapturableTransactionsResponse,
+  OrderCapturableTransactionsVariables,
+  OrderCaptureResponse,
+  OrderCaptureVariables,
+  OrderCloseOrOpenVariables,
+  OrderCloseResponse,
+  OrderFulfillmentOrdersResponse,
+  OrderMarkAsPaidResponse,
+  OrderMarkAsPaidVariables,
+  OrderOpenResponse,
+  OrderUpdateInput,
+  OrderUpdateResponse,
+  OrderUpdateVariables,
+  FULFILLMENT_CANCEL_MUTATION,
+  FULFILLMENT_CREATE_MUTATION,
+  FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+  ORDER_CANCEL_MUTATION,
+  ORDER_CAPTURABLE_TRANSACTIONS_QUERY,
+  ORDER_CAPTURE_MUTATION,
+  ORDER_CLOSE_MUTATION,
+  ORDER_FULFILLMENT_ORDERS_QUERY,
+  ORDER_MARK_AS_PAID_MUTATION,
+  ORDER_OPEN_MUTATION,
+  ORDER_UPDATE_MUTATION,
+} from '../channel/shopify-graphql.types';
 
 @Injectable()
 export class OrderService {
@@ -34,6 +77,9 @@ export class OrderService {
     private readonly invoiceService: InvoiceService,
     private readonly shopifyPushEnqueuer: ShopifyPushEnqueuer,
     private readonly shopifyPushService: ShopifyPushService,
+    private readonly graphql: ShopifyGraphqlClient,
+    private readonly shopifyOAuth: ShopifyOAuthService,
+    private readonly settings: OrganizationSettingsService,
   ) {}
 
   async findAll(orgId: string, query: QueryOrdersDto) {
@@ -668,24 +714,28 @@ export class OrderService {
       },
     );
 
-    // After the local order commits, enqueue a Shopify push if the org has a
-    // connected Shopify channel. We do this OUTSIDE the transaction so a
-    // queue/Redis hiccup never rolls back the local sale. The job runs in
-    // the background; failures are recorded on `order.metadata.shopifySync`
-    // and retried with exponential backoff (5 attempts).
+    // Auto-push to Shopify — only if the org has opted in via
+    // orderSettings.autoSyncToShopify. Default is OFF: offline orders stay
+    // local and must be pushed manually (POST /orders/:id/sync) or in bulk
+    // via the channels-page Sync action.
+    // OUTSIDE the transaction so a queue/Redis hiccup never rolls back the
+    // local sale.
     try {
-      const shopifyChannel = await this.shopifyPushService.findShopifyChannel(
-        orgId,
-      );
-      if (shopifyChannel?.status === 'CONNECTED') {
-        // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
-        // even before the worker picks the job up.
-        await this.markPendingSync(result.order.id);
-        await this.shopifyPushEnqueuer.enqueueOrderPush({
-          type: 'order',
-          orderId: result.order.id,
-          organizationId: orgId,
-        });
+      const orderSettings = await this.settings.getOrderSettings(orgId);
+      if (orderSettings.autoSyncToShopify) {
+        const shopifyChannel = await this.shopifyPushService.findShopifyChannel(
+          orgId,
+        );
+        if (shopifyChannel?.status === 'CONNECTED') {
+          // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
+          // even before the worker picks the job up.
+          await this.markPendingSync(result.order.id);
+          await this.shopifyPushEnqueuer.enqueueOrderPush({
+            type: 'order',
+            orderId: result.order.id,
+            organizationId: orgId,
+          });
+        }
       }
     } catch (err) {
       this.logger.warn(
@@ -694,6 +744,47 @@ export class OrderService {
     }
 
     return result;
+  }
+
+  // ─── MANUAL SYNC TO SHOPIFY ───
+  // Push a single MANUAL offline order to the connected Shopify store on
+  // demand. Idempotent — already-synced orders return early; already-queued
+  // ones don't re-enqueue; failed pushes are retried.
+  async syncToShopify(id: string, orgId: string) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+
+    if (order.channel.platform !== ChannelPlatform.MANUAL) {
+      throw new BadRequestException(
+        'Only offline (MANUAL channel) orders can be synced to Shopify. This order originated in Shopify.',
+      );
+    }
+
+    const shopifyChannel = await this.shopifyPushService.findShopifyChannel(orgId);
+    if (!shopifyChannel || shopifyChannel.status !== ChannelStatus.CONNECTED) {
+      throw new BadRequestException(
+        'No connected Shopify channel. Connect Shopify first, then sync.',
+      );
+    }
+
+    const meta = (order.metadata as Prisma.JsonObject) ?? {};
+    const sync = (meta.shopifySync ?? null) as
+      | { status: 'PENDING' | 'SYNCED' | 'FAILED' }
+      | null;
+
+    if (sync?.status === 'SYNCED') {
+      return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
+    }
+    if (sync?.status === 'PENDING') {
+      return { status: 'ALREADY_QUEUED' as const, orderId: order.id };
+    }
+
+    await this.markPendingSync(order.id);
+    await this.shopifyPushEnqueuer.enqueueOrderPush({
+      type: 'order',
+      orderId: order.id,
+      organizationId: orgId,
+    });
+    return { status: 'QUEUED' as const, orderId: order.id };
   }
 
   /** Stamp metadata.shopifySync = { status: 'PENDING', attempts: 0 }. */
@@ -804,5 +895,758 @@ export class OrderService {
     }
 
     return tx.customer.update({ where: { id: existing.id }, data: patch });
+  }
+
+  // ─── PHASE 1: LIFECYCLE & METADATA ────────────────────────────────────────
+  // Each operation branches on `order.channel.platform`:
+  //   - SHOPIFY: call the matching GraphQL mutation, then mirror to DB.
+  //   - MANUAL:  apply locally only.
+  // A timeline event is written on every successful action so the order
+  // detail page renders an audit trail regardless of channel.
+
+  /**
+   * Edit metadata on an existing order: tags, note, customer contact, address,
+   * custom attributes. For SHOPIFY, fields propagate via `orderUpdate`. For
+   * MANUAL, only fields with a local column are persisted (others are accepted
+   * but ignored — they're meaningful only when there's a Shopify mirror).
+   */
+  async update(id: string, orgId: string, userId: string, dto: UpdateOrderDto) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+
+    if (isShopify) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const input: OrderUpdateInput = {
+        id: ShopifyGraphqlClient.toGid('Order', order.externalId),
+      };
+      if (dto.tags !== undefined) input.tags = dto.tags;
+      if (dto.note !== undefined) input.note = dto.note;
+      if (dto.email !== undefined) input.email = dto.email;
+      if (dto.phone !== undefined) input.phone = dto.phone;
+      if (dto.poNumber !== undefined) input.poNumber = dto.poNumber;
+      if (dto.customAttributes !== undefined) input.customAttributes = dto.customAttributes;
+      if (dto.shippingAddress !== undefined) {
+        input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
+      }
+      const result = await this.graphql.request<OrderUpdateResponse, OrderUpdateVariables>(
+        { shopDomain, accessToken: token },
+        ORDER_UPDATE_MUTATION,
+        { input },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(result.orderUpdate.userErrors, 'orderUpdate');
+    }
+
+    const updatedFields = Object.keys(dto).filter(
+      (k) => (dto as Record<string, unknown>)[k] !== undefined,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      const data: Prisma.OrderUpdateInput = {};
+      if (dto.tags !== undefined) data.tags = dto.tags;
+      if (dto.note !== undefined) data.note = dto.note;
+      if (dto.shippingAddress !== undefined) {
+        data.shippingAddress = dto.shippingAddress as Prisma.InputJsonValue;
+      }
+      if (dto.billingAddress !== undefined) {
+        data.billingAddress = dto.billingAddress as Prisma.InputJsonValue;
+      }
+      const updated = Object.keys(data).length > 0
+        ? await tx.order.update({ where: { id }, data })
+        : order;
+
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId: id,
+          actorId: userId,
+          action: 'updated',
+          message: `Order details updated (${updatedFields.join(', ') || 'no changes'})`,
+          metadata: { updatedFields } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Cancel an order. Shopify's `orderCancel` is async — it returns a Job and
+   * the actual cancellation happens in the background. We apply an optimistic
+   * local update (cancelledAt, cancelReason, optional refund/restock status)
+   * and rely on the `orders/cancelled` webhook to reconcile fully.
+   */
+  async cancel(id: string, orgId: string, userId: string, dto: CancelOrderDto) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    if (order.cancelledAt) {
+      throw new BadRequestException('Order is already cancelled');
+    }
+    const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+
+    if (isShopify) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const variables: OrderCancelVariables = {
+        orderId: ShopifyGraphqlClient.toGid('Order', order.externalId),
+        reason: dto.reason,
+        refund: dto.refund ?? false,
+        restock: dto.restock ?? true,
+        notifyCustomer: dto.notifyCustomer ?? true,
+        staffNote: dto.staffNote ?? null,
+      };
+      const result = await this.graphql.request<OrderCancelResponse, OrderCancelVariables>(
+        { shopDomain, accessToken: token },
+        ORDER_CANCEL_MUTATION,
+        variables,
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        result.orderCancel.orderCancelUserErrors,
+        'orderCancel',
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const data: Prisma.OrderUpdateInput = {
+        cancelReason: dto.reason,
+        cancelledAt: new Date(),
+      };
+      if (dto.refund) data.financialStatus = OrderFinancialStatus.REFUNDED;
+      if (dto.restock) data.fulfillmentStatus = OrderFulfillmentStatus.RESTOCKED;
+      const updated = await tx.order.update({ where: { id }, data });
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId: id,
+          actorId: userId,
+          action: 'cancelled',
+          message: `Order cancelled (${dto.reason})${dto.staffNote ? `: ${dto.staffNote}` : ''}`,
+          metadata: {
+            reason: dto.reason,
+            refund: dto.refund ?? false,
+            restock: dto.restock ?? true,
+            notifyCustomer: dto.notifyCustomer ?? true,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** Archive (close) an order. Reversible via `open()`. */
+  async close(id: string, orgId: string, userId: string) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    if (order.closedAt) {
+      throw new BadRequestException('Order is already closed');
+    }
+    const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+
+    if (isShopify) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const result = await this.graphql.request<OrderCloseResponse, OrderCloseOrOpenVariables>(
+        { shopDomain, accessToken: token },
+        ORDER_CLOSE_MUTATION,
+        { input: { id: ShopifyGraphqlClient.toGid('Order', order.externalId) } },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(result.orderClose.userErrors, 'orderClose');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: { closedAt: new Date() },
+      });
+      await tx.orderTimelineEvent.create({
+        data: { orderId: id, actorId: userId, action: 'closed', message: 'Order archived' },
+      });
+      return updated;
+    });
+  }
+
+  /** Un-archive (reopen) a previously closed order. */
+  async open(id: string, orgId: string, userId: string) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    if (!order.closedAt) {
+      throw new BadRequestException('Order is already open');
+    }
+    const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+
+    if (isShopify) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const result = await this.graphql.request<OrderOpenResponse, OrderCloseOrOpenVariables>(
+        { shopDomain, accessToken: token },
+        ORDER_OPEN_MUTATION,
+        { input: { id: ShopifyGraphqlClient.toGid('Order', order.externalId) } },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(result.orderOpen.userErrors, 'orderOpen');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: { closedAt: null },
+      });
+      await tx.orderTimelineEvent.create({
+        data: { orderId: id, actorId: userId, action: 'reopened', message: 'Order re-opened' },
+      });
+      return updated;
+    });
+  }
+
+  /** Mark an outstanding order as paid (e.g. cash-on-delivery, wire, COD). */
+  async markPaid(id: string, orgId: string, userId: string) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    if (order.financialStatus === OrderFinancialStatus.PAID) {
+      throw new BadRequestException('Order is already paid');
+    }
+    const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+
+    if (isShopify) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const result = await this.graphql.request<
+        OrderMarkAsPaidResponse,
+        OrderMarkAsPaidVariables
+      >(
+        { shopDomain, accessToken: token },
+        ORDER_MARK_AS_PAID_MUTATION,
+        { input: { id: ShopifyGraphqlClient.toGid('Order', order.externalId) } },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        result.orderMarkAsPaid.userErrors,
+        'orderMarkAsPaid',
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: { financialStatus: OrderFinancialStatus.PAID },
+      });
+      await tx.orderTimelineEvent.create({
+        data: { orderId: id, actorId: userId, action: 'paid', message: 'Order marked as paid' },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Capture an authorized payment. Only valid for SHOPIFY orders — MANUAL
+   * orders don't have an authorize/capture cycle; use `markPaid` instead.
+   *
+   * Flow for Shopify:
+   *   1. Query the order's transactions to find a successful AUTHORIZATION.
+   *   2. Call `orderCapture` against that transaction.
+   *   3. Mirror the financialStatus locally (the orders/updated webhook also
+   *      fires and reconciles within seconds).
+   */
+  async capture(id: string, orgId: string, userId: string, dto: CapturePaymentDto) {
+    const order = await this.loadOrderWithChannel(id, orgId);
+    if (
+      order.financialStatus === OrderFinancialStatus.PAID ||
+      order.financialStatus === OrderFinancialStatus.REFUNDED
+    ) {
+      throw new BadRequestException('Order has no capturable balance');
+    }
+    if (order.channel.platform !== ChannelPlatform.SHOPIFY) {
+      throw new BadRequestException(
+        'Manual orders have no authorize/capture cycle. Use mark-paid instead.',
+      );
+    }
+
+    const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+    const auth = { shopDomain, accessToken: token };
+    const gid = ShopifyGraphqlClient.toGid('Order', order.externalId);
+
+    const txResp = await this.graphql.request<
+      OrderCapturableTransactionsResponse,
+      OrderCapturableTransactionsVariables
+    >(auth, ORDER_CAPTURABLE_TRANSACTIONS_QUERY, { id: gid });
+
+    const authTx = txResp.order?.transactions.find(
+      (t) => t.kind === 'AUTHORIZATION' && t.status === 'SUCCESS',
+    );
+    if (!authTx) {
+      throw new BadRequestException(
+        'No authorize transaction available to capture against this order.',
+      );
+    }
+
+    const amountStr =
+      dto.amount !== undefined ? dto.amount.toFixed(2) : authTx.amountSet.shopMoney.amount;
+
+    const capResp = await this.graphql.request<OrderCaptureResponse, OrderCaptureVariables>(
+      auth,
+      ORDER_CAPTURE_MUTATION,
+      {
+        input: {
+          id: gid,
+          parentTransactionId: authTx.id,
+          amount: amountStr,
+          currency: dto.currency ?? authTx.amountSet.shopMoney.currencyCode,
+          finalCapture: dto.finalCapture ?? false,
+        },
+      },
+    );
+    ShopifyGraphqlClient.throwIfUserErrors(capResp.orderCapture.userErrors, 'orderCapture');
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: { financialStatus: OrderFinancialStatus.PAID },
+      });
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId: id,
+          actorId: userId,
+          action: 'captured',
+          message: `Payment captured (${amountStr} ${dto.currency ?? authTx.amountSet.shopMoney.currencyCode})`,
+          metadata: {
+            transactionId: capResp.orderCapture.transaction?.id ?? null,
+            amount: amountStr,
+            finalCapture: dto.finalCapture ?? false,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  }
+
+  // ─── PHASE 2: FULFILLMENT & TRACKING ──────────────────────────────────────
+  // Three actions: create a fulfillment (mark items shipped + tracking),
+  // update tracking on an existing fulfillment, cancel a fulfillment.
+  // SHOPIFY orders round-trip via the matching GraphQL mutations and the
+  // fulfillments/* + orders/fulfilled webhooks reconcile state. MANUAL orders
+  // are purely local — the OrderFulfillment row and the per-line-item
+  // `fulfillmentStatus` column carry the truth.
+
+  /**
+   * Return the line items still available to fulfill. For Shopify this calls
+   * `order.fulfillmentOrders` and flattens the open FOs into a UI-friendly
+   * shape (preserving the FO id so the UI doesn't need to know about it,
+   * but `createFulfillment` can recover it from the line item ID). For
+   * manual orders it just lists local line items not yet marked fulfilled.
+   */
+  async listFulfillableLineItems(orderId: string, orgId: string) {
+    const order = await this.loadOrderWithChannel(orderId, orgId);
+
+    if (order.channel.platform === ChannelPlatform.SHOPIFY) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const resp = await this.graphql.request<
+        OrderFulfillmentOrdersResponse,
+        { id: string }
+      >(
+        { shopDomain, accessToken: token },
+        ORDER_FULFILLMENT_ORDERS_QUERY,
+        { id: ShopifyGraphqlClient.toGid('Order', order.externalId) },
+      );
+      const fos = resp.order?.fulfillmentOrders.nodes ?? [];
+      return {
+        source: 'shopify' as const,
+        fulfillmentOrders: fos.map((fo) => ({
+          id: fo.id,
+          status: fo.status,
+          locationName: fo.assignedLocation?.name ?? null,
+          lineItems: fo.lineItems.nodes.map((li) => ({
+            // `lineItemId` is the OrderLineItem numeric ID; that's what the
+            // create-fulfillment endpoint accepts. The internal FO line item
+            // ID is resolved server-side from it.
+            lineItemId: ShopifyGraphqlClient.extractId(li.lineItem.id),
+            title: li.lineItem.title,
+            variantTitle: li.lineItem.variantTitle,
+            sku: li.lineItem.sku,
+            remainingQuantity: li.remainingQuantity,
+            totalQuantity: li.totalQuantity,
+          })),
+        })),
+      };
+    }
+
+    const lineItems = await this.prisma.orderLineItem.findMany({
+      where: { orderId, fulfillmentStatus: { not: 'fulfilled' } },
+      orderBy: { createdAt: 'asc' },
+    });
+    return {
+      source: 'manual' as const,
+      fulfillmentOrders: [
+        {
+          id: 'manual',
+          status: 'OPEN',
+          locationName: null,
+          lineItems: lineItems.map((li) => ({
+            lineItemId: li.id,
+            title: li.title,
+            variantTitle: li.variantTitle,
+            sku: li.sku,
+            remainingQuantity: li.quantity,
+            totalQuantity: li.quantity,
+          })),
+        },
+      ],
+    };
+  }
+
+  /**
+   * Create a fulfillment for the selected line items with optional tracking.
+   *
+   * For SHOPIFY: queries the order's fulfillment orders, maps each requested
+   * line item to its FO line item, groups by FO, and calls `fulfillmentCreate`.
+   * The fulfillments/create + orders/fulfilled webhooks update the local DB.
+   *
+   * For MANUAL: creates an `OrderFulfillment` row, flips the chosen line items'
+   * `fulfillmentStatus` to "fulfilled", and recomputes the order-level status.
+   */
+  async createFulfillment(
+    orderId: string,
+    orgId: string,
+    userId: string,
+    dto: CreateFulfillmentDto,
+  ) {
+    const order = await this.loadOrderWithChannel(orderId, orgId);
+
+    if (order.channel.platform === ChannelPlatform.SHOPIFY) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const auth = { shopDomain, accessToken: token };
+      const orderGid = ShopifyGraphqlClient.toGid('Order', order.externalId);
+
+      const foResp = await this.graphql.request<
+        OrderFulfillmentOrdersResponse,
+        { id: string }
+      >(auth, ORDER_FULFILLMENT_ORDERS_QUERY, { id: orderGid });
+      const fos = foResp.order?.fulfillmentOrders.nodes ?? [];
+
+      // Group the requested line items by which FulfillmentOrder owns them.
+      // If a single OrderLineItem spans multiple FOs (multi-location), we
+      // greedily take from the first match — multi-location partial
+      // fulfillment is Phase 2b. The remainingQuantity ceiling protects
+      // against over-fulfilling.
+      const requestedByLineItem = new Map(
+        dto.lineItems.map((li) => [li.lineItemId, li]),
+      );
+      const grouped = new Map<string, Array<{ id: string; quantity: number }>>();
+      for (const fo of fos) {
+        for (const foli of fo.lineItems.nodes) {
+          const orderLineItemId = ShopifyGraphqlClient.extractId(foli.lineItem.id);
+          const req = requestedByLineItem.get(orderLineItemId);
+          if (!req) continue;
+          const qty =
+            req.quantity !== undefined
+              ? Math.min(req.quantity, foli.remainingQuantity)
+              : foli.remainingQuantity;
+          if (qty <= 0) continue;
+          const list = grouped.get(fo.id) ?? [];
+          list.push({ id: foli.id, quantity: qty });
+          grouped.set(fo.id, list);
+          requestedByLineItem.delete(orderLineItemId);
+        }
+      }
+      if (grouped.size === 0) {
+        throw new BadRequestException(
+          'None of the requested line items are currently fulfillable.',
+        );
+      }
+
+      const lineItemsByFulfillmentOrder = Array.from(grouped.entries()).map(
+        ([fulfillmentOrderId, fulfillmentOrderLineItems]) => ({
+          fulfillmentOrderId,
+          fulfillmentOrderLineItems,
+        }),
+      );
+
+      const result = await this.graphql.request<
+        FulfillmentCreateResponse,
+        FulfillmentCreateVariables
+      >(auth, FULFILLMENT_CREATE_MUTATION, {
+        fulfillment: {
+          lineItemsByFulfillmentOrder,
+          notifyCustomer: dto.notifyCustomer ?? true,
+          trackingInfo: dto.tracking
+            ? {
+                number: dto.tracking.number ?? null,
+                url: dto.tracking.url ?? null,
+                company: dto.tracking.company ?? null,
+              }
+            : null,
+        },
+      });
+      ShopifyGraphqlClient.throwIfUserErrors(
+        result.fulfillmentCreate.userErrors,
+        'fulfillmentCreate',
+      );
+
+      // Local OrderFulfillment row is created when fulfillments/create
+      // webhook fires (via upsertOrder), so just record the action in our
+      // timeline here for immediate UI feedback.
+      await this.prisma.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'fulfilled',
+          message: dto.tracking?.number
+            ? `Fulfillment initiated (tracking ${dto.tracking.number}${
+                dto.tracking.company ? ` via ${dto.tracking.company}` : ''
+              })`
+            : 'Fulfillment initiated',
+          metadata: {
+            shopifyFulfillmentId: result.fulfillmentCreate.fulfillment?.id ?? null,
+            tracking: dto.tracking ?? null,
+            notifyCustomer: dto.notifyCustomer ?? true,
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return this.prisma.order.findUnique({ where: { id: orderId } });
+    }
+
+    // ── Manual branch ──────────────────────────────────────────────────────
+    return this.prisma.$transaction(async (tx) => {
+      const requestedIds = dto.lineItems.map((li) => li.lineItemId);
+      const lineItems = await tx.orderLineItem.findMany({
+        where: { orderId, id: { in: requestedIds } },
+      });
+      if (lineItems.length !== requestedIds.length) {
+        throw new BadRequestException(
+          'One or more line items were not found on this order.',
+        );
+      }
+
+      const fulfillment = await tx.orderFulfillment.create({
+        data: {
+          orderId,
+          externalId: `manual_${randomUUID()}`,
+          status: 'fulfilled',
+          trackingNumber: dto.tracking?.number ?? null,
+          trackingUrl: dto.tracking?.url ?? null,
+          trackingCompany: dto.tracking?.company ?? null,
+          shippedAt: new Date(),
+          metadata: {
+            lineItemIds: lineItems.map((li) => li.id),
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.orderLineItem.updateMany({
+        where: { id: { in: lineItems.map((li) => li.id) } },
+        data: { fulfillmentStatus: 'fulfilled' },
+      });
+
+      const allItems = await tx.orderLineItem.findMany({ where: { orderId } });
+      const newStatus = this.computeFulfillmentStatus(allItems);
+      await tx.order.update({
+        where: { id: orderId },
+        data: { fulfillmentStatus: newStatus },
+      });
+
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'fulfilled',
+          message: `Fulfillment recorded (${lineItems.length} item${lineItems.length === 1 ? '' : 's'}${
+            dto.tracking?.number ? `, tracking ${dto.tracking.number}` : ''
+          })`,
+          metadata: {
+            fulfillmentId: fulfillment.id,
+            tracking: dto.tracking ?? null,
+            lineItemIds: lineItems.map((li) => li.id),
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      return fulfillment;
+    });
+  }
+
+  /** Update tracking number/URL/carrier on an existing fulfillment. */
+  async updateTracking(
+    orderId: string,
+    fulfillmentId: string,
+    orgId: string,
+    userId: string,
+    dto: UpdateTrackingDto,
+  ) {
+    const order = await this.loadOrderWithChannel(orderId, orgId);
+    const fulfillment = await this.prisma.orderFulfillment.findFirst({
+      where: { id: fulfillmentId, orderId },
+    });
+    if (!fulfillment) throw new NotFoundException('Fulfillment not found');
+
+    const isShopifyFulfillment =
+      order.channel.platform === ChannelPlatform.SHOPIFY &&
+      !!fulfillment.externalId &&
+      !fulfillment.externalId.startsWith('manual_');
+
+    if (isShopifyFulfillment) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const result = await this.graphql.request<
+        FulfillmentTrackingInfoUpdateResponse,
+        FulfillmentTrackingInfoUpdateVariables
+      >(
+        { shopDomain, accessToken: token },
+        FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+        {
+          fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
+          trackingInfoInput: {
+            number: dto.tracking.number ?? null,
+            url: dto.tracking.url ?? null,
+            company: dto.tracking.company ?? null,
+          },
+          notifyCustomer: dto.notifyCustomer ?? true,
+        },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        result.fulfillmentTrackingInfoUpdate.userErrors,
+        'fulfillmentTrackingInfoUpdate',
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.orderFulfillment.update({
+        where: { id: fulfillmentId },
+        data: {
+          trackingNumber: dto.tracking.number ?? null,
+          trackingUrl: dto.tracking.url ?? null,
+          trackingCompany: dto.tracking.company ?? null,
+        },
+      });
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'tracking_updated',
+          message: `Tracking updated${
+            dto.tracking.number ? `: ${dto.tracking.number}` : ''
+          }${dto.tracking.company ? ` (${dto.tracking.company})` : ''}`,
+          metadata: {
+            fulfillmentId,
+            tracking: { ...dto.tracking },
+          } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /**
+   * Cancel a fulfillment. SHOPIFY fulfillments round-trip via
+   * `fulfillmentCancel`. MANUAL fulfillments reverse the local state:
+   * line items un-fulfilled, order status recomputed.
+   */
+  async cancelFulfillment(
+    orderId: string,
+    fulfillmentId: string,
+    orgId: string,
+    userId: string,
+  ) {
+    const order = await this.loadOrderWithChannel(orderId, orgId);
+    const fulfillment = await this.prisma.orderFulfillment.findFirst({
+      where: { id: fulfillmentId, orderId },
+    });
+    if (!fulfillment) throw new NotFoundException('Fulfillment not found');
+    if (fulfillment.status === 'cancelled') {
+      throw new BadRequestException('Fulfillment is already cancelled');
+    }
+
+    const isShopifyFulfillment =
+      order.channel.platform === ChannelPlatform.SHOPIFY &&
+      !!fulfillment.externalId &&
+      !fulfillment.externalId.startsWith('manual_');
+
+    if (isShopifyFulfillment) {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const result = await this.graphql.request<
+        FulfillmentCancelResponse,
+        FulfillmentCancelVariables
+      >(
+        { shopDomain, accessToken: token },
+        FULFILLMENT_CANCEL_MUTATION,
+        { id: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!) },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        result.fulfillmentCancel.userErrors,
+        'fulfillmentCancel',
+      );
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.orderFulfillment.update({
+        where: { id: fulfillmentId },
+        data: { status: 'cancelled' },
+      });
+
+      // For manual fulfillments, reverse the line-item status flips done at
+      // create-time. For Shopify, the webhook will reconcile.
+      if (!isShopifyFulfillment) {
+        const meta = (fulfillment.metadata ?? {}) as Record<string, unknown>;
+        const lineItemIds = Array.isArray(meta.lineItemIds)
+          ? (meta.lineItemIds as string[])
+          : [];
+        if (lineItemIds.length > 0) {
+          await tx.orderLineItem.updateMany({
+            where: { id: { in: lineItemIds } },
+            data: { fulfillmentStatus: null },
+          });
+        }
+        const allItems = await tx.orderLineItem.findMany({ where: { orderId } });
+        const newStatus = this.computeFulfillmentStatus(allItems);
+        await tx.order.update({
+          where: { id: orderId },
+          data: { fulfillmentStatus: newStatus },
+        });
+      }
+
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'fulfillment_cancelled',
+          message: 'Fulfillment cancelled',
+          metadata: { fulfillmentId } as Prisma.InputJsonValue,
+        },
+      });
+      return updated;
+    });
+  }
+
+  /** Compute order-level fulfillment status from the per-line-item state. */
+  private computeFulfillmentStatus(
+    items: { fulfillmentStatus: string | null }[],
+  ): OrderFulfillmentStatus {
+    const fulfilled = items.filter((li) => li.fulfillmentStatus === 'fulfilled').length;
+    if (fulfilled === 0) return OrderFulfillmentStatus.UNFULFILLED;
+    if (fulfilled === items.length) return OrderFulfillmentStatus.FULFILLED;
+    return OrderFulfillmentStatus.PARTIAL;
+  }
+
+  // ─── PHASE 1 HELPERS ──────────────────────────────────────────────────────
+
+  private async loadOrderWithChannel(id: string, orgId: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id, organizationId: orgId, deletedAt: null },
+      include: { channel: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    return order;
+  }
+
+  /**
+   * Map an arbitrary address object (accepts both REST snake_case and the
+   * camelCase shape Shopify GraphQL expects) into a MailingAddressInput.
+   * Unknown fields fall through; the merchant DB stores addresses as raw
+   * JSON so we tolerate variation.
+   */
+  private toShopifyAddress(addr: Record<string, unknown>): MailingAddressInput {
+    const pick = (...keys: string[]): string | null => {
+      for (const k of keys) {
+        const v = addr[k];
+        if (typeof v === 'string') return v;
+      }
+      return null;
+    };
+    return {
+      address1: pick('address1'),
+      address2: pick('address2'),
+      city: pick('city'),
+      province: pick('province'),
+      country: pick('country'),
+      countryCode: pick('countryCode', 'country_code'),
+      zip: pick('zip'),
+      firstName: pick('firstName', 'first_name'),
+      lastName: pick('lastName', 'last_name'),
+      phone: pick('phone'),
+      company: pick('company'),
+    };
   }
 }

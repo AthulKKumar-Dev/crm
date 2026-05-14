@@ -1,0 +1,123 @@
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  ProductSettings,
+  UpdateProductSettingsInput,
+  parseProductSettings,
+  ProductSettingsSchema,
+} from './schemas/product-settings.schema';
+import {
+  OrderSettings,
+  UpdateOrderSettingsInput,
+  parseOrderSettings,
+  OrderSettingsSchema,
+} from './schemas/order-settings.schema';
+
+/**
+ * Resolves and persists per-org settings. Each domain (product, order, …)
+ * is stored in its own JSONB column on `OrganizationSettings` and validated
+ * by its Zod schema. Defaults come from the schemas themselves — we never
+ * write a "default settings" row eagerly; the row is upserted on first
+ * write, and reads always parse-through-defaults.
+ */
+@Injectable()
+export class OrganizationSettingsService {
+  private readonly logger = new Logger(OrganizationSettingsService.name);
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Return the org's full settings, applying schema defaults to any missing
+   * fields. Does NOT write — safe for hot read paths (e.g. product creation
+   * checking whether auto-sync is enabled).
+   */
+  async get(orgId: string): Promise<{
+    productSettings: ProductSettings;
+    orderSettings: OrderSettings;
+  }> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+    });
+    return {
+      productSettings: parseProductSettings(row?.productSettings ?? null),
+      orderSettings: parseOrderSettings(row?.orderSettings ?? null),
+    };
+  }
+
+  /** Read just product settings. Convenience for the product-creation hot path. */
+  async getProductSettings(orgId: string): Promise<ProductSettings> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { productSettings: true },
+    });
+    return parseProductSettings(row?.productSettings ?? null);
+  }
+
+  /** Read just order settings. Convenience for the offline-order creation hot path. */
+  async getOrderSettings(orgId: string): Promise<OrderSettings> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { orderSettings: true },
+    });
+    return parseOrderSettings(row?.orderSettings ?? null);
+  }
+
+  /** Merge-patch product settings; validate via Zod before write. */
+  async updateProductSettings(
+    orgId: string,
+    patch: UpdateProductSettingsInput,
+  ): Promise<ProductSettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getProductSettings(orgId);
+    const next = ProductSettingsSchema.parse({ ...current, ...patch });
+    await this.upsert(orgId, { productSettings: next as Prisma.InputJsonValue });
+    return next;
+  }
+
+  /** Merge-patch order settings; validate via Zod before write. */
+  async updateOrderSettings(
+    orgId: string,
+    patch: UpdateOrderSettingsInput,
+  ): Promise<OrderSettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getOrderSettings(orgId);
+    const next = OrderSettingsSchema.parse({ ...current, ...patch });
+    await this.upsert(orgId, { orderSettings: next as Prisma.InputJsonValue });
+    return next;
+  }
+
+  /**
+   * Defense-in-depth: callers from a NestJS controller should never reach
+   * this point with a falsy orgId because `OrgRequiredGuard` includes the
+   * settings controller in its whitelist. But internal callers (e.g.
+   * ProductService.create reading auto-sync settings) might still pass a
+   * stale value, and Prisma silently returns null rows when given
+   * `where: { organizationId: undefined }` — so throw a clear error here
+   * instead of producing garbage downstream.
+   */
+  private assertOrgId(orgId: string | undefined | null): asserts orgId is string {
+    if (!orgId) {
+      throw new BadRequestException(
+        'Organization context required to read or write settings.',
+      );
+    }
+  }
+
+  private async upsert(
+    orgId: string,
+    data: Prisma.OrganizationSettingsUncheckedUpdateInput,
+  ): Promise<void> {
+    await this.prisma.organizationSettings.upsert({
+      where: { organizationId: orgId },
+      create: {
+        ...(data as Prisma.OrganizationSettingsUncheckedCreateInput),
+        organizationId: orgId,
+      },
+      update: data,
+    });
+  }
+}

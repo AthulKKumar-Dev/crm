@@ -1,6 +1,6 @@
-import { Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req } from '@nestjs/common';
+import { BadRequestException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req, Logger } from '@nestjs/common';
 import type { Response, Request } from 'express';
-import { UserRole } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, SyncStatus, UserRole } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { SYNC_QUEUE, SyncJobData } from './sync.queue';
@@ -8,6 +8,7 @@ import { SYNC_QUEUE, SyncJobData } from './sync.queue';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
+import { PrismaService } from '../prisma/prisma.service';
 import { ChannelService } from './channel.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ConnectShopifyDto } from './dto/connect-shopify.dto';
@@ -20,7 +21,10 @@ import { WhatsAppCallbackDto } from './dto/whatsapp-callback.dto';
 
 @Controller('channels')
 export class ChannelController {
+  private readonly logger = new Logger(ChannelController.name);
+
   constructor(
+    private readonly prisma: PrismaService,
     private readonly channelService: ChannelService,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly instagramOAuth: InstagramOAuthService,
@@ -165,12 +169,57 @@ export class ChannelController {
   }
 
   // POST /channels/:id/sync — trigger manual sync
+  //
+  // Self-heals stuck channels: if a previous sync attempt crashed before
+  // its `finally` block (e.g. credential resolution threw before runSync
+  // entered its try/finally), the row can be pinned to IN_PROGRESS and the
+  // UI button gets disabled forever. Before queueing a new job we always
+  // reset the row to IDLE so the next attempt has a clean state. The
+  // BullMQ queue handles concurrent runs separately — even if a real job
+  // is still in flight, the reset is harmless: that job's `finally` will
+  // overwrite the status when it finishes.
   @Post(':id/sync')
   async triggerSync(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: TriggerSyncDto,
   ) {
+    const existing = await this.prisma.channel.findFirst({
+      where: { id, organizationId: user.orgId! },
+      select: { syncStatus: true, status: true, platform: true, name: true },
+    });
+    if (!existing) {
+      throw new BadRequestException(`Channel ${id} not found`);
+    }
+    // Sync semantics by platform:
+    //   SHOPIFY → pull from Shopify + bulk-push local unsynced items.
+    //   MANUAL  → no pull source; runSync short-circuits the pull and just
+    //             runs the bulk-push (products + orders + drafts). Useful
+    //             when the user has auto-sync OFF and wants to push their
+    //             CRM-side items to Shopify on demand.
+    //   Anything else (INSTAGRAM, WHATSAPP) has no push or pull semantics
+    //   for this sync queue — reject so the UI doesn't expose the affordance.
+    if (
+      existing.platform !== ChannelPlatform.SHOPIFY &&
+      existing.platform !== ChannelPlatform.MANUAL
+    ) {
+      throw new BadRequestException(
+        `Sync is not available for ${existing.platform} channels.`,
+      );
+    }
+    if (existing.syncStatus === SyncStatus.IN_PROGRESS) {
+      this.logger.warn(
+        `Channel ${id} was IN_PROGRESS at sync trigger — resetting to IDLE before queueing a fresh job.`,
+      );
+      await this.prisma.channel.update({
+        where: { id },
+        data: {
+          syncStatus: SyncStatus.IDLE,
+          status: ChannelStatus.CONNECTED,
+        },
+      });
+    }
+
     // Add job to BullMQ queue — returns immediately
     const job = await this.syncQueue.add('sync', {
       channelId: id,

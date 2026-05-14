@@ -6,7 +6,14 @@ import { customerKeys } from "~/hooks/use-customer-queries";
 import { productKeys } from "~/hooks/use-product-queries";
 import { invoiceKeys } from "~/hooks/use-invoice-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import type { CreateOfflineOrderRequest } from "~/types/api";
+import type {
+  CreateOfflineOrderRequest,
+  UpdateOrderRequest,
+  CancelOrderRequest,
+  CapturePaymentRequest,
+  CreateFulfillmentRequest,
+  UpdateTrackingRequest,
+} from "~/types/api";
 
 /** Mutation hook for creating an offline (in-store) order with auto-invoice. */
 export function useCreateOfflineOrderMutation() {
@@ -32,5 +39,164 @@ export function useCreateOfflineOrderMutation() {
     },
     onError: (error) =>
       handleMutationError(error, "Failed to create offline order."),
+  });
+}
+
+// ─── Phase 1: Lifecycle & Metadata mutations ───────────────────────────────
+// Each mutation invalidates the affected order's detail + the list so the UI
+// reflects the new state without a manual refresh. They all share the same
+// error toast handler (server's message is preferred when available).
+
+function invalidateOrder(queryClient: ReturnType<typeof useQueryClient>, id: string) {
+  queryClient.invalidateQueries({ queryKey: orderKeys.detail(id) });
+  queryClient.invalidateQueries({ queryKey: orderKeys.all });
+}
+
+/** PATCH /orders/:id — edit tags / note / contact / addresses / custom attributes. */
+export function useUpdateOrderMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: UpdateOrderRequest) => orderService.update(id, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Order updated.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to update order."),
+  });
+}
+
+/** POST /orders/:id/cancel — cancel an order with optional refund + restock. */
+export function useCancelOrderMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CancelOrderRequest) => orderService.cancel(id, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      // For Shopify, the cancel runs async — `orders/cancelled` webhook will
+      // refine the local state. Phrase the toast accordingly.
+      toast.success("Cancellation initiated.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to cancel order."),
+  });
+}
+
+/** POST /orders/:id/close — archive a completed order. */
+export function useCloseOrderMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => orderService.close(id),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Order archived.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to close order."),
+  });
+}
+
+/** POST /orders/:id/open — un-archive a previously closed order. */
+export function useOpenOrderMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => orderService.open(id),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Order re-opened.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to reopen order."),
+  });
+}
+
+/** POST /orders/:id/mark-paid — flip financial status to PAID. */
+export function useMarkOrderPaidMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => orderService.markPaid(id),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Marked as paid.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to mark order paid."),
+  });
+}
+
+/** POST /orders/:id/capture — capture an authorized Shopify payment. */
+export function useCaptureOrderPaymentMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CapturePaymentRequest) => orderService.capture(id, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Payment captured.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to capture payment."),
+  });
+}
+
+// ─── Phase 2: Fulfillment & tracking mutations ─────────────────────────────
+
+/** POST /orders/:id/fulfillments — create a fulfillment with optional tracking. */
+export function useCreateFulfillmentMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: CreateFulfillmentRequest) =>
+      orderService.createFulfillment(id, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      queryClient.invalidateQueries({ queryKey: orderKeys.fulfillable(id) });
+      toast.success("Fulfillment created.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to create fulfillment."),
+  });
+}
+
+/** PATCH /orders/:id/fulfillments/:fid/tracking — update tracking info. */
+export function useUpdateTrackingMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ fulfillmentId, data }: { fulfillmentId: string; data: UpdateTrackingRequest }) =>
+      orderService.updateTracking(id, fulfillmentId, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Tracking updated.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to update tracking."),
+  });
+}
+
+/** POST /orders/:id/fulfillments/:fid/cancel — cancel a fulfillment. */
+export function useCancelFulfillmentMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (fulfillmentId: string) =>
+      orderService.cancelFulfillment(id, fulfillmentId),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      queryClient.invalidateQueries({ queryKey: orderKeys.fulfillable(id) });
+      toast.success("Fulfillment cancelled.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to cancel fulfillment."),
+  });
+}
+
+/**
+ * POST /orders/:id/sync — manually push a MANUAL offline order to Shopify.
+ * The toast text reflects the idempotent server response (already synced,
+ * already queued, or newly queued).
+ */
+export function useSyncOrderMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => orderService.syncToShopify(id),
+    onSuccess: (result) => {
+      invalidateOrder(queryClient, id);
+      if (result.status === "ALREADY_SYNCED") {
+        toast.info("Order already synced to Shopify.");
+      } else if (result.status === "ALREADY_QUEUED") {
+        toast.info("Sync already in progress.");
+      } else {
+        toast.success("Sync to Shopify queued.");
+      }
+    },
+    onError: (error) => handleMutationError(error, "Failed to sync order."),
   });
 }

@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
-  Sun, Moon, Monitor, Receipt, Star, MapPin,
+  Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -37,6 +37,11 @@ import {
 import { useProductTypes } from "~/hooks/use-product-queries";
 import { useRecomputeLoyaltyMutation } from "~/hooks/use-loyalty-mutations";
 import { getPricingPlan } from "~/data/pricing-plans";
+import {
+  ProductSettingsTab,
+  OrderSettingsTab,
+} from "~/components/app/settings/sync-settings-tab";
+import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
 
@@ -48,6 +53,8 @@ export function meta() {
 
 const TABS = [
   { id: "general", label: "General", icon: Building2 },
+  { id: "products", label: "Products", icon: Package },
+  { id: "orders", label: "Orders", icon: ShoppingBag },
   { id: "tax-gst", label: "Tax & GST", icon: Receipt },
   { id: "loyalty", label: "Loyalty Tiers", icon: Star },
   { id: "security", label: "Security", icon: Lock },
@@ -1055,6 +1062,15 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("general");
   const [showInvite, setShowInvite] = useState(false);
+  /**
+   * Drives the org-setup sheet:
+   *   - `null`     — sheet closed
+   *   - `"default"` — open with the choice step (upgrade vs create). Used by
+   *                   PERSONAL workspaces where both options are valid.
+   *   - `"create"` — open straight on the create-org form (skip choice). Used
+   *                   by ORGANIZATION workspaces, where "upgrade" isn't valid.
+   */
+  const [orgSheetMode, setOrgSheetMode] = useState<"default" | "create" | null>(null);
 
   const authUser = useAuthStore((state) => state.user);
   const currentOrgId = useAuthStore((state) => state.currentOrgId);
@@ -1237,18 +1253,36 @@ export default function SettingsPage() {
                       {org?.type === "ORGANIZATION" && (
                         <div className="pt-4">
                           <Field label="Workspace Type" hint="This workspace is a team organization.">
-                            <span className="inline-flex rounded-full bg-[#CEF17B]/30 px-2.5 py-1 text-xs font-semibold text-[#084734]">
-                              Organization
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex rounded-full bg-[#CEF17B]/30 px-2.5 py-1 text-xs font-semibold text-[#084734]">
+                                Organization
+                              </span>
+                              <button
+                                onClick={() => setOrgSheetMode("create")}
+                                className="inline-flex h-7 items-center gap-1 rounded-md border bg-white dark:bg-gray-900 px-2.5 text-[11px] font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                              >
+                                Create another organization
+                                <ChevronRight className="size-3" />
+                              </button>
+                            </div>
                           </Field>
                         </div>
                       )}
                       {org?.type === "PERSONAL" && (
                         <div className="pt-4">
                           <Field label="Workspace Type" hint="This is your personal workspace.">
-                            <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
-                              Personal
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                                Personal
+                              </span>
+                              <button
+                                onClick={() => setOrgSheetMode("default")}
+                                className="inline-flex h-7 items-center gap-1 rounded-md border bg-white dark:bg-gray-900 px-2.5 text-[11px] font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800"
+                              >
+                                Set up as organization
+                                <ChevronRight className="size-3" />
+                              </button>
+                            </div>
                           </Field>
                         </div>
                       )}
@@ -1619,6 +1653,12 @@ export default function SettingsPage() {
             </>
           )}
 
+          {/* ─── PRODUCT SETTINGS ─── */}
+          {activeTab === "products" && <ProductSettingsTab />}
+
+          {/* ─── ORDER SETTINGS ─── */}
+          {activeTab === "orders" && <OrderSettingsTab />}
+
           {/* ─── TAX & GST ─── */}
           {activeTab === "tax-gst" && org && (
             <TaxGstTab orgId={org.id} gstEnabled={org.gstEnabled ?? false} />
@@ -1636,6 +1676,17 @@ export default function SettingsPage() {
 
         </div>
       </div>
+
+      {/* Org-setup sheet — handles both "upgrade personal to org" and
+          "create new org alongside" flows. Mode controls whether the choice
+          step is shown or the form opens directly. */}
+      {orgSheetMode !== null && org && (
+        <UpgradeOrganizationDialog
+          org={org}
+          onClose={() => setOrgSheetMode(null)}
+          initialPath={orgSheetMode === "create" ? "create" : undefined}
+        />
+      )}
     </div>
   );
 }

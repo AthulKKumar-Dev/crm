@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   ForbiddenException,
   ConflictException,
@@ -8,16 +9,19 @@ import slugify from 'slugify';
 import { randomBytes } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { BillingService } from '../billing/billing.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { CreatePersonalDto } from './dto/create-personal.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
+import { UpgradeToOrganizationDto } from './dto/upgrade-to-organization.dto';
 
 @Injectable()
 export class OrganizationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly billing: BillingService,
+    private readonly redis: RedisService,
   ) { }
 
   // ─── CREATE ORGANIZATION ───
@@ -56,6 +60,14 @@ export class OrganizationService {
         include: { members: true },
       });
     });
+
+    // Invalidate the cached session so the next request to JwtStrategy
+    // rebuilds it from the DB and picks up the new membership. Without
+    // this, a user who signed up and *just* created an org keeps the
+    // pre-membership session in Redis (orgId: undefined) and every
+    // org-scoped endpoint trips OrgRequiredGuard or hits Prisma with a
+    // `undefined` org filter.
+    await this.redis.deleteSession(userId);
 
     return this.formatOrg(org, UserRole.OWNER);
   }
@@ -98,6 +110,10 @@ export class OrganizationService {
         include: { members: true },
       });
     });
+
+    // Same rationale as create() above — drop the stale (pre-membership)
+    // cached session so JwtStrategy will refresh it next time.
+    await this.redis.deleteSession(userId);
 
     return this.formatOrg(org, UserRole.OWNER);
   }
@@ -142,6 +158,54 @@ export class OrganizationService {
     });
 
     return org;
+  }
+
+  // ─── UPGRADE PERSONAL → ORGANIZATION ───
+  // Flips a PERSONAL workspace to ORGANIZATION in place. Same row, same
+  // billing subscription, same data — only the `type` changes plus the
+  // org fields the user fills (name/logo/industry/website/timezone).
+  //
+  // Restricted to OWNER. Rejects with 400 if the org is already an
+  // ORGANIZATION (no-op surface; prevents accidental downgrades the other
+  // direction by never allowing the inverse).
+  async upgradeToOrganization(
+    orgId: string,
+    userId: string,
+    dto: UpgradeToOrganizationDto,
+  ) {
+    await this.requireRole(orgId, userId, [UserRole.OWNER]);
+
+    const current = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { type: true, deletedAt: true },
+    });
+    if (!current || current.deletedAt) {
+      throw new BadRequestException('Organization not found');
+    }
+    if (current.type !== OrganizationType.PERSONAL) {
+      throw new BadRequestException(
+        'This workspace is already set up as an organization.',
+      );
+    }
+
+    const org = await this.prisma.organization.update({
+      where: { id: orgId },
+      data: {
+        type: OrganizationType.ORGANIZATION,
+        name: dto.name,
+        ...(dto.logo !== undefined && { logo: dto.logo }),
+        ...(dto.industry !== undefined && { industry: dto.industry }),
+        ...(dto.website !== undefined && { website: dto.website }),
+        ...(dto.timezone !== undefined && { timezone: dto.timezone }),
+      },
+    });
+
+    // Drop the cached session so the type flip is reflected on next request.
+    // (The session payload itself doesn't carry org type, but the cached
+    // memberships array does — keep them in sync.)
+    await this.redis.deleteSession(userId);
+
+    return this.formatOrg(org, UserRole.OWNER);
   }
 
   // ─── SOFT DELETE ORG ───

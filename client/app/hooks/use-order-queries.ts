@@ -8,6 +8,7 @@ export const orderKeys = {
   list: (params?: OrderListParams) => [...orderKeys.all, "list", params] as const,
   detail: (id: string) => [...orderKeys.all, "detail", id] as const,
   stats: (params?: DashboardQueryParams) => [...orderKeys.all, "stats", params] as const,
+  fulfillable: (id: string) => [...orderKeys.all, "fulfillable", id] as const,
 };
 
 /** Fetch a paginated list of orders with optional filters. */
@@ -32,5 +33,19 @@ export function useOrder(id?: string | null) {
     queryKey: orderKeys.detail(id!),
     queryFn: () => orderService.get(id!),
     enabled: !!id,
+  });
+}
+
+/**
+ * Fetch the line items still eligible for fulfillment, grouped by
+ * fulfillment order (Shopify) or as one bucket (manual). Only invoked when
+ * `enabled` is true so we don't hit Shopify on every page render.
+ */
+export function useFulfillableLineItems(id: string, enabled: boolean) {
+  return useQuery({
+    queryKey: orderKeys.fulfillable(id),
+    queryFn: () => orderService.fulfillableLineItems(id),
+    enabled,
+    staleTime: 0,
   });
 }
