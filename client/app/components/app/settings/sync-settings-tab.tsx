@@ -1,4 +1,5 @@
-import { Loader2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Loader2 } from "lucide-react";
 import {
   useOrganizationSettings,
 } from "~/hooks/use-settings-queries";
@@ -6,6 +7,8 @@ import {
   useUpdateProductSettingsMutation,
   useUpdateOrderSettingsMutation,
 } from "~/hooks/use-settings-mutations";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useUpdateOrganizationMutation } from "~/hooks/use-org-mutations";
 
 /**
  * Combined "Products" and "Orders" settings panes. Each domain has one toggle
@@ -44,12 +47,128 @@ export function ProductSettingsTab() {
           label="Auto-sync new products to Shopify"
           help="When ON, every product created in the CRM is pushed to your connected Shopify store immediately. When OFF (default), products stay local until you sync them manually from the product page or via the channels-page Sync button."
           checked={settings.autoSyncToShopify}
-          disabled={mutation.isPending}
+          disabled={isFieldSaving(mutation, "autoSyncToShopify")}
           onChange={(checked) => mutation.mutate({ autoSyncToShopify: checked })}
         />
+        <SettingsToggleRow
+          label="Track quantity (all products)"
+          help="When ON, every variant tracks inventory regardless of its individual setting — stock decrements on offline orders and Shopify pushes set inventory_management=shopify. Combine with the option below if you want to track but still allow overselling. Turn OFF (default) to honor each variant's per-row setting."
+          checked={settings.trackQuantityGlobally}
+          disabled={isFieldSaving(mutation, "trackQuantityGlobally")}
+          onChange={(checked) => mutation.mutate({ trackQuantityGlobally: checked })}
+        />
+        <SettingsToggleRow
+          label="Continue selling when out of stock (all products)"
+          help="When ON, every variant in your catalog is treated as continue-selling — offline orders accept lines even when stock is 0, and Shopify pushes use inventory_policy=continue across the board. The per-variant toggle on individual products becomes redundant. Turn OFF to honor each variant's setting individually (default)."
+          checked={settings.allowOversellGlobally}
+          disabled={isFieldSaving(mutation, "allowOversellGlobally")}
+          onChange={(checked) => mutation.mutate({ allowOversellGlobally: checked })}
+        />
+        <LowStockThresholdRow />
       </SettingsCard>
     </div>
   );
+}
+
+/**
+ * Inline editor for `Organization.lowStockThreshold` — the number that drives
+ * the "Low stock" stat card on the dashboard, the Low-stock products panel,
+ * and the `?stockStatus=low_stock` product filter on the list page. Lives in
+ * the Products settings tab because it's a product-domain concern, even
+ * though the value itself is stored on the Organization row (not in the
+ * productSettings JSONB).
+ *
+ * Save semantics: blur or Enter commits; Escape reverts. We don't autosave on
+ * every keystroke because a number input pumps changes per-digit.
+ */
+function LowStockThresholdRow() {
+  const { data: org } = useCurrentOrg();
+  const mutation = useUpdateOrganizationMutation(org?.id ?? "");
+  const serverValue = org?.lowStockThreshold ?? 10;
+
+  const [draft, setDraft] = useState<string>(String(serverValue));
+  const [justSaved, setJustSaved] = useState(false);
+
+  // Keep the input in sync when the server-side value changes (initial load,
+  // settle of a saved mutation, etc.).
+  useEffect(() => {
+    setDraft(String(serverValue));
+  }, [serverValue]);
+
+  function commit() {
+    const parsed = parseInt(draft, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      // Invalid input → snap back to the server value.
+      setDraft(String(serverValue));
+      return;
+    }
+    if (parsed === serverValue) return;
+    mutation.mutate(
+      { lowStockThreshold: parsed },
+      {
+        onSuccess: () => {
+          setJustSaved(true);
+          setTimeout(() => setJustSaved(false), 1500);
+        },
+      },
+    );
+  }
+
+  return (
+    <div className="flex items-start justify-between gap-4 px-5 py-4">
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+          Low-stock alert threshold
+        </p>
+        <p className="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+          Variants whose stock is at or below this number are flagged as "low
+          stock" on the dashboard, in the Low-stock panel, and in the products
+          list "Low stock" filter. Out-of-stock items (≤ 0) are counted
+          separately. Default is 10.
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        {mutation.isPending ? (
+          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+        ) : justSaved ? (
+          <Check className="size-3.5 text-green-600" />
+        ) : null}
+        <input
+          type="number"
+          min={1}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+              setDraft(String(serverValue));
+              e.currentTarget.blur();
+            }
+          }}
+          disabled={mutation.isPending || !org?.id}
+          className="h-8 w-20 rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-right text-xs tabular-nums focus:outline-none focus:ring-2 focus:ring-[#cdff8c] disabled:opacity-50"
+        />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * True when a mutation is in-flight AND the in-flight call carried a value
+ * for `field`. Lets two toggle rows that share a single mutation hook gray
+ * out only the row that's currently saving — otherwise clicking one toggle
+ * dims the other, which reads as "the other turned off."
+ */
+function isFieldSaving<F extends string>(
+  mutation: { isPending: boolean; variables?: Record<string, unknown> | unknown },
+  field: F,
+): boolean {
+  if (!mutation.isPending) return false;
+  const vars = mutation.variables;
+  if (!vars || typeof vars !== "object") return false;
+  return field in (vars as Record<string, unknown>);
 }
 
 export function OrderSettingsTab() {

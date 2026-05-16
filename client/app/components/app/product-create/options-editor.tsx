@@ -1,0 +1,90 @@
+import { Plus, Trash2 } from "lucide-react";
+import type { ProductOption } from "~/types/api";
+
+/**
+ * Editor for the product's option types (Size, Color, Material).
+ *
+ * Up to 3 option types can be defined. Each option has a name (e.g. "Size")
+ * and a list of values entered as comma-separated text (e.g. "S, M, L").
+ *
+ * The parent owns the `options` state; this is a controlled component.
+ */
+export function OptionsEditor({
+  options,
+  onChange,
+}: {
+  options: ProductOption[];
+  onChange: (next: ProductOption[]) => void;
+}) {
+  function patchOption(idx: number, patch: Partial<ProductOption>) {
+    onChange(options.map((o, i) => (i === idx ? { ...o, ...patch } : o)));
+  }
+
+  function addOption() {
+    if (options.length >= 3) return;
+    onChange([
+      ...options,
+      { name: "", values: [], position: options.length + 1 },
+    ]);
+  }
+
+  function removeOption(idx: number) {
+    onChange(
+      options
+        .filter((_, i) => i !== idx)
+        .map((o, i) => ({ ...o, position: i + 1 })),
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {options.map((opt, idx) => (
+        <div
+          key={idx}
+          className="rounded-lg border border-input bg-gray-50 dark:bg-gray-800/40 p-3"
+        >
+          <div className="flex items-center gap-2">
+            <input
+              value={opt.name}
+              onChange={(e) => patchOption(idx, { name: e.target.value })}
+              placeholder="Option name (e.g. Size)"
+              className="h-8 flex-1 rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+            />
+            <button
+              type="button"
+              onClick={() => removeOption(idx)}
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-red-600"
+              title="Remove option"
+            >
+              <Trash2 className="size-3.5" />
+            </button>
+          </div>
+          <input
+            value={opt.values.join(", ")}
+            onChange={(e) =>
+              patchOption(idx, {
+                values: e.target.value
+                  .split(",")
+                  .map((v) => v.trim())
+                  .filter(Boolean),
+              })
+            }
+            placeholder="Values, comma-separated (e.g. Small, Medium, Large)"
+            className="mt-2 h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+          />
+        </div>
+      ))}
+
+      {options.length < 3 && (
+        <button
+          type="button"
+          onClick={addOption}
+          className="inline-flex items-center gap-1.5 rounded-md border border-dashed border-input bg-white dark:bg-gray-900 px-3 py-1.5 text-xs text-muted-foreground hover:bg-gray-50 dark:hover:bg-gray-800/60"
+        >
+          <Plus className="size-3.5" />
+          Add option
+        </button>
+      )}
+    </div>
+  );
+}

@@ -567,24 +567,46 @@ export type ProductStatus = "ACTIVE" | "DRAFT" | "ARCHIVED";
 /** Derived stock status for filtering. */
 export type StockStatus = "in_stock" | "low_stock" | "out_of_stock";
 
-/** A product image with source URL and alt text. */
+/** A product image with source URL, alt text, position, and optional dimensions. */
 export interface ProductImage {
   id: string;
   src: string;
   alt: string | null;
+  position: number;
+  width?: number | null;
+  height?: number | null;
 }
 
-/** A product variant with pricing and inventory. */
+/** A product variant with pricing, inventory, options, and optional image link. */
 export interface ProductVariant {
   id: string;
   title: string;
   sku: string | null;
+  barcode?: string | null;
   price: number;
   compareAtPrice: number | null;
+  cost?: number | string | null;
   inventoryQuantity: number;
+  trackQuantity?: boolean;
+  continueSellingWhenOutOfStock?: boolean;
+  weight?: number | string | null;
+  weightUnit?: "g" | "kg" | "oz" | "lb" | null;
+  hsCode?: string | null;
+  countryOfOrigin?: string | null;
+  requiresShipping?: boolean;
+  taxable?: boolean;
   option1: string | null;
   option2: string | null;
   option3: string | null;
+  position: number;
+  imageId?: string | null;
+}
+
+/** Option-type definition (e.g. {name:"Size", values:["S","M","L"]}). */
+export interface ProductOption {
+  name: string;
+  values: string[];
+  position?: number;
 }
 
 /** Channel reference embedded in product/order/customer responses. */
@@ -596,7 +618,7 @@ export interface ChannelRef {
 
 /** Per-product Shopify sync status (sub-object of `Product.metadata.shopifySync`). */
 export interface ProductShopifySync {
-  status: "PENDING" | "SYNCED" | "FAILED";
+  status: "PENDING" | "SYNCED" | "FAILED" | "OUT_OF_SYNC";
   shopifyProductId?: string;
   error?: string;
   syncedAt?: string;
@@ -611,6 +633,8 @@ export interface Product {
   productType: string | null;
   status: ProductStatus;
   tags: string[];
+  hsnCode?: string | null;
+  gstRate?: number | string | null;
   totalStock: number;
   variantCount: number;
   priceRange: { min: number; max: number };
@@ -622,20 +646,84 @@ export interface Product {
   shopifySync: ProductShopifySync | null;
 }
 
-/** A product detail response with all variants and images. */
+/** A product detail response with all variants, images, and CRM-managed fields. */
 export interface ProductDetail extends Product {
   images: ProductImage[];
+  bodyHtml?: string | null;
+  hsnCode?: string | null;
+  gstRate?: number | string | null;
+  options?: ProductOption[] | null;
+  publishedAt?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** Result of any bulk operation: ids that succeeded vs ids skipped (with reason). */
+export interface BulkResult {
+  ok: string[];
+  skipped: Array<{ id: string; reason: string }>;
+  /** Set on bulkSync (count of jobs queued) and bulkDelete (rows hard-deleted). */
+  queued?: number;
+  deleted?: number;
+}
+
+/** CSV import job lifecycle (mirrors ProductImportJob model server-side). */
+export type ProductImportStatus =
+  | "PARSING"
+  | "PREVIEW"
+  | "RUNNING"
+  | "COMPLETED"
+  | "FAILED";
+
+export interface ProductImportError {
+  row: number;
+  handle?: string;
+  message: string;
+}
+
+export interface ProductImportJob {
+  id: string;
+  status: ProductImportStatus;
+  filename: string;
+  totalRows: number;
+  processedRows: number;
+  createdCount: number;
+  updatedCount: number;
+  errorCount: number;
+  errors: ProductImportError[];
+  previewRows: Record<string, string>[];
+  createdAt: string;
+  completedAt: string | null;
 }
 
 /** Variant block on a create-product / update-product request. */
 export interface ProductVariantInput {
+  /** Existing variant id when editing — `undefined` for a freshly-added row. */
+  id?: string;
   price: number;
   sku?: string;
+  barcode?: string;
   compareAtPrice?: number;
+  cost?: number;
   inventoryQuantity?: number;
+  trackQuantity?: boolean;
+  continueSellingWhenOutOfStock?: boolean;
+  weight?: number;
+  weightUnit?: "g" | "kg" | "oz" | "lb";
+  hsCode?: string;
+  countryOfOrigin?: string;
+  requiresShipping?: boolean;
+  taxable?: boolean;
+  option1?: string;
+  option2?: string;
+  option3?: string;
+  position?: number;
+  imageId?: string;
 }
 
-/** Payload for creating a CRM-native product (single default variant). */
+/**
+ * Payload for creating a CRM-native product. Either `variant` (single, legacy)
+ * OR `variants` + `options` (multi-variant) — mutually exclusive.
+ */
 export interface CreateProductRequest {
   title: string;
   vendor?: string;
@@ -645,7 +733,12 @@ export interface CreateProductRequest {
   bodyHtml?: string;
   hsnCode?: string;
   gstRate?: number;
-  variant: ProductVariantInput;
+  /** ISO 8601 string. When set on a DRAFT product in the future, the
+   *  scheduler will flip it to ACTIVE on/after this date. */
+  publishedAt?: string;
+  variant?: ProductVariantInput;
+  variants?: ProductVariantInput[];
+  options?: ProductOption[];
 }
 
 /** Payload for editing a MANUAL-channel product. All fields optional. */
@@ -654,6 +747,31 @@ export type UpdateProductRequest = Partial<
 > & {
   variant?: Partial<ProductVariantInput>;
 };
+
+/** Variant CRUD payloads (for /products/:id/variants and /variants/:id endpoints). */
+export interface CreateVariantRequest {
+  price: number;
+  sku?: string;
+  barcode?: string;
+  compareAtPrice?: number;
+  cost?: number;
+  inventoryQuantity?: number;
+  trackQuantity?: boolean;
+  continueSellingWhenOutOfStock?: boolean;
+  weight?: number;
+  weightUnit?: "g" | "kg" | "oz" | "lb";
+  hsCode?: string;
+  countryOfOrigin?: string;
+  requiresShipping?: boolean;
+  taxable?: boolean;
+  option1?: string;
+  option2?: string;
+  option3?: string;
+  position?: number;
+  imageId?: string;
+}
+
+export type UpdateVariantRequest = Partial<Omit<CreateVariantRequest, "imageId">>;
 
 /** Query parameters for the product list endpoint. */
 export interface ProductListParams {
@@ -927,6 +1045,19 @@ export interface FulfillableLineItemsResponse {
 export interface ProductSettings {
   /** When true, products created in the CRM are auto-pushed to Shopify. Default false. */
   autoSyncToShopify: boolean;
+  /**
+   * Global override for the per-variant continue-selling-when-out-of-stock flag.
+   * When true, all variants behave as continue-selling regardless of their
+   * individual setting. Default false.
+   */
+  allowOversellGlobally: boolean;
+  /**
+   * Global override for the per-variant track-quantity flag. When true, every
+   * variant tracks inventory regardless of its individual setting — stock
+   * decrements on offline orders, Shopify pushes set inventory_management to
+   * `shopify`. Default false (per-variant flag is honored as-is).
+   */
+  trackQuantityGlobally: boolean;
 }
 
 /** Order-domain settings stored as JSONB on OrganizationSettings.orderSettings. */
