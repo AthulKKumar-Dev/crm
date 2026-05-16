@@ -1,4 +1,4 @@
-import { Trash2, AlertTriangle } from "lucide-react";
+import { Trash2, AlertTriangle, Info } from "lucide-react";
 import { formatCurrency } from "~/lib/utils";
 
 export type CartLine = {
@@ -11,6 +11,12 @@ export type CartLine = {
   inventoryQuantity: number;
   /** Server is source of truth at submit; preview shows 0 if unknown. */
   gstRate: number | null;
+  /**
+   * When true, this line is allowed to oversell — either the org or the
+   * variant opted into continue-selling-when-out-of-stock. Drives the cart's
+   * overflow indicator (amber backorder note vs. red error).
+   */
+  canOversell: boolean;
 };
 
 export function OrderCart({
@@ -60,12 +66,18 @@ export function OrderCart({
                   <p className="text-[10px] text-muted-foreground truncate max-w-[18rem]">
                     {l.variantTitle}
                   </p>
-                  {overflow && (
-                    <p className="mt-1 inline-flex items-center gap-1 text-[10px] text-red-600">
-                      <AlertTriangle className="size-3" />
-                      Only {l.inventoryQuantity} in stock
-                    </p>
-                  )}
+                  {overflow &&
+                    (l.canOversell ? (
+                      <p className="mt-1 inline-flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400">
+                        <Info className="size-3" />
+                        Backorder — {Math.max(0, l.inventoryQuantity)} in stock, ordering {l.quantity}
+                      </p>
+                    ) : (
+                      <p className="mt-1 inline-flex items-center gap-1 text-[10px] text-red-600">
+                        <AlertTriangle className="size-3" />
+                        Only {l.inventoryQuantity} in stock
+                      </p>
+                    ))}
                 </td>
                 <td className="px-3 py-2 text-right">
                   <input

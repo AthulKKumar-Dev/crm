@@ -15,7 +15,17 @@ import { useOrders } from "~/hooks/use-order-queries";
 import { useDeleteProductMutation } from "~/hooks/use-product-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
-import { cn, formatCurrency } from "~/lib/utils";
+import { ImageGalleryUploader } from "~/components/app/product-create/image-gallery-uploader";
+import { VariantImageLink } from "~/components/app/product-create/variant-image-link";
+import { DuplicateButton } from "~/components/app/products/duplicate-button";
+import { cn, formatCurrency, formatMargin } from "~/lib/utils";
+import { Calendar } from "lucide-react";
+
+// Feature flag — media uploads are temporarily held while we finalize storage
+// strategy. The backend endpoints stay live; only the UI entry points hide.
+// Read-only display of Shopify-synced images still works. Flip to `true`
+// to re-enable uploads, gallery editing, and variant-image linking.
+const MEDIA_UPLOAD_ENABLED = false;
 
 export function meta() {
   return [{ title: "Product Detail | Collabo CRM" }];
@@ -51,11 +61,11 @@ export default function ProductDetailPage() {
   }
 
   const isManual = product.channel?.platform === "MANUAL";
-  const meta = ((product as any).metadata ?? {}) as Record<string, unknown>;
+  const meta = (product.metadata ?? {}) as Record<string, unknown>;
   const sync = (meta.shopifySync ?? null) as
-    | { status: "PENDING" | "SYNCED" | "FAILED"; shopifyProductId?: string; error?: string }
+    | { status: "PENDING" | "SYNCED" | "FAILED" | "OUT_OF_SYNC"; shopifyProductId?: string; error?: string }
     | null;
-  const totalStock = (product as any).totalStock ?? 0;
+  const totalStock = product.totalStock ?? 0;
 
   function handleArchive() {
     if (!product) return;
@@ -108,28 +118,38 @@ export default function ProductDetailPage() {
             {product.productType && <>Type: {product.productType} • </>}
             {totalStock} in stock
           </p>
+          {product.status === "DRAFT" && product.publishedAt && new Date(product.publishedAt) > new Date() && (
+            <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+              <Calendar className="size-3" />
+              Publishes on {new Date(product.publishedAt).toLocaleString(undefined, {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {isManual ? (
-            <>
-              <button
-                onClick={() => setEditing(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
-              >
-                <Pencil className="size-3.5" />
-                Edit
-              </button>
-              <button
-                onClick={handleArchive}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-              >
-                <Trash2 className="size-3.5" />
-                Archive
-              </button>
-            </>
-          ) : (
+          <button
+            onClick={() => setEditing(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+          >
+            <Pencil className="size-3.5" />
+            Edit
+          </button>
+          <DuplicateButton productId={product.id} />
+          <button
+            onClick={handleArchive}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+          >
+            <Trash2 className="size-3.5" />
+            Archive
+          </button>
+          {!isManual && (
             <span className="text-[11px] text-muted-foreground italic">
-              Synced products are read-only — edit in {product.channel?.name ?? "Shopify"}.
+              Synced from {product.channel?.name ?? "Shopify"}. Local edits push back when you click Sync.
             </span>
           )}
         </div>
@@ -137,12 +157,41 @@ export default function ProductDetailPage() {
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
+          {/* Media — read-only thumb grid (uploads currently held; see
+           *  MEDIA_UPLOAD_ENABLED). When the flag flips on, MANUAL products
+           *  get the full gallery uploader; until then we just show whatever
+           *  images came from Shopify sync. Empty-state section is hidden
+           *  entirely so we don't tease an upload UI we can't deliver. */}
+          {product.images && product.images.length > 0 && (
+            <Section title={`Media (${product.images.length})`}>
+              {MEDIA_UPLOAD_ENABLED && isManual ? (
+                <ImageGalleryUploader productId={product.id} images={product.images} />
+              ) : (
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
+                  {product.images.map((img) => (
+                    <img
+                      key={img.id}
+                      src={img.src}
+                      alt={img.alt ?? ""}
+                      className="aspect-square w-full rounded-lg object-cover"
+                    />
+                  ))}
+                </div>
+              )}
+            </Section>
+          )}
+          {MEDIA_UPLOAD_ENABLED && isManual && (!product.images || product.images.length === 0) && (
+            <Section title="Media">
+              <ImageGalleryUploader productId={product.id} images={product.images ?? []} />
+            </Section>
+          )}
+
           {/* Description */}
-          {(product as any).bodyHtml && (
+          {product.bodyHtml && (
             <Section title="Description">
               <div
                 className="prose prose-sm max-w-none dark:prose-invert text-xs"
-                dangerouslySetInnerHTML={{ __html: (product as any).bodyHtml }}
+                dangerouslySetInnerHTML={{ __html: product.bodyHtml }}
               />
             </Section>
           )}
@@ -156,43 +205,87 @@ export default function ProductDetailPage() {
                     <th className="px-5 py-2 text-left font-medium">Title</th>
                     <th className="px-5 py-2 text-left font-medium">SKU</th>
                     <th className="px-5 py-2 text-right font-medium">Price</th>
-                    <th className="px-5 py-2 text-right font-medium">Compare-at</th>
+                    <th className="px-5 py-2 text-right font-medium">Cost</th>
+                    <th className="px-5 py-2 text-right font-medium">Margin</th>
                     <th className="px-5 py-2 text-right font-medium">Stock</th>
+                    <th className="px-5 py-2 text-right font-medium">Weight</th>
+                    {MEDIA_UPLOAD_ENABLED && isManual && product.images && product.images.length > 0 && (
+                      <th className="px-5 py-2 text-right font-medium">Image</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {product.variants.map((v) => (
-                    <tr key={v.id}>
-                      <td className="px-5 py-3">
-                        <p className="font-medium text-gray-900 dark:text-gray-100">{v.title}</p>
-                        {(v.option1 || v.option2 || v.option3) && (
-                          <p className="text-[10px] text-muted-foreground">
-                            {[v.option1, v.option2, v.option3].filter(Boolean).join(" / ")}
-                          </p>
+                  {product.variants.map((v) => {
+                    const stockTracked = v.trackQuantity !== false;
+                    return (
+                      <tr key={v.id}>
+                        <td className="px-5 py-3">
+                          <p className="font-medium text-gray-900 dark:text-gray-100">{v.title}</p>
+                          {(v.option1 || v.option2 || v.option3) && (
+                            <p className="text-[10px] text-muted-foreground">
+                              {[v.option1, v.option2, v.option3].filter(Boolean).join(" / ")}
+                            </p>
+                          )}
+                          {v.barcode && (
+                            <p className="text-[10px] font-mono text-muted-foreground">
+                              {v.barcode}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 font-mono text-[11px] text-muted-foreground">
+                          {v.sku ?? "—"}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums font-medium">
+                          <div>{formatCurrency(v.price, currency)}</div>
+                          {v.compareAtPrice && (
+                            <div className="text-[10px] font-normal text-muted-foreground line-through">
+                              {formatCurrency(v.compareAtPrice, currency)}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-muted-foreground">
+                          {v.cost != null ? formatCurrency(v.cost, currency) : "—"}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-muted-foreground">
+                          {formatMargin(v.price, v.cost, currency)}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums">
+                          {!stockTracked ? (
+                            <span className="text-[10px] italic text-muted-foreground" title="Not tracked">
+                              Untracked
+                            </span>
+                          ) : (
+                            <span
+                              className={cn(
+                                "font-medium",
+                                v.inventoryQuantity === 0 && "text-red-600",
+                                v.inventoryQuantity > 0 &&
+                                  v.inventoryQuantity <= 5 &&
+                                  "text-amber-600",
+                              )}
+                            >
+                              {v.inventoryQuantity}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-5 py-3 text-right tabular-nums text-muted-foreground">
+                          {v.weight != null
+                            ? `${Number(v.weight)} ${v.weightUnit ?? ""}`
+                            : "—"}
+                        </td>
+                        {MEDIA_UPLOAD_ENABLED && isManual && product.images && product.images.length > 0 && (
+                          <td className="px-5 py-3 text-right">
+                            <VariantImageLink
+                              productId={product.id}
+                              variantId={v.id}
+                              currentImageId={v.imageId}
+                              images={product.images}
+                            />
+                          </td>
                         )}
-                      </td>
-                      <td className="px-5 py-3 font-mono text-[11px] text-muted-foreground">
-                        {v.sku ?? "—"}
-                      </td>
-                      <td className="px-5 py-3 text-right tabular-nums font-medium">
-                        {formatCurrency(v.price, currency)}
-                      </td>
-                      <td className="px-5 py-3 text-right tabular-nums text-muted-foreground">
-                        {v.compareAtPrice ? formatCurrency(v.compareAtPrice, currency) : "—"}
-                      </td>
-                      <td
-                        className={cn(
-                          "px-5 py-3 text-right tabular-nums font-medium",
-                          v.inventoryQuantity === 0 && "text-red-600",
-                          v.inventoryQuantity > 0 &&
-                            v.inventoryQuantity <= 5 &&
-                            "text-amber-600",
-                        )}
-                      >
-                        {v.inventoryQuantity}
-                      </td>
-                    </tr>
-                  ))}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -248,14 +341,14 @@ export default function ProductDetailPage() {
           </Section>
 
           {/* GST */}
-          {((product as any).hsnCode || (product as any).gstRate != null) && (
+          {(product.hsnCode || product.gstRate != null) && (
             <Section title="GST">
               <dl className="space-y-1.5 text-xs">
-                <DescRow label="HSN code" value={(product as any).hsnCode || "—"} />
+                <DescRow label="HSN code" value={product.hsnCode || "—"} />
                 <DescRow
                   label="GST rate"
                   value={
-                    (product as any).gstRate != null ? `${(product as any).gstRate}%` : "—"
+                    product.gstRate != null ? `${product.gstRate}%` : "—"
                   }
                 />
               </dl>
@@ -309,7 +402,7 @@ export default function ProductDetailPage() {
 function ShopifySyncCard({
   sync,
 }: {
-  sync: { status: "PENDING" | "SYNCED" | "FAILED"; shopifyProductId?: string; error?: string };
+  sync: { status: "PENDING" | "SYNCED" | "FAILED" | "OUT_OF_SYNC"; shopifyProductId?: string; error?: string };
 }) {
   if (sync.status === "SYNCED") {
     return (
@@ -332,6 +425,19 @@ function ShopifySyncCard({
         <Loader2 className="size-3 animate-spin" />
         Syncing
       </span>
+    );
+  }
+  if (sync.status === "OUT_OF_SYNC") {
+    return (
+      <div className="space-y-2 text-xs">
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="size-3" />
+          Out of sync
+        </span>
+        <p className="text-[10px] text-muted-foreground">
+          Local edits haven't been pushed yet. Click <em>Sync to Shopify</em> when ready.
+        </p>
+      </div>
     );
   }
   return (

@@ -70,6 +70,7 @@ export function OfflineOrderForm({
           unitPrice: seed.unitPrice,
           inventoryQuantity: seed.inventoryQuantity,
           gstRate: seed.gstRate,
+          canOversell: seed.canOversell,
         },
       ];
     });

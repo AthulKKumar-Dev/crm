@@ -50,9 +50,18 @@ import { BillingModule } from './billing/billing.module';
       ? [
           ServeStaticModule.forRoot({
             rootPath: join(__dirname, '..', '..', '..', 'client', 'build', 'client'),
+            exclude: ['/api/(.*)', '/uploads/(.*)'],
           }),
         ]
       : []),
+    // Always mount /uploads (product images, future attachments). Local image
+    // storage writes here; the path matches LocalImageStorage's URL builder.
+    // For S3-backed deploys this is harmless — the bucket URL is returned
+    // directly and clients never hit /uploads.
+    ServeStaticModule.forRoot({
+      rootPath: join(process.cwd(), 'uploads'),
+      serveRoot: '/uploads',
+    }),
     PrismaModule,
     RedisModule,
     BullModule.forRootAsync({

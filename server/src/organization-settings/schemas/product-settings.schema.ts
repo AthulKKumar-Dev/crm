@@ -13,12 +13,57 @@ export const ProductSettingsSchema = z.object({
    * Sync action).
    */
   autoSyncToShopify: z.boolean().default(false),
+
+  /**
+   * Global override for the per-variant "Continue selling when out of stock"
+   * flag. When TRUE, every variant in the org is treated as continue-selling
+   * regardless of its individual setting — useful for businesses that fulfill
+   * backorders by default. When FALSE (default), the per-variant flag is
+   * honored as-is.
+   *
+   * Affects two places:
+   *   1. Offline-order stock validation in OrderService — refuses lines only
+   *      when neither the global nor the variant flag is on AND stock < qty.
+   *   2. Shopify push payloads — `inventory_policy` is sent as `continue`
+   *      whenever (global || variant) is true, so the merchant's Shopify
+   *      storefront behaves consistently with the CRM.
+   */
+  allowOversellGlobally: z.boolean().default(false),
+
+  /**
+   * Global override for the per-variant "Track quantity" flag. When TRUE,
+   * every variant in the org is treated as tracked regardless of its
+   * individual setting. This pairs with `allowOversellGlobally` for
+   * businesses that always want stock movements recorded — even on variants
+   * a user may have set to "untracked" by accident.
+   *
+   * Affects:
+   *   1. Offline-order stock checks and inventory decrement (force tracked).
+   *   2. Shopify push payloads — `inventory_management: 'shopify'` is sent
+   *      for every variant when global is ON.
+   */
+  trackQuantityGlobally: z.boolean().default(false),
 });
 
 export type ProductSettings = z.infer<typeof ProductSettingsSchema>;
 
-/** Patch schema — all fields optional for PATCH semantics. */
-export const UpdateProductSettingsSchema = ProductSettingsSchema.partial();
+/**
+ * Patch schema — every field truly optional.
+ *
+ * We can't use `ProductSettingsSchema.partial()` here: Zod's `.partial()`
+ * keeps the `.default(false)` on each field, which means a PATCH body like
+ * `{ allowOversellGlobally: true }` gets canonicalized to
+ * `{ autoSyncToShopify: false, allowOversellGlobally: true }` by the
+ * validation pipe — and the service's `{ ...current, ...body }` merge then
+ * overwrites the user's existing autoSyncToShopify=true with false. Building
+ * the patch schema from scratch with plain `.optional()` (no defaults)
+ * preserves missing-key semantics so the merge is a real per-field patch.
+ */
+export const UpdateProductSettingsSchema = z.object({
+  autoSyncToShopify: z.boolean().optional(),
+  allowOversellGlobally: z.boolean().optional(),
+  trackQuantityGlobally: z.boolean().optional(),
+});
 export type UpdateProductSettingsInput = z.infer<typeof UpdateProductSettingsSchema>;
 
 /** Apply schema defaults to an unknown value, or fall through to defaults. */

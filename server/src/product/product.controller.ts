@@ -3,62 +3,279 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   Patch,
   Post,
   Query,
+  Res,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+
+/**
+ * Minimal multer file shape — defined locally so we don't have to depend on
+ * `@types/multer` for the controller-level type annotation. Multer always
+ * provides these fields at runtime regardless of types.
+ */
+type MulterFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+  size: number;
+};
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { UpdateProductGstDto } from './dto/update-product-gst.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import {
+  CreateVariantDto,
+  ReorderVariantsDto,
+  UpdateVariantDto,
+} from './dto/variant.dto';
+import {
+  ReorderImagesDto,
+  SetVariantImageDto,
+  UpdateImageDto,
+} from './dto/image.dto';
+import { UpdateOptionsDto } from './dto/option.dto';
+import {
+  BulkProductIdsDto,
+  BulkSetStatusDto,
+  BulkTagsDto,
+} from './dto/bulk.dto';
 
 @Controller('products')
 export class ProductController {
   constructor(private readonly productService: ProductService) { }
 
-  // GET /api/v1/products?page=1&status=ACTIVE&search=shirt&stockStatus=low_stock
+  // ── COLLECTION-LEVEL ROUTES ─────────────────────────────────────────────
+
   @Get()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryProductsDto) {
     return this.productService.findAll(user.orgId!, query);
   }
 
-  // POST /api/v1/products — create a CRM-native product on the MANUAL channel.
   @Post()
   create(@CurrentUser() user: JwtPayload, @Body() dto: CreateProductDto) {
     return this.productService.create(user.orgId!, user.sub, dto);
   }
 
-  // GET /api/v1/products/vendors — for filter dropdown
   @Get('vendors')
   getVendors(@CurrentUser() user: JwtPayload) {
     return this.productService.getVendors(user.orgId!);
   }
 
-  // GET /api/v1/products/types — for filter dropdown
   @Get('types')
   getProductTypes(@CurrentUser() user: JwtPayload) {
     return this.productService.getProductTypes(user.orgId!);
   }
 
-  // GET /api/v1/products/stats — PLACE BEFORE :id route
   @Get('stats')
   getStats(@CurrentUser() user: JwtPayload, @Query('channelId') channelId?: string) {
     return this.productService.getStats(user.orgId!, channelId);
   }
 
-  // GET /api/v1/products/:id — full detail with all variants and images
+  // ── VARIANT-LEVEL ROUTES (must register BEFORE :id wildcards) ──────────
+  // These don't take a parent productId in the URL because the variant id is
+  // globally unique and the service joins back to product → org for auth.
+
+  @Patch('variants/:variantId')
+  updateVariant(
+    @Param('variantId') variantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateVariantDto,
+  ) {
+    return this.productService.updateVariant(variantId, user.orgId!, dto);
+  }
+
+  @Delete('variants/:variantId')
+  deleteVariant(
+    @Param('variantId') variantId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productService.deleteVariant(variantId, user.orgId!);
+  }
+
+  @Post('variants/:variantId/image')
+  setVariantImage(
+    @Param('variantId') variantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SetVariantImageDto,
+  ) {
+    return this.productService.setVariantImage(variantId, user.orgId!, dto);
+  }
+
+  // ── IMAGE-LEVEL ROUTES (must register BEFORE :id wildcards) ────────────
+
+  @Patch('images/:imageId')
+  updateImage(
+    @Param('imageId') imageId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateImageDto,
+  ) {
+    return this.productService.updateImage(imageId, user.orgId!, dto);
+  }
+
+  @Delete('images/:imageId')
+  removeImage(
+    @Param('imageId') imageId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productService.removeImage(imageId, user.orgId!);
+  }
+
+  // ── PRODUCT-NESTED ROUTES (variants/images for a given product) ────────
+
+  @Post(':id/variants')
+  createVariant(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: CreateVariantDto,
+  ) {
+    return this.productService.createVariant(id, user.orgId!, dto);
+  }
+
+  @Post(':id/variants/reorder')
+  reorderVariants(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ReorderVariantsDto,
+  ) {
+    return this.productService.reorderVariants(id, user.orgId!, dto);
+  }
+
+  @Post(':id/variants/generate')
+  generateVariants(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.productService.generateVariantsFromOptions(id, user.orgId!);
+  }
+
+  @Patch(':id/options')
+  updateOptions(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateOptionsDto,
+  ) {
+    return this.productService.updateOptions(id, user.orgId!, dto.options);
+  }
+
+  @Post(':id/images')
+  @UseInterceptors(FileInterceptor('file'))
+  addImage(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: MulterFile,
+  ) {
+    return this.productService.addImage(id, user.orgId!, file);
+  }
+
+  @Post(':id/images/reorder')
+  reorderImages(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: ReorderImagesDto,
+  ) {
+    return this.productService.reorderImages(id, user.orgId!, dto);
+  }
+
+  // ── PHASE 3: BULK + CSV + DUPLICATE ────────────────────────────────────
+  // All registered BEFORE :id so they don't get swallowed by /products/:id.
+
+  @Post('bulk/status')
+  bulkSetStatus(@CurrentUser() user: JwtPayload, @Body() dto: BulkSetStatusDto) {
+    return this.productService.bulkSetStatus(user.orgId!, dto.productIds, dto.status);
+  }
+
+  @Post('bulk/archive')
+  bulkArchive(@CurrentUser() user: JwtPayload, @Body() dto: BulkProductIdsDto) {
+    return this.productService.bulkArchive(user.orgId!, dto.productIds);
+  }
+
+  @Delete('bulk')
+  bulkDelete(@CurrentUser() user: JwtPayload, @Body() dto: BulkProductIdsDto) {
+    return this.productService.bulkDelete(user.orgId!, dto.productIds);
+  }
+
+  @Post('bulk/tags/add')
+  bulkAddTags(@CurrentUser() user: JwtPayload, @Body() dto: BulkTagsDto) {
+    return this.productService.bulkAddTags(user.orgId!, dto.productIds, dto.tags);
+  }
+
+  @Post('bulk/tags/remove')
+  bulkRemoveTags(@CurrentUser() user: JwtPayload, @Body() dto: BulkTagsDto) {
+    return this.productService.bulkRemoveTags(user.orgId!, dto.productIds, dto.tags);
+  }
+
+  @Post('bulk/sync')
+  bulkSync(@CurrentUser() user: JwtPayload, @Body() dto: BulkProductIdsDto) {
+    return this.productService.bulkSync(user.orgId!, dto.productIds);
+  }
+
+  /** Stream a Shopify-format CSV export. Supports the same query filters
+   *  as the list endpoint (status/vendor/productType/search). */
+  @Get('export.csv')
+  @Header('Content-Type', 'text/csv; charset=utf-8')
+  @Header('Content-Disposition', 'attachment; filename="products.csv"')
+  async exportCsv(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: QueryProductsDto,
+    @Res() res: Response,
+  ) {
+    const csv = await this.productService.exportCsv(user.orgId!, query);
+    res.send(csv);
+  }
+
+  /** Multipart CSV upload — Stage 1: returns a PREVIEW job. */
+  @Post('import')
+  @UseInterceptors(FileInterceptor('file'))
+  startImport(
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: MulterFile & { originalname: string },
+  ) {
+    return this.productService.startImportPreview(user.orgId!, user.sub, file);
+  }
+
+  /** Confirm a PREVIEW job — re-uploads the original CSV, kicks off ingest. */
+  @Post('import/:jobId/confirm')
+  @UseInterceptors(FileInterceptor('file'))
+  confirmImport(
+    @Param('jobId') jobId: string,
+    @CurrentUser() user: JwtPayload,
+    @UploadedFile() file: MulterFile,
+  ) {
+    return this.productService.confirmImport(
+      user.orgId!,
+      user.sub,
+      jobId,
+      file.buffer.toString('utf-8'),
+    );
+  }
+
+  @Get('import/:jobId')
+  getImportJob(@Param('jobId') jobId: string, @CurrentUser() user: JwtPayload) {
+    return this.productService.getImportJob(user.orgId!, jobId);
+  }
+
+  // ── ITEM-LEVEL ROUTES (existing) ───────────────────────────────────────
+
+  @Post(':id/duplicate')
+  duplicate(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.productService.duplicate(id, user.orgId!);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.productService.findOne(id, user.orgId!);
   }
 
-  // PATCH /api/v1/products/:id/gst — update HSN code and GST rate
-  // Separate from core product data because HSN/GST are CRM-managed,
-  // not synced from Shopify. This avoids conflicts with sync.
   @Patch(':id/gst')
   updateGst(
     @Param('id') id: string,
@@ -68,7 +285,6 @@ export class ProductController {
     return this.productService.updateGst(id, user.orgId!, dto);
   }
 
-  // PATCH /api/v1/products/:id — edit a CRM-native (MANUAL) product.
   @Patch(':id')
   update(
     @Param('id') id: string,
@@ -78,15 +294,11 @@ export class ProductController {
     return this.productService.update(id, user.orgId!, dto);
   }
 
-  // DELETE /api/v1/products/:id — soft-delete a CRM-native product.
   @Delete(':id')
   softDelete(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.productService.softDelete(id, user.orgId!);
   }
 
-  // POST /api/v1/products/:id/sync — manually push a MANUAL product to the
-  // connected Shopify store. Idempotent; returns { status, productId } where
-  // status is one of: ALREADY_SYNCED | ALREADY_QUEUED | QUEUED.
   @Post(':id/sync')
   syncToShopify(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.productService.syncToShopify(id, user.orgId!);

@@ -29,7 +29,7 @@ COPY . ./
 # DATABASE_URL is required by prisma.config.ts but only used at runtime,
 # so we pass a dummy value here just to satisfy the config validator.
 RUN DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy" npx prisma generate
-RUN npm run build
+RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
 
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────────────────

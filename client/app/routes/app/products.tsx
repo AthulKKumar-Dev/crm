@@ -1,21 +1,26 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import {
   Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
   PackageX, AlertTriangle, Check, Loader2, Pencil, Trash2, UploadCloud,
+  Download, Upload,
 } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
+import { BulkActionBar } from "~/components/app/products/bulk-action-bar";
+import { CsvImportWizard } from "~/components/app/products/csv-import-wizard";
 import { formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats } from "~/hooks/use-product-queries";
 import {
   useDeleteProductMutation,
   useSyncProductMutation,
 } from "~/hooks/use-product-mutations";
+import { productService } from "~/services/product.service";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { handleMutationError } from "~/lib/handle-mutation-error";
 import type { ProductStatus, ProductListParams, Product } from "~/types/api";
 
 export function meta() {
@@ -46,6 +51,10 @@ export default function ProductsPage() {
   // (also reachable from the detail page).
   const [creatingProduct, setCreatingProduct] = useState(false);
   const [editingFullProductId, setEditingFullProductId] = useState<string | null>(null);
+  // Phase 3: bulk-selection state + wizards
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [importOpen, setImportOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const deleteProduct = useDeleteProductMutation();
 
@@ -69,6 +78,14 @@ export default function ProductsPage() {
   const totalPages = meta?.totalPages ?? 1;
   const categoryFilters = ["All", ...(productTypes ?? [])];
 
+  // Resolve the selected ids back to full Product objects (for the bulk bar).
+  const selectedProducts = useMemo(
+    () => products.filter((p) => selectedIds.has(p.id)),
+    [products, selectedIds],
+  );
+  const allOnPageSelected =
+    products.length > 0 && products.every((p) => selectedIds.has(p.id));
+
   function handleSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
     setSearchQuery(event.target.value);
     setCurrentPage(1);
@@ -77,6 +94,38 @@ export default function ProductsPage() {
   function handleTypeFilter(type: string) {
     setSelectedType(type);
     setCurrentPage(1);
+  }
+
+  function toggleSelect(id: string, checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllOnPage(checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) products.forEach((p) => next.add(p.id));
+      else products.forEach((p) => next.delete(p.id));
+      return next;
+    });
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      await productService.downloadExportCsv({
+        search: searchQuery || undefined,
+        productType: selectedType !== "All" ? selectedType : undefined,
+      });
+    } catch (err) {
+      handleMutationError(err, "Failed to export CSV.");
+    } finally {
+      setExporting(false);
+    }
   }
 
   return (
@@ -89,14 +138,41 @@ export default function ProductsPage() {
             Manage your product catalog, inventory, and pricing.
           </p>
         </div>
-        <button
-          onClick={() => setCreatingProduct(true)}
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
-        >
-          <Plus className="size-3.5" />
-          Add Product
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleExport}
+            disabled={exporting}
+            title="Export products as Shopify-format CSV"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:opacity-50"
+          >
+            {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+            Export
+          </button>
+          <button
+            onClick={() => setImportOpen(true)}
+            title="Import products from a Shopify-format CSV"
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+          >
+            <Upload className="size-3.5" />
+            Import
+          </button>
+          <button
+            onClick={() => setCreatingProduct(true)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
+          >
+            <Plus className="size-3.5" />
+            Add Product
+          </button>
+        </div>
       </div>
+
+      {/* Bulk action bar — only visible when at least one product is selected */}
+      {selectedProducts.length > 0 && (
+        <BulkActionBar
+          selectedProducts={selectedProducts}
+          onClear={() => setSelectedIds(new Set())}
+        />
+      )}
 
       {/* Stat cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -168,6 +244,15 @@ export default function ProductsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b bg-gray-50/60 dark:bg-gray-800/60 text-left">
+                  <th className="w-10 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      onChange={(e) => toggleSelectAllOnPage(e.target.checked)}
+                      title="Select all on this page"
+                      className="size-3.5 accent-[#CEF17B] cursor-pointer"
+                    />
+                  </th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Product</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Type</th>
                   <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Vendor</th>
@@ -187,9 +272,19 @@ export default function ProductsPage() {
                 {products.map((product) => (
                   <tr
                     key={product.id}
-                    className="hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer"
+                    className={`hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer ${
+                      selectedIds.has(product.id) ? "bg-[#CEF17B]/10" : ""
+                    }`}
                     onClick={() => navigate(`/products/${product.id}`)}
                   >
+                    <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(product.id)}
+                        onChange={(e) => toggleSelect(product.id, e.target.checked)}
+                        className="size-3.5 accent-[#CEF17B] cursor-pointer"
+                      />
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
                         {product.image ? (
@@ -228,10 +323,10 @@ export default function ProductsPage() {
                     {gstEnabled && (
                       <>
                         <td className="px-4 py-3 text-xs font-mono text-muted-foreground">
-                          {(product as any).hsnCode || <span className="text-orange-500">—</span>}
+                          {product.hsnCode || <span className="text-orange-500">—</span>}
                         </td>
                         <td className="px-4 py-3 text-xs text-muted-foreground">
-                          {(product as any).gstRate != null ? `${(product as any).gstRate}%` : <span className="text-orange-500">—</span>}
+                          {product.gstRate != null ? `${product.gstRate}%` : <span className="text-orange-500">—</span>}
                         </td>
                       </>
                     )}
@@ -295,16 +390,17 @@ export default function ProductsPage() {
         />
       )}
 
+      {/* CSV import wizard */}
+      {importOpen && <CsvImportWizard onClose={() => setImportOpen(false)} />}
+
     </div>
   );
 }
 
 // ── Product Row Actions ─────────────────────────────────────────────────────
-// Renders the right-most cell of each product row. Four states:
-//   1. Synced to Shopify (channel.platform === SHOPIFY)        → green badge
-//   2. Currently syncing (shopifySync.status === PENDING)     → spinner badge
-//   3. Sync failed (shopifySync.status === FAILED)            → red badge + edit/archive
-//   4. CRM-only, no sync attempted yet (MANUAL, no shopifySync) → edit/archive
+// Right-most cell of each product row. Edit / Archive are always available
+// (synced products are now editable too — local edits push back via the Sync
+// button). The badge in front reflects the product's current sync state.
 
 function ProductRowActions({
   product,
@@ -319,22 +415,8 @@ function ProductRowActions({
   const sync = product.shopifySync;
   const syncMutation = useSyncProductMutation();
 
-  if (isSynced) {
-    return (
-      <span
-        title={
-          sync?.shopifyProductId
-            ? `Shopify product ID: ${sync.shopifyProductId}`
-            : "Synced to Shopify"
-        }
-        className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300"
-      >
-        <Check className="size-3" />
-        Synced
-      </span>
-    );
-  }
-
+  // While a push is in flight, collapse the actions to a single spinner badge
+  // — clicking anything else would race the queued job.
   if (sync?.status === "PENDING") {
     return (
       <span
@@ -347,32 +429,72 @@ function ProductRowActions({
     );
   }
 
-  // Show "Sync" for MANUAL-only products (no sync attempted) or FAILED ones
-  // so the merchant can push them on demand without leaving the list.
+  // Pick a status badge for the leading slot (when applicable).
+  let badge: React.ReactNode = null;
+  if (sync?.status === "SYNCED" && isSynced) {
+    badge = (
+      <span
+        title={
+          sync.shopifyProductId
+            ? `Shopify product ID: ${sync.shopifyProductId}`
+            : "Synced to Shopify"
+        }
+        className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300"
+      >
+        <Check className="size-3" />
+        Synced
+      </span>
+    );
+  } else if (sync?.status === "OUT_OF_SYNC") {
+    badge = (
+      <span
+        title="Local edits haven't been pushed to Shopify yet"
+        className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+      >
+        <AlertTriangle className="size-3" />
+        Out of sync
+      </span>
+    );
+  } else if (sync?.status === "FAILED") {
+    badge = (
+      <span
+        title={`Shopify sync failed: ${sync.error ?? "unknown"}`}
+        className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300"
+      >
+        <AlertTriangle className="size-3" />
+        Sync failed
+      </span>
+    );
+  }
+
+  // Sync button is hidden for fully-synced (no edits yet) products to reduce
+  // noise; it reappears as soon as something needs pushing or has failed.
+  const showSyncButton = sync?.status !== "SYNCED" || !isSynced;
+
   return (
     <div className="inline-flex items-center gap-1">
-      {sync?.status === "FAILED" && (
-        <span
-          title={`Shopify sync failed: ${sync.error ?? "unknown"}`}
-          className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300"
+      {badge}
+      {showSyncButton && (
+        <button
+          type="button"
+          title={
+            sync?.status === "FAILED"
+              ? "Retry sync to Shopify"
+              : sync?.status === "OUT_OF_SYNC"
+                ? "Push local edits to Shopify"
+                : "Sync to Shopify"
+          }
+          disabled={syncMutation.isPending}
+          onClick={() => syncMutation.mutate(product.id)}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-[#084734] disabled:opacity-50"
         >
-          <AlertTriangle className="size-3" />
-          Sync failed
-        </span>
+          {syncMutation.isPending && syncMutation.variables === product.id ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <UploadCloud className="size-3.5" />
+          )}
+        </button>
       )}
-      <button
-        type="button"
-        title={sync?.status === "FAILED" ? "Retry sync to Shopify" : "Sync to Shopify"}
-        disabled={syncMutation.isPending}
-        onClick={() => syncMutation.mutate(product.id)}
-        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-[#084734] disabled:opacity-50"
-      >
-        {syncMutation.isPending && syncMutation.variables === product.id ? (
-          <Loader2 className="size-3.5 animate-spin" />
-        ) : (
-          <UploadCloud className="size-3.5" />
-        )}
-      </button>
       <button
         type="button"
         title="Edit product"

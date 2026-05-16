@@ -474,9 +474,8 @@ export class OrderService {
         // 2. Resolve customer (existing by id/email/phone, else create).
         const customer = await this.resolveCustomer(tx, orgId, channel.id, dto);
 
-        // 3. Fetch variants. Stock validation/decrement is intentionally NOT
-        //    done here yet — that will be added in a follow-up. For now, we
-        //    only need product info for line-item snapshots and tax math.
+        // 3. Fetch variants — used for line-item snapshots, tax math, AND
+        //    inventory gating (Phase 2: trackQuantity / continueSellingWhenOutOfStock).
         const variants = await tx.productVariant.findMany({
           where: {
             id: { in: variantIds },
@@ -491,6 +490,28 @@ export class OrderService {
           throw new NotFoundException(
             `Product variants not found: ${missing.join(', ')}`,
           );
+        }
+
+        // 3a. Stock validation — refuse line items that would oversell a
+        //     tracked variant unless overselling is allowed.
+        //     "Tracked" is true when EITHER the org's `trackQuantityGlobally`
+        //     is on OR the variant's per-row `trackQuantity` is on.
+        //     "Oversell allowed" is true when EITHER `allowOversellGlobally`
+        //     is on OR `continueSellingWhenOutOfStock` is on for the variant.
+        const productSettings =
+          await this.settings.getProductSettings(orgId);
+        const oversellGlobally = productSettings.allowOversellGlobally === true;
+        const trackGlobally = productSettings.trackQuantityGlobally === true;
+        for (const li of dto.lineItems) {
+          const v = variantById.get(li.productVariantId)!;
+          const tracks = trackGlobally || v.trackQuantity !== false;
+          const allowOversell =
+            oversellGlobally || v.continueSellingWhenOutOfStock === true;
+          if (tracks && !allowOversell && v.inventoryQuantity < li.quantity) {
+            throw new BadRequestException(
+              `Insufficient stock for "${v.product.title}${v.title && v.title !== 'Default Title' ? ` — ${v.title}` : ''}": ${v.inventoryQuantity} available, ${li.quantity} requested.`,
+            );
+          }
         }
 
         // 4. Resolve seller GSTIN (only required when invoice generation is on).
@@ -649,7 +670,32 @@ export class OrderService {
           include: { lineItems: true },
         });
 
-        // 8. (Inventory decrement intentionally deferred — see step 3 note.)
+        // 8. Inventory decrement + audit trail. Skipped per-variant when
+        //    trackQuantity=false AND the org-level trackQuantityGlobally
+        //    override is off (e.g. digital goods / made-to-order). Each
+        //    decrement gets an InventoryEvent row with reason="sale" so the
+        //    org has a complete audit history of stock movements.
+        for (const li of dto.lineItems) {
+          const v = variantById.get(li.productVariantId)!;
+          if (!trackGlobally && v.trackQuantity === false) continue;
+          const updatedVariant = await tx.productVariant.update({
+            where: { id: v.id },
+            data: { inventoryQuantity: { decrement: li.quantity } },
+            select: { inventoryQuantity: true },
+          });
+          await tx.inventoryEvent.create({
+            data: {
+              organizationId: orgId,
+              variantId: v.id,
+              quantityBefore: v.inventoryQuantity,
+              quantityAfter: updatedVariant.inventoryQuantity,
+              changeAmount: -li.quantity,
+              reason: 'sale',
+              referenceType: 'order',
+              referenceId: order.id,
+            },
+          });
+        }
 
         // 9. Update customer denormalized counters.
         await tx.customer.update({
@@ -1009,6 +1055,40 @@ export class OrderService {
       if (dto.refund) data.financialStatus = OrderFinancialStatus.REFUNDED;
       if (dto.restock) data.fulfillmentStatus = OrderFulfillmentStatus.RESTOCKED;
       const updated = await tx.order.update({ where: { id }, data });
+
+      // Local restock for MANUAL channel orders. Shopify orders are restocked
+      // server-side by the orderCancel mutation we already sent — adjusting
+      // inventory locally would double-count once the next pull-sync lands.
+      if (dto.restock && !isShopify) {
+        const productSettings = await this.settings.getProductSettings(orgId);
+        const trackGlobally = productSettings.trackQuantityGlobally === true;
+        const lineItems = await tx.orderLineItem.findMany({
+          where: { orderId: id },
+          include: { variant: true },
+        });
+        for (const li of lineItems) {
+          if (!li.variant) continue;
+          if (!trackGlobally && li.variant.trackQuantity === false) continue;
+          const updatedVariant = await tx.productVariant.update({
+            where: { id: li.variant.id },
+            data: { inventoryQuantity: { increment: li.quantity } },
+            select: { inventoryQuantity: true },
+          });
+          await tx.inventoryEvent.create({
+            data: {
+              organizationId: orgId,
+              variantId: li.variant.id,
+              quantityBefore: li.variant.inventoryQuantity,
+              quantityAfter: updatedVariant.inventoryQuantity,
+              changeAmount: li.quantity,
+              reason: 'restock',
+              referenceType: 'order',
+              referenceId: id,
+            },
+          });
+        }
+      }
+
       await tx.orderTimelineEvent.create({
         data: {
           orderId: id,

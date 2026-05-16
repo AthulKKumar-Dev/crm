@@ -28,3 +28,34 @@ export function formatCurrency(
     return `${currency} ${value.toFixed(options.maximumFractionDigits ?? 2)}`;
   }
 }
+
+/**
+ * Compute profit (price − cost) and margin percentage. Returns null when
+ * cost isn't set or pricing is invalid, so callers can render an "—".
+ */
+export function calcMargin(
+  price: number | string | null | undefined,
+  cost: number | string | null | undefined,
+): { profit: number; marginPct: number } | null {
+  const p = typeof price === "string" ? Number(price) : price;
+  const c = typeof cost === "string" ? Number(cost) : cost;
+  if (p == null || c == null || !Number.isFinite(p) || !Number.isFinite(c) || p <= 0) {
+    return null;
+  }
+  const profit = p - c;
+  return { profit, marginPct: (profit / p) * 100 };
+}
+
+/**
+ * Render margin as "$5.00 (33%)" using the org's currency. Returns "—" when
+ * margin can't be computed (e.g. cost is not set).
+ */
+export function formatMargin(
+  price: number | string | null | undefined,
+  cost: number | string | null | undefined,
+  currency: string,
+): string {
+  const m = calcMargin(price, cost);
+  if (!m) return "—";
+  return `${formatCurrency(m.profit, currency)} (${m.marginPct.toFixed(0)}%)`;
+}

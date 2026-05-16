@@ -1,8 +1,8 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsDateString,
   IsEnum,
-  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -13,26 +13,10 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ProductStatus } from '@prisma/client';
+import { CreateVariantDto } from './variant.dto';
+import { ProductOptionDto } from './option.dto';
 
-export class CreateVariantDto {
-  @IsNumber()
-  @Min(0)
-  price: number;
-
-  @IsOptional()
-  @IsString()
-  sku?: string;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  compareAtPrice?: number;
-
-  @IsOptional()
-  @IsInt()
-  @Min(0)
-  inventoryQuantity?: number;
-}
+export { CreateVariantDto } from './variant.dto';
 
 export class CreateProductDto {
   @IsString()
@@ -71,7 +55,35 @@ export class CreateProductDto {
   @Max(28)
   gstRate?: number;
 
+  /**
+   * Optional ISO 8601 date for scheduled publishing. When the product status
+   * is DRAFT and this date is in the future, ProductPublishScheduler flips
+   * the product to ACTIVE on/after the date.
+   */
+  @IsOptional()
+  @IsDateString()
+  publishedAt?: string;
+
+  // ── Variant inputs (mutually exclusive) ─────────────────────────────────
+  // - `variant`  (singular): legacy single-default-variant flow.
+  // - `variants` (plural):   multi-variant flow with per-variant SKU/price/stock
+  //                          and option assignments. Requires `options`.
+  // Exactly one must be provided. Validated in the service layer.
+  @IsOptional()
   @ValidateNested()
   @Type(() => CreateVariantDto)
-  variant: CreateVariantDto;
+  variant?: CreateVariantDto;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CreateVariantDto)
+  variants?: CreateVariantDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @ValidateNested({ each: true })
+  @Type(() => ProductOptionDto)
+  options?: ProductOptionDto[];
 }
