@@ -3,6 +3,7 @@ import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient } from './shopify-graphql.client';
+import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 
 /** Shape persisted on Order.metadata.shopifySync to track push state. */
 export interface ShopifySyncMetadata {
@@ -28,6 +29,7 @@ export class ShopifyPushService {
     private readonly prisma: PrismaService,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly graphql: ShopifyGraphqlClient,
+    private readonly orgSettings: OrganizationSettingsService,
   ) { }
 
   /** Resolves the configured Shopify Admin API version (env-driven). */
@@ -417,9 +419,16 @@ export class ShopifyPushService {
 
   /**
    * Push a single CRM-native product to Shopify, then rebadge the local
-   * Product + variants from the MANUAL channel to the SHOPIFY channel using
-   * the new Shopify IDs. After this completes, the existing read-direction
-   * sync handles future updates.
+   * Product + variants + images from the MANUAL channel to the SHOPIFY channel
+   * using the new Shopify IDs. After this completes, the existing read-
+   * direction sync handles future updates.
+   *
+   * Now supports:
+   *   - Multiple variants (each with its own option1/2/3, sku, price, stock).
+   *   - Product-level option types (Size, Color, …).
+   *   - Multiple images (uploaded to /uploads/, sent to Shopify by `src` URL).
+   *   - Variant→image linkage (a second `PUT /variants/{id}.json` per variant
+   *     because Shopify REST won't accept `image_id` in the create payload).
    */
   async pushProduct(productId: string, orgId: string): Promise<void> {
     const shopify = await this.findShopifyChannel(orgId);
@@ -439,6 +448,7 @@ export class ShopifyPushService {
       where: { id: productId, organizationId: orgId, deletedAt: null },
       include: {
         variants: { orderBy: { position: 'asc' } },
+        images: { orderBy: { position: 'asc' } },
         channel: true,
       },
     });
@@ -446,47 +456,48 @@ export class ShopifyPushService {
       throw new NotFoundException(`Product ${productId} not found`);
     }
 
-    // Already-synced products are skipped — Shopify is the source of truth
-    // once a product lives on the SHOPIFY channel.
-    if (product.channel.platform === ChannelPlatform.SHOPIFY) {
-      this.logger.log(`Product ${product.id} already on SHOPIFY channel, skipping push.`);
-      return;
+    if (product.variants.length === 0) {
+      throw new Error(`Product ${product.id} has no variants to push`);
     }
 
     const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(shopify.id);
 
-    // Build the Shopify product payload. Single-variant only for this cut.
-    const variant = product.variants[0];
-    if (!variant) {
-      throw new Error(`Product ${product.id} has no variant to push`);
+    // Read the org's product settings once per push so the global
+    // overrides flow through to Shopify's per-variant inventory fields.
+    const productSettings = await this.orgSettings.getProductSettings(orgId);
+    const oversellGlobally = productSettings.allowOversellGlobally === true;
+    const trackGlobally = productSettings.trackQuantityGlobally === true;
+
+    // SHOPIFY-channel product → push as an update (PUT). The CRM allows
+    // editing synced products; this is the path that propagates those local
+    // edits back to the Shopify store. New variants are also handled (POST);
+    // image changes on synced products are still out of scope.
+    if (product.channel.platform === ChannelPlatform.SHOPIFY) {
+      await this.pushProductUpdate(
+        product,
+        shopDomain,
+        token,
+        oversellGlobally,
+        trackGlobally,
+      );
+      await this.recordProductSuccess(productId, product.externalId);
+      this.logger.log(
+        `Pushed update for Shopify product "${product.title}" (${product.externalId}).`,
+      );
+      return;
     }
 
-    const payload = {
-      product: {
-        title: product.title,
-        body_html: product.bodyHtml ?? undefined,
-        vendor: product.vendor ?? undefined,
-        product_type: product.productType ?? undefined,
-        status: this.mapStatusToShopify(product.status),
-        tags: (product.tags ?? []).join(', '),
-        variants: [
-          {
-            price: variant.price.toString(),
-            sku: variant.sku ?? undefined,
-            option1: variant.option1 ?? 'Default Title',
-            compare_at_price: variant.compareAtPrice?.toString() ?? undefined,
-            inventory_management: 'shopify',
-            requires_shipping: variant.requiresShipping,
-            taxable: variant.taxable,
-          },
-        ],
-      },
-    };
+    const payload = this.buildShopifyProductPayload(
+      product,
+      oversellGlobally,
+      trackGlobally,
+    );
 
     const result = await this.postShopify<{
       product: {
         id: number;
-        variants: Array<{ id: number; inventory_item_id: number }>;
+        variants: Array<{ id: number; inventory_item_id: number; option1?: string; option2?: string; option3?: string }>;
+        images?: Array<{ id: number; src: string; position: number }>;
       };
     }>(shopDomain, token, '/products.json', payload);
 
@@ -494,9 +505,9 @@ export class ShopifyPushService {
       throw new Error('Shopify product create returned no id');
     }
 
-    // Rebadge: switch the local product (and variants) to the SHOPIFY channel
-    // with their new Shopify IDs. Done in a small transaction so we don't end
-    // up with mismatched product/variant externalIds on partial failure.
+    // Rebadge transaction: switch product + variants + images to SHOPIFY
+    // channel/IDs. Variants are zip-aligned by index, which is safe because
+    // Shopify preserves the order we sent. Images likewise zip by position.
     await this.prisma.$transaction(async (tx) => {
       await tx.product.update({
         where: { id: product.id },
@@ -506,6 +517,7 @@ export class ShopifyPushService {
           externalCreatedAt: new Date(),
         },
       });
+
       for (let i = 0; i < product.variants.length && i < result.product.variants.length; i++) {
         const localVariant = product.variants[i];
         const remoteVariant = result.product.variants[i];
@@ -517,35 +529,498 @@ export class ShopifyPushService {
           },
         });
       }
+
+      const remoteImages = result.product.images ?? [];
+      for (let i = 0; i < product.images.length && i < remoteImages.length; i++) {
+        const localImage = product.images[i];
+        const remoteImage = remoteImages[i];
+        await tx.productImage.update({
+          where: { id: localImage.id },
+          data: { externalId: String(remoteImage.id) },
+        });
+      }
     });
 
-    // Optionally seed initial inventory at the primary location. This is a
-    // best-effort step — failure is logged but not propagated, since the
-    // rebadge already succeeded. Skipped when read_locations isn't granted
-    // (resolveLocationId returns null) or the variant has 0 stock.
-    if (variant.inventoryQuantity > 0) {
-      try {
-        const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
-        const inventoryItemId = result.product.variants[0]?.inventory_item_id;
-        if (locationId && inventoryItemId) {
-          await this.postShopify(shopDomain, token, '/inventory_levels/set.json', {
-            location_id: locationId,
-            inventory_item_id: inventoryItemId,
-            available: variant.inventoryQuantity,
-          });
-        }
-      } catch (err) {
-        this.logger.warn(
-          `Inventory seed failed for product ${product.id} (push otherwise succeeded): ${err}`,
-        );
-      }
-    }
+    // Bind variant→image after create (Shopify REST quirk — variants.image_id
+    // can't be set inline). Best-effort; failures don't undo the push.
+    await this.bindVariantImages(
+      shopDomain,
+      token,
+      product.variants,
+      product.images,
+      result.product.variants,
+      result.product.images ?? [],
+    );
+
+    // Push per-variant inventory_item metadata (cost, hsCode, countryOfOrigin).
+    await this.pushInventoryItemMetadata(
+      shopDomain,
+      token,
+      product.variants,
+      result.product.variants,
+    );
+
+    // Seed inventory per variant at the primary location.
+    await this.seedInventoryPerVariant(
+      shopify.id,
+      shopDomain,
+      token,
+      product.variants,
+      result.product.variants,
+    );
 
     await this.recordProductSuccess(productId, String(result.product.id));
 
     this.logger.log(
-      `Pushed CRM product "${product.title}" → Shopify product ${result.product.id}`,
+      `Pushed CRM product "${product.title}" → Shopify product ${result.product.id} (${product.variants.length} variants, ${product.images.length} images)`,
     );
+  }
+
+  /**
+   * Push CRM-side edits of an already-synced product back to Shopify.
+   *   - PUT  /products/{id}.json            — title / body / vendor / type / tags / status
+   *   - POST /products/{id}/variants.json   — for variants added locally after sync
+   *   - PUT  /variants/{id}.json            — per-existing-variant pricing / sku / barcode /
+   *                                            weight / inventory policy / shipping / taxable
+   *   - PUT  /inventory_items/{id}.json     — cost / hsCode / countryOfOrigin (when set)
+   *
+   * Image changes (add/remove/reorder) on synced products are NOT pushed in
+   * this iteration — local image edits stay local until the next pull-sync
+   * overwrites the local snapshot. Tracked as a follow-up.
+   *
+   * Local externalIds for newly-created variants get rewritten to the real
+   * Shopify ids returned by POST so subsequent pushes go through the PUT path.
+   */
+  private async pushProductUpdate(
+    product: {
+      id: string;
+      externalId: string;
+      title: string;
+      bodyHtml: string | null;
+      vendor: string | null;
+      productType: string | null;
+      status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
+      tags: string[];
+      variants: Array<{
+        id: string;
+        externalId: string;
+        inventoryItemId: string | null;
+        title: string;
+        option1: string | null;
+        option2: string | null;
+        option3: string | null;
+        price: any;
+        sku: string | null;
+        compareAtPrice: any;
+        barcode: string | null;
+        weight: any;
+        weightUnit: string | null;
+        cost: any;
+        hsCode: string | null;
+        countryOfOrigin: string | null;
+        trackQuantity: boolean;
+        continueSellingWhenOutOfStock: boolean;
+        requiresShipping: boolean;
+        taxable: boolean;
+      }>;
+    },
+    shopDomain: string,
+    token: string,
+    oversellGlobally: boolean,
+    trackGlobally: boolean,
+  ): Promise<void> {
+    // Top-level product fields.
+    await this.putShopify(shopDomain, token, `/products/${product.externalId}.json`, {
+      product: {
+        id: Number(product.externalId),
+        title: product.title,
+        body_html: product.bodyHtml ?? undefined,
+        vendor: product.vendor ?? undefined,
+        product_type: product.productType ?? undefined,
+        status: this.mapStatusToShopify(product.status),
+        tags: (product.tags ?? []).join(', '),
+      },
+    });
+
+    // Per-variant fields. Each variant is an independent call — failures on
+    // one are logged but don't stop the others.
+    for (const variant of product.variants) {
+      const isNewLocal =
+        !variant.externalId || variant.externalId.startsWith('manual_');
+
+      if (isNewLocal) {
+        // Brand-new variant added locally to a synced product. Create it on
+        // Shopify (POST), then rewrite the local externalId / inventoryItemId
+        // so future edits go through the PUT path.
+        try {
+          const result = await this.postShopify<{
+            variant: { id: number; inventory_item_id: number };
+          }>(shopDomain, token, `/products/${product.externalId}/variants.json`, {
+            variant: {
+              option1: variant.option1 ?? variant.title ?? 'Default Title',
+              ...(variant.option2 ? { option2: variant.option2 } : {}),
+              ...(variant.option3 ? { option3: variant.option3 } : {}),
+              price: variant.price.toString(),
+              sku: variant.sku ?? undefined,
+              compare_at_price: variant.compareAtPrice?.toString() ?? undefined,
+              barcode: variant.barcode ?? undefined,
+              weight: variant.weight ? Number(variant.weight) : undefined,
+              weight_unit: variant.weightUnit ?? undefined,
+              inventory_management: variant.trackQuantity ? 'shopify' : null,
+              inventory_policy:
+              oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
+              requires_shipping: variant.requiresShipping,
+              taxable: variant.taxable,
+            },
+          });
+          if (result?.variant?.id) {
+            await this.prisma.productVariant.update({
+              where: { id: variant.id },
+              data: {
+                externalId: String(result.variant.id),
+                inventoryItemId: String(result.variant.inventory_item_id),
+              },
+            });
+            // Push inventory item meta if present.
+            await this.pushInventoryItemMetaForVariant(
+              shopDomain,
+              token,
+              variant,
+              String(result.variant.inventory_item_id),
+            );
+          }
+        } catch (err) {
+          this.logger.warn(
+            `Failed to create new variant for synced product ${product.externalId}: ${err}`,
+          );
+        }
+        continue;
+      }
+
+      // Existing variant — straight update.
+      try {
+        await this.putShopify(shopDomain, token, `/variants/${variant.externalId}.json`, {
+          variant: {
+            id: Number(variant.externalId),
+            price: variant.price.toString(),
+            sku: variant.sku ?? undefined,
+            compare_at_price: variant.compareAtPrice?.toString() ?? null,
+            barcode: variant.barcode ?? undefined,
+            weight: variant.weight ? Number(variant.weight) : undefined,
+            weight_unit: variant.weightUnit ?? undefined,
+            inventory_management:
+              trackGlobally || variant.trackQuantity ? 'shopify' : null,
+            inventory_policy:
+              oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
+            requires_shipping: variant.requiresShipping,
+            taxable: variant.taxable,
+          },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Variant update failed for ${variant.externalId}: ${err}`,
+        );
+      }
+
+      // Inventory-item meta (cost / hsCode / countryOfOrigin) for existing variants.
+      await this.pushInventoryItemMetaForVariant(
+        shopDomain,
+        token,
+        variant,
+        variant.inventoryItemId,
+      );
+    }
+  }
+
+  /** Single-variant version of pushInventoryItemMetadata, used by both the
+   *  create-then-rebadge flow's loop and the update flow above. */
+  private async pushInventoryItemMetaForVariant(
+    shopDomain: string,
+    token: string,
+    variant: { cost: any; hsCode: string | null; countryOfOrigin: string | null },
+    inventoryItemId: string | null,
+  ): Promise<void> {
+    const hasMeta =
+      variant.cost != null ||
+      variant.hsCode != null ||
+      variant.countryOfOrigin != null;
+    if (!hasMeta || !inventoryItemId) return;
+    try {
+      await this.putShopify(
+        shopDomain,
+        token,
+        `/inventory_items/${inventoryItemId}.json`,
+        {
+          inventory_item: {
+            id: Number(inventoryItemId),
+            cost: variant.cost != null ? Number(variant.cost).toFixed(2) : undefined,
+            harmonized_system_code: variant.hsCode ?? undefined,
+            country_code_of_origin: variant.countryOfOrigin ?? undefined,
+          },
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Inventory item update failed for ${inventoryItemId}: ${err}`,
+      );
+    }
+  }
+
+  /**
+   * Build the `POST /products.json` payload from a CRM product. Handles both
+   * single-variant (`Default Title` / no options) and multi-variant cases.
+   *
+   * Note: cost / hsCode / countryOfOrigin live on the `inventory_item` resource,
+   * not on the variant — those are sent via `seedInventoryItemMeta` after the
+   * product create returns and we know the inventory_item_ids.
+   */
+  private buildShopifyProductPayload(
+    product: {
+      title: string;
+      bodyHtml: string | null;
+      vendor: string | null;
+      productType: string | null;
+      status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
+      tags: string[];
+      options: Prisma.JsonValue;
+      variants: Array<{
+        price: any;
+        sku: string | null;
+        option1: string | null;
+        option2: string | null;
+        option3: string | null;
+        compareAtPrice: any;
+        requiresShipping: boolean;
+        taxable: boolean;
+        barcode: string | null;
+        weight: any;
+        weightUnit: string | null;
+        trackQuantity: boolean;
+        continueSellingWhenOutOfStock: boolean;
+      }>;
+      images: Array<{ src: string; alt: string | null; position: number }>;
+    },
+    oversellGlobally: boolean,
+    trackGlobally: boolean,
+  ) {
+    const optionsArr = this.deriveOptionTypes(product);
+
+    return {
+      product: {
+        title: product.title,
+        body_html: product.bodyHtml ?? undefined,
+        vendor: product.vendor ?? undefined,
+        product_type: product.productType ?? undefined,
+        status: this.mapStatusToShopify(product.status),
+        tags: (product.tags ?? []).join(', '),
+        ...(optionsArr.length > 0 ? { options: optionsArr.map((name) => ({ name })) } : {}),
+        variants: product.variants.map((v) => ({
+          price: v.price.toString(),
+          sku: v.sku ?? undefined,
+          option1: v.option1 ?? 'Default Title',
+          ...(v.option2 ? { option2: v.option2 } : {}),
+          ...(v.option3 ? { option3: v.option3 } : {}),
+          compare_at_price: v.compareAtPrice?.toString() ?? undefined,
+          barcode: v.barcode ?? undefined,
+          weight: v.weight ? Number(v.weight) : undefined,
+          weight_unit: v.weightUnit ?? undefined,
+          // null inventory_management = "Don't track quantity" in Shopify.
+          // Global override forces tracking on for every variant when ON.
+          inventory_management:
+            trackGlobally || v.trackQuantity ? 'shopify' : null,
+          // Global override forces continue-sell on for every variant when ON.
+          inventory_policy:
+            oversellGlobally || v.continueSellingWhenOutOfStock ? 'continue' : 'deny',
+          requires_shipping: v.requiresShipping,
+          taxable: v.taxable,
+        })),
+        ...(product.images.length > 0
+          ? {
+              images: product.images.map((img) => ({
+                src: img.src,
+                alt: img.alt ?? undefined,
+                position: img.position,
+              })),
+            }
+          : {}),
+      },
+    };
+  }
+
+  /**
+   * Set per-variant inventory_item metadata (cost, harmonized_system_code,
+   * country_code_of_origin) via Shopify's `/inventory_items/:id.json` REST
+   * resource. Required because these fields don't ride on the product or
+   * variant objects in the create payload — they live on inventory_item.
+   *
+   * Best-effort: a failure on one variant logs a warning and continues. If
+   * the merchant's app lacks `write_inventory` scope, this whole step is a
+   * no-op (postShopify throws an actionable 403).
+   */
+  private async pushInventoryItemMetadata(
+    shopDomain: string,
+    token: string,
+    localVariants: Array<{
+      cost: any;
+      hsCode: string | null;
+      countryOfOrigin: string | null;
+    }>,
+    remoteVariants: Array<{ inventory_item_id: number }>,
+  ): Promise<void> {
+    for (let i = 0; i < localVariants.length && i < remoteVariants.length; i++) {
+      const lv = localVariants[i];
+      const rv = remoteVariants[i];
+      const hasMeta =
+        lv.cost != null || lv.hsCode != null || lv.countryOfOrigin != null;
+      if (!hasMeta || !rv?.inventory_item_id) continue;
+
+      try {
+        await this.putShopify(
+          shopDomain,
+          token,
+          `/inventory_items/${rv.inventory_item_id}.json`,
+          {
+            inventory_item: {
+              id: rv.inventory_item_id,
+              cost: lv.cost != null ? Number(lv.cost).toFixed(2) : undefined,
+              harmonized_system_code: lv.hsCode ?? undefined,
+              country_code_of_origin: lv.countryOfOrigin ?? undefined,
+            },
+          },
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to set inventory_item ${rv.inventory_item_id} metadata: ${err}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Derive option type names from `Product.options` (preferred) or fall back
+   * to inferring from variants when a multi-variant product was created
+   * without an explicit options block.
+   */
+  private deriveOptionTypes(product: {
+    options: Prisma.JsonValue;
+    variants: Array<{ option1: string | null; option2: string | null; option3: string | null }>;
+  }): string[] {
+    if (Array.isArray(product.options)) {
+      return product.options
+        .filter((o) => o && typeof o === 'object' && !Array.isArray(o))
+        .map((o) => (o as Record<string, unknown>).name as string)
+        .filter(Boolean);
+    }
+    // Infer from variants — if any variant has option2 set, we have 2 options, etc.
+    const has1 = product.variants.some((v) => v.option1 && v.option1 !== 'Default Title');
+    const has2 = product.variants.some((v) => !!v.option2);
+    const has3 = product.variants.some((v) => !!v.option3);
+    if (!has1) return [];
+    if (has3) return ['Option 1', 'Option 2', 'Option 3'];
+    if (has2) return ['Option 1', 'Option 2'];
+    return ['Option 1'];
+  }
+
+  /**
+   * After create, walk each local variant that has a linked image and PUT
+   * the matching Shopify image_id onto the corresponding remote variant.
+   * Failures are logged but don't fail the push — variant images can be set
+   * manually in Shopify Admin if this step fails.
+   */
+  private async bindVariantImages(
+    shopDomain: string,
+    token: string,
+    localVariants: Array<{ id: string; imageId: string | null; option1: string | null; option2: string | null; option3: string | null }>,
+    localImages: Array<{ id: string; position: number }>,
+    remoteVariants: Array<{ id: number; option1?: string; option2?: string; option3?: string }>,
+    remoteImages: Array<{ id: number; position: number }>,
+  ): Promise<void> {
+    const linksToCreate = localVariants
+      .map((lv, idx) => {
+        if (!lv.imageId) return null;
+        const localImg = localImages.find((i) => i.id === lv.imageId);
+        if (!localImg) return null;
+        const remoteImg = remoteImages.find((ri) => ri.position === localImg.position);
+        if (!remoteImg) return null;
+        const remoteVariant = remoteVariants[idx];
+        if (!remoteVariant) return null;
+        return { variantId: remoteVariant.id, imageId: remoteImg.id };
+      })
+      .filter(Boolean) as Array<{ variantId: number; imageId: number }>;
+
+    for (const link of linksToCreate) {
+      try {
+        await this.putShopify(shopDomain, token, `/variants/${link.variantId}.json`, {
+          variant: { id: link.variantId, image_id: link.imageId },
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Failed to bind variant ${link.variantId} → image ${link.imageId}: ${err}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Set inventory levels at the primary location for each variant that has
+   * stock > 0. Best-effort: a failure on one variant is logged and the rest
+   * still run. Skipped entirely when `read_locations` scope is missing.
+   */
+  private async seedInventoryPerVariant(
+    channelId: string,
+    shopDomain: string,
+    token: string,
+    localVariants: Array<{ inventoryQuantity: number }>,
+    remoteVariants: Array<{ inventory_item_id: number }>,
+  ): Promise<void> {
+    const haveStock = localVariants.some((v) => v.inventoryQuantity > 0);
+    if (!haveStock) return;
+
+    const locationId = await this.resolveLocationId(channelId, shopDomain, token);
+    if (!locationId) return;
+
+    for (let i = 0; i < localVariants.length && i < remoteVariants.length; i++) {
+      const lv = localVariants[i];
+      const rv = remoteVariants[i];
+      if (lv.inventoryQuantity <= 0 || !rv?.inventory_item_id) continue;
+
+      try {
+        await this.postShopify(shopDomain, token, '/inventory_levels/set.json', {
+          location_id: locationId,
+          inventory_item_id: rv.inventory_item_id,
+          available: lv.inventoryQuantity,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Inventory seed failed for inventory_item ${rv.inventory_item_id}: ${err}`,
+        );
+      }
+    }
+  }
+
+  /** PUT helper — mirrors `postShopify` but for update operations. */
+  private async putShopify<T>(
+    shopDomain: string,
+    token: string,
+    endpoint: string,
+    body: unknown,
+  ): Promise<T> {
+    const res = await fetch(
+      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': token,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Shopify PUT ${res.status} on ${endpoint}: ${text}`);
+    }
+    return res.json() as Promise<T>;
   }
 
   /**
@@ -553,45 +1028,56 @@ export class ShopifyPushService {
    * Shopify store is freshly connected. Sequential to respect Shopify's REST
    * rate limits.
    */
+  /**
+   * Triggered by the channels-page "Push to Shopify" / "Sync Now" button.
+   * Picks up two kinds of pending work in a single sweep:
+   *
+   *   1. MANUAL-channel products that have never been pushed (no shopifySync
+   *      metadata) or last attempted FAILED → create on Shopify.
+   *   2. SHOPIFY-channel products with status `OUT_OF_SYNC` (the user edited
+   *      them locally) or `FAILED` (the previous push update failed) → push
+   *      the local edits via the update path in `pushProduct`.
+   *
+   * Already-SYNCED and currently-PENDING products are left alone so we don't
+   * race in-flight jobs or re-push unchanged data.
+   */
   async bulkPushManualProducts(orgId: string): Promise<void> {
-    const manual = await this.prisma.channel.findUnique({
-      where: {
-        organizationId_platform: {
-          organizationId: orgId,
-          platform: ChannelPlatform.MANUAL,
-        },
-      },
-    });
-    if (!manual) {
-      this.logger.log(`Org ${orgId} has no MANUAL channel — nothing to bulk-push.`);
-      return;
-    }
-
-    // Pull all MANUAL products then filter to unsynced/failed in app code —
-    // Prisma JSON-path queries against optional nested fields are awkward,
-    // and the row count here is bounded by the org's CRM-native product list.
+    // Pull every product for the org with its channel platform; filter in
+    // app code because Prisma JSON-path queries against optional nested
+    // fields are awkward, and the row count is bounded by the catalog size.
     const products = await this.prisma.product.findMany({
-      where: {
-        organizationId: orgId,
-        channelId: manual.id,
-        deletedAt: null,
-      },
-      select: { id: true, metadata: true },
+      where: { organizationId: orgId, deletedAt: null },
+      include: { channel: { select: { platform: true } } },
     });
 
-    const unsynced = products.filter((p) => !this.isAlreadySynced(p.metadata));
-    if (unsynced.length === 0) {
-      this.logger.log(`Org ${orgId} has no unsynced CRM products to push.`);
+    const toPush = products.filter((p) => {
+      const sync = this.readProductSyncMeta(p.metadata);
+      const status = sync?.status;
+      // Skip in-flight + already-good states regardless of channel.
+      if (status === 'PENDING' || status === 'SYNCED') return false;
+      if (p.channel.platform === ChannelPlatform.MANUAL) {
+        // MANUAL: push if never pushed or last attempt failed.
+        return !status || status === 'FAILED';
+      }
+      if (p.channel.platform === ChannelPlatform.SHOPIFY) {
+        // SHOPIFY-rebadged: push only when there's something to send.
+        return status === 'OUT_OF_SYNC' || status === 'FAILED';
+      }
+      return false;
+    });
+
+    if (toPush.length === 0) {
+      this.logger.log(`Org ${orgId} has no products pending Shopify push.`);
       return;
     }
 
     this.logger.log(
-      `Bulk-pushing ${unsynced.length} unsynced CRM product(s) for org ${orgId}…`,
+      `Bulk-pushing ${toPush.length} pending product(s) for org ${orgId}…`,
     );
 
     let succeeded = 0;
     let failed = 0;
-    for (const p of unsynced) {
+    for (const p of toPush) {
       try {
         await this.pushProduct(p.id, orgId);
         succeeded++;

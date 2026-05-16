@@ -22,6 +22,7 @@ import { SHOPIFY_PUSH_QUEUE } from './shopify-push.queue';
 import { WHATSAPP_MESSAGING_QUEUE } from './whatsapp.queue';
 import { DRAFT_MIRROR_QUEUE } from '../draft-order/draft-mirror.queue';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
+import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { LoyaltyModule } from '../loyalty/loyalty.module';
     // are safe — they share the same underlying Redis queue.
     BullModule.registerQueue({ name: DRAFT_MIRROR_QUEUE }),
     LoyaltyModule,
+    OrganizationSettingsModule,
   ],
   controllers: [ChannelController, ShopifyWebhookController, InstagramWebhookController],
   providers: [

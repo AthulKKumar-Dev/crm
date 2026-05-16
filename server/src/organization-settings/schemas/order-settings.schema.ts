@@ -16,8 +16,18 @@ export const OrderSettingsSchema = z.object({
 
 export type OrderSettings = z.infer<typeof OrderSettingsSchema>;
 
-/** Patch schema — all fields optional for PATCH semantics. */
-export const UpdateOrderSettingsSchema = OrderSettingsSchema.partial();
+/**
+ * Patch schema — every field truly optional, without defaults.
+ *
+ * Same trap as ProductSettings: `OrderSettingsSchema.partial()` would keep
+ * the `.default(false)`, causing a PATCH that doesn't include
+ * `autoSyncToShopify` to be canonicalized to `{ autoSyncToShopify: false }`
+ * and silently overwriting a user's existing `true` during the service-side
+ * merge. Explicit `.optional()` keeps unset keys unset.
+ */
+export const UpdateOrderSettingsSchema = z.object({
+  autoSyncToShopify: z.boolean().optional(),
+});
 export type UpdateOrderSettingsInput = z.infer<typeof UpdateOrderSettingsSchema>;
 
 /** Apply schema defaults to an unknown value, or fall through to defaults. */
