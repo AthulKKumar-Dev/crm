@@ -11,6 +11,7 @@ import { WhatsAppMessagingService } from './whatsapp-messaging.service';
 import { WhatsAppMessagingProcessor } from './whatsapp.processor';
 import { WhatsAppTriggerService } from './whatsapp-trigger.service';
 import { ShopifySyncService } from './shopify-sync.service';
+import { ShopifyAnalyticsService } from './shopify-analytics.service';
 import { ShopifyPushService } from './shopify-push.service';
 import { ShopifyPushProcessor } from './shopify-push.processor';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
@@ -41,14 +42,14 @@ import { OrganizationSettingsModule } from '../organization-settings/organizatio
   providers: [
     ChannelService, ShopifyOAuthService, InstagramOAuthService, WhatsAppOAuthService,
     WhatsAppMessagingService, WhatsAppMessagingProcessor, WhatsAppTriggerService,
-    ShopifySyncService, SyncProcessor, EncryptionService,
+    ShopifySyncService, ShopifyAnalyticsService, SyncProcessor, EncryptionService,
     ShopifyPushService, ShopifyPushProcessor, ShopifyPushEnqueuer,
     ShopifyGraphqlClient,
   ],
   exports: [
     ChannelService, ShopifyOAuthService, InstagramOAuthService, WhatsAppOAuthService,
     WhatsAppMessagingService, WhatsAppTriggerService,
-    ShopifySyncService, EncryptionService,
+    ShopifySyncService, ShopifyAnalyticsService, EncryptionService,
     ShopifyPushService, ShopifyPushEnqueuer,
     ShopifyGraphqlClient,
   ],

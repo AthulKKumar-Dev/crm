@@ -22,6 +22,10 @@ export class ShopifyGraphqlError extends Error {
       | 'RETRY_EXHAUSTED'
       | 'EMPTY_RESPONSE',
     public readonly details?: unknown,
+    /// HTTP status code when the failure came from the transport layer.
+    /// Callers use this to distinguish plan-gated 406s (e.g. ShopifyQL
+    /// `sessions` dataset on Basic plans) from generic 4xx errors.
+    public readonly httpStatus?: number,
   ) {
     super(message);
     this.name = 'ShopifyGraphqlError';
@@ -126,6 +130,7 @@ export class ShopifyGraphqlClient {
           `Shopify HTTP ${res.status}`,
           'HTTP_ERROR',
           await res.text(),
+          res.status,
         );
       }
 

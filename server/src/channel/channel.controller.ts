@@ -245,4 +245,30 @@ export class ChannelController {
   getSyncLogs(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.channelService.getSyncLogs(id, user.orgId!);
   }
+
+  // POST /channels/:id/register-webhooks — re-run webhook registration for
+  // an already-connected Shopify channel. Used when we add a new topic to
+  // `WEBHOOK_TOPICS` (e.g. analytics cart/checkout events) — existing
+  // channels need to re-register against Shopify or they'll silently miss
+  // the new topics. Idempotent on Shopify's side: already-registered
+  // topics return a "topic already registered" error which we swallow.
+  @Post(':id/register-webhooks')
+  async reRegisterWebhooks(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    const channel = await this.prisma.channel.findFirst({
+      where: {
+        id,
+        organizationId: user.orgId!,
+        platform: ChannelPlatform.SHOPIFY,
+      },
+      select: { id: true },
+    });
+    if (!channel) {
+      throw new BadRequestException(`Shopify channel ${id} not found`);
+    }
+    await this.shopifyOAuth.registerWebhooks(channel.id);
+    return { ok: true };
+  }
 }

@@ -267,6 +267,8 @@ model Organization {
   collections            Collection[]
   collectionTaxOverrides CollectionTaxOverride[]
   whatsappMessages       WhatsAppMessageLog[]
+  analyticsSnapshots     AnalyticsSnapshot[]
+  rawAnalyticsEvents     RawAnalyticsEvent[]
   settings               OrganizationSettings?
 
   @@map("organizations")
@@ -378,14 +380,16 @@ model Channel {
   createdAt        DateTime        @default(now()) @map("created_at")
   updatedAt        DateTime        @updatedAt @map("updated_at")
 
-  organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  syncLogs         SyncLog[]
-  products         Product[]
-  customers        Customer[]
-  orders           Order[]
-  draftOrders      DraftOrder[]
-  collections      Collection[]
-  whatsappMessages WhatsAppMessageLog[]
+  organization       Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  syncLogs           SyncLog[]
+  products           Product[]
+  customers          Customer[]
+  orders             Order[]
+  draftOrders        DraftOrder[]
+  collections        Collection[]
+  whatsappMessages   WhatsAppMessageLog[]
+  analyticsSnapshots AnalyticsSnapshot[]
+  rawAnalyticsEvents RawAnalyticsEvent[]
 
   @@unique([organizationId, platform]) // ← ONE store per platform per org
   @@index([organizationId])
@@ -1101,4 +1105,81 @@ model WhatsAppMessageLog {
   @@index([orderId])
   @@index([externalId])
   @@map("whatsapp_message_logs")
+}
+
+// ─── Analytics ───────────────────────────────────────────────────────────────
+
+enum AnalyticsGranularity {
+  DAILY
+  HOURLY
+}
+
+/// Channel-agnostic analytics snapshots. One row per (channel, date, granularity)
+/// after the daily ingestion job runs. `metrics` holds the normalised payload
+/// in JSON so the table stays stable when new metric columns appear in
+/// ShopifyQL (or when Instagram/WhatsApp analytics get wired in later).
+///
+/// Source values:
+///   "shopify_ql"          — fetched via `shopifyqlQuery` (sessions dataset).
+///   "shopify_orders_fb"   — derived from local Order rows because ShopifyQL
+///                           returned 406 (merchant on Basic plan).
+///   "instagram_insights"  — reserved for Phase 2.
+model AnalyticsSnapshot {
+  id             String               @id @default(cuid())
+  organizationId String               @map("organization_id")
+  channelId      String               @map("channel_id")
+  date           DateTime             @db.Date
+  granularity    AnalyticsGranularity @default(DAILY)
+  source         String // "shopify_ql" | "shopify_orders_fb" | "instagram_insights"
+  /// Normalised metric payload. Shape (all optional except channel-specific minimums):
+  /// {
+  ///   sessions: number, pageviews: number, uniqueVisitors: number,
+  ///   addedToCartRate: number, reachedCheckoutRate: number, conversionRate: number,
+  ///   orders: number, revenue: number, currency: string,
+  ///   byReferrer: [{ referrerSource: string, sessions: number, orders: number, revenue: number }],
+  ///   byUtm: [{ utmSource: string, utmMedium: string, utmCampaign: string, sessions: number }]
+  /// }
+  metrics        Json                 @db.JsonB
+  createdAt      DateTime             @default(now()) @map("created_at")
+  updatedAt      DateTime             @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, date, granularity])
+  @@index([organizationId, date])
+  @@index([channelId, date])
+  @@map("analytics_snapshots")
+}
+
+/// Raw per-event analytics records — populated by the Phase 2 Web Pixel
+/// extension. Stubbed here so adding that ingest endpoint later won't require
+/// a schema migration.
+///   eventName: "page_viewed" | "product_viewed" | "product_added_to_cart"
+///             | "checkout_started" | "checkout_completed" | ...
+model RawAnalyticsEvent {
+  id              String   @id @default(cuid())
+  organizationId  String   @map("organization_id")
+  channelId       String   @map("channel_id")
+  eventName       String   @map("event_name")
+  occurredAt      DateTime @map("occurred_at")
+  /// Stable per-visitor id supplied by the pixel; null for non-instrumented
+  /// surfaces (server-side webhooks etc.).
+  visitorId       String?  @map("visitor_id")
+  /// Stable per-session id supplied by the pixel.
+  sessionId       String?  @map("session_id")
+  /// Shopify customer id if the visitor is identified.
+  externalCustomerId String? @map("external_customer_id")
+  /// Free-form payload: product id, cart contents, referrer, utm, device, etc.
+  payload         Json     @db.JsonB
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, occurredAt])
+  @@index([channelId, occurredAt])
+  @@index([eventName, occurredAt])
+  @@index([sessionId])
+  @@map("raw_analytics_events")
 }

@@ -869,3 +869,59 @@ export const DRAFT_ORDER_INVOICE_SEND_MUTATION = /* GraphQL */ `
     }
   }
 `;
+
+// ─── shopifyqlQuery ────────────────────────────────────────────────────────
+// Runs a ShopifyQL string against the Analytics API. In API version 2026-01
+// the field returns a concrete `ShopifyqlQueryResponse` object (NOT a union)
+// with two fields:
+//   * `parseErrors: [String!]!` — empty when the query parsed; otherwise an
+//     array of human-readable error strings (the query string itself was
+//     malformed).
+//   * `tableData: ShopifyqlTableData` — nullable; populated when parsing
+//     succeeded.
+//
+// `rows` is a JSON scalar (an array of arrays). Each inner array's values
+// correspond positionally to `columns`. Values come back natively typed
+// (numbers as numbers, strings as strings, null where the cell is empty).
+//
+// Required scope: `read_reports`. The `sessions` / `online_store_visitors`
+// datasets additionally require the merchant to be on Shopify Advanced or
+// Plus (Basic plans surface as HTTP 406 before the GraphQL envelope is ever
+// returned — handled by the analytics service, not this file).
+
+export interface ShopifyqlTableDataColumn {
+  name: string;
+  /// One of: STRING, NUMBER, PERCENT, CURRENCY, MONEY, DATE, DATETIME, ...
+  dataType: string;
+  displayName: string;
+  subType?: string | null;
+}
+
+export interface ShopifyqlTableData {
+  columns: ShopifyqlTableDataColumn[];
+  /// JSON scalar — row-major 2D array; cell types follow `columns[i].dataType`.
+  rows: Array<Array<string | number | boolean | null>>;
+}
+
+export interface ShopifyqlQueryResponse {
+  shopifyqlQuery: {
+    parseErrors: string[];
+    tableData: ShopifyqlTableData | null;
+  };
+}
+
+export interface ShopifyqlQueryVariables {
+  shopifyql: string;
+}
+
+export const SHOPIFYQL_QUERY = /* GraphQL */ `
+  query AnalyticsShopifyqlQuery($shopifyql: String!) {
+    shopifyqlQuery(query: $shopifyql) {
+      parseErrors
+      tableData {
+        columns { name dataType displayName }
+        rows
+      }
+    }
+  }
+`;
