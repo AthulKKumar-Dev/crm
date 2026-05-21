@@ -344,7 +344,7 @@ export default function ProductDetailPage() {
           {(product.hsnCode || product.gstRate != null) && (
             <Section title="GST">
               <dl className="space-y-1.5 text-xs">
-                <DescRow label="HSN code" value={product.hsnCode || "—"} />
+                <DescRow label="HSN / SAC code" value={product.hsnCode || "—"} />
                 <DescRow
                   label="GST rate"
                   value={

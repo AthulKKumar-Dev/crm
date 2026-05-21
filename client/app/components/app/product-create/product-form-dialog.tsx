@@ -524,7 +524,7 @@ export function ProductFormDialog({
             <Section title="Tax (GST)">
               <div className="grid grid-cols-2 gap-3">
                 <Field
-                  label="HSN code"
+                  label="HSN / SAC code"
                   value={form.hsnCode}
                   onChange={(v) => patch({ hsnCode: v })}
                   mono
