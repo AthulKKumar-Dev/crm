@@ -35,6 +35,8 @@ export class ShopifyOAuthService {
         // Both read AND write scopes — write_* are needed because the CRM
         // now pushes data INTO Shopify (orders from the offline-order flow,
         // products created in the CRM, inventory levels for new products).
+        // read_reports unlocks the `shopifyqlQuery` field for the analytics
+        // section (sessions / pageviews / add-to-cart-rate / conversion).
         // Existing tokens are pinned to the scopes they were issued with;
         // merchants must re-grant on the custom-app side or reconnect.
         this.scopes = [
@@ -43,6 +45,7 @@ export class ShopifyOAuthService {
             'read_customers',
             'read_inventory', 'write_inventory',
             'read_locations',
+            'read_reports',
         ].join(',');
         this.appUrl = this.config.get<string>('appUrl')!;
         this.apiVersion = this.config.get<string>('shopify.apiVersion') ?? '2026-01';
@@ -363,13 +366,28 @@ export class ShopifyOAuthService {
         'orders/cancelled',
         'orders/fulfilled',
         'orders/partially_fulfilled',
-        'fulfillments/create',
-        'fulfillments/update',
+        // NOTE: `fulfillments/create` and `fulfillments/update` are NOT
+        // valid Shopify webhook topics — Shopify rejects them with
+        // "Invalid topic specified". The fulfillment data is already
+        // reconciled through `orders/fulfilled` and `orders/updated`
+        // (both flow through `upsertOrder`, which reads the fulfillments
+        // array off the parent order). If we ever need per-fulfillment
+        // events, the correct family is `fulfillment_orders/*` — but the
+        // webhook controller doesn't act on those today, so subscribing
+        // would just create noise.
         'draft_orders/create',
         'draft_orders/update',
         'customers/create',
         'customers/update',
         'inventory_levels/update',
+        // Analytics — populates `RawAnalyticsEvent` and feeds the hourly
+        // aggregator that lights up the per-product add-to-cart and
+        // per-product checkout panels on the analytics page.
+        'carts/create',
+        'carts/update',
+        'checkouts/create',
+        'checkouts/update',
+        'checkouts/delete',
     ];
 
     async registerWebhooks(channelId: string): Promise<void> {

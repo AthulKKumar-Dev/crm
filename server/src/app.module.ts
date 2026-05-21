@@ -31,6 +31,7 @@ import { DraftOrderModule } from './draft-order/draft-order.module';
 import { ProductModule } from './product/product.module';
 import { CustomerModule } from './customer/customer.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 import { GstModule } from './gst/gst.module';
 import { InvoiceModule } from './invoice/invoice.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
@@ -83,6 +84,7 @@ import { BillingModule } from './billing/billing.module';
     ProductModule,
     CustomerModule,
     DashboardModule,
+    AnalyticsModule,
     GstModule,
     InvoiceModule,
     LoyaltyModule,

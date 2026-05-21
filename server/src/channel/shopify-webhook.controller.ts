@@ -119,6 +119,19 @@ export class ShopifyWebhookController {
                                 `WhatsApp trigger failed (non-fatal): ${err instanceof Error ? err.message : err}`,
                             );
                         }
+                        // Also record the order as an analytics event so
+                        // the cart aggregator can compute
+                        // checkout→order conversion using consistent
+                        // sources (webhook-only counts on both sides of
+                        // the ratio). The local Order table still drives
+                        // the overall revenue / conversionRate stats —
+                        // this row is just for funnel math.
+                        await this.recordAnalyticsEvent(
+                            channel.id,
+                            channel.organizationId,
+                            topic,
+                            body,
+                        );
                     }
                     break;
 
@@ -166,6 +179,27 @@ export class ShopifyWebhookController {
                     );
                     break;
 
+                // ─── Analytics: cart + checkout events ─────────────────
+                // Stored verbatim in `RawAnalyticsEvent`. The hourly
+                // `CartEventsAggregator` dedupes by cart/checkout token and
+                // rolls them into `AnalyticsSnapshot.metrics.byProduct`.
+                // We don't process them inline — webhooks can fire dozens
+                // of times for a single shopper session, so we want the
+                // aggregator to dedupe instead of doing read-modify-write
+                // on every event.
+                case 'carts/create':
+                case 'carts/update':
+                case 'checkouts/create':
+                case 'checkouts/update':
+                case 'checkouts/delete':
+                    await this.recordAnalyticsEvent(
+                        channel.id,
+                        channel.organizationId,
+                        topic,
+                        body,
+                    );
+                    break;
+
                 default:
                     this.logger.log(`Unhandled webhook topic: ${topic}`);
             }
@@ -192,6 +226,87 @@ export class ShopifyWebhookController {
             });
             this.logger.log(`Product ${externalId} marked as archived (deleted in Shopify)`);
         }
+    }
+
+    /**
+     * Persist a webhook payload as a `RawAnalyticsEvent` row. The
+     * `sessionId` field carries the right token for each topic so the
+     * aggregator can deduplicate / link funnel stages:
+     *   - cart events     → cart `token`
+     *   - checkout events → checkout `token` (falls back to `cart_token`
+     *                       so a checkout can be matched back to its cart)
+     *   - order events    → `checkout_token` (links the order to its
+     *                       checkout for funnel math); falls back to
+     *                       order id if checkout_token is absent.
+     */
+    private async recordAnalyticsEvent(
+        channelId: string,
+        orgId: string,
+        topic: string,
+        body: Record<string, unknown>,
+    ) {
+        const occurredAt = this.parseEventTimestamp(body) ?? new Date();
+        const sessionId = this.extractSessionToken(topic, body);
+        const externalCustomerId =
+            ((body as { customer?: { id?: string | number } }).customer?.id ??
+                null) === null
+                ? null
+                : String(
+                      (body as { customer: { id: string | number } }).customer
+                          .id,
+                  );
+
+        try {
+            await this.prisma.rawAnalyticsEvent.create({
+                data: {
+                    organizationId: orgId,
+                    channelId,
+                    eventName: topic.replace('/', '_'),
+                    occurredAt,
+                    visitorId: null,
+                    sessionId,
+                    externalCustomerId,
+                    payload: body as object,
+                },
+            });
+        } catch (err) {
+            this.logger.warn(
+                `Failed to record analytics event for ${topic}: ${err instanceof Error ? err.message : err}`,
+            );
+        }
+    }
+
+    private extractSessionToken(
+        topic: string,
+        body: Record<string, unknown>,
+    ): string | null {
+        if (topic.startsWith('orders/')) {
+            // Order webhooks don't have a plain `token` field; we prefer
+            // `checkout_token` so the order rolls up under the same
+            // funnel slot as its preceding checkout. Falls back to the
+            // order id (always present) so the count of distinct orders
+            // is never wrong.
+            const checkoutToken = (body as { checkout_token?: string })
+                .checkout_token;
+            if (typeof checkoutToken === 'string') return checkoutToken;
+            const id = (body as { id?: string | number }).id;
+            return id ? String(id) : null;
+        }
+        // Cart + checkout webhooks both expose `token` directly.
+        return (
+            (body as { token?: string }).token ??
+            (body as { cart_token?: string }).cart_token ??
+            null
+        );
+    }
+
+    private parseEventTimestamp(body: Record<string, unknown>): Date | null {
+        const raw =
+            (body as { updated_at?: string }).updated_at ??
+            (body as { created_at?: string }).created_at;
+        if (typeof raw !== 'string') return null;
+        const parsed = new Date(raw);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
     }
 
     private async handleInventoryUpdate(

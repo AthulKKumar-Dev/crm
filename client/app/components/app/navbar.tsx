@@ -46,7 +46,7 @@ const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboa
   // { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
   { label: "Customers", href: "/customers", icon: Users },
   { label: "Invoices", href: "/invoices", icon: Receipt },
-  // { label: "Analytics", href: "/analytics", icon: BarChart3 },
+  { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
 
 /** Top navigation bar with pill-style nav links, notification icons, and user/workspace dropdown. */
