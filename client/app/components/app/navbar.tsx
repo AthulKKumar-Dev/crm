@@ -34,6 +34,7 @@ import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { toast } from "sonner";
 
 const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
@@ -57,11 +58,19 @@ export function Navbar() {
     useAuthStore();
   const stopImpersonating = useStopImpersonating();
 
-  // Extra nav link visible only to real Collabo-team super admins (never while
-  // they're impersonating another user — the impersonation token has isSuperAdmin=false).
-  const navLinks = user?.isSuperAdmin && !impersonatedBy
-    ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
-    : NAV_LINKS;
+  const { isVendor } = useCurrentRole();
+
+  // Vendors are locked down to Orders + Products only. Otherwise, an extra
+  // Super Admin link is visible to real Collabo-team super admins (never while
+  // impersonating — the impersonation token has isSuperAdmin=false).
+  const navLinks = isVendor
+    ? [
+        { label: "Orders", href: "/orders", icon: ShoppingCart },
+        { label: "Products", href: "/products", icon: Package },
+      ]
+    : user?.isSuperAdmin && !impersonatedBy
+      ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+      : NAV_LINKS;
 
   async function handleSwitchOrg(orgId: string) {
     if (orgId === currentOrgId) return;

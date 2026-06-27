@@ -28,6 +28,8 @@ type MulterFile = {
   size: number;
 };
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
+import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { UpdateProductGstDto } from './dto/update-product-gst.dto';
@@ -57,8 +59,9 @@ export class ProductController {
   // ── COLLECTION-LEVEL ROUTES ─────────────────────────────────────────────
 
   @Get()
+  @AllowVendor()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryProductsDto) {
-    return this.productService.findAll(user.orgId!, query);
+    return this.productService.findAll(user.orgId!, query, vendorScopeFor(user));
   }
 
   @Post()
@@ -67,8 +70,9 @@ export class ProductController {
   }
 
   @Get('vendors')
+  @AllowVendor()
   getVendors(@CurrentUser() user: JwtPayload) {
-    return this.productService.getVendors(user.orgId!);
+    return this.productService.getVendors(user.orgId!, vendorScopeFor(user));
   }
 
   @Get('types')
@@ -272,8 +276,9 @@ export class ProductController {
   }
 
   @Get(':id')
+  @AllowVendor()
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.productService.findOne(id, user.orgId!);
+    return this.productService.findOne(id, user.orgId!, vendorScopeFor(user));
   }
 
   @Patch(':id/gst')

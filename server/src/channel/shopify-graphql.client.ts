@@ -81,8 +81,11 @@ export class ShopifyGraphqlClient {
     auth: ShopifyAuthContext,
     query: string,
     variables?: TVars,
+    apiVersion?: string,
   ): Promise<TResponse> {
-    const url = `https://${auth.shopDomain}/admin/api/${this.getApiVersion()}/graphql.json`;
+    // `apiVersion` overrides the configured version for a single call — needed for
+    // mutations only available on a newer version (e.g. fulfillmentOrderReportProgress).
+    const url = `https://${auth.shopDomain}/admin/api/${apiVersion ?? this.getApiVersion()}/graphql.json`;
     const body = JSON.stringify({ query, variables: variables ?? {} });
 
     let attempt = 0;
