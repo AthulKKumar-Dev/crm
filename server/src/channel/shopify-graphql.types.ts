@@ -748,6 +748,29 @@ export const FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION = /* GraphQL */ `
   }
 `;
 
+// fulfillmentOrderOpen — marks a fulfilment order "ready for fulfilment",
+// reverting an IN_PROGRESS (manually-reported-progress) FO back to OPEN. This is
+// the counterpart to fulfillmentOrderReportProgress. Available since API 2026-01.
+export interface FulfillmentOrderOpenVariables {
+  id: string;
+}
+
+export interface FulfillmentOrderOpenResponse {
+  fulfillmentOrderOpen: {
+    fulfillmentOrder: { id: string; status: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const FULFILLMENT_ORDER_OPEN_MUTATION = /* GraphQL */ `
+  mutation FulfillmentOrderOpen($id: ID!) {
+    fulfillmentOrderOpen(id: $id) {
+      fulfillmentOrder { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
 // fulfillmentOrderReportProgress — drives Shopify's "Mark as in progress".
 // Requires API version 2026-04+ and the write_merchant_managed_fulfillment_orders
 // (or write_assigned_fulfillment_orders) scope. Takes the FulfillmentOrder GID.

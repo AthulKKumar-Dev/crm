@@ -57,10 +57,13 @@ import {
   FULFILLMENT_CANCEL_MUTATION,
   FULFILLMENT_ORDER_HOLD_MUTATION,
   FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION,
+  FULFILLMENT_ORDER_OPEN_MUTATION,
   FulfillmentOrderHoldResponse,
   FulfillmentOrderHoldVariables,
   FulfillmentOrderReleaseHoldResponse,
   FulfillmentOrderReleaseHoldVariables,
+  FulfillmentOrderOpenResponse,
+  FulfillmentOrderOpenVariables,
   FULFILLMENT_ORDER_REPORT_PROGRESS_MUTATION,
   FulfillmentOrderReportProgressResponse,
   FULFILLMENT_EVENT_CREATE_MUTATION,
@@ -1566,7 +1569,9 @@ export class OrderService {
   /**
    * Best-effort: reflect the vendor's status on the Shopify fulfilment orders
    * containing their line items.
-   *   on_hold     → fulfillmentOrderHold
+   *   on_hold     → (reopen if in-progress, then) fulfillmentOrderHold
+   *   released    → fulfillmentOrderReleaseHold (if held) or fulfillmentOrderOpen
+   *                 (if in-progress) — i.e. back to OPEN / unfulfilled
    *   in_progress → release any hold, then fulfillmentOrderReportProgress
    * FO-level for v1 (a fulfilment order shared with another vendor is affected
    * wholesale; per-line partial holds are a follow-up). `reportProgress` needs
@@ -1609,6 +1614,17 @@ export class OrderService {
 
     for (const t of targets) {
       if (status === 'on_hold') {
+        // A fulfilment order that's mid-progress (IN_PROGRESS) must be reopened
+        // before Shopify will let it be held.
+        if (t.foStatus === 'IN_PROGRESS') {
+          await this.graphql
+            .request<FulfillmentOrderOpenResponse, FulfillmentOrderOpenVariables>(
+              auth,
+              FULFILLMENT_ORDER_OPEN_MUTATION,
+              { id: t.foId },
+            )
+            .catch(() => undefined);
+        }
         await this.graphql.request<FulfillmentOrderHoldResponse, FulfillmentOrderHoldVariables>(
           auth,
           FULFILLMENT_ORDER_HOLD_MUTATION,
@@ -1623,13 +1639,24 @@ export class OrderService {
           },
         );
       } else if (status === 'released') {
-        // Only release fulfilment orders that are actually on hold (a partial hold
-        // moved the held items into their own ON_HOLD fulfilment order).
-        if (t.foStatus !== 'ON_HOLD') continue;
-        await this.graphql.request<
-          FulfillmentOrderReleaseHoldResponse,
-          FulfillmentOrderReleaseHoldVariables
-        >(auth, FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION, { id: t.foId });
+        // "Released" means back to unfulfilled/OPEN. How we get there depends on
+        // the FO's current state: release a hold, or reopen an in-progress FO.
+        if (t.foStatus === 'ON_HOLD') {
+          await this.graphql.request<
+            FulfillmentOrderReleaseHoldResponse,
+            FulfillmentOrderReleaseHoldVariables
+          >(auth, FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION, { id: t.foId });
+        } else if (t.foStatus === 'IN_PROGRESS') {
+          const res = await this.graphql.request<
+            FulfillmentOrderOpenResponse,
+            FulfillmentOrderOpenVariables
+          >(auth, FULFILLMENT_ORDER_OPEN_MUTATION, { id: t.foId });
+          ShopifyGraphqlClient.throwIfUserErrors(
+            res.fulfillmentOrderOpen.userErrors,
+            'fulfillmentOrderOpen',
+          );
+        }
+        // OPEN already means unfulfilled — nothing to push.
       } else {
         // in_progress: release any hold, then report progress (requires 2026-04+).
         await this.graphql
