@@ -24,6 +24,8 @@ export default [
     route("orders", "routes/app/orders.tsx"),
     route("orders/new", "routes/app/orders/new.tsx"),
     route("orders/:id", "routes/app/orders/$id.tsx"),
+    route("orders/:id/packing-slip", "routes/app/orders/packing-slip.tsx"),
+    route("orders/:id/pick-slip", "routes/app/orders/pick-slip.tsx"),
     route("drafts", "routes/app/drafts.tsx"),
     route("drafts/new", "routes/app/drafts/new.tsx"),
     route("drafts/:id", "routes/app/drafts/$id.tsx"),

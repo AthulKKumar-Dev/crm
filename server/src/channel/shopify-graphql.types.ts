@@ -540,6 +540,41 @@ export const ORDER_FULFILLMENT_ORDERS_QUERY = /* GraphQL */ `
   }
 `;
 
+// Same shape as ORDER_FULFILLMENT_ORDERS_QUERY but WITHOUT the OPEN/IN_PROGRESS
+// filter, so callers can act on fulfilment orders in any status — e.g. release a
+// hold on an ON_HOLD fulfilment order, which the filtered query would hide.
+export const ORDER_ALL_FULFILLMENT_ORDERS_QUERY = /* GraphQL */ `
+  query OrderAllFulfillmentOrders($id: ID!) {
+    order(id: $id) {
+      id
+      fulfillmentOrders(first: 25) {
+        nodes {
+          id
+          status
+          requestStatus
+          assignedLocation {
+            name
+            location { id }
+          }
+          lineItems(first: 100) {
+            nodes {
+              id
+              remainingQuantity
+              totalQuantity
+              lineItem {
+                id
+                title
+                variantTitle
+                sku
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 // ─── fulfillmentCreate ─────────────────────────────────────────────────────
 // Shopify-side input groups line items by their fulfillment order.
 // `notifyCustomer` lets Shopify send the shipping email.
@@ -655,6 +690,162 @@ export const FULFILLMENT_CANCEL_MUTATION = /* GraphQL */ `
         trackingInfo { number url company }
       }
       userErrors { field message }
+    }
+  }
+`;
+
+// ─── fulfillmentOrderHold / releaseHold — drives the vendor "On hold" status.
+// NOTE: the FulfillmentOrderHoldInput shape is API-version sensitive. Calls are
+// made best-effort (failures are logged, never block the local status update),
+// so a version mismatch degrades gracefully rather than breaking the action.
+
+export interface FulfillmentOrderHoldVariables {
+  // The fulfillment order id is a SEPARATE argument — it is NOT inside the input.
+  id: string;
+  fulfillmentHold: {
+    reason: string; // FulfillmentHoldReason enum, e.g. 'OTHER'
+    reasonNotes?: string;
+    // When provided, ONLY these FO line items are held (Shopify splits the FO).
+    // Omitting this holds the ENTIRE fulfillment order — which is the bug we're
+    // fixing for the per-product vendor hold.
+    fulfillmentOrderLineItems?: Array<{ id: string; quantity: number }>;
+  };
+}
+
+export interface FulfillmentOrderHoldResponse {
+  fulfillmentOrderHold: {
+    fulfillmentOrder: { id: string; status: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const FULFILLMENT_ORDER_HOLD_MUTATION = /* GraphQL */ `
+  mutation FulfillmentOrderHold($id: ID!, $fulfillmentHold: FulfillmentOrderHoldInput!) {
+    fulfillmentOrderHold(id: $id, fulfillmentHold: $fulfillmentHold) {
+      fulfillmentOrder { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+export interface FulfillmentOrderReleaseHoldVariables {
+  id: string;
+}
+
+export interface FulfillmentOrderReleaseHoldResponse {
+  fulfillmentOrderReleaseHold: {
+    fulfillmentOrder: { id: string; status: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION = /* GraphQL */ `
+  mutation FulfillmentOrderReleaseHold($id: ID!) {
+    fulfillmentOrderReleaseHold(id: $id) {
+      fulfillmentOrder { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+// fulfillmentOrderOpen — marks a fulfilment order "ready for fulfilment",
+// reverting an IN_PROGRESS (manually-reported-progress) FO back to OPEN. This is
+// the counterpart to fulfillmentOrderReportProgress. Available since API 2026-01.
+export interface FulfillmentOrderOpenVariables {
+  id: string;
+}
+
+export interface FulfillmentOrderOpenResponse {
+  fulfillmentOrderOpen: {
+    fulfillmentOrder: { id: string; status: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const FULFILLMENT_ORDER_OPEN_MUTATION = /* GraphQL */ `
+  mutation FulfillmentOrderOpen($id: ID!) {
+    fulfillmentOrderOpen(id: $id) {
+      fulfillmentOrder { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+// fulfillmentOrderReportProgress — drives Shopify's "Mark as in progress".
+// Requires API version 2026-04+ and the write_merchant_managed_fulfillment_orders
+// (or write_assigned_fulfillment_orders) scope. Takes the FulfillmentOrder GID.
+export interface FulfillmentOrderReportProgressResponse {
+  fulfillmentOrderReportProgress: {
+    fulfillmentOrder: { id: string; status: string } | null;
+    userErrors: Array<{ field?: string[] | null; message: string }>;
+  };
+}
+
+export const FULFILLMENT_ORDER_REPORT_PROGRESS_MUTATION = /* GraphQL */ `
+  mutation FulfillmentOrderReportProgress($id: ID!) {
+    fulfillmentOrderReportProgress(id: $id) {
+      fulfillmentOrder { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+// fulfillmentEventCreate — drives "Mark as delivered" (and other shipment events).
+// Takes the FULFILLMENT GID + a status (e.g. 'DELIVERED').
+export interface FulfillmentEventCreateVariables {
+  fulfillmentEvent: {
+    fulfillmentId: string;
+    status: string; // FulfillmentEventStatus, e.g. 'DELIVERED'
+    happenedAt?: string;
+  };
+}
+
+export interface FulfillmentEventCreateResponse {
+  fulfillmentEventCreate: {
+    fulfillmentEvent: { id: string; status: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const FULFILLMENT_EVENT_CREATE_MUTATION = /* GraphQL */ `
+  mutation FulfillmentEventCreate($fulfillmentEvent: FulfillmentEventInput!) {
+    fulfillmentEventCreate(fulfillmentEvent: $fulfillmentEvent) {
+      fulfillmentEvent { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── Order fulfillments WITH their line items ──────────────────────────────
+// Used to attribute an existing Shopify fulfilment to a specific (vendor) line
+// when our local lineItemIds metadata is missing — e.g. the order was fulfilled
+// directly in Shopify admin, or before we started tagging fulfilments. Lets the
+// per-product "mark delivered" / "unfulfil" actions work for ANY fulfilled line.
+export interface OrderFulfillmentWithLinesNode {
+  id: string;
+  status: string;
+  fulfillmentLineItems: {
+    nodes: Array<{ quantity: number; lineItem: { id: string } | null }>;
+  };
+}
+
+export interface OrderFulfillmentsWithLinesResponse {
+  order: { fulfillments: OrderFulfillmentWithLinesNode[] } | null;
+}
+
+export const ORDER_FULFILLMENTS_WITH_LINES_QUERY = /* GraphQL */ `
+  query OrderFulfillmentsWithLines($id: ID!) {
+    order(id: $id) {
+      fulfillments(first: 50) {
+        id
+        status
+        fulfillmentLineItems(first: 100) {
+          nodes {
+            quantity
+            lineItem { id }
+          }
+        }
+      }
     }
   }
 `;

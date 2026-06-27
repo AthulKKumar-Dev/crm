@@ -1,6 +1,8 @@
 import { Body, Controller, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
+import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { OrderService } from './order.service';
 import { QueryDashboardDto } from '../dashboard/dto/query-dashboard.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
@@ -10,6 +12,7 @@ import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CapturePaymentDto } from './dto/capture-payment.dto';
 import { CreateFulfillmentDto } from './dto/create-fulfillment.dto';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
+import { SetItemsStatusDto } from './dto/mark-in-progress.dto';
 import type { Response } from 'express';
 
 @Controller('orders')
@@ -18,8 +21,9 @@ export class OrderController {
 
   // GET /api/v1/orders?page=1&limit=20&financialStatus=PAID&search=1001
   @Get()
+  @AllowVendor()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryOrdersDto) {
-    return this.orderService.findAll(user.orgId!, query);
+    return this.orderService.findAll(user.orgId!, query, vendorScopeFor(user));
   }
 
   // POST /api/v1/orders/offline — create an offline (in-store) order with
@@ -78,8 +82,12 @@ export class OrderController {
 
   // GET /api/v1/orders/:id
   @Get(':id')
+  @AllowVendor()
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.orderService.findOne(id, user.orgId!);
+    const scope = vendorScopeFor(user);
+    return scope
+      ? this.orderService.findOneForVendor(id, user.orgId!, scope)
+      : this.orderService.findOne(id, user.orgId!);
   }
 
   // PATCH /api/v1/orders/:id — edit tags / note / email / phone /
@@ -145,33 +153,107 @@ export class OrderController {
   // POST /api/v1/orders/:id/fulfillments
   // Create a fulfillment with optional tracking info.
   @Post(':id/fulfillments')
+  @AllowVendor()
   createFulfillment(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateFulfillmentDto,
   ) {
-    return this.orderService.createFulfillment(id, user.orgId!, user.sub, dto);
+    return this.orderService.createFulfillment(id, user.orgId!, user.sub, dto, vendorScopeFor(user));
+  }
+
+  // POST /api/v1/orders/:id/items/status — vendor sets their items to in_progress / on_hold.
+  @Post(':id/items/status')
+  @AllowVendor()
+  setItemsStatus(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SetItemsStatusDto,
+  ) {
+    return this.orderService.setVendorItemsStatus(
+      id,
+      user.orgId!,
+      user.sub,
+      dto.status,
+      dto.lineItemIds,
+      vendorScopeFor(user),
+      dto.reason,
+    );
+  }
+
+  // POST /api/v1/orders/:id/items/:lineId/delivered — vendor marks ONE product delivered.
+  @Post(':id/items/:lineId/delivered')
+  @AllowVendor()
+  markItemDelivered(
+    @Param('id') id: string,
+    @Param('lineId') lineId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.orderService.markVendorItemDelivered(
+      id,
+      user.orgId!,
+      user.sub,
+      lineId,
+      vendorScopeFor(user),
+    );
+  }
+
+  // POST /api/v1/orders/:id/items/:lineId/unfulfill — vendor switches ONE product back to unfulfilled.
+  @Post(':id/items/:lineId/unfulfill')
+  @AllowVendor()
+  unfulfillItem(
+    @Param('id') id: string,
+    @Param('lineId') lineId: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.orderService.unfulfillVendorItem(
+      id,
+      user.orgId!,
+      user.sub,
+      lineId,
+      vendorScopeFor(user),
+    );
   }
 
   // PATCH /api/v1/orders/:id/fulfillments/:fid/tracking
   @Patch(':id/fulfillments/:fid/tracking')
+  @AllowVendor()
   updateTracking(
     @Param('id') id: string,
     @Param('fid') fid: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: UpdateTrackingDto,
   ) {
-    return this.orderService.updateTracking(id, fid, user.orgId!, user.sub, dto);
+    return this.orderService.updateTracking(id, fid, user.orgId!, user.sub, dto, vendorScopeFor(user));
   }
 
-  // POST /api/v1/orders/:id/fulfillments/:fid/cancel
+  // POST /api/v1/orders/:id/fulfillments/:fid/delivered — mark a shipment delivered.
+  @Post(':id/fulfillments/:fid/delivered')
+  @AllowVendor()
+  markFulfillmentDelivered(
+    @Param('id') id: string,
+    @Param('fid') fid: string,
+    @CurrentUser() user: JwtPayload,
+  ) {
+    return this.orderService.markFulfillmentDelivered(
+      id,
+      user.orgId!,
+      user.sub,
+      fid,
+      vendorScopeFor(user),
+    );
+  }
+
+  // POST /api/v1/orders/:id/fulfillments/:fid/cancel — also the vendor's
+  // "switch back to unfulfilled" action (scoped to their own fulfilments).
   @Post(':id/fulfillments/:fid/cancel')
+  @AllowVendor()
   cancelFulfillment(
     @Param('id') id: string,
     @Param('fid') fid: string,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.orderService.cancelFulfillment(id, fid, user.orgId!, user.sub);
+    return this.orderService.cancelFulfillment(id, fid, user.orgId!, user.sub, vendorScopeFor(user));
   }
 
   // POST /api/v1/orders/:id/sync — manually push a MANUAL offline order to the

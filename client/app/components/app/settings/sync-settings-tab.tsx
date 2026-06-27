@@ -9,6 +9,7 @@ import {
 } from "~/hooks/use-settings-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useUpdateOrganizationMutation } from "~/hooks/use-org-mutations";
+import type { ProductSettings } from "~/types/api";
 
 /**
  * Combined "Products" and "Orders" settings panes. Each domain has one toggle
@@ -65,7 +66,75 @@ export function ProductSettingsTab() {
           onChange={(checked) => mutation.mutate({ allowOversellGlobally: checked })}
         />
         <LowStockThresholdRow />
+        <VendorMetafieldRow settings={settings} mutation={mutation} />
       </SettingsCard>
+    </div>
+  );
+}
+
+/**
+ * Multi-vendor routing config. Toggle to read each product's vendor from a
+ * Shopify product metafield (e.g. `custom.vendor_shop_domain`) into
+ * Product.vendorKey, which scopes VENDOR-role members. Built-in Product.vendor
+ * is the fallback. Namespace/key commit on blur.
+ */
+function VendorMetafieldRow({
+  settings,
+  mutation,
+}: {
+  settings: ProductSettings;
+  mutation: ReturnType<typeof useUpdateProductSettingsMutation>;
+}) {
+  const [namespace, setNamespace] = useState(settings.vendorMetafieldNamespace ?? "custom");
+  const [key, setKey] = useState(settings.vendorMetafieldKey ?? "vendor_shop_domain");
+
+  useEffect(() => setNamespace(settings.vendorMetafieldNamespace ?? "custom"), [settings.vendorMetafieldNamespace]);
+  useEffect(() => setKey(settings.vendorMetafieldKey ?? "vendor_shop_domain"), [settings.vendorMetafieldKey]);
+
+  return (
+    <div className="space-y-3 px-5 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+            Identify vendor by product metafield
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground leading-relaxed">
+            When ON, product sync reads the metafield below into each product's vendor key, which is
+            used to scope vendor accounts (their products + order lines). The built-in Shopify "Vendor"
+            field is the fallback for untagged products. Re-sync products after enabling. Default OFF.
+          </p>
+        </div>
+        <ToggleSwitch
+          checked={settings.vendorMetafieldEnabled}
+          disabled={isFieldSaving(mutation, "vendorMetafieldEnabled")}
+          onChange={(checked) => mutation.mutate({ vendorMetafieldEnabled: checked })}
+        />
+      </div>
+      {settings.vendorMetafieldEnabled && (
+        <div className="flex items-center gap-2">
+          <input
+            value={namespace}
+            onChange={(e) => setNamespace(e.target.value)}
+            onBlur={() =>
+              namespace && namespace !== settings.vendorMetafieldNamespace &&
+              mutation.mutate({ vendorMetafieldNamespace: namespace })
+            }
+            placeholder="namespace (e.g. custom)"
+            className="h-8 flex-1 rounded-lg border border-input bg-white px-3 text-xs dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-[#cdff8c]"
+          />
+          <span className="text-xs text-muted-foreground">.</span>
+          <input
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            onBlur={() =>
+              key && key !== settings.vendorMetafieldKey &&
+              mutation.mutate({ vendorMetafieldKey: key })
+            }
+            placeholder="key (e.g. vendor_shop_domain)"
+            className="h-8 flex-1 rounded-lg border border-input bg-white px-3 text-xs dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-[#cdff8c]"
+          />
+        </div>
+      )}
     </div>
   );
 }

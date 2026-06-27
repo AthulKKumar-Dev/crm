@@ -20,6 +20,7 @@ import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
 import { OrgRequiredGuard } from './auth/guards/org-required.guard';
+import { VendorAccessGuard } from './auth/guards/vendor-access.guard';
 import { SuperAdminGuard } from './auth/guards/super-admin.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
@@ -98,6 +99,7 @@ import { BillingModule } from './billing/billing.module';
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: OrgRequiredGuard },
+    { provide: APP_GUARD, useClass: VendorAccessGuard },
     { provide: APP_GUARD, useClass: SuperAdminGuard },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
     { provide: APP_FILTER, useClass: PrismaExceptionFilter },
