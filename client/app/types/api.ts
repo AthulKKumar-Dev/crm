@@ -122,12 +122,65 @@ export interface OrganizationMembership {
   id: string;
   organizationId: string;
   role: UserRole;
+  /** For VENDOR role: the Product.vendor value this membership is scoped to. */
+  vendorScope?: string | null;
   isActive: boolean;
   organization: Organization;
 }
 
 /** Possible roles a user can hold within an organization. */
-export type UserRole = "OWNER" | "ADMIN" | "MANAGER" | "AGENT" | "VIEWER";
+export type UserRole = "OWNER" | "ADMIN" | "MANAGER" | "AGENT" | "VIEWER" | "VENDOR";
+
+// ─── Vendor-scoped order shapes (returned to VENDOR-role users) ──────────────
+
+export interface VendorShipTo {
+  name: string | null;
+  company: string | null;
+  address1: string | null;
+  address2: string | null;
+  city: string | null;
+  province: string | null;
+  zip: string | null;
+  country: string | null;
+}
+
+export interface VendorOrderLine {
+  id: string;
+  title: string;
+  variantTitle: string | null;
+  sku: string | null;
+  quantity: number;
+  price: string | number;
+  lineTotal: number;
+  imageUrl: string | null;
+  fulfillmentStatus: string | null;
+  /** The live fulfilment this line belongs to (for per-product deliver/unfulfil). */
+  fulfillmentId: string | null;
+}
+
+export interface VendorOrderFulfillment {
+  id: string;
+  status: string;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  trackingCompany: string | null;
+  shippedAt: string | null;
+  createdAt: string;
+}
+
+/** What `GET /orders/:id` returns to a VENDOR — their items only, no money/customer. */
+export interface VendorOrderDetail {
+  id: string;
+  orderNumber: number;
+  name: string;
+  fulfillmentStatus: string;
+  currency: string;
+  createdAt: string;
+  shipTo: VendorShipTo | null;
+  lineItems: VendorOrderLine[];
+  vendorSubtotal: number;
+  fulfillments: VendorOrderFulfillment[];
+}
 
 // ─── Auth Request Types ────────────────────────────────────────────────────
 
@@ -176,6 +229,7 @@ export interface AuthOrganization {
   slug: string;
   type: "PERSONAL" | "ORGANIZATION";
   role: UserRole;
+  vendorScope?: string | null;
 }
 
 /** Response returned after successful login, including tokens and user info. */
@@ -382,6 +436,8 @@ export interface UpdateMemberRoleRequest {
 export interface SendInviteRequest {
   email: string;
   role: UserRole;
+  /** Required when role is VENDOR: the Product.vendor value to scope them to. */
+  vendorScope?: string;
 }
 
 /** A pending team invitation record. */
@@ -853,6 +909,8 @@ export interface OrderLineItem {
   price: number;
   sku: string | null;
   variantTitle: string | null;
+  /** Per-line fulfilment state: null | 'fulfilled' | 'delivered' | 'on_hold' | 'in_progress'. */
+  fulfillmentStatus: string | null;
 }
 
 /** A fulfillment record within an order detail. */
@@ -1058,6 +1116,15 @@ export interface ProductSettings {
    * `shopify`. Default false (per-variant flag is honored as-is).
    */
   trackQuantityGlobally: boolean;
+  /**
+   * Multi-vendor routing: when true, product sync reads the vendor from the
+   * Shopify product metafield `{vendorMetafieldNamespace}.{vendorMetafieldKey}`
+   * into Product.vendorKey (the primary vendor match key; built-in Product.vendor
+   * is the fallback). Default false.
+   */
+  vendorMetafieldEnabled: boolean;
+  vendorMetafieldNamespace: string;
+  vendorMetafieldKey: string;
 }
 
 /** Order-domain settings stored as JSONB on OrganizationSettings.orderSettings. */

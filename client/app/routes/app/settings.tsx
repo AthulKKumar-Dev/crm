@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { toast } from "sonner";
 import {
@@ -27,6 +27,7 @@ import {
   useRevokeInviteMutation,
 } from "~/hooks/use-org-mutations";
 import { userService } from "~/services/user.service";
+import { apiClient } from "~/lib/api-client";
 import { useGstins, useIndianStates, useStateTaxRates, useProductTypeTaxRates, useCollections, useCollectionOverrides } from "~/hooks/use-gst-queries";
 import {
   useCreateGstinMutation, useUpdateGstinMutation, useDeleteGstinMutation,
@@ -100,6 +101,7 @@ const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
   { value: "MANAGER", label: "Manager" },
   { value: "AGENT", label: "Agent" },
   { value: "VIEWER", label: "Viewer" },
+  { value: "VENDOR", label: "Vendor" },
 ];
 
 const AVATAR_COLORS = [
@@ -202,48 +204,84 @@ type PasswordForm = z.infer<typeof passwordSchema>;
 function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("AGENT");
+  const [vendorScope, setVendorScope] = useState("");
   const sendInvite = useSendInviteMutation(orgId);
 
+  const needsVendor = role === "VENDOR";
+
+  // Distinct Product.vendor values to scope a vendor invite to.
+  const { data: vendorOptions = [] } = useQuery({
+    queryKey: ["products", "vendors"],
+    queryFn: () => apiClient.get<string[]>("/products/vendors").then((r) => r.data),
+    enabled: needsVendor,
+  });
+
+  const canSend = !!email.trim() && (!needsVendor || !!vendorScope);
+
   function handleSendInvite() {
-    if (!email.trim()) return;
-    sendInvite.mutate({ email: email.trim(), role }, {
-      onSuccess: () => { setEmail(""); onDone(); },
-    });
+    if (!canSend) return;
+    sendInvite.mutate(
+      { email: email.trim(), role, vendorScope: needsVendor ? vendorScope : undefined },
+      { onSuccess: () => { setEmail(""); setVendorScope(""); onDone(); } },
+    );
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-dashed border-[#CEF17B] bg-[#CEF17B]/5 p-3">
-      <div className="relative flex-1">
-        <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-gray-400 dark:text-gray-400" />
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="teammate@company.com"
-          className="w-full rounded-lg border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 py-2 pl-9 pr-3 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
-        />
+    <div className="space-y-2 rounded-lg border border-dashed border-[#CEF17B] bg-[#CEF17B]/5 p-3">
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <Mail className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-gray-400 dark:text-gray-400" />
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="teammate@company.com"
+            className="w-full rounded-lg border border-gray-200 bg-white dark:bg-gray-900 dark:border-gray-700 py-2 pl-9 pr-3 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 shadow-sm outline-none focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
+          />
+        </div>
+        <Select value={role} onValueChange={(selectedRole) => setRole(selectedRole as UserRole)}>
+          <SelectTrigger className="w-[110px] h-9 shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-xs shadow-sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ROLE_OPTIONS.map((roleOption) => (
+              <SelectItem key={roleOption.value} value={roleOption.value}>{roleOption.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <button
+          type="button"
+          onClick={handleSendInvite}
+          disabled={sendInvite.isPending || !canSend}
+          className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
+        >
+          {sendInvite.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Send"}
+        </button>
+        <button type="button" onClick={onDone} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+          <X className="size-4" />
+        </button>
       </div>
-      <Select value={role} onValueChange={(selectedRole) => setRole(selectedRole as UserRole)}>
-        <SelectTrigger className="w-[110px] h-9 shrink-0 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-xs shadow-sm">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {ROLE_OPTIONS.map((roleOption) => (
-            <SelectItem key={roleOption.value} value={roleOption.value}>{roleOption.label}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <button
-        type="button"
-        onClick={handleSendInvite}
-        disabled={sendInvite.isPending || !email.trim()}
-        className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
-      >
-        {sendInvite.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Send"}
-      </button>
-      <button type="button" onClick={onDone} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
-        <X className="size-4" />
-      </button>
+
+      {needsVendor && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Package className="size-3.5 shrink-0 text-gray-400" />
+            <Select value={vendorScope} onValueChange={setVendorScope}>
+              <SelectTrigger className="flex-1 h-9 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-xs shadow-sm">
+                <SelectValue placeholder={vendorOptions.length ? "Select the vendor…" : "No vendors found in products"} />
+              </SelectTrigger>
+              <SelectContent>
+                {vendorOptions.map((v) => (
+                  <SelectItem key={v} value={v}>{v}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="pl-6 text-[10px] text-muted-foreground">
+            This vendor will only see products and orders for <strong>{vendorScope || "the selected vendor"}</strong>.
+          </p>
+        </div>
+      )}
     </div>
   );
 }

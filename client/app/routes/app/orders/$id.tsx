@@ -19,6 +19,9 @@ import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { useInvoices } from "~/hooks/use-invoice-queries";
 import { OrderActionsMenu } from "~/components/app/order-actions";
 import { OrderFulfillmentsSection } from "~/components/app/order-fulfillments";
+import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
+import { VendorOrderDetail } from "~/components/app/vendor-order-detail";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import {
   Select,
   SelectContent,
@@ -56,6 +59,7 @@ const FULFILLMENT_CLASS: Record<string, string> = {
 
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { isVendor } = useCurrentRole();
   const { data: order, isLoading } = useOrder(id);
   const { data: org } = useCurrentOrg();
   const currency = order?.currency ?? org?.currency ?? "INR";
@@ -68,6 +72,11 @@ export default function OrderDetailPage() {
   );
 
   const [showInvoiceDialog, setShowInvoiceDialog] = useState(false);
+
+  // Vendors get a deliberately narrow, vendor-scoped view (their items only).
+  if (isVendor) {
+    return <VendorOrderDetail orderId={id!} />;
+  }
 
   if (isLoading || !order) {
     return (
@@ -169,43 +178,15 @@ export default function OrderDetailPage() {
             )}
           </Section>
 
-          {/* Line items */}
-          <Section title={`Line items (${order.lineItems.length})`}>
-            <div className="overflow-x-auto -mx-5">
-              <table className="w-full text-xs">
-                <thead className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                  <tr className="border-b">
-                    <th className="px-5 py-2 text-left font-medium">Item</th>
-                    <th className="px-5 py-2 text-right font-medium">Qty</th>
-                    <th className="px-5 py-2 text-right font-medium">Unit price</th>
-                    <th className="px-5 py-2 text-right font-medium">Line total</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {order.lineItems.map((li) => (
-                    <tr key={li.id}>
-                      <td className="px-5 py-3">
-                        <p className="font-medium text-gray-900 dark:text-gray-100">{li.title}</p>
-                        {li.variantTitle && (
-                          <p className="text-[10px] text-muted-foreground">{li.variantTitle}</p>
-                        )}
-                        {li.sku && (
-                          <p className="text-[10px] font-mono text-muted-foreground">SKU {li.sku}</p>
-                        )}
-                      </td>
-                      <td className="px-5 py-3 text-right tabular-nums">{li.quantity}</td>
-                      <td className="px-5 py-3 text-right tabular-nums">
-                        {formatCurrency(li.price, currency)}
-                      </td>
-                      <td className="px-5 py-3 text-right tabular-nums font-semibold">
-                        {formatCurrency(Number(li.price) * li.quantity, currency)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </Section>
+          {/* Line items — with per-product fulfilment actions (fulfill, mark
+              delivered, unfulfill, hold/release). */}
+          <OrderItemsFulfillment
+            orderId={order.id}
+            items={order.lineItems}
+            currency={currency}
+            title="Line items"
+            allowInProgress
+          />
 
           {/* Totals */}
           <Section title="Totals">

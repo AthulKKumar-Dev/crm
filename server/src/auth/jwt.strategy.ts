@@ -48,10 +48,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             email: user.email,
             orgId: membership?.organizationId,
             role: membership?.role,
+            vendorScope: membership?.vendorScope ?? undefined,
             emailVerified: user.emailVerified,
             memberships: user.memberships.map((m) => ({
                 orgId: m.organizationId,
                 role: m.role,
+                vendorScope: m.vendorScope ?? undefined,
             })),
         };
 

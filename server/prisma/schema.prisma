@@ -58,6 +58,7 @@ enum UserRole {
   MANAGER // Manage orders, customers, campaigns. Cannot manage team.
   AGENT // View/respond to conversations, view orders. Limited write.
   VIEWER // Read-only. For stakeholders.
+  VENDOR // External supplier. Locked to their own products/orders only (scoped by OrganizationMember.vendorScope).
 }
 
 enum InviteStatus {
@@ -297,6 +298,7 @@ model OrganizationMember {
   userId         String   @map("user_id")
   role           UserRole @default(AGENT)
   permissions    Json?    @db.JsonB // Fine-grained overrides
+  vendorScope    String?  @map("vendor_scope") // For VENDOR role: the Product.vendor value this member is limited to
   isActive       Boolean  @default(true) @map("is_active")
   joinedAt       DateTime @default(now()) @map("joined_at")
   createdAt      DateTime @default(now()) @map("created_at")
@@ -348,6 +350,7 @@ model TeamInvite {
   organizationId String       @map("organization_id")
   email          String
   role           UserRole     @default(AGENT)
+  vendorScope    String?      @map("vendor_scope") // For VENDOR invites: the Product.vendor value to scope the member to
   token          String       @unique
   status         InviteStatus @default(PENDING)
   invitedBy      String       @map("invited_by")
@@ -428,7 +431,8 @@ model Product {
   externalId        String        @map("external_id") // Shopify product ID
   title             String // "Blue T-Shirt"
   bodyHtml          String?       @map("body_html") // Product description HTML
-  vendor            String? // "Nike"
+  vendor            String? // "Nike" (built-in Shopify Vendor field)
+  vendorKey         String?       @map("vendor_key") // vendor metafield value — primary vendor match key
   productType       String?       @map("product_type") // "T-Shirts"
   status            ProductStatus @default(ACTIVE)
   tags              String[]      @default([]) // ["summer", "sale"]
@@ -454,6 +458,7 @@ model Product {
   @@index([channelId])
   @@index([status])
   @@index([vendor])
+  @@index([vendorKey])
   @@index([productType])
   @@index([createdAt])
   @@map("products")
@@ -660,6 +665,7 @@ model OrderLineItem {
   title             String // Product name snapshot
   variantTitle      String?  @map("variant_title") // "Small / Red"
   sku               String?
+  vendor            String? // Snapshot of the line's vendor (Product.vendor) — drives vendor-scoped access
   quantity          Int
   price             Decimal  @db.Decimal(12, 2) // Per unit
   totalDiscount     Decimal  @default(0) @map("total_discount") @db.Decimal(12, 2)
@@ -675,6 +681,7 @@ model OrderLineItem {
   @@unique([orderId, externalId])
   @@index([orderId])
   @@index([variantId])
+  @@index([vendor])
   @@map("order_line_items")
 }
 

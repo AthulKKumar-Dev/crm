@@ -69,6 +69,33 @@ export const orderService = {
       .post<OrderFulfillment>(`/orders/${id}/fulfillments`, data)
       .then((response) => response.data),
 
+  // Vendor: set their own line items' status (on_hold with reason / released).
+  setItemsStatus: (
+    id: string,
+    status: "in_progress" | "on_hold" | "released",
+    lineItemIds: string[],
+    reason?: string,
+  ) =>
+    apiClient
+      .post<{ updated: number; status: string }>(`/orders/${id}/items/status`, {
+        status,
+        lineItemIds,
+        reason,
+      })
+      .then((response) => response.data),
+
+  // Vendor: mark ONE product delivered (updates the app + Shopify).
+  markItemDelivered: (id: string, lineId: string) =>
+    apiClient
+      .post<{ id: string; status: string }>(`/orders/${id}/items/${lineId}/delivered`)
+      .then((response) => response.data),
+
+  // Vendor: switch ONE product back to unfulfilled (updates the app + Shopify).
+  unfulfillItem: (id: string, lineId: string) =>
+    apiClient
+      .post<{ id: string; status: string }>(`/orders/${id}/items/${lineId}/unfulfill`)
+      .then((response) => response.data),
+
   updateTracking: (id: string, fid: string, data: UpdateTrackingRequest) =>
     apiClient
       .patch<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/tracking`, data)

@@ -43,6 +43,16 @@ export const ProductSettingsSchema = z.object({
    *      for every variant when global is ON.
    */
   trackQuantityGlobally: z.boolean().default(false),
+
+  /**
+   * Multi-vendor routing. When enabled, product sync reads the Shopify product
+   * metafield `{vendorMetafieldNamespace}.{vendorMetafieldKey}` into
+   * `Product.vendorKey`, which becomes the primary key for matching a product to
+   * a vendor (the built-in `Product.vendor` name is the fallback).
+   */
+  vendorMetafieldEnabled: z.boolean().default(false),
+  vendorMetafieldNamespace: z.string().default("custom"),
+  vendorMetafieldKey: z.string().default("vendor_shop_domain"),
 });
 
 export type ProductSettings = z.infer<typeof ProductSettingsSchema>;
@@ -63,6 +73,9 @@ export const UpdateProductSettingsSchema = z.object({
   autoSyncToShopify: z.boolean().optional(),
   allowOversellGlobally: z.boolean().optional(),
   trackQuantityGlobally: z.boolean().optional(),
+  vendorMetafieldEnabled: z.boolean().optional(),
+  vendorMetafieldNamespace: z.string().optional(),
+  vendorMetafieldKey: z.string().optional(),
 });
 export type UpdateProductSettingsInput = z.infer<typeof UpdateProductSettingsSchema>;
 

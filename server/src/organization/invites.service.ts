@@ -40,6 +40,27 @@ export class InvitesService {
             throw new BadRequestException('Cannot invite someone as OWNER');
         }
 
+        // 2b. VENDOR invites must be scoped to a real vendor; non-vendors carry no scope.
+        let vendorScope: string | null = null;
+        if (dto.role === UserRole.VENDOR) {
+            const scope = dto.vendorScope?.trim();
+            if (!scope) {
+                throw new BadRequestException('A vendor must be selected for VENDOR invites.');
+            }
+            const hasProducts = await this.prisma.product.findFirst({
+                where: {
+                    organizationId: orgId,
+                    deletedAt: null,
+                    OR: [{ vendorKey: scope }, { vendor: scope }],
+                },
+                select: { id: true },
+            });
+            if (!hasProducts) {
+                throw new BadRequestException(`No products found for vendor "${scope}".`);
+            }
+            vendorScope = scope;
+        }
+
         // 3. Check if already a member
         const existingUser = await this.prisma.user.findUnique({ where: { email: dto.email } });
         if (existingUser) {
@@ -68,6 +89,7 @@ export class InvitesService {
                 organizationId: orgId,
                 email: dto.email,
                 role: dto.role,
+                vendorScope,
                 token,
                 invitedBy: userId,
                 expiresAt,
@@ -81,6 +103,7 @@ export class InvitesService {
             id: invite.id,
             email: invite.email,
             role: invite.role,
+            vendorScope: invite.vendorScope,
             status: invite.status,
             token: invite.token,
             expiresAt: invite.expiresAt,

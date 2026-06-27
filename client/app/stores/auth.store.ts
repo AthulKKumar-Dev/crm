@@ -83,6 +83,7 @@ function normalizeOrganizations(
     id: crypto.randomUUID(),
     organizationId: o.id,
     role: o.role,
+    vendorScope: o.vendorScope ?? null,
     isActive: true,
     organization: {
       id: o.id,

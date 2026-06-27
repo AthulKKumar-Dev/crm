@@ -27,6 +27,7 @@ import {
     OrderNode,
     ORDERS_LIST_QUERY,
 } from './shopify-graphql.types';
+import { parseProductSettings } from '../organization-settings/schemas/product-settings.schema';
 
 const PAGE_LIMIT = 250;
 const GRAPHQL_PAGE_SIZE = 50;
@@ -223,10 +224,12 @@ export class ShopifySyncService {
             const countRes = await this.shopifyFetch(shopDomain, token, '/products/count.json');
             await this.prisma.syncLog.update({ where: { id: syncLog.id }, data: { totalEstimated: countRes?.count ?? 0 } });
 
+            const vendorMetafield = await this.getVendorMetafieldConfig(orgId);
             for await (const page of this.paginatedFetch(shopDomain, token, '/products.json', 'products', syncLog.cursor)) {
                 for (const sp of page.data) {
                     try {
-                        await this.upsertProduct(channelId, orgId, sp);
+                        const vendorKey = await this.resolveVendorKey(sp, vendorMetafield, shopDomain, token);
+                        await this.upsertProduct(channelId, orgId, sp, vendorKey);
                         processed++;
                     } catch (error) {
                         failed++;
@@ -599,15 +602,17 @@ export class ShopifySyncService {
 
     // ─── UPSERT HELPERS ───
 
-    async upsertProduct(channelId: string, orgId: string, sp: any) {
+    async upsertProduct(channelId: string, orgId: string, sp: any, vendorKey?: string | null) {
         const externalId = String(sp.id);
         const tags = sp.tags ? sp.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
+        // Only touch vendor_key when a value was resolved (string|null). undefined = leave as-is.
+        const vendorKeyUpdate = vendorKey === undefined ? {} : { vendorKey };
 
         const product = await this.prisma.product.upsert({
             where: { channelId_externalId: { channelId, externalId } },
             create: {
                 organizationId: orgId, channelId, externalId,
-                title: sp.title, bodyHtml: sp.body_html, vendor: sp.vendor,
+                title: sp.title, bodyHtml: sp.body_html, vendor: sp.vendor, vendorKey: vendorKey ?? null,
                 productType: sp.product_type, status: this.mapProductStatus(sp.status),
                 tags, options: sp.options || null,
                 publishedAt: sp.published_at ? new Date(sp.published_at) : null,
@@ -615,7 +620,7 @@ export class ShopifySyncService {
                 externalUpdatedAt: sp.updated_at ? new Date(sp.updated_at) : null,
             },
             update: {
-                title: sp.title, bodyHtml: sp.body_html, vendor: sp.vendor,
+                title: sp.title, bodyHtml: sp.body_html, vendor: sp.vendor, ...vendorKeyUpdate,
                 productType: sp.product_type, status: this.mapProductStatus(sp.status),
                 tags, options: sp.options || null,
                 publishedAt: sp.published_at ? new Date(sp.published_at) : null,
@@ -713,9 +718,22 @@ export class ShopifySyncService {
 
         for (const li of so.line_items || []) {
             let variantId: string | null = null;
+            let vendor: string | null = null;
             if (li.variant_id) {
-                const variant = await this.prisma.productVariant.findFirst({ where: { externalId: String(li.variant_id), product: { channelId } } });
+                const variant = await this.prisma.productVariant.findFirst({
+                    where: { externalId: String(li.variant_id), product: { channelId } },
+                    include: { product: { select: { vendor: true, vendorKey: true } } },
+                });
                 variantId = variant?.id ?? null;
+                vendor = variant?.product?.vendorKey ?? variant?.product?.vendor ?? null;
+            }
+            // Fallback when the variant is gone: resolve the vendor via the product's external id.
+            if (!vendor && li.product_id) {
+                const product = await this.prisma.product.findFirst({
+                    where: { channelId, externalId: String(li.product_id) },
+                    select: { vendor: true, vendorKey: true },
+                });
+                vendor = product?.vendorKey ?? product?.vendor ?? null;
             }
             await this.prisma.orderLineItem.upsert({
                 where: { orderId_externalId: { orderId: order.id, externalId: String(li.id) } },
@@ -723,12 +741,12 @@ export class ShopifySyncService {
                     orderId: order.id, variantId, externalId: String(li.id),
                     externalProductId: li.product_id ? String(li.product_id) : null,
                     externalVariantId: li.variant_id ? String(li.variant_id) : null,
-                    title: li.title || 'Unknown', variantTitle: li.variant_title, sku: li.sku,
+                    title: li.title || 'Unknown', variantTitle: li.variant_title, sku: li.sku, vendor,
                     quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0',
                     fulfillmentStatus: li.fulfillment_status, requiresShipping: li.requires_shipping ?? true,
                     taxable: li.taxable ?? true, properties: li.properties || null,
                 },
-                update: { variantId, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', fulfillmentStatus: li.fulfillment_status },
+                update: { variantId, vendor, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', fulfillmentStatus: li.fulfillment_status },
             });
         }
 
@@ -989,6 +1007,58 @@ export class ShopifySyncService {
         const apiVersion = this.graphql.getApiVersion();
         const res = await fetch(`https://${shopDomain}/admin/api/${apiVersion}${endpoint}`, { headers: { 'X-Shopify-Access-Token': token } });
         return res.ok ? res.json() : null;
+    }
+
+    // ─── VENDOR METAFIELD (multi-vendor routing) ───
+
+    /** Per-org vendor metafield config, or null when the feature is disabled. */
+    private async getVendorMetafieldConfig(
+        orgId: string,
+    ): Promise<{ namespace: string; key: string } | null> {
+        const row = await this.prisma.organizationSettings.findUnique({
+            where: { organizationId: orgId },
+            select: { productSettings: true },
+        });
+        const ps = parseProductSettings(row?.productSettings ?? null);
+        if (!ps.vendorMetafieldEnabled) return null;
+        return { namespace: ps.vendorMetafieldNamespace, key: ps.vendorMetafieldKey };
+    }
+
+    /**
+     * Resolve a product's vendor metafield value (→ Product.vendorKey). Returns:
+     *   • undefined → leave the column untouched (no config, or fetch failed),
+     *   • string    → the metafield value,
+     *   • null      → configured, but the product has no such metafield.
+     * Prefers inline `sp.metafields` (zero-cost); otherwise fetches the product's
+     * metafields. Gated entirely by `config` (null when the feature is off).
+     */
+    private async resolveVendorKey(
+        sp: any,
+        config: { namespace: string; key: string } | null,
+        shopDomain: string,
+        token: string,
+    ): Promise<string | null | undefined> {
+        if (!config) return undefined;
+        if (Array.isArray(sp.metafields)) {
+            const m = sp.metafields.find(
+                (x: any) => x?.namespace === config.namespace && x?.key === config.key,
+            );
+            return m?.value != null ? String(m.value) : null;
+        }
+        try {
+            const res = await this.shopifyFetch(
+                shopDomain,
+                token,
+                `/products/${sp.id}/metafields.json?namespace=${encodeURIComponent(config.namespace)}`,
+            );
+            const m = (res?.metafields ?? []).find((x: any) => x?.key === config.key);
+            return m?.value != null ? String(m.value) : null;
+        } catch (e) {
+            this.logger.warn(
+                `Vendor metafield fetch failed for product ${sp.id}: ${e instanceof Error ? e.message : e}`,
+            );
+            return undefined;
+        }
     }
 
     // ─── SYNC LOG HELPERS ───
