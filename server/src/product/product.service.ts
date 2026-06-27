@@ -61,7 +61,7 @@ export class ProductService {
     @Inject(IMAGE_STORAGE) private readonly imageStorage: IImageStorage,
   ) {}
 
-  async findAll(orgId: string, query: QueryProductsDto) {
+  async findAll(orgId: string, query: QueryProductsDto, vendorScope?: string) {
     const where: Prisma.ProductWhereInput = {
       organizationId: orgId,
       deletedAt: null,
@@ -69,6 +69,8 @@ export class ProductService {
 
     if (query.status) where.status = query.status;
     if (query.vendor) where.vendor = query.vendor;
+    // VENDOR role: force the scope, overriding any client-supplied vendor filter.
+    if (vendorScope) where.vendor = vendorScope;
     if (query.productType) where.productType = query.productType;
     if (query.channelId) where.channelId = query.channelId;
 
@@ -182,9 +184,9 @@ export class ProductService {
     };
   }
 
-  async findOne(id: string, orgId: string) {
+  async findOne(id: string, orgId: string, vendorScope?: string) {
     const product = await this.prisma.product.findFirst({
-      where: { id, organizationId: orgId, deletedAt: null },
+      where: { id, organizationId: orgId, deletedAt: null, ...(vendorScope ? { vendor: vendorScope } : {}) },
       include: {
         variants: { orderBy: { position: 'asc' } },
         images: { orderBy: { position: 'asc' } },
@@ -202,15 +204,21 @@ export class ProductService {
     };
   }
 
-  // Get unique vendors for filter dropdown
-  async getVendors(orgId: string) {
-    const vendors = await this.prisma.product.findMany({
-      where: { organizationId: orgId, deletedAt: null, vendor: { not: null } },
-      select: { vendor: true },
-      distinct: ['vendor'],
-      orderBy: { vendor: 'asc' },
+  // Distinct vendor match keys for the invite dropdown / filter. The match key is
+  // the vendor metafield value (Product.vendorKey) when present, else the built-in
+  // Product.vendor name. A VENDOR only ever sees their own key.
+  async getVendors(orgId: string, vendorScope?: string) {
+    if (vendorScope) return [vendorScope];
+    const products = await this.prisma.product.findMany({
+      where: { organizationId: orgId, deletedAt: null },
+      select: { vendor: true, vendorKey: true },
     });
-    return vendors.map((v) => v.vendor).filter(Boolean);
+    const keys = new Set<string>();
+    for (const p of products) {
+      const key = p.vendorKey ?? p.vendor;
+      if (key) keys.add(key);
+    }
+    return Array.from(keys).sort();
   }
 
   // Get unique product types for filter dropdown

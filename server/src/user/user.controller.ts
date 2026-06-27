@@ -2,6 +2,7 @@ import { Controller, Get, Patch, Post, Delete, Body } from '@nestjs/common';
 
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { AuthService } from '../auth/auth.service';
 import { UserService } from './user.service';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -15,6 +16,7 @@ export class UserController {
   ) { }
 
   @Get('me')
+  @AllowVendor()
   async getProfile(@CurrentUser() user: JwtPayload) {
     const fullUser = await this.userService.findByIdWithMemberships(user.sub);
     if (!fullUser) return null;

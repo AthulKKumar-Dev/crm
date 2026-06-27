@@ -2,6 +2,7 @@ import { Controller, Post, Get, Patch, Delete, Body, Param } from '@nestjs/commo
 
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { UserService } from '../user/user.service';
 import { OrganizationService } from './organization.service';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
@@ -37,12 +38,14 @@ export class OrganizationController {
 
   // GET /api/v1/organizations — list user's orgs (for org switcher UI)
   @Get()
+  @AllowVendor()
   findAll(@CurrentUser() user: JwtPayload) {
     return this.orgService.findAllForUser(user.sub);
   }
 
   // GET /api/v1/organizations/:orgId — get org details
   @Get(':orgId')
+  @AllowVendor()
   findOne(@Param('orgId') orgId: string, @CurrentUser() user: JwtPayload) {
     return this.orgService.findOne(orgId, user.sub);
   }

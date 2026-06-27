@@ -13,6 +13,7 @@ import {
 import { useProduct } from "~/hooks/use-product-queries";
 import { useOrders } from "~/hooks/use-order-queries";
 import { useDeleteProductMutation } from "~/hooks/use-product-mutations";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
 import { ImageGalleryUploader } from "~/components/app/product-create/image-gallery-uploader";
@@ -40,6 +41,7 @@ const STATUS_CLASS: Record<string, string> = {
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { isVendor } = useCurrentRole();
   const { data: product, isLoading } = useProduct(id);
   const { data: org } = useCurrentOrg();
   const currency = org?.currency ?? "INR";
@@ -132,21 +134,25 @@ export default function ProductDetailPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setEditing(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
-          >
-            <Pencil className="size-3.5" />
-            Edit
-          </button>
-          <DuplicateButton productId={product.id} />
-          <button
-            onClick={handleArchive}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-          >
-            <Trash2 className="size-3.5" />
-            Archive
-          </button>
+          {!isVendor && (
+            <>
+              <button
+                onClick={() => setEditing(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+              >
+                <Pencil className="size-3.5" />
+                Edit
+              </button>
+              <DuplicateButton productId={product.id} />
+              <button
+                onClick={handleArchive}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
+              >
+                <Trash2 className="size-3.5" />
+                Archive
+              </button>
+            </>
+          )}
           {!isManual && (
             <span className="text-[11px] text-muted-foreground italic">
               Synced from {product.channel?.name ?? "Shopify"}. Local edits push back when you click Sync.

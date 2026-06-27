@@ -20,6 +20,7 @@ import {
 } from "~/hooks/use-product-mutations";
 import { productService } from "~/services/product.service";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type { ProductStatus, ProductListParams, Product } from "~/types/api";
 
@@ -43,6 +44,7 @@ const PAGE_SIZE = 12;
 
 export default function ProductsPage() {
   const navigate = useNavigate();
+  const { isVendor } = useCurrentRole();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedType, setSelectedType] = useState("All");
   const [currentPage, setCurrentPage] = useState(1);
@@ -138,36 +140,38 @@ export default function ProductsPage() {
             Manage your product catalog, inventory, and pricing.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleExport}
-            disabled={exporting}
-            title="Export products as Shopify-format CSV"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:opacity-50"
-          >
-            {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
-            Export
-          </button>
-          <button
-            onClick={() => setImportOpen(true)}
-            title="Import products from a Shopify-format CSV"
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
-          >
-            <Upload className="size-3.5" />
-            Import
-          </button>
-          <button
-            onClick={() => setCreatingProduct(true)}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
-          >
-            <Plus className="size-3.5" />
-            Add Product
-          </button>
-        </div>
+        {!isVendor && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleExport}
+              disabled={exporting}
+              title="Export products as Shopify-format CSV"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:opacity-50"
+            >
+              {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+              Export
+            </button>
+            <button
+              onClick={() => setImportOpen(true)}
+              title="Import products from a Shopify-format CSV"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+            >
+              <Upload className="size-3.5" />
+              Import
+            </button>
+            <button
+              onClick={() => setCreatingProduct(true)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
+            >
+              <Plus className="size-3.5" />
+              Add Product
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Bulk action bar — only visible when at least one product is selected */}
-      {selectedProducts.length > 0 && (
+      {!isVendor && selectedProducts.length > 0 && (
         <BulkActionBar
           selectedProducts={selectedProducts}
           onClear={() => setSelectedIds(new Set())}

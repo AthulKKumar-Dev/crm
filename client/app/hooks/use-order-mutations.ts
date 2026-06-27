@@ -149,6 +149,60 @@ export function useCreateFulfillmentMutation(id: string) {
   });
 }
 
+/** POST /orders/:id/items/status — vendor sets their items to in_progress / on_hold. */
+export function useSetItemsStatusMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      status,
+      lineItemIds,
+      reason,
+    }: {
+      status: "in_progress" | "on_hold" | "released";
+      lineItemIds: string[];
+      reason?: string;
+    }) => orderService.setItemsStatus(id, status, lineItemIds, reason),
+    onSuccess: (_data, variables) => {
+      invalidateOrder(queryClient, id);
+      toast.success(
+        variables.status === "on_hold"
+          ? "Put on hold."
+          : variables.status === "released"
+            ? "Hold released."
+            : "Marked in progress.",
+      );
+    },
+    onError: (error) => handleMutationError(error, "Failed to update items."),
+  });
+}
+
+/** POST /orders/:id/items/:lineId/delivered — vendor marks one product delivered. */
+export function useMarkDeliveredMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (lineId: string) => orderService.markItemDelivered(id, lineId),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Marked as delivered.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to mark delivered."),
+  });
+}
+
+/** POST /orders/:id/items/:lineId/unfulfill — vendor switches one product back to unfulfilled. */
+export function useUnfulfillMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (lineId: string) => orderService.unfulfillItem(id, lineId),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      queryClient.invalidateQueries({ queryKey: orderKeys.fulfillable(id) });
+      toast.success("Switched back to unfulfilled.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to unfulfill."),
+  });
+}
+
 /** PATCH /orders/:id/fulfillments/:fid/tracking — update tracking info. */
 export function useUpdateTrackingMutation(id: string) {
   const queryClient = useQueryClient();

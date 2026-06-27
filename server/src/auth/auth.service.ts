@@ -105,6 +105,7 @@ export class AuthService {
         slug: m.organization.slug,
         type: m.organization.type,
         role: m.role,
+        vendorScope: m.vendorScope ?? undefined,
       })),
       nextStep: hasOrgs ? null : 'choose-plan',
       message: 'Email verified successfully.',
@@ -196,8 +197,9 @@ export class AuthService {
     await this.redis.setSession(user.id, {
       sub: user.id, email: user.email,
       orgId: membership?.organizationId, role: membership?.role,
+      vendorScope: membership?.vendorScope ?? undefined,
       emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
       isSuperAdmin: user.isSuperAdmin,
     });
 
@@ -219,6 +221,7 @@ export class AuthService {
         slug: m.organization.slug,
         type: m.organization.type,
         role: m.role,
+        vendorScope: m.vendorScope ?? undefined,
       })),
       nextStep: user.memberships.length === 0 ? 'choose-plan' : null,
     };
@@ -262,8 +265,9 @@ export class AuthService {
     await this.redis.setSession(userId, {
       sub: userId, email: user.email,
       orgId: membership.organizationId, role: membership.role,
+      vendorScope: membership.vendorScope ?? undefined,
       emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
       isSuperAdmin: user.isSuperAdmin,
     });
 
@@ -282,6 +286,7 @@ export class AuthService {
         slug: m.organization.slug,
         type: m.organization.type,
         role: m.role,
+        vendorScope: m.vendorScope ?? undefined,
       })),
     };
   }
@@ -335,7 +340,7 @@ export class AuthService {
     if (invite.expiresAt < new Date()) throw new BadRequestException('Invite has expired');
 
     const userExists = !!(await this.userService.findByEmail(invite.email));
-    return { email: invite.email, role: invite.role, organization: invite.organization, userExists };
+    return { email: invite.email, role: invite.role, vendorScope: invite.vendorScope, organization: invite.organization, userExists };
   }
 
   async acceptInvite(dto: AcceptInviteDto) {
@@ -362,7 +367,7 @@ export class AuthService {
     }
 
     await this.prisma.organizationMember.create({
-      data: { organizationId: invite.organizationId, userId: user.id, role: invite.role },
+      data: { organizationId: invite.organizationId, userId: user.id, role: invite.role, vendorScope: invite.vendorScope },
     });
     await this.prisma.teamInvite.update({
       where: { id: invite.id },
@@ -437,8 +442,9 @@ export class AuthService {
     await this.redis.setSession(user.id, {
       sub: user.id, email: user.email,
       orgId: membership?.organizationId, role: membership?.role,
+      vendorScope: membership?.vendorScope ?? undefined,
       emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
       isSuperAdmin: user.isSuperAdmin,
     });
 
@@ -542,8 +548,9 @@ export class AuthService {
       email: target.email,
       orgId: membership?.organizationId,
       role: membership?.role,
+      vendorScope: membership?.vendorScope ?? undefined,
       emailVerified: target.emailVerified,
-      memberships: target.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
+      memberships: target.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
       isSuperAdmin: false,
       impersonatedBy: superAdminId,
     });
@@ -579,6 +586,7 @@ export class AuthService {
         slug: m.organization.slug,
         type: m.organization.type,
         role: m.role,
+        vendorScope: m.vendorScope ?? undefined,
       })),
       currentOrganization: membership
         ? {
@@ -652,6 +660,7 @@ export class AuthService {
         slug: m.organization.slug,
         type: m.organization.type,
         role: m.role,
+        vendorScope: m.vendorScope ?? undefined,
       })),
       currentOrganization: membership
         ? {
