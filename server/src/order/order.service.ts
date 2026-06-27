@@ -258,7 +258,18 @@ export class OrderService {
         lineItems: {
           include: {
             variant: {
-              select: { id: true, title: true, sku: true, price: true },
+              select: {
+                id: true,
+                title: true,
+                sku: true,
+                price: true,
+                image: { select: { src: true } },
+                product: {
+                  select: {
+                    images: { select: { src: true }, orderBy: { position: 'asc' }, take: 1 },
+                  },
+                },
+              },
             },
           },
         },
@@ -269,7 +280,14 @@ export class OrderService {
     });
 
     if (!order) throw new NotFoundException('Order not found');
-    return order;
+    // Flatten a per-line product image so the UI can show thumbnails.
+    return {
+      ...order,
+      lineItems: order.lineItems.map((li) => ({
+        ...li,
+        imageUrl: li.variant?.image?.src ?? li.variant?.product?.images?.[0]?.src ?? null,
+      })),
+    };
   }
 
   async getComparison(orgId: string, query: QueryDashboardDto) {

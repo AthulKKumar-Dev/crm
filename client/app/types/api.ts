@@ -911,6 +911,8 @@ export interface OrderLineItem {
   variantTitle: string | null;
   /** Per-line fulfilment state: null | 'fulfilled' | 'delivered' | 'on_hold' | 'in_progress'. */
   fulfillmentStatus: string | null;
+  /** Flattened product/variant thumbnail (variant image, else first product image). */
+  imageUrl: string | null;
 }
 
 /** A fulfillment record within an order detail. */
