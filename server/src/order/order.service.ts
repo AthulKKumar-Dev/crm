@@ -2209,6 +2209,36 @@ export class OrderService {
   }
 
   /** Update tracking number/URL/carrier on an existing fulfillment. */
+  /**
+   * Add / update tracking for a single product (by line id) — resolves the
+   * fulfilment that ships the line (local mapping, else Shopify), then reuses
+   * updateTracking to push to Shopify (fulfillmentTrackingInfoUpdate) and store
+   * it locally. Works for both the owner and a scoped vendor.
+   */
+  async updateItemTracking(
+    orderId: string,
+    orgId: string,
+    userId: string,
+    lineId: string,
+    dto: UpdateTrackingDto,
+    vendorScope?: string,
+  ) {
+    const order = await this.loadOrderWithChannel(orderId, orgId);
+    const line = await this.prisma.orderLineItem.findFirst({
+      where: { id: lineId, orderId },
+      select: { id: true, externalId: true, vendor: true },
+    });
+    if (!line) throw new NotFoundException('Line item not found');
+    if (vendorScope && line.vendor !== vendorScope) {
+      throw new ForbiddenException('You can only update your own items.');
+    }
+    const fulfillment = await this.resolveFulfillmentForLine(order, line);
+    if (!fulfillment) {
+      throw new BadRequestException('Fulfil this item before adding tracking.');
+    }
+    return this.updateTracking(orderId, fulfillment.id, orgId, userId, dto);
+  }
+
   async updateTracking(
     orderId: string,
     fulfillmentId: string,

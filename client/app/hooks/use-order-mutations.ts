@@ -203,6 +203,20 @@ export function useUnfulfillMutation(id: string) {
   });
 }
 
+/** PATCH /orders/:id/items/:lineId/tracking — add/update tracking for one product. */
+export function useUpdateItemTrackingMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ lineId, data }: { lineId: string; data: UpdateTrackingRequest }) =>
+      orderService.updateItemTracking(id, lineId, data),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      toast.success("Tracking saved.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to save tracking."),
+  });
+}
+
 /** PATCH /orders/:id/fulfillments/:fid/tracking — update tracking info. */
 export function useUpdateTrackingMutation(id: string) {
   const queryClient = useQueryClient();
