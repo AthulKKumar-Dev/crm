@@ -96,6 +96,12 @@ export const orderService = {
       .post<{ id: string; status: string }>(`/orders/${id}/items/${lineId}/unfulfill`)
       .then((response) => response.data),
 
+  // Add / update tracking for ONE product (updates the app + Shopify).
+  updateItemTracking: (id: string, lineId: string, data: UpdateTrackingRequest) =>
+    apiClient
+      .patch<OrderFulfillment>(`/orders/${id}/items/${lineId}/tracking`, data)
+      .then((response) => response.data),
+
   updateTracking: (id: string, fid: string, data: UpdateTrackingRequest) =>
     apiClient
       .patch<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/tracking`, data)

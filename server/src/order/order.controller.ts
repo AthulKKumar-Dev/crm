@@ -215,6 +215,25 @@ export class OrderController {
     );
   }
 
+  // PATCH /api/v1/orders/:id/items/:lineId/tracking — add/update tracking for ONE product.
+  @Patch(':id/items/:lineId/tracking')
+  @AllowVendor()
+  updateItemTracking(
+    @Param('id') id: string,
+    @Param('lineId') lineId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateTrackingDto,
+  ) {
+    return this.orderService.updateItemTracking(
+      id,
+      user.orgId!,
+      user.sub,
+      lineId,
+      dto,
+      vendorScopeFor(user),
+    );
+  }
+
   // PATCH /api/v1/orders/:id/fulfillments/:fid/tracking
   @Patch(':id/fulfillments/:fid/tracking')
   @AllowVendor()

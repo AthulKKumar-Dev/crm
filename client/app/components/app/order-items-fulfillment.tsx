@@ -1,10 +1,11 @@
-import { useState } from "react";
-import { CheckCircle2, Clock, Loader2, Package, PauseCircle, PlayCircle, Truck, Undo2 } from "lucide-react";
+import { Fragment, useState } from "react";
+import { CheckCircle2, Clock, Loader2, MapPin, Package, PauseCircle, PlayCircle, Truck, Undo2 } from "lucide-react";
 import {
   useSetItemsStatusMutation,
   useCreateFulfillmentMutation,
   useMarkDeliveredMutation,
   useUnfulfillMutation,
+  useUpdateItemTrackingMutation,
 } from "~/hooks/use-order-mutations";
 import { cn, formatCurrency } from "~/lib/utils";
 
@@ -59,6 +60,12 @@ export function OrderItemsFulfillment({
   const createFulfillment = useCreateFulfillmentMutation(orderId);
   const markDelivered = useMarkDeliveredMutation(orderId);
   const unfulfill = useUnfulfillMutation(orderId);
+  const updateTracking = useUpdateItemTrackingMutation(orderId);
+
+  // Which line's inline "add tracking" form is open, plus its draft values.
+  const [trackingLine, setTrackingLine] = useState<string | null>(null);
+  const [tNumber, setTNumber] = useState("");
+  const [tCompany, setTCompany] = useState("");
 
   const selectedIds = [...selected];
   // Only unfulfilled / on-hold lines can be bulk-selected — fulfilled & delivered
@@ -129,6 +136,22 @@ export function OrderItemsFulfillment({
     setStatus.mutate(
       { status: "in_progress", lineItemIds: selectedIds },
       { onSuccess: () => setSelected(new Set()) },
+    );
+  }
+
+  function openTracking(lineId: string) {
+    setTrackingLine(lineId);
+    setTNumber("");
+    setTCompany("");
+  }
+
+  function saveTracking(lineId: string) {
+    updateTracking.mutate(
+      {
+        lineId,
+        data: { tracking: { number: tNumber || undefined, company: tCompany || undefined } },
+      },
+      { onSuccess: () => setTrackingLine(null) },
     );
   }
 
@@ -256,7 +279,8 @@ export function OrderItemsFulfillment({
           </thead>
           <tbody className="divide-y">
             {items.map((li) => (
-              <tr key={li.id}>
+              <Fragment key={li.id}>
+                <tr>
                 <td className="px-5 py-3 align-top">
                   <input
                     type="checkbox"
@@ -317,7 +341,7 @@ export function OrderItemsFulfillment({
 
                     {/* Per-product actions. Delivered is terminal — no actions. */}
                     {li.fulfillmentStatus === "fulfilled" && (
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex flex-wrap items-center justify-end gap-1">
                         <button
                           onClick={() => markDelivered.mutate(li.id)}
                           disabled={markDelivered.isPending || unfulfill.isPending}
@@ -329,6 +353,14 @@ export function OrderItemsFulfillment({
                             <Truck className="size-3" />
                           )}
                           Mark delivered
+                        </button>
+                        <button
+                          onClick={() => openTracking(li.id)}
+                          title="Add or update tracking"
+                          className="inline-flex items-center gap-1 rounded-md border border-input bg-white px-2 py-1 text-[10px] font-medium text-gray-600 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800/60"
+                        >
+                          <MapPin className="size-3" />
+                          Add tracking
                         </button>
                         <button
                           onClick={() => unfulfill.mutate(li.id)}
@@ -348,6 +380,48 @@ export function OrderItemsFulfillment({
                   </div>
                 </td>
               </tr>
+
+              {/* Inline "add tracking" form for this product. */}
+              {trackingLine === li.id && (
+                <tr className="bg-gray-50 dark:bg-gray-800/40">
+                  <td />
+                  <td colSpan={5} className="px-5 pb-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        value={tNumber}
+                        onChange={(e) => setTNumber(e.target.value)}
+                        placeholder="Tracking number"
+                        className="min-w-[10rem] flex-1 rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
+                      />
+                      <input
+                        value={tCompany}
+                        onChange={(e) => setTCompany(e.target.value)}
+                        placeholder="Shipping carrier"
+                        className="min-w-[8rem] flex-1 rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
+                      />
+                      <button
+                        onClick={() => saveTracking(li.id)}
+                        disabled={updateTracking.isPending}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-gray-900 px-3 py-2 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+                      >
+                        {updateTracking.isPending ? (
+                          <Loader2 className="size-3.5 animate-spin" />
+                        ) : (
+                          <MapPin className="size-3.5" />
+                        )}
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setTrackingLine(null)}
+                        className="rounded-lg px-3 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </Fragment>
             ))}
           </tbody>
           {showSubtotal && (

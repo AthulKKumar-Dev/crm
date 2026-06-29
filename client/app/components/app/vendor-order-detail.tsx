@@ -88,6 +88,7 @@ export function VendorOrderDetail({ orderId }: { orderId: string }) {
             currency={order.currency}
             title="Your items"
             showSubtotal
+            allowInProgress
           />
 
           {/* Shipments — read-only tracking. */}
