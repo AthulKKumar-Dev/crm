@@ -1094,8 +1094,33 @@ export class OrderService {
 
     if (isShopify) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
+      const auth = { shopDomain, accessToken: token };
+      const orderGid = ShopifyGraphqlClient.toGid('Order', order.externalId);
+
+      // Shopify refuses to cancel an order that still has active fulfilments
+      // ("Cannot cancel an order that has outstanding fulfillments"), so cancel
+      // those first (best-effort), then cancel the order itself.
+      const ffResp = await this.graphql.request<OrderFulfillmentsWithLinesResponse, { id: string }>(
+        auth,
+        ORDER_FULFILLMENTS_WITH_LINES_QUERY,
+        { id: orderGid },
+      );
+      for (const f of ffResp.order?.fulfillments ?? []) {
+        if (f.status === 'CANCELLED') continue;
+        await this.cancelFulfillmentOnShopify(
+          order,
+          ShopifyGraphqlClient.extractId(f.id),
+        ).catch((e) =>
+          this.logger.warn(
+            `Could not cancel fulfilment before order cancel on ${id}: ${
+              e instanceof Error ? e.message : e
+            }`,
+          ),
+        );
+      }
+
       const variables: OrderCancelVariables = {
-        orderId: ShopifyGraphqlClient.toGid('Order', order.externalId),
+        orderId: orderGid,
         reason: dto.reason,
         refund: dto.refund ?? false,
         restock: dto.restock ?? true,
@@ -1103,7 +1128,7 @@ export class OrderService {
         staffNote: dto.staffNote ?? null,
       };
       const result = await this.graphql.request<OrderCancelResponse, OrderCancelVariables>(
-        { shopDomain, accessToken: token },
+        auth,
         ORDER_CANCEL_MUTATION,
         variables,
       );
@@ -1111,6 +1136,12 @@ export class OrderService {
         result.orderCancel.orderCancelUserErrors,
         'orderCancel',
       );
+
+      // Reflect the fulfilment cancellations locally (webhooks reconcile too).
+      await this.prisma.orderFulfillment.updateMany({
+        where: { orderId: id, status: { not: 'cancelled' } },
+        data: { status: 'cancelled' },
+      });
     }
 
     return this.prisma.$transaction(async (tx) => {
