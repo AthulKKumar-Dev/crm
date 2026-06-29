@@ -17,6 +17,30 @@ const STATUS_CLASS: Record<string, string> = {
   partial: "bg-blue-100 text-blue-700",
 };
 
+// Shipping carriers offered in the tracking dropdowns.
+const CARRIERS = ["Shiprocket"];
+
+function CarrierSelect({
+  value,
+  onChange,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+}) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
+      <option value="">Shipping carrier</option>
+      {CARRIERS.map((c) => (
+        <option key={c} value={c}>
+          {c}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export interface FulfillmentItem {
   id: string;
   title: string;
@@ -26,6 +50,9 @@ export interface FulfillmentItem {
   price: string | number;
   fulfillmentStatus: string | null;
   imageUrl?: string | null;
+  trackingNumber?: string | null;
+  trackingUrl?: string | null;
+  trackingCompany?: string | null;
 }
 
 /**
@@ -139,10 +166,10 @@ export function OrderItemsFulfillment({
     );
   }
 
-  function openTracking(lineId: string) {
-    setTrackingLine(lineId);
-    setTNumber("");
-    setTCompany("");
+  function openTracking(li: FulfillmentItem) {
+    setTrackingLine(li.id);
+    setTNumber(li.trackingNumber ?? "");
+    setTCompany(li.trackingCompany ?? "");
   }
 
   function saveTracking(lineId: string) {
@@ -181,10 +208,9 @@ export function OrderItemsFulfillment({
               placeholder="Tracking number (optional)"
               className="rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
             />
-            <input
+            <CarrierSelect
               value={trackingCompany}
-              onChange={(e) => setTrackingCompany(e.target.value)}
-              placeholder="Carrier (optional)"
+              onChange={setTrackingCompany}
               className="rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
             />
             <input
@@ -314,6 +340,24 @@ export function OrderItemsFulfillment({
                       {li.sku && (
                         <p className="text-[10px] font-mono text-muted-foreground">SKU {li.sku}</p>
                       )}
+                      {(li.trackingNumber || li.trackingCompany) && (
+                        <p className="text-[10px] text-muted-foreground">
+                          Tracking:{" "}
+                          {li.trackingUrl ? (
+                            <a
+                              href={li.trackingUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="underline"
+                            >
+                              {li.trackingNumber ?? "link"}
+                            </a>
+                          ) : (
+                            li.trackingNumber
+                          )}
+                          {li.trackingCompany ? ` (${li.trackingCompany})` : ""}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </td>
@@ -355,12 +399,12 @@ export function OrderItemsFulfillment({
                           Mark delivered
                         </button>
                         <button
-                          onClick={() => openTracking(li.id)}
+                          onClick={() => openTracking(li)}
                           title="Add or update tracking"
                           className="inline-flex items-center gap-1 rounded-md border border-input bg-white px-2 py-1 text-[10px] font-medium text-gray-600 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800/60"
                         >
                           <MapPin className="size-3" />
-                          Add tracking
+                          {li.trackingNumber ? "Edit tracking" : "Add tracking"}
                         </button>
                         <button
                           onClick={() => unfulfill.mutate(li.id)}
@@ -393,10 +437,9 @@ export function OrderItemsFulfillment({
                         placeholder="Tracking number"
                         className="min-w-[10rem] flex-1 rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
                       />
-                      <input
+                      <CarrierSelect
                         value={tCompany}
-                        onChange={(e) => setTCompany(e.target.value)}
-                        placeholder="Shipping carrier"
+                        onChange={setTCompany}
                         className="min-w-[8rem] flex-1 rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
                       />
                       <button

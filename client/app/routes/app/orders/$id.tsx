@@ -10,6 +10,7 @@ import {
   Clock,
   Package,
   CreditCard,
+  Printer,
   X,
 } from "lucide-react";
 import { useOrder } from "~/hooks/use-order-queries";
@@ -144,6 +145,20 @@ export default function OrderDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link
+            to={`/orders/${order.id}/packing-slip`}
+            target="_blank"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800/60"
+          >
+            <Printer className="size-3.5" /> Packing slip
+          </Link>
+          <Link
+            to={`/orders/${order.id}/pick-slip`}
+            target="_blank"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800/60"
+          >
+            <Printer className="size-3.5" /> Pick slip
+          </Link>
           {gstEnabled && !invoice && (
             <button
               onClick={() => setShowInvoiceDialog(true)}
