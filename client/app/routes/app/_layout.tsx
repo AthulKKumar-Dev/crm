@@ -15,6 +15,17 @@ export default function AppLayout() {
   const vendorBlocked =
     isVendor && !VENDOR_ALLOWED_PREFIXES.some((p) => location.pathname.startsWith(p));
 
+  // Print/document routes render bare (no navbar/sidebar) so the app chrome
+  // never bleeds into the printed PDF. AuthGuard still gates them.
+  const isPrintRoute = /\/(packing-slip|pick-slip|print)$/.test(location.pathname);
+  if (isPrintRoute) {
+    return (
+      <AuthGuard>
+        <Outlet />
+      </AuthGuard>
+    );
+  }
+
   return (
     <AuthGuard>
       <div className="min-h-screen bg-[#f1f7fa] dark:bg-gray-950">
