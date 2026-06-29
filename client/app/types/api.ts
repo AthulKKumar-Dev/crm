@@ -156,6 +156,10 @@ export interface VendorOrderLine {
   fulfillmentStatus: string | null;
   /** The live fulfilment this line belongs to (for per-product deliver/unfulfil). */
   fulfillmentId: string | null;
+  /** Tracking from this line's fulfilment (shown inline once added). */
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  trackingCompany: string | null;
 }
 
 export interface VendorOrderFulfillment {
@@ -913,6 +917,10 @@ export interface OrderLineItem {
   fulfillmentStatus: string | null;
   /** Flattened product/variant thumbnail (variant image, else first product image). */
   imageUrl: string | null;
+  /** Tracking from this line's fulfilment (shown inline once added). */
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  trackingCompany: string | null;
 }
 
 /** A fulfillment record within an order detail. */

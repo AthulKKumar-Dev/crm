@@ -283,12 +283,16 @@ export class OrderService {
     });
 
     if (!order) throw new NotFoundException('Order not found');
-    // Flatten a per-line product image so the UI can show thumbnails.
+    // Flatten a per-line product image + its fulfilment tracking for the UI.
+    const lineTracking = this.buildLineTrackingMap(order.fulfillments);
     return {
       ...order,
       lineItems: order.lineItems.map((li) => ({
         ...li,
         imageUrl: li.variant?.image?.src ?? li.variant?.product?.images?.[0]?.src ?? null,
+        trackingNumber: lineTracking.get(li.id)?.trackingNumber ?? null,
+        trackingUrl: lineTracking.get(li.id)?.trackingUrl ?? null,
+        trackingCompany: lineTracking.get(li.id)?.trackingCompany ?? null,
       })),
     };
   }
@@ -1485,8 +1489,10 @@ export class OrderService {
       }
     }
 
+    const lineTracking = this.buildLineTrackingMap(order.fulfillments);
     const lineItems = order.lineItems.map((li) => {
       const unitPrice = Number(li.price);
+      const tracking = lineTracking.get(li.id);
       return {
         id: li.id,
         title: li.title,
@@ -1498,6 +1504,9 @@ export class OrderService {
         imageUrl: li.variant?.image?.src ?? li.variant?.product?.images?.[0]?.src ?? null,
         fulfillmentStatus: li.fulfillmentStatus,
         fulfillmentId: lineToFulfillmentId.get(li.id) ?? null,
+        trackingNumber: tracking?.trackingNumber ?? null,
+        trackingUrl: tracking?.trackingUrl ?? null,
+        trackingCompany: tracking?.trackingCompany ?? null,
       };
     });
     const vendorSubtotal = lineItems.reduce((sum, li) => sum + li.lineTotal, 0);
@@ -1720,6 +1729,37 @@ export class OrderService {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return [];
     const ids = (metadata as Record<string, unknown>).lineItemIds;
     return Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string') : [];
+  }
+
+  /**
+   * Map each line-item id → the tracking on the (live) fulfilment that ships it,
+   * so the UI can show tracking inline on the product row.
+   */
+  private buildLineTrackingMap(
+    fulfillments: Array<{
+      status: string;
+      trackingNumber: string | null;
+      trackingUrl: string | null;
+      trackingCompany: string | null;
+      metadata: Prisma.JsonValue | null;
+    }>,
+  ) {
+    const map = new Map<
+      string,
+      { trackingNumber: string | null; trackingUrl: string | null; trackingCompany: string | null }
+    >();
+    for (const f of fulfillments) {
+      if (f.status === 'cancelled') continue;
+      if (!f.trackingNumber && !f.trackingUrl && !f.trackingCompany) continue;
+      for (const lid of this.fulfillmentLineItemIds(f.metadata)) {
+        map.set(lid, {
+          trackingNumber: f.trackingNumber,
+          trackingUrl: f.trackingUrl,
+          trackingCompany: f.trackingCompany,
+        });
+      }
+    }
+    return map;
   }
 
   /** Ship-to name + postal address only — drops phone/email. */
@@ -1996,17 +2036,6 @@ export class OrderService {
       const auth = { shopDomain, accessToken: token };
       const orderGid = ShopifyGraphqlClient.toGid('Order', order.externalId);
 
-      const foResp = await this.graphql.request<
-        OrderFulfillmentOrdersResponse,
-        { id: string }
-      >(auth, ORDER_FULFILLMENT_ORDERS_QUERY, { id: orderGid });
-      const fos = foResp.order?.fulfillmentOrders.nodes ?? [];
-
-      // Group the requested line items by which FulfillmentOrder owns them.
-      // If a single OrderLineItem spans multiple FOs (multi-location), we
-      // greedily take from the first match — multi-location partial
-      // fulfillment is Phase 2b. The remainingQuantity ceiling protects
-      // against over-fulfilling.
       // The requested IDs may be LOCAL OrderLineItem ids (vendor flow, from
       // findOneForVendor) or already SHOPIFY line-item ids (merchant flow, from
       // listFulfillableLineItems). Translate local ids → their Shopify externalId
@@ -2019,6 +2048,53 @@ export class OrderService {
       const requestedByLineItem = new Map(
         dto.lineItems.map((li) => [localIdToExternal.get(li.lineItemId) ?? li.lineItemId, li]),
       );
+      const requestedExternalIds = new Set(requestedByLineItem.keys());
+
+      // Read ALL fulfilment orders (any status) so items that are on hold or
+      // mid-progress are still found. Shopify won't fulfil those until they're
+      // back to OPEN, so release / reopen the affected ones first, then re-read.
+      const readFulfillmentOrders = async () => {
+        const resp = await this.graphql.request<OrderFulfillmentOrdersResponse, { id: string }>(
+          auth,
+          ORDER_ALL_FULFILLMENT_ORDERS_QUERY,
+          { id: orderGid },
+        );
+        return resp.order?.fulfillmentOrders.nodes ?? [];
+      };
+      let fos = await readFulfillmentOrders();
+      let reopened = false;
+      for (const fo of fos) {
+        const hasRequested = fo.lineItems.nodes.some((foli) =>
+          requestedExternalIds.has(ShopifyGraphqlClient.extractId(foli.lineItem.id)),
+        );
+        if (!hasRequested) continue;
+        if (fo.status === 'ON_HOLD') {
+          await this.graphql
+            .request<FulfillmentOrderReleaseHoldResponse, FulfillmentOrderReleaseHoldVariables>(
+              auth,
+              FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION,
+              { id: fo.id },
+            )
+            .catch(() => undefined);
+          reopened = true;
+        } else if (fo.status === 'IN_PROGRESS') {
+          await this.graphql
+            .request<FulfillmentOrderOpenResponse, FulfillmentOrderOpenVariables>(
+              auth,
+              FULFILLMENT_ORDER_OPEN_MUTATION,
+              { id: fo.id },
+            )
+            .catch(() => undefined);
+          reopened = true;
+        }
+      }
+      if (reopened) fos = await readFulfillmentOrders();
+
+      // Group the requested line items by which FulfillmentOrder owns them.
+      // If a single OrderLineItem spans multiple FOs (multi-location), we
+      // greedily take from the first match — multi-location partial
+      // fulfillment is Phase 2b. The remainingQuantity ceiling protects
+      // against over-fulfilling.
       const grouped = new Map<string, Array<{ id: string; quantity: number }>>();
       for (const fo of fos) {
         for (const foli of fo.lineItems.nodes) {
