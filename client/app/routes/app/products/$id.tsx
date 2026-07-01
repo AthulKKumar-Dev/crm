@@ -134,15 +134,15 @@ export default function ProductDetailPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setEditing(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
+          >
+            <Pencil className="size-3.5" />
+            Edit
+          </button>
           {!isVendor && (
             <>
-              <button
-                onClick={() => setEditing(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
-              >
-                <Pencil className="size-3.5" />
-                Edit
-              </button>
               <DuplicateButton productId={product.id} />
               <button
                 onClick={handleArchive}

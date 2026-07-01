@@ -480,12 +480,13 @@ export class ProductService {
   // Allowed for both MANUAL (creates a new Shopify product) and SHOPIFY-channel
   // products (pushes local edits as an update). The push service decides which
   // path to take based on `product.channel.platform`.
-  async syncToShopify(id: string, orgId: string) {
+  async syncToShopify(id: string, orgId: string, vendorScope?: string) {
     const product = await this.prisma.product.findFirst({
       where: { id, organizationId: orgId, deletedAt: null },
       include: { channel: true },
     });
     if (!product) throw new NotFoundException('Product not found');
+    this.assertVendorOwnsProduct(product.vendor, vendorScope);
 
     const shopify = await this.prisma.channel.findUnique({
       where: {
@@ -531,24 +532,29 @@ export class ProductService {
   }
 
   // ─── UPDATE PRODUCT (top-level fields + optional default-variant fields) ───
-  async update(id: string, orgId: string, dto: UpdateProductDto) {
+  async update(id: string, orgId: string, dto: UpdateProductDto, vendorScope?: string) {
     const product = await this.prisma.product.findFirst({
       where: { id, organizationId: orgId, deletedAt: null },
       include: { channel: true, variants: { orderBy: { position: 'asc' }, take: 1 } },
     });
     if (!product) throw new NotFoundException('Product not found');
+    this.assertVendorOwnsProduct(product.vendor, vendorScope);
     this.assertCrmEditable(product.channel.platform);
+
+    // Vendors may not change the vendor assignment or tax fields — ignore them
+    // even if present in the payload (backend guarantee; UI shows read-only).
+    const isVendor = !!vendorScope;
 
     const updated = await this.prisma.$transaction(async (tx) => {
       const productPatch: Prisma.ProductUpdateInput = {};
       if (dto.title !== undefined) productPatch.title = dto.title;
-      if (dto.vendor !== undefined) productPatch.vendor = dto.vendor;
+      if (!isVendor && dto.vendor !== undefined) productPatch.vendor = dto.vendor;
       if (dto.productType !== undefined) productPatch.productType = dto.productType;
       if (dto.status !== undefined) productPatch.status = dto.status;
       if (dto.tags !== undefined) productPatch.tags = dto.tags;
       if (dto.bodyHtml !== undefined) productPatch.bodyHtml = dto.bodyHtml;
-      if (dto.hsnCode !== undefined) productPatch.hsnCode = dto.hsnCode;
-      if (dto.gstRate !== undefined) productPatch.gstRate = dto.gstRate;
+      if (!isVendor && dto.hsnCode !== undefined) productPatch.hsnCode = dto.hsnCode;
+      if (!isVendor && dto.gstRate !== undefined) productPatch.gstRate = dto.gstRate;
       if (dto.publishedAt !== undefined) {
         productPatch.publishedAt = dto.publishedAt ? new Date(dto.publishedAt) : null;
       }
@@ -624,15 +630,27 @@ export class ProductService {
   // ═══════════════════════════════════════════════════════════════════════
 
   /**
+   * Ownership gate for vendor-scoped edits. A VENDOR may only touch products
+   * whose `vendor` column matches their scope. No-op for admins (vendorScope
+   * undefined), so existing behavior is unchanged.
+   */
+  private assertVendorOwnsProduct(productVendor: string | null, vendorScope?: string) {
+    if (vendorScope && productVendor !== vendorScope) {
+      throw new ForbiddenException('You can only edit your own products.');
+    }
+  }
+
+  /**
    * Resolve a variant scoped to the org and assert MANUAL editability. Returns
    * the loaded variant + parent product. Throws 404 / 403 as appropriate.
    */
-  private async loadVariantForEdit(variantId: string, orgId: string) {
+  private async loadVariantForEdit(variantId: string, orgId: string, vendorScope?: string) {
     const variant = await this.prisma.productVariant.findFirst({
       where: { id: variantId, product: { organizationId: orgId, deletedAt: null } },
       include: { product: { include: { channel: true } } },
     });
     if (!variant) throw new NotFoundException('Variant not found');
+    this.assertVendorOwnsProduct(variant.product.vendor, vendorScope);
     this.assertCrmEditable(variant.product.channel.platform);
     return variant;
   }
@@ -641,18 +659,19 @@ export class ProductService {
    * Resolve a product scoped to the org and assert MANUAL editability. Returns
    * the loaded product. Throws 404 / 403 as appropriate.
    */
-  private async loadProductForEdit(productId: string, orgId: string) {
+  private async loadProductForEdit(productId: string, orgId: string, vendorScope?: string) {
     const product = await this.prisma.product.findFirst({
       where: { id: productId, organizationId: orgId, deletedAt: null },
       include: { channel: true },
     });
     if (!product) throw new NotFoundException('Product not found');
+    this.assertVendorOwnsProduct(product.vendor, vendorScope);
     this.assertCrmEditable(product.channel.platform);
     return product;
   }
 
-  async createVariant(productId: string, orgId: string, dto: CreateVariantDto) {
-    const product = await this.loadProductForEdit(productId, orgId);
+  async createVariant(productId: string, orgId: string, dto: CreateVariantDto, vendorScope?: string) {
+    const product = await this.loadProductForEdit(productId, orgId, vendorScope);
 
     const last = await this.prisma.productVariant.findFirst({
       where: { productId },
@@ -687,7 +706,8 @@ export class ProductService {
         position: dto.position ?? nextPosition,
         imageId: dto.imageId ?? null,
         requiresShipping: dto.requiresShipping ?? true,
-        taxable: dto.taxable ?? true,
+        // Vendors cannot set the tax flag — always defaults to taxable.
+        taxable: vendorScope ? true : (dto.taxable ?? true),
       },
     });
 
@@ -695,8 +715,8 @@ export class ProductService {
     return created;
   }
 
-  async updateVariant(variantId: string, orgId: string, dto: UpdateVariantDto) {
-    const variant = await this.loadVariantForEdit(variantId, orgId);
+  async updateVariant(variantId: string, orgId: string, dto: UpdateVariantDto, vendorScope?: string) {
+    const variant = await this.loadVariantForEdit(variantId, orgId, vendorScope);
 
     const patch: Prisma.ProductVariantUpdateInput = {};
     if (dto.price !== undefined) patch.price = dto.price;
@@ -713,7 +733,8 @@ export class ProductService {
     if (dto.weightUnit !== undefined) patch.weightUnit = dto.weightUnit;
     if (dto.hsCode !== undefined) patch.hsCode = dto.hsCode;
     if (dto.countryOfOrigin !== undefined) patch.countryOfOrigin = dto.countryOfOrigin;
-    if (dto.taxable !== undefined) patch.taxable = dto.taxable;
+    // Vendors cannot change the per-variant tax flag.
+    if (!vendorScope && dto.taxable !== undefined) patch.taxable = dto.taxable;
     if (dto.option1 !== undefined) patch.option1 = dto.option1;
     if (dto.option2 !== undefined) patch.option2 = dto.option2;
     if (dto.option3 !== undefined) patch.option3 = dto.option3;
@@ -739,8 +760,8 @@ export class ProductService {
     return updated;
   }
 
-  async deleteVariant(variantId: string, orgId: string) {
-    const variant = await this.loadVariantForEdit(variantId, orgId);
+  async deleteVariant(variantId: string, orgId: string, vendorScope?: string) {
+    const variant = await this.loadVariantForEdit(variantId, orgId, vendorScope);
 
     const total = await this.prisma.productVariant.count({
       where: { productId: variant.productId },
@@ -784,8 +805,8 @@ export class ProductService {
     return { ok: true };
   }
 
-  async updateOptions(productId: string, orgId: string, options: ProductOptionDto[]) {
-    const product = await this.loadProductForEdit(productId, orgId);
+  async updateOptions(productId: string, orgId: string, options: ProductOptionDto[], vendorScope?: string) {
+    const product = await this.loadProductForEdit(productId, orgId, vendorScope);
 
     await this.prisma.product.update({
       where: { id: productId },
@@ -804,8 +825,8 @@ export class ProductService {
    * (option1, option2, option3) triple). Useful when the merchant adds a new
    * value to an existing option type.
    */
-  async generateVariantsFromOptions(productId: string, orgId: string) {
-    const product = await this.loadProductForEdit(productId, orgId);
+  async generateVariantsFromOptions(productId: string, orgId: string, vendorScope?: string) {
+    const product = await this.loadProductForEdit(productId, orgId, vendorScope);
 
     const full = await this.prisma.product.findUnique({
       where: { id: productId },
@@ -1054,9 +1075,14 @@ export class ProductService {
    * merchants can manage their full catalog from the CRM. Only `not found`
    * lands in `skipped`.
    */
-  private async resolveBulkTargets(orgId: string, ids: string[]) {
+  private async resolveBulkTargets(orgId: string, ids: string[], vendorScope?: string) {
     const products = await this.prisma.product.findMany({
-      where: { id: { in: ids }, organizationId: orgId, deletedAt: null },
+      where: {
+        id: { in: ids },
+        organizationId: orgId,
+        deletedAt: null,
+        ...(vendorScope ? { vendor: vendorScope } : {}),
+      },
       include: { channel: { select: { platform: true } } },
     });
     const found = new Set(products.map((p) => p.id));
@@ -1166,8 +1192,8 @@ export class ProductService {
    * the worker handles failures and stamps metadata.shopifySync on individual
    * products. Returns the count of jobs queued.
    */
-  async bulkSync(orgId: string, productIds: string[]) {
-    const { ok, skipped } = await this.resolveBulkTargets(orgId, productIds);
+  async bulkSync(orgId: string, productIds: string[], vendorScope?: string) {
+    const { ok, skipped } = await this.resolveBulkTargets(orgId, productIds, vendorScope);
     if (ok.length === 0) return { ok: [], skipped, queued: 0 };
 
     const shopify = await this.prisma.channel.findUnique({

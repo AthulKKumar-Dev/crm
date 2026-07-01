@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { GripVertical, MoreVertical, Trash2, X } from "lucide-react";
 import type { ProductOption, ProductVariantInput } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { formatMargin } from "~/lib/utils";
 
 /**
@@ -256,6 +257,8 @@ function VariantDetailPanel({
   onClose: () => void;
 }) {
   const { data: org } = useCurrentOrg();
+  // Vendors cannot change the per-variant tax flag — render it read-only.
+  const { isVendor } = useCurrentRole();
   const currency = org?.currency ?? "USD";
   const titleLabels = [variant.option1, variant.option2, variant.option3].filter(Boolean) as string[];
   const variantTitle = titleLabels.length > 0 ? titleLabels.join(" / ") : "Default Title";
@@ -418,6 +421,7 @@ function VariantDetailPanel({
               hint="When off, the variant is exempt from automatic tax."
               checked={variant.taxable !== false}
               onChange={(checked) => onChange({ taxable: checked })}
+              disabled={isVendor}
             />
           </PanelSection>
         </div>
@@ -497,17 +501,26 @@ function PanelToggle({
   hint,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   hint?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
-    <label className="flex items-start gap-2 rounded-lg border border-input bg-white dark:bg-gray-800/40 p-2.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60">
+    <label
+      className={`flex items-start gap-2 rounded-lg border border-input bg-white dark:bg-gray-800/40 p-2.5 ${
+        disabled
+          ? "cursor-not-allowed opacity-60"
+          : "cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60"
+      }`}
+    >
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="mt-0.5 size-3.5 accent-[#CEF17B]"
       />
