@@ -16,7 +16,6 @@ export class DashboardService {
       if (query.dateFrom) dateFilter.externalCreatedAt.gte = new Date(query.dateFrom);
       if (query.dateTo) dateFilter.externalCreatedAt.lte = new Date(query.dateTo);
     }
-
     const baseOrderWhere: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
@@ -394,7 +393,7 @@ export class DashboardService {
         deletedAt: null,
         status: 'ACTIVE',
         ...(channelId && { channelId }),
-        variants: { some: { inventoryQuantity: { gt: 0, lte: threshold } } },
+        variants: { some: { inventoryQuantity: { lte: threshold } } },
       },
       include: {
         images: { take: 1, orderBy: { position: 'asc' } },
