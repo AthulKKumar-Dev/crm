@@ -3,6 +3,7 @@ import type { Request } from 'express';
 
 import { AuthService } from './auth.service';
 import { Public } from './decorators/public.decorator';
+import { AllowVendor } from './decorators/allow-vendor.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { JwtPayload } from './interfaces/jwt-payload.interface';
 import { SignupDto } from './dto/signup.dto';
@@ -54,8 +55,12 @@ export class AuthController {
     return this.authService.logout(dto.refreshToken);
   }
 
-  // Switch to a different organization — requires valid JWT
+  // Switch to a different organization — requires valid JWT.
+  // @AllowVendor: a vendor-context session (role=VENDOR while inside the
+  // invited org) must be able to switch back to its own org. switchOrg still
+  // validates active membership in the target org, so this stays safe.
   @Post('switch-org')
+  @AllowVendor()
   switchOrg(@CurrentUser() user: JwtPayload, @Body() dto: SwitchOrgDto) {
     return this.authService.switchOrg(user.sub, dto.orgId);
   }
