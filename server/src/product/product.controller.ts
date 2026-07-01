@@ -90,20 +90,22 @@ export class ProductController {
   // globally unique and the service joins back to product → org for auth.
 
   @Patch('variants/:variantId')
+  @AllowVendor()
   updateVariant(
     @Param('variantId') variantId: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: UpdateVariantDto,
   ) {
-    return this.productService.updateVariant(variantId, user.orgId!, dto);
+    return this.productService.updateVariant(variantId, user.orgId!, dto, vendorScopeFor(user));
   }
 
   @Delete('variants/:variantId')
+  @AllowVendor()
   deleteVariant(
     @Param('variantId') variantId: string,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.productService.deleteVariant(variantId, user.orgId!);
+    return this.productService.deleteVariant(variantId, user.orgId!, vendorScopeFor(user));
   }
 
   @Post('variants/:variantId/image')
@@ -137,12 +139,13 @@ export class ProductController {
   // ── PRODUCT-NESTED ROUTES (variants/images for a given product) ────────
 
   @Post(':id/variants')
+  @AllowVendor()
   createVariant(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateVariantDto,
   ) {
-    return this.productService.createVariant(id, user.orgId!, dto);
+    return this.productService.createVariant(id, user.orgId!, dto, vendorScopeFor(user));
   }
 
   @Post(':id/variants/reorder')
@@ -155,20 +158,22 @@ export class ProductController {
   }
 
   @Post(':id/variants/generate')
+  @AllowVendor()
   generateVariants(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
   ) {
-    return this.productService.generateVariantsFromOptions(id, user.orgId!);
+    return this.productService.generateVariantsFromOptions(id, user.orgId!, vendorScopeFor(user));
   }
 
   @Patch(':id/options')
+  @AllowVendor()
   updateOptions(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: UpdateOptionsDto,
   ) {
-    return this.productService.updateOptions(id, user.orgId!, dto.options);
+    return this.productService.updateOptions(id, user.orgId!, dto.options, vendorScopeFor(user));
   }
 
   @Post(':id/images')
@@ -219,8 +224,9 @@ export class ProductController {
   }
 
   @Post('bulk/sync')
+  @AllowVendor()
   bulkSync(@CurrentUser() user: JwtPayload, @Body() dto: BulkProductIdsDto) {
-    return this.productService.bulkSync(user.orgId!, dto.productIds);
+    return this.productService.bulkSync(user.orgId!, dto.productIds, vendorScopeFor(user));
   }
 
   /** Stream a Shopify-format CSV export. Supports the same query filters
@@ -291,12 +297,13 @@ export class ProductController {
   }
 
   @Patch(':id')
+  @AllowVendor()
   update(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: UpdateProductDto,
   ) {
-    return this.productService.update(id, user.orgId!, dto);
+    return this.productService.update(id, user.orgId!, dto, vendorScopeFor(user));
   }
 
   @Delete(':id')
@@ -305,7 +312,8 @@ export class ProductController {
   }
 
   @Post(':id/sync')
+  @AllowVendor()
   syncToShopify(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.productService.syncToShopify(id, user.orgId!);
+    return this.productService.syncToShopify(id, user.orgId!, vendorScopeFor(user));
   }
 }

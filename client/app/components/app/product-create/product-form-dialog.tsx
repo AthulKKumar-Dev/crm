@@ -19,6 +19,7 @@ import {
   useUpdateVariantMutation,
 } from "~/hooks/use-product-mutations";
 import { useProduct } from "~/hooks/use-product-queries";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import type {
   CreateProductRequest,
   ProductDetail,
@@ -210,6 +211,9 @@ export function ProductFormDialog({
   onClose: () => void;
 }) {
   const isEdit = !!productId;
+  // Vendors may edit product details but not the vendor assignment or tax
+  // fields — those render read-only (backend also enforces this).
+  const { isVendor } = useCurrentRole();
   const { data: product, isLoading } = useProduct(productId ?? null);
   const [form, setForm] = useState<FormState>(EMPTY);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -474,6 +478,7 @@ export function ProductFormDialog({
                   label="Vendor"
                   value={form.vendor}
                   onChange={(v) => patch({ vendor: v })}
+                  disabled={isVendor}
                 />
                 <Field
                   label="Product type"
@@ -529,6 +534,7 @@ export function ProductFormDialog({
                   onChange={(v) => patch({ hsnCode: v })}
                   mono
                   placeholder="6109"
+                  disabled={isVendor}
                 />
                 <Field
                   label="GST rate (%)"
@@ -537,6 +543,7 @@ export function ProductFormDialog({
                   onChange={(v) => patch({ gstRate: v })}
                   type="number"
                   placeholder="18"
+                  disabled={isVendor}
                 />
               </div>
             </Section>
@@ -797,6 +804,7 @@ function SingleVariantFields({
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const { data: org } = useCurrentOrg();
+  const { isVendor } = useCurrentRole();
   const currency = org?.currency ?? "USD";
 
   return (
@@ -977,6 +985,7 @@ function SingleVariantFields({
               hint="When off, this variant is exempt from automatic tax."
               checked={variant.taxable}
               onChange={(v) => patch({ taxable: v })}
+              disabled={isVendor}
             />
           </FieldsSubsection>
         </div>
@@ -1007,17 +1016,26 @@ function Toggle({
   hint,
   checked,
   onChange,
+  disabled = false,
 }: {
   label: string;
   hint?: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
-    <label className="flex items-start gap-2 rounded-lg border border-input bg-white dark:bg-gray-800/40 p-2.5 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60">
+    <label
+      className={`flex items-start gap-2 rounded-lg border border-input bg-white dark:bg-gray-800/40 p-2.5 ${
+        disabled
+          ? "cursor-not-allowed opacity-60"
+          : "cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800/60"
+      }`}
+    >
       <input
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="mt-0.5 size-3.5 accent-[#CEF17B]"
       />
@@ -1043,6 +1061,7 @@ function Field({
   required = false,
   error,
   placeholder,
+  disabled = false,
 }: {
   label: string;
   value: string;
@@ -1053,6 +1072,7 @@ function Field({
   required?: boolean;
   error?: string;
   placeholder?: string;
+  disabled?: boolean;
 }) {
   return (
     <label className="block">
@@ -1065,10 +1085,13 @@ function Field({
         step={step}
         value={value}
         placeholder={placeholder}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
         className={`mt-1 h-9 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 ${
           error ? "border-red-400" : "border-input"
-        } ${mono ? "font-mono" : ""}`}
+        } ${mono ? "font-mono" : ""} ${
+          disabled ? "cursor-not-allowed opacity-60" : ""
+        }`}
       />
       {error && <span className="mt-1 block text-[10px] text-red-600">{error}</span>}
     </label>
