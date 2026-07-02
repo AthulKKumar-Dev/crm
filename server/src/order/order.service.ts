@@ -98,7 +98,7 @@ export class OrderService {
     private readonly graphql: ShopifyGraphqlClient,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly settings: OrganizationSettingsService,
-  ) {}
+  ) { }
 
   async findAll(orgId: string, query: QueryOrdersDto, vendorScope?: string) {
     const where: Prisma.OrderWhereInput = {
@@ -627,9 +627,9 @@ export class OrderService {
 
         const isIntraState = sellerGstin
           ? this.calculator.isIntraState(
-              sellerGstin.stateCode,
-              placeOfSupplyCode,
-            )
+            sellerGstin.stateCode,
+            placeOfSupplyCode,
+          )
           : true;
 
         const lineItemsToCreate: Array<{
@@ -657,11 +657,11 @@ export class OrderService {
           const productGstRate = this.calculator.toNumber(v.product.gstRate);
           const gstRate = sellerGstin
             ? await this.taxResolver.resolveGstRate(
-                orgId,
-                v.product.id,
-                productGstRate || null,
-                placeOfSupplyCode,
-              )
+              orgId,
+              v.product.id,
+              productGstRate || null,
+              placeOfSupplyCode,
+            )
             : 0;
 
           const calc = this.calculator.calculateLineItem(
@@ -986,9 +986,9 @@ export class OrderService {
         billingStateCode: input.billingStateCode ?? null,
         ...(input.address
           ? {
-              addresses: [input.address] as Prisma.InputJsonValue,
-              defaultAddress: input.address as Prisma.InputJsonValue,
-            }
+            addresses: [input.address] as Prisma.InputJsonValue,
+            defaultAddress: input.address as Prisma.InputJsonValue,
+          }
           : {}),
       },
     });
@@ -1123,8 +1123,7 @@ export class OrderService {
           ShopifyGraphqlClient.extractId(f.id),
         ).catch((e) =>
           this.logger.warn(
-            `Could not cancel fulfilment before order cancel on ${id}: ${
-              e instanceof Error ? e.message : e
+            `Could not cancel fulfilment before order cancel on ${id}: ${e instanceof Error ? e.message : e
             }`,
           ),
         );
@@ -2176,10 +2175,10 @@ export class OrderService {
           notifyCustomer: dto.notifyCustomer ?? true,
           trackingInfo: dto.tracking
             ? {
-                number: dto.tracking.number ?? null,
-                url: dto.tracking.url ?? null,
-                company: dto.tracking.company ?? null,
-              }
+              number: dto.tracking.number ?? null,
+              url: dto.tracking.url ?? null,
+              company: dto.tracking.company ?? null,
+            }
             : null,
         },
       });
@@ -2197,9 +2196,8 @@ export class OrderService {
           actorId: userId,
           action: 'fulfilled',
           message: dto.tracking?.number
-            ? `Fulfillment initiated (tracking ${dto.tracking.number}${
-                dto.tracking.company ? ` via ${dto.tracking.company}` : ''
-              })`
+            ? `Fulfillment initiated (tracking ${dto.tracking.number}${dto.tracking.company ? ` via ${dto.tracking.company}` : ''
+            })`
             : 'Fulfillment initiated',
           metadata: {
             shopifyFulfillmentId: result.fulfillmentCreate.fulfillment?.id ?? null,
@@ -2311,9 +2309,8 @@ export class OrderService {
           orderId,
           actorId: userId,
           action: 'fulfilled',
-          message: `Fulfillment recorded (${lineItems.length} item${lineItems.length === 1 ? '' : 's'}${
-            dto.tracking?.number ? `, tracking ${dto.tracking.number}` : ''
-          })`,
+          message: `Fulfillment recorded (${lineItems.length} item${lineItems.length === 1 ? '' : 's'}${dto.tracking?.number ? `, tracking ${dto.tracking.number}` : ''
+            })`,
           metadata: {
             fulfillmentId: fulfillment.id,
             tracking: dto.tracking ?? null,
@@ -2418,9 +2415,8 @@ export class OrderService {
           orderId,
           actorId: userId,
           action: 'tracking_updated',
-          message: `Tracking updated${
-            dto.tracking.number ? `: ${dto.tracking.number}` : ''
-          }${dto.tracking.company ? ` (${dto.tracking.company})` : ''}`,
+          message: `Tracking updated${dto.tracking.number ? `: ${dto.tracking.number}` : ''
+            }${dto.tracking.company ? ` (${dto.tracking.company})` : ''}`,
           metadata: {
             fulfillmentId,
             tracking: { ...dto.tracking },
