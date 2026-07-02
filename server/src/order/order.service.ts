@@ -192,6 +192,11 @@ export class OrderService {
             // For vendors, count only their own line items.
             select: { lineItems: vendorScope ? { where: { vendor: vendorScope } } : true },
           },
+          // For vendors, pull their own line items' prices so we can show a
+          // vendor-scoped subtotal in the list (their items only).
+          ...(vendorScope
+            ? { lineItems: { where: { vendor: vendorScope }, select: { price: true, quantity: true } } }
+            : {}),
         },
         orderBy: { [sortBy]: sortOrder },
         skip,
@@ -207,7 +212,9 @@ export class OrderService {
       totalPages: Math.ceil(total / limit),
     };
 
-    // VENDOR role: a deliberately narrow projection — no money, no customer.
+    // VENDOR role: a deliberately narrow projection — no customer, and the
+    // amount is the vendor's own subtotal (their items only), matching the
+    // vendor order detail page's `vendorSubtotal`.
     if (vendorScope) {
       return {
         data: data.map((order) => ({
@@ -215,6 +222,10 @@ export class OrderService {
           orderNumber: order.orderNumber,
           name: order.name,
           fulfillmentStatus: order.fulfillmentStatus,
+          totalPrice: order.lineItems.reduce(
+            (sum, li) => sum + Number(li.price) * li.quantity,
+            0,
+          ),
           createdAt: order.externalCreatedAt || order.createdAt,
           itemCount: order._count.lineItems, // already filtered to the vendor's items
         })),
