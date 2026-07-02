@@ -366,23 +366,6 @@ export class ShopifyPushService {
 
   // ─── REST HELPER ───
 
-  /** GET helper — mirrors `postShopify` for read operations. */
-  private async getShopify<T>(
-    shopDomain: string,
-    token: string,
-    endpoint: string,
-  ): Promise<T> {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
-      { headers: { 'X-Shopify-Access-Token': token } },
-    );
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify ${res.status} on ${endpoint}: ${text}`);
-    }
-    return res.json() as Promise<T>;
-  }
-
   private async postShopify<T>(
     shopDomain: string,
     token: string,
@@ -595,19 +578,18 @@ export class ShopifyPushService {
   }
 
   /**
-   * Push CRM-side edits of an already-synced product back to Shopify.
-   *   - PUT  /products/{id}.json            — title / body / vendor / type / tags / status
-   *   - POST /products/{id}/variants.json   — for variants added locally after sync
-   *   - PUT  /variants/{id}.json            — per-existing-variant pricing / sku / barcode /
-   *                                            weight / inventory policy / shipping / taxable
-   *   - PUT  /inventory_items/{id}.json     — cost / hsCode / countryOfOrigin (when set)
+   * Push CRM-side edits of an already-synced product back to Shopify:
+   *   - PUT  /products/{id}.json           — title / body / vendor / type / tags / status
+   *   - POST /products/{id}/variants.json  — variants added locally (admin only)
+   *   - PUT  /variants/{id}.json           — per-existing-variant pricing / sku / barcode /
+   *                                          weight / inventory policy / shipping / taxable
+   *   - PUT  /inventory_items/{id}.json    — cost / hsCode / countryOfOrigin (when set)
+   *   - POST /inventory_levels/set.json    — stock (available) per variant at the location
    *
-   * Image changes (add/remove/reorder) on synced products are NOT pushed in
-   * this iteration — local image edits stay local until the next pull-sync
-   * overwrites the local snapshot. Tracked as a follow-up.
-   *
-   * Local externalIds for newly-created variants get rewritten to the real
-   * Shopify ids returned by POST so subsequent pushes go through the PUT path.
+   * Option-structure changes (adding options / converting single→multi) are NOT
+   * synced here — that path was intentionally removed. Vendors cannot add or
+   * restructure variants (enforced in the UI); they only edit existing fields.
+   * Image changes on synced products are also out of scope.
    */
   private async pushProductUpdate(
     product: {
@@ -668,16 +650,13 @@ export class ShopifyPushService {
       },
     });
 
-    // Per-variant fields. Each variant is an independent call — failures on
-    // one are logged but don't stop the others.
     for (const variant of product.variants) {
       const isNewLocal =
         !variant.externalId || variant.externalId.startsWith('manual_');
 
       if (isNewLocal) {
-        // Brand-new variant added locally to a synced product. Create it on
-        // Shopify (POST), then rewrite the local externalId / inventoryItemId
-        // so future edits go through the PUT path.
+        // Brand-new variant added locally (admin only — vendors can't add).
+        // Create it on Shopify, then rewrite the local externalId / itemId.
         try {
           const result = await this.postShopify<{
             variant: { id: number; inventory_item_id: number };
@@ -694,7 +673,7 @@ export class ShopifyPushService {
               weight_unit: variant.weightUnit ?? undefined,
               inventory_management: variant.trackQuantity ? 'shopify' : null,
               inventory_policy:
-              oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
+                oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
               requires_shipping: variant.requiresShipping,
               taxable: variant.taxable,
             },
@@ -707,14 +686,12 @@ export class ShopifyPushService {
                 inventoryItemId: String(result.variant.inventory_item_id),
               },
             });
-            // Push inventory item meta if present.
             await this.pushInventoryItemMetaForVariant(
               shopDomain,
               token,
               variant,
               String(result.variant.inventory_item_id),
             );
-            // Seed stock for the newly-created variant.
             if (locationId && (trackGlobally || variant.trackQuantity)) {
               await this.setInventoryLevel(
                 shopDomain,
@@ -733,15 +710,11 @@ export class ShopifyPushService {
         continue;
       }
 
-      // Existing variant — straight update.
+      // Existing variant — field update only (no option/structure changes).
       try {
         await this.putShopify(shopDomain, token, `/variants/${variant.externalId}.json`, {
           variant: {
             id: Number(variant.externalId),
-            // Option values (Size / Color / …) — carry local renames to Shopify.
-            option1: variant.option1 ?? undefined,
-            option2: variant.option2 ?? undefined,
-            option3: variant.option3 ?? undefined,
             price: variant.price.toString(),
             sku: variant.sku ?? undefined,
             compare_at_price: variant.compareAtPrice?.toString() ?? null,
@@ -762,9 +735,7 @@ export class ShopifyPushService {
         );
       }
 
-      // Older pulls didn't persist inventory_item_id. Without it we can push
-      // neither inventory levels nor inventory-item meta — so backfill it from
-      // Shopify on demand and cache it locally for next time.
+      // Resolve inventory_item_id (older pulls didn't persist it) for stock + meta.
       let inventoryItemId = variant.inventoryItemId;
       if (!inventoryItemId) {
         inventoryItemId = await this.backfillInventoryItemId(
@@ -775,7 +746,7 @@ export class ShopifyPushService {
         );
       }
 
-      // Inventory-item meta (cost / hsCode / countryOfOrigin) for existing variants.
+      // Inventory-item meta (cost / hsCode / countryOfOrigin).
       await this.pushInventoryItemMetaForVariant(
         shopDomain,
         token,
@@ -783,8 +754,7 @@ export class ShopifyPushService {
         inventoryItemId,
       );
 
-      // Push current stock. The variant PUT above does not carry inventory —
-      // Shopify requires the inventory_levels endpoint.
+      // Push current stock (available) at the primary location.
       if (
         locationId &&
         inventoryItemId &&
@@ -797,17 +767,25 @@ export class ShopifyPushService {
           inventoryItemId,
           variant.inventoryQuantity,
         );
-      } else {
-        // Make the skip reason visible — otherwise a non-updating stock looks
-        // like a silent no-op.
-        this.logger.warn(
-          `Inventory NOT pushed for variant ${variant.externalId}: ` +
-            `locationId=${locationId ?? 'null'}, ` +
-            `inventoryItemId=${inventoryItemId ?? 'null'}, ` +
-            `trackQuantity=${variant.trackQuantity}, trackGlobally=${trackGlobally}`,
-        );
       }
     }
+  }
+
+  /** GET helper — mirrors `postShopify` for read operations. */
+  private async getShopify<T>(
+    shopDomain: string,
+    token: string,
+    endpoint: string,
+  ): Promise<T> {
+    const res = await fetch(
+      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
+      { headers: { 'X-Shopify-Access-Token': token } },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Shopify ${res.status} on ${endpoint}: ${text}`);
+    }
+    return res.json() as Promise<T>;
   }
 
   /** Older product pulls didn't persist inventory_item_id. Fetch it from
