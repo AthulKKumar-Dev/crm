@@ -548,14 +548,17 @@ export function ProductFormDialog({
               </div>
             </Section>
 
-            {/* Section: variants — toggle between single + multi flow */}
+            {/* Section: variants — toggle between single + multi flow.
+             *  Vendors may edit existing variant fields (price / stock) but
+             *  cannot add variants or change the option structure. */}
             <Section title="Variants">
               <label className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
                 <input
                   type="checkbox"
                   checked={form.hasOptions}
                   onChange={(e) => handleToggleOptions(e.target.checked)}
-                  className="size-3.5 accent-[#CEF17B]"
+                  disabled={isVendor}
+                  className="size-3.5 accent-[#CEF17B] disabled:opacity-50"
                 />
                 This product has multiple variants (e.g. Size, Color)
               </label>
@@ -572,25 +575,29 @@ export function ProductFormDialog({
                 />
               ) : (
                 <div className="space-y-3 mt-3">
-                  <div>
-                    <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      Option types
-                    </p>
-                    <OptionsEditor
-                      options={form.options}
-                      onChange={(next) => patch({ options: next })}
-                    />
-                    {errors.options && (
-                      <p className="mt-1 text-[10px] text-red-600">{errors.options}</p>
-                    )}
-                  </div>
+                  {/* Option-type editing is a structural change — hidden for
+                   *  vendors, who can only edit existing variant fields. */}
+                  {!isVendor && (
+                    <div>
+                      <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Option types
+                      </p>
+                      <OptionsEditor
+                        options={form.options}
+                        onChange={(next) => patch({ options: next })}
+                      />
+                      {errors.options && (
+                        <p className="mt-1 text-[10px] text-red-600">{errors.options}</p>
+                      )}
+                    </div>
+                  )}
 
                   <div>
                     <div className="mb-1.5 flex items-center justify-between">
                       <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                         Variants ({form.variants.length})
                       </p>
-                      {!isEdit ? (
+                      {isVendor ? null : !isEdit ? (
                         <button
                           type="button"
                           onClick={regenerateVariantsClient}
