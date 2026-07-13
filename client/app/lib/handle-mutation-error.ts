@@ -16,8 +16,16 @@ export function handleMutationError(
   fallbackMessage?: string
 ): void {
   if (isAxiosError(error)) {
-    const serverMessage = error.response?.data?.message;
-    toast.error(serverMessage || fallbackMessage || "Something went wrong. Please try again.");
+    const data = error.response?.data as
+      | { message?: string; errors?: string[] }
+      | undefined;
+    const base =
+      data?.message || fallbackMessage || "Something went wrong. Please try again.";
+    const detail =
+      Array.isArray(data?.errors) && typeof data.errors[0] === "string"
+        ? ` ${data.errors[0]}`
+        : "";
+    toast.error(base + detail);
   } else {
     toast.error("Something went wrong. Please try again.");
   }

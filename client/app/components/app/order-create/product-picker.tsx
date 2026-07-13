@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Search, Plus } from "lucide-react";
 import { useProducts } from "~/hooks/use-product-queries";
 import { useOrganizationSettings } from "~/hooks/use-settings-queries";
 import { formatCurrency } from "~/lib/utils";
 import type { Product, ProductVariant } from "~/types/api";
+import { useDebounced } from "~/hooks/use-debounced";
 
 export type CartLineSeed = {
   variantId: string;
@@ -23,14 +24,6 @@ export type CartLineSeed = {
   canOversell: boolean;
 };
 
-function useDebounced<T>(value: T, delay = 250): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
 
 export function ProductPicker({
   onAdd,
@@ -141,15 +134,14 @@ export function ProductPicker({
                     {formatCurrency(variant.price, currency)}
                   </p>
                   <p
-                    className={`text-[10px] tabular-nums ${
-                      oos
-                        ? canOversell
-                          ? "text-amber-600"
-                          : "text-red-600"
-                        : variant.inventoryQuantity <= 5
-                          ? "text-amber-600"
-                          : "text-muted-foreground"
-                    }`}
+                    className={`text-[10px] tabular-nums ${oos
+                      ? canOversell
+                        ? "text-amber-600"
+                        : "text-red-600"
+                      : variant.inventoryQuantity <= 5
+                        ? "text-amber-600"
+                        : "text-muted-foreground"
+                      }`}
                   >
                     {oos && canOversell
                       ? "Out of stock · backorder OK"

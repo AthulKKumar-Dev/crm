@@ -36,6 +36,7 @@ import { UpdateProductGstDto } from './dto/update-product-gst.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import {
+  BulkUpdateVariantsDto,
   CreateVariantDto,
   ReorderVariantsDto,
   UpdateVariantDto,
@@ -155,6 +156,21 @@ export class ProductController {
     @Body() dto: ReorderVariantsDto,
   ) {
     return this.productService.reorderVariants(id, user.orgId!, dto);
+  }
+
+  @Patch(':id/variants/bulk')
+  @AllowVendor()
+  bulkUpdateVariants(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: BulkUpdateVariantsDto,
+  ) {
+    return this.productService.bulkUpdateVariants(
+      id,
+      user.orgId!,
+      dto,
+      vendorScopeFor(user),
+    );
   }
 
   @Post(':id/variants/generate')
@@ -293,7 +309,12 @@ export class ProductController {
     @CurrentUser() user: JwtPayload,
     @Body() dto: UpdateProductGstDto,
   ) {
-    return this.productService.updateGst(id, user.orgId!, dto);
+    return this.productService.updateGst(
+      id,
+      user.orgId!,
+      dto,
+      vendorScopeFor(user),
+    );
   }
 
   @Patch(':id')
