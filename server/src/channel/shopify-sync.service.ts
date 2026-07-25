@@ -14,7 +14,7 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
-import { ShopifyGraphqlClient } from './shopify-graphql.client';
+import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 import {
     DRAFT_MIRROR_QUEUE,
@@ -26,11 +26,38 @@ import {
     OrdersListVariables,
     OrderNode,
     ORDERS_LIST_QUERY,
+    ORDERS_COUNT_QUERY,
+    PRODUCTS_COUNT_QUERY,
+    CUSTOMERS_COUNT_QUERY,
+    PRODUCTS_LIST_QUERY,
+    ProductsListResponse,
+    ProductsListVariables,
+    ProductSyncNode,
+    PRODUCTS_INVENTORY_QUERY,
+    ProductsInventoryResponse,
+    CUSTOMERS_LIST_QUERY,
+    CustomersListResponse,
+    CustomersListVariables,
+    CustomerSyncNode,
+    COLLECTIONS_LIST_QUERY,
+    CollectionsListResponse,
+    CollectionsListVariables,
+    CollectionSyncNode,
+    COLLECTION_PRODUCTS_QUERY,
+    CollectionProductsResponse,
+    PageInfo,
 } from './shopify-graphql.types';
 import { parseProductSettings } from '../organization-settings/schemas/product-settings.schema';
 
-const PAGE_LIMIT = 250;
 const GRAPHQL_PAGE_SIZE = 50;
+
+// GraphQL WeightUnit enum → REST weight_unit strings the DB already stores.
+const WEIGHT_UNIT_MAP: Record<string, string> = {
+    KILOGRAMS: 'kg',
+    GRAMS: 'g',
+    POUNDS: 'lb',
+    OUNCES: 'oz',
+};
 
 @Injectable()
 export class ShopifySyncService {
@@ -120,6 +147,7 @@ export class ShopifySyncService {
         });
 
         let allSucceeded = true;
+        let authFailed = false;
         let initError: Error | null = null;
         let token: string | null = null;
         let shopDomain: string | null = null;
@@ -165,6 +193,12 @@ export class ShopifySyncService {
                         }
                     } catch (error) {
                         allSucceeded = false;
+                        // Token revoked (app uninstalled / secret rotated) —
+                        // mark the channel DISCONNECTED instead of ERROR so
+                        // the UI surfaces "Reconnect" and retries stop.
+                        if (error instanceof ShopifyGraphqlError && error.code === 'AUTH_FAILED') {
+                            authFailed = true;
+                        }
                         this.logger.error(`Sync failed for ${entityType} on channel ${channelId}`, error);
                     }
                 }
@@ -176,7 +210,11 @@ export class ShopifySyncService {
                 where: { id: channelId },
                 data: {
                     syncStatus: allSucceeded ? SyncStatus.COMPLETED : SyncStatus.FAILED,
-                    status: allSucceeded ? ChannelStatus.CONNECTED : ChannelStatus.ERROR,
+                    status: allSucceeded
+                        ? ChannelStatus.CONNECTED
+                        : authFailed
+                            ? ChannelStatus.DISCONNECTED
+                            : ChannelStatus.ERROR,
                     lastSyncedAt: allSucceeded ? new Date() : undefined,
                 },
             }).catch((err) => {
@@ -221,19 +259,24 @@ export class ShopifySyncService {
         let failed = 0;
 
         try {
-            const countRes = await this.shopifyFetch(shopDomain, token, '/products/count.json');
-            await this.prisma.syncLog.update({ where: { id: syncLog.id }, data: { totalEstimated: countRes?.count ?? 0 } });
+            const auth = { shopDomain, accessToken: token };
+            await this.updateTotalEstimated(syncLog.id, auth, PRODUCTS_COUNT_QUERY, 'productsCount');
 
             const vendorMetafield = await this.getVendorMetafieldConfig(orgId);
-            for await (const page of this.paginatedFetch(shopDomain, token, '/products.json', 'products', syncLog.cursor)) {
-                for (const sp of page.data) {
+            for await (const page of this.paginateProductsGraphql(auth, syncLog.cursor, vendorMetafield)) {
+                for (const node of page.products) {
                     try {
-                        const vendorKey = await this.resolveVendorKey(sp, vendorMetafield, shopDomain, token);
+                        const sp = this.transformGraphqlProduct(node);
+                        // Vendor metafield is inlined in the query — no extra call.
+                        // undefined = feature off (leave vendorKey untouched).
+                        const vendorKey = vendorMetafield
+                            ? (node.vendorMetafield?.value != null ? String(node.vendorMetafield.value) : null)
+                            : undefined;
                         await this.upsertProduct(channelId, orgId, sp, vendorKey);
                         processed++;
                     } catch (error) {
                         failed++;
-                        this.logger.error(`Failed product ${sp.id}`, error);
+                        this.logger.error(`Failed product ${node.id}`, error);
                     }
                 }
                 await this.prisma.syncLog.update({
@@ -246,6 +289,94 @@ export class ShopifySyncService {
             await this.failSyncLog(syncLog.id, processed, failed, error);
             throw error;
         }
+    }
+
+    private async *paginateProductsGraphql(
+        auth: { shopDomain: string; accessToken: string },
+        startCursor: string | null,
+        vendorMetafield: { namespace: string; key: string } | null,
+    ): AsyncGenerator<{ products: ProductSyncNode[]; nextCursor: string | null }> {
+        let cursor: string | null = startCursor ?? null;
+        do {
+            const variables: ProductsListVariables = {
+                first: GRAPHQL_PAGE_SIZE,
+                after: cursor,
+                withMetafield: !!vendorMetafield,
+                // $mfKey is non-null in the query — pass a harmless placeholder
+                // when the feature is off (the field is skipped via @include).
+                mfNamespace: vendorMetafield?.namespace ?? 'custom',
+                mfKey: vendorMetafield?.key ?? 'vendor',
+            };
+            const res = await this.graphql.request<ProductsListResponse, ProductsListVariables>(
+                auth,
+                PRODUCTS_LIST_QUERY,
+                variables,
+            );
+            const nextCursor = res.products.pageInfo.hasNextPage
+                ? res.products.pageInfo.endCursor
+                : null;
+            yield { products: res.products.nodes, nextCursor };
+            cursor = nextCursor;
+        } while (cursor);
+    }
+
+    // GraphQL ProductSyncNode → the REST snake_case shape `upsertProduct`
+    // consumes (shared with the products/* webhooks). Same bridging strategy
+    // as `transformGraphqlOrder` below.
+    private transformGraphqlProduct(node: ProductSyncNode): Record<string, any> {
+        const variants = node.variants.nodes.map((v) => {
+            const weight = v.inventoryItem?.measurement?.weight ?? null;
+            return {
+                id: ShopifyGraphqlClient.extractId(v.id),
+                title: v.title,
+                sku: v.sku,
+                barcode: v.barcode,
+                price: v.price,
+                compare_at_price: v.compareAtPrice,
+                inventory_quantity: v.inventoryQuantity ?? 0,
+                inventory_item_id: v.inventoryItem
+                    ? ShopifyGraphqlClient.extractId(v.inventoryItem.id)
+                    : null,
+                weight: weight?.value ?? null,
+                weight_unit: weight?.unit ? (WEIGHT_UNIT_MAP[weight.unit] ?? weight.unit.toLowerCase()) : null,
+                // REST option1/2/3 follow the product's option order — so do
+                // GraphQL selectedOptions.
+                option1: v.selectedOptions?.[0]?.value ?? null,
+                option2: v.selectedOptions?.[1]?.value ?? null,
+                option3: v.selectedOptions?.[2]?.value ?? null,
+                position: v.position,
+                requires_shipping: v.inventoryItem?.requiresShipping ?? true,
+                taxable: v.taxable,
+            };
+        });
+
+        const images = node.media.nodes
+            .filter((m) => m.image?.url)
+            .map((m, i) => ({
+                id: ShopifyGraphqlClient.extractId(m.id),
+                src: m.image!.url,
+                alt: m.image!.altText,
+                position: i + 1,
+            }));
+
+        return {
+            id: ShopifyGraphqlClient.extractId(node.id),
+            title: node.title,
+            body_html: node.descriptionHtml,
+            vendor: node.vendor,
+            product_type: node.productType,
+            status: node.status ? node.status.toLowerCase() : 'active',
+            // `upsertProduct` splits on ',' — mirror the REST string shape.
+            tags: Array.isArray(node.tags) ? node.tags.join(', ') : '',
+            published_at: node.publishedAt,
+            created_at: node.createdAt,
+            updated_at: node.updatedAt,
+            options: node.options?.length
+                ? node.options.map((o) => ({ name: o.name, values: o.values, position: o.position }))
+                : null,
+            variants,
+            images,
+        };
     }
 
     // ─── SYNC ORDERS ───
@@ -261,10 +392,8 @@ export class ShopifySyncService {
         let failed = 0;
 
         try {
-            // Count remains REST — GraphQL has no equivalent cheap count call.
-            // This is informational only (drives the totalEstimated progress UI).
-            const countRes = await this.shopifyFetch(shopDomain, token, '/orders/count.json?status=any');
-            await this.prisma.syncLog.update({ where: { id: syncLog.id }, data: { totalEstimated: countRes?.count ?? 0 } });
+            // Informational only (drives the totalEstimated progress UI).
+            await this.updateTotalEstimated(syncLog.id, { shopDomain, accessToken: token }, ORDERS_COUNT_QUERY, 'ordersCount');
 
             const channel = await this.prisma.channel.findUnique({ where: { id: channelId } });
             const filters: string[] = [];
@@ -463,17 +592,17 @@ export class ShopifySyncService {
         let failed = 0;
 
         try {
-            const countRes = await this.shopifyFetch(shopDomain, token, '/customers/count.json');
-            await this.prisma.syncLog.update({ where: { id: syncLog.id }, data: { totalEstimated: countRes?.count ?? 0 } });
+            const auth = { shopDomain, accessToken: token };
+            await this.updateTotalEstimated(syncLog.id, auth, CUSTOMERS_COUNT_QUERY, 'customersCount');
 
-            for await (const page of this.paginatedFetch(shopDomain, token, '/customers.json', 'customers', syncLog.cursor)) {
-                for (const sc of page.data) {
+            for await (const page of this.paginateCustomersGraphql(auth, syncLog.cursor)) {
+                for (const node of page.customers) {
                     try {
-                        await this.upsertCustomer(channelId, orgId, sc);
+                        await this.upsertCustomer(channelId, orgId, this.transformGraphqlCustomer(node));
                         processed++;
                     } catch (error) {
                         failed++;
-                        this.logger.error(`Failed customer ${sc.id}`, error);
+                        this.logger.error(`Failed customer ${node.id}`, error);
                     }
                 }
                 await this.prisma.syncLog.update({
@@ -488,6 +617,52 @@ export class ShopifySyncService {
         }
     }
 
+    private async *paginateCustomersGraphql(
+        auth: { shopDomain: string; accessToken: string },
+        startCursor: string | null,
+    ): AsyncGenerator<{ customers: CustomerSyncNode[]; nextCursor: string | null }> {
+        let cursor: string | null = startCursor ?? null;
+        do {
+            const variables: CustomersListVariables = { first: GRAPHQL_PAGE_SIZE, after: cursor };
+            const res = await this.graphql.request<CustomersListResponse, CustomersListVariables>(
+                auth,
+                CUSTOMERS_LIST_QUERY,
+                variables,
+            );
+            const nextCursor = res.customers.pageInfo.hasNextPage
+                ? res.customers.pageInfo.endCursor
+                : null;
+            yield { customers: res.customers.nodes, nextCursor };
+            cursor = nextCursor;
+        } while (cursor);
+    }
+
+    // GraphQL CustomerSyncNode → REST snake_case shape for `upsertCustomer`
+    // (shared with the customers/* webhooks).
+    private transformGraphqlCustomer(node: CustomerSyncNode): Record<string, any> {
+        return {
+            id: ShopifyGraphqlClient.extractId(node.id),
+            email: node.email,
+            first_name: node.firstName,
+            last_name: node.lastName,
+            phone: node.phone,
+            state: node.state ? node.state.toLowerCase() : 'enabled',
+            verified_email: node.verifiedEmail,
+            accepts_marketing: node.emailMarketingConsent?.marketingState === 'SUBSCRIBED',
+            orders_count: parseInt(node.numberOfOrders ?? '0', 10) || 0,
+            total_spent: node.amountSpent?.amount ?? '0',
+            // `upsertCustomer` splits on ',' — mirror the REST string shape.
+            tags: Array.isArray(node.tags) ? node.tags.join(', ') : '',
+            note: node.note,
+            addresses: node.addresses?.length
+                ? node.addresses.map((a) => this.transformAddress(a))
+                : null,
+            default_address: node.defaultAddress ? this.transformAddress(node.defaultAddress) : null,
+            created_at: node.createdAt,
+            updated_at: node.updatedAt,
+        };
+    }
+
     // ─── SYNC INVENTORY ───
     private async syncInventory(channelId: string, orgId: string, shopDomain: string, token: string) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'inventory');
@@ -495,25 +670,36 @@ export class ShopifySyncService {
         let failed = 0;
 
         try {
-            for await (const page of this.paginatedFetch(shopDomain, token, '/products.json', 'products', syncLog.cursor, { fields: 'id,variants' })) {
-                for (const product of page.data) {
-                    for (const variant of product.variants || []) {
+            const auth = { shopDomain, accessToken: token };
+            let cursor: string | null = syncLog.cursor ?? null;
+            do {
+                const res: ProductsInventoryResponse = await this.graphql.request<ProductsInventoryResponse>(
+                    auth,
+                    PRODUCTS_INVENTORY_QUERY,
+                    { first: GRAPHQL_PAGE_SIZE, after: cursor },
+                );
+                for (const product of res.products.nodes) {
+                    for (const variant of product.variants.nodes) {
                         try {
+                            const quantity = variant.inventoryQuantity ?? 0;
                             const existing = await this.prisma.productVariant.findFirst({
-                                where: { externalId: String(variant.id), product: { channelId } },
+                                where: {
+                                    externalId: ShopifyGraphqlClient.extractId(variant.id),
+                                    product: { channelId },
+                                },
                             });
-                            if (existing && existing.inventoryQuantity !== variant.inventory_quantity) {
+                            if (existing && existing.inventoryQuantity !== quantity) {
                                 await this.prisma.$transaction([
                                     this.prisma.productVariant.update({
                                         where: { id: existing.id },
-                                        data: { inventoryQuantity: variant.inventory_quantity },
+                                        data: { inventoryQuantity: quantity },
                                     }),
                                     this.prisma.inventoryEvent.create({
                                         data: {
                                             organizationId: orgId, variantId: existing.id,
                                             quantityBefore: existing.inventoryQuantity,
-                                            quantityAfter: variant.inventory_quantity,
-                                            changeAmount: variant.inventory_quantity - existing.inventoryQuantity,
+                                            quantityAfter: quantity,
+                                            changeAmount: quantity - existing.inventoryQuantity,
                                             reason: 'sync', referenceType: 'sync',
                                         },
                                     }),
@@ -525,11 +711,12 @@ export class ShopifySyncService {
                         }
                     }
                 }
+                cursor = res.products.pageInfo.hasNextPage ? res.products.pageInfo.endCursor : null;
                 await this.prisma.syncLog.update({
                     where: { id: syncLog.id },
-                    data: { recordsProcessed: processed, recordsFailed: failed, cursor: page.nextCursor },
+                    data: { recordsProcessed: processed, recordsFailed: failed, cursor },
                 });
-            }
+            } while (cursor);
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
             await this.failSyncLog(syncLog.id, processed, failed, error);
@@ -544,59 +731,97 @@ export class ShopifySyncService {
         let failed = 0;
 
         try {
-            // 1. Sync custom collections
-            for await (const page of this.paginatedFetch(shopDomain, token, '/custom_collections.json', 'custom_collections', syncLog.cursor)) {
-                for (const col of page.data) {
+            const auth = { shopDomain, accessToken: token };
+            // One GraphQL connection covers custom AND smart collections —
+            // `ruleSet` is non-null only for smart ones. Product membership
+            // (previously REST `collects.json`) is inlined per collection.
+            let cursor: string | null = syncLog.cursor ?? null;
+            do {
+                const res: CollectionsListResponse = await this.graphql.request<
+                    CollectionsListResponse,
+                    CollectionsListVariables
+                >(auth, COLLECTIONS_LIST_QUERY, { first: 25, after: cursor });
+
+                for (const node of res.collections.nodes) {
                     try {
-                        await this.upsertCollection(channelId, orgId, col, 'custom');
+                        const col = {
+                            id: ShopifyGraphqlClient.extractId(node.id),
+                            title: node.title,
+                            handle: node.handle,
+                            // GraphQL enum BEST_SELLING → REST "best-selling"
+                            sort_order: node.sortOrder
+                                ? node.sortOrder.toLowerCase().replace(/_/g, '-')
+                                : null,
+                            published_at: null,
+                        };
+                        await this.upsertCollection(
+                            channelId, orgId, col,
+                            node.ruleSet ? 'smart' : 'custom',
+                        );
+                        await this.syncCollectionProducts(channelId, auth, node);
                         processed++;
                     } catch (error) {
                         failed++;
-                        this.logger.error(`Failed custom collection ${col.id}`, error);
+                        this.logger.error(`Failed collection ${node.id}`, error);
                     }
                 }
-            }
 
-            // 2. Sync smart collections
-            for await (const page of this.paginatedFetch(shopDomain, token, '/smart_collections.json', 'smart_collections', null)) {
-                for (const col of page.data) {
-                    try {
-                        await this.upsertCollection(channelId, orgId, col, 'smart');
-                        processed++;
-                    } catch (error) {
-                        failed++;
-                        this.logger.error(`Failed smart collection ${col.id}`, error);
-                    }
-                }
-            }
-
-            // 3. Sync collects (product-collection links)
-            for await (const page of this.paginatedFetch(shopDomain, token, '/collects.json', 'collects', null)) {
-                for (const collect of page.data) {
-                    try {
-                        const product = await this.prisma.product.findFirst({
-                            where: { channelId, externalId: String(collect.product_id) },
-                        });
-                        const collection = await this.prisma.collection.findFirst({
-                            where: { channelId, externalId: String(collect.collection_id) },
-                        });
-                        if (product && collection) {
-                            await this.prisma.productCollection.upsert({
-                                where: { productId_collectionId: { productId: product.id, collectionId: collection.id } },
-                                create: { productId: product.id, collectionId: collection.id, position: collect.position ?? 0 },
-                                update: { position: collect.position ?? 0 },
-                            });
-                        }
-                    } catch (error) {
-                        this.logger.error(`Failed collect ${collect.id}`, error);
-                    }
-                }
-            }
+                cursor = res.collections.pageInfo.hasNextPage
+                    ? res.collections.pageInfo.endCursor
+                    : null;
+                await this.prisma.syncLog.update({
+                    where: { id: syncLog.id },
+                    data: { recordsProcessed: processed, recordsFailed: failed, cursor },
+                });
+            } while (cursor);
 
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
             await this.failSyncLog(syncLog.id, processed, failed, error);
             throw error;
+        }
+    }
+
+    // Product-collection links (replaces REST `collects.json`). The first page
+    // of product ids rides along on the collections query; oversized
+    // collections are drained with COLLECTION_PRODUCTS_QUERY.
+    private async syncCollectionProducts(
+        channelId: string,
+        auth: { shopDomain: string; accessToken: string },
+        node: CollectionSyncNode,
+    ): Promise<void> {
+        const collection = await this.prisma.collection.findFirst({
+            where: { channelId, externalId: ShopifyGraphqlClient.extractId(node.id) },
+            select: { id: true },
+        });
+        if (!collection) return;
+
+        let position = 0;
+        let productNodes = node.products.nodes;
+        let pageInfo: PageInfo = node.products.pageInfo;
+
+        for (;;) {
+            for (const p of productNodes) {
+                position++;
+                const product = await this.prisma.product.findFirst({
+                    where: { channelId, externalId: ShopifyGraphqlClient.extractId(p.id) },
+                    select: { id: true },
+                });
+                if (!product) continue;
+                await this.prisma.productCollection.upsert({
+                    where: { productId_collectionId: { productId: product.id, collectionId: collection.id } },
+                    create: { productId: product.id, collectionId: collection.id, position },
+                    update: { position },
+                });
+            }
+            if (!pageInfo.hasNextPage || !pageInfo.endCursor) break;
+            const res = await this.graphql.request<CollectionProductsResponse>(
+                auth,
+                COLLECTION_PRODUCTS_QUERY,
+                { id: node.id, first: 100, after: pageInfo.endCursor },
+            );
+            productNodes = res.collection?.products.nodes ?? [];
+            pageInfo = res.collection?.products.pageInfo ?? { hasNextPage: false, endCursor: null };
         }
     }
 
@@ -965,64 +1190,26 @@ export class ShopifySyncService {
         });
     }
 
-    // ─── PAGINATED FETCH ───
-    private async *paginatedFetch(
-        shopDomain: string, token: string, endpoint: string,
-        resourceKey: string, startCursor?: string | null,
-        extraParams?: Record<string, string>,
-    ): AsyncGenerator<{ data: any[]; nextCursor: string | null }> {
-        const apiVersion = this.graphql.getApiVersion();
-        let url: string;
-        if (startCursor) {
-            url = `https://${shopDomain}/admin/api/${apiVersion}${endpoint}?limit=${PAGE_LIMIT}&page_info=${startCursor}`;
-        } else {
-            const params = new URLSearchParams({ limit: String(PAGE_LIMIT), ...extraParams });
-            url = `https://${shopDomain}/admin/api/${apiVersion}${endpoint}?${params.toString()}`;
+    // ─── COUNT HELPER ───
+    // Informational only — drives the totalEstimated progress UI. A failed
+    // count must never fail the sync (some shops/plans gate count fields).
+    private async updateTotalEstimated(
+        logId: string,
+        auth: { shopDomain: string; accessToken: string },
+        query: string,
+        field: 'productsCount' | 'customersCount' | 'ordersCount',
+    ): Promise<void> {
+        try {
+            const res = await this.graphql.request<Record<string, { count: number } | null>>(auth, query);
+            await this.prisma.syncLog.update({
+                where: { id: logId },
+                data: { totalEstimated: res?.[field]?.count ?? 0 },
+            });
+        } catch (err) {
+            this.logger.warn(
+                `Count query ${field} failed (non-fatal): ${err instanceof Error ? err.message : err}`,
+            );
         }
-
-        while (url) {
-            const res = await this.fetchWithRateLimit(url, token);
-            const data = await res.json();
-            const items = data[resourceKey] || [];
-            const linkHeader = res.headers.get('link');
-            const nextCursor = this.parseNextCursor(linkHeader);
-
-            yield { data: items, nextCursor };
-
-            url = nextCursor
-                ? `https://${shopDomain}/admin/api/${apiVersion}${endpoint}?limit=${PAGE_LIMIT}&page_info=${nextCursor}`
-                : '';
-        }
-    }
-
-    private async fetchWithRateLimit(url: string, token: string): Promise<Response> {
-        while (true) {
-            const res = await fetch(url, { headers: { 'X-Shopify-Access-Token': token } });
-            if (res.status === 429) {
-                const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
-                this.logger.warn(`Rate limited, waiting ${retryAfter}s`);
-                await this.sleep(retryAfter * 1000);
-                continue;
-            }
-            if (res.status === 403) {
-                const errorBody = await res.text();
-                this.logger.warn(`Shopify 403 Forbidden: ${errorBody}. Enable "Protected customer data access" in your Shopify Partner Dashboard → App → API access.`);
-                throw new Error(`Shopify access denied (403). Your app needs "Protected customer data access" enabled in the Shopify Partner Dashboard. Details: ${errorBody}`);
-            }
-            if (!res.ok) throw new Error(`Shopify API ${res.status}: ${await res.text()}`);
-            const callLimit = res.headers.get('X-Shopify-Shop-Api-Call-Limit');
-            if (callLimit) {
-                const [used, max] = callLimit.split('/').map(Number);
-                if (used / max > 0.8) await this.sleep(500);
-            }
-            return res;
-        }
-    }
-
-    private async shopifyFetch(shopDomain: string, token: string, endpoint: string): Promise<any> {
-        const apiVersion = this.graphql.getApiVersion();
-        const res = await fetch(`https://${shopDomain}/admin/api/${apiVersion}${endpoint}`, { headers: { 'X-Shopify-Access-Token': token } });
-        return res.ok ? res.json() : null;
     }
 
     // ─── VENDOR METAFIELD (multi-vendor routing) ───
@@ -1038,43 +1225,6 @@ export class ShopifySyncService {
         const ps = parseProductSettings(row?.productSettings ?? null);
         if (!ps.vendorMetafieldEnabled) return null;
         return { namespace: ps.vendorMetafieldNamespace, key: ps.vendorMetafieldKey };
-    }
-
-    /**
-     * Resolve a product's vendor metafield value (→ Product.vendorKey). Returns:
-     *   • undefined → leave the column untouched (no config, or fetch failed),
-     *   • string    → the metafield value,
-     *   • null      → configured, but the product has no such metafield.
-     * Prefers inline `sp.metafields` (zero-cost); otherwise fetches the product's
-     * metafields. Gated entirely by `config` (null when the feature is off).
-     */
-    private async resolveVendorKey(
-        sp: any,
-        config: { namespace: string; key: string } | null,
-        shopDomain: string,
-        token: string,
-    ): Promise<string | null | undefined> {
-        if (!config) return undefined;
-        if (Array.isArray(sp.metafields)) {
-            const m = sp.metafields.find(
-                (x: any) => x?.namespace === config.namespace && x?.key === config.key,
-            );
-            return m?.value != null ? String(m.value) : null;
-        }
-        try {
-            const res = await this.shopifyFetch(
-                shopDomain,
-                token,
-                `/products/${sp.id}/metafields.json?namespace=${encodeURIComponent(config.namespace)}`,
-            );
-            const m = (res?.metafields ?? []).find((x: any) => x?.key === config.key);
-            return m?.value != null ? String(m.value) : null;
-        } catch (e) {
-            this.logger.warn(
-                `Vendor metafield fetch failed for product ${sp.id}: ${e instanceof Error ? e.message : e}`,
-            );
-            return undefined;
-        }
     }
 
     // ─── SYNC LOG HELPERS ───
@@ -1102,11 +1252,4 @@ export class ShopifySyncService {
     private mapCancelReason(s: string | null): OrderCancelReason | null { if (!s) return null; return ({ customer: 'CUSTOMER', fraud: 'FRAUD', inventory: 'INVENTORY', declined: 'DECLINED', other: 'OTHER' } as any)[s] || 'OTHER'; }
     private mapCustomerState(s: string): CustomerState { return ({ enabled: 'ENABLED', disabled: 'DISABLED', declined: 'DECLINED', invited: 'INVITED' } as any)[s] || 'ENABLED'; }
 
-    private parseNextCursor(link: string | null): string | null {
-        if (!link) return null;
-        const match = link.match(/<[^>]*page_info=([^&>]+)[^>]*>;\s*rel="next"/);
-        return match ? match[1] : null;
-    }
-
-    private sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 }

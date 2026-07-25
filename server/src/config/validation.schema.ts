@@ -10,6 +10,7 @@ export const validationSchema = Joi.object({
     RESEND_API_KEY: Joi.string().optional(),
     SHOPIFY_CLIENT_ID: Joi.string().optional(),
     SHOPIFY_CLIENT_SECRET: Joi.string().optional(),
+    SHOPIFY_SCOPES: Joi.string().optional(),
     ENCRYPTION_KEY: Joi.string().length(32).optional(),
     META_APP_ID: Joi.string().optional(),
     META_APP_SECRET: Joi.string().optional(),

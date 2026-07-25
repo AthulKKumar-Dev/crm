@@ -1,4 +1,5 @@
 import { BadRequestException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Response, Request } from 'express';
 import { ChannelPlatform, ChannelStatus, SyncStatus, UserRole } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -18,6 +19,7 @@ import { TriggerSyncDto } from './dto/trigger-sync.dto';
 import { InstagramOAuthService } from './instagram-oauth.service';
 import { WhatsAppOAuthService } from './whatsapp-oauth.service';
 import { WhatsAppCallbackDto } from './dto/whatsapp-callback.dto';
+import { ShopifyPixelService } from './shopify-pixel.service';
 
 @Controller('channels')
 export class ChannelController {
@@ -27,53 +29,83 @@ export class ChannelController {
     private readonly prisma: PrismaService,
     private readonly channelService: ChannelService,
     private readonly shopifyOAuth: ShopifyOAuthService,
+    private readonly shopifyPixel: ShopifyPixelService,
     private readonly instagramOAuth: InstagramOAuthService,
     private readonly whatsappOAuth: WhatsAppOAuthService,
+    private readonly config: ConfigService,
     @InjectQueue(SYNC_QUEUE) private readonly syncQueue: Queue,
   ) { }
 
-  // POST /channels/shopify/install — start OAuth flow
+  // POST /channels/shopify/install — start public-app OAuth (shop domain only)
   @Post('shopify/install')
   async installShopify(
     @CurrentUser() user: JwtPayload,
     @Body() dto: ConnectShopifyDto,
   ) {
-    const authUrl = await this.shopifyOAuth.getInstallUrl(
-      user.orgId!,
-      user.sub,
-      dto.shopDomain,
-      dto.apiKey,
-      dto.apiSecret,
-    );
+    const authUrl = await this.shopifyOAuth.getInstallUrl(user.orgId!, user.sub, dto.shopDomain);
     return { authUrl };
   }
 
-  // GET /channels/shopify/callback — Shopify redirects here after OAuth
+  // GET /channels/shopify/callback — Shopify redirects here after the merchant
+  // approves (or cancels) the install. The merchant's browser is sitting on
+  // this URL, so EVERY outcome must end in a redirect back to the frontend —
+  // never a JSON error page.
   @Public()
   @Get('shopify/callback')
   async shopifyCallback(
-    @Query() query: { code: string; hmac: string; shop: string; state: string; timestamp: string },
+    @Query() query: { code?: string; hmac: string; shop: string; state: string; timestamp: string },
     @Res() res: Response,
   ) {
-    const result = await this.shopifyOAuth.handleCallback(query);
-
-    // Auto-trigger initial sync after successful connection
+    const frontendUrl = this.config.get<string>('frontendUrl');
     try {
-      await this.syncQueue.add('sync', {
-        channelId: result.channelId,
-        organizationId: result.organizationId,
-        entityTypes: ['products', 'orders', 'customers', 'inventory'],
-      } as SyncJobData, {
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-        removeOnComplete: 100,
-        removeOnFail: 50,
-      });
-    } catch (error) {
-      // Non-fatal: sync can be triggered manually later
-    }
+      const result = await this.shopifyOAuth.handleCallback(query);
 
-    return res.redirect(result.redirectUrl);
+      // Register webhooks before redirecting — without them the store only
+      // updates on manual/scheduled syncs. Non-fatal: the
+      // POST /channels/:id/register-webhooks endpoint can re-run this.
+      try {
+        await this.shopifyOAuth.registerWebhooks(result.channelId);
+        try {
+          await this.shopifyPixel.activatePixel(result.channelId);
+        } catch (error) {
+          this.logger.warn(
+            `Pixel activation failed after OAuth connect (non-fatal): ${error instanceof Error ? error.message : error}`,
+          );
+        }
+      } catch (error) {
+        this.logger.warn(
+          `Webhook registration failed after OAuth connect (non-fatal): ${error instanceof Error ? error.message : error}`,
+        );
+      }
+
+      // Auto-trigger initial sync after successful connection
+      try {
+        await this.syncQueue.add('sync', {
+          channelId: result.channelId,
+          organizationId: result.organizationId,
+          entityTypes: ['products', 'orders', 'customers', 'inventory'],
+        } satisfies SyncJobData, {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: { count: 100 },
+          removeOnFail: { count: 50 },
+        });
+      } catch {
+        // Non-fatal: sync can be triggered manually later
+      }
+
+      return res.redirect(result.redirectUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      const reason =
+        message.includes('state') ? 'invalid_state'
+          : message.includes('cancelled') ? 'cancelled'
+            : message.includes('another organization') ? 'shop_taken'
+              : message.includes('HMAC') ? 'invalid_hmac'
+                : 'connect_failed';
+      this.logger.warn(`Shopify OAuth callback failed (${reason}): ${message}`);
+      return res.redirect(`${frontendUrl}/channel?error=shopify_connect_failed&reason=${reason}`);
+    }
   }
 
   // POST /channels/shopify/manual-connect — connect using manually created custom app credentials
@@ -244,6 +276,16 @@ export class ChannelController {
   @Get(':id/sync-logs')
   getSyncLogs(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.channelService.getSyncLogs(id, user.orgId!);
+  }
+
+  @Post(':id/activate-pixel')
+  async activatePixel(@CurrentUser() user: JwtPayload, @Param('id') id: string) {
+    const channel = await this.prisma.channel.findFirst({
+      where: { id, organizationId: user.orgId!, platform: ChannelPlatform.SHOPIFY },
+      select: { id: true },
+    });
+    if (!channel) throw new BadRequestException('Shopify channel not found');
+    return this.shopifyPixel.activatePixel(id);
   }
 
   // POST /channels/:id/register-webhooks — re-run webhook registration for
