@@ -42,7 +42,13 @@ export class ChannelController {
     @CurrentUser() user: JwtPayload,
     @Body() dto: ConnectShopifyDto,
   ) {
-    const authUrl = await this.shopifyOAuth.getInstallUrl(user.orgId!, user.sub, dto.shopDomain);
+    const authUrl = await this.shopifyOAuth.getInstallUrl(
+      user.orgId!,
+      user.sub,
+      dto.shopDomain,
+      dto.apiKey,
+      dto.apiSecret,
+    );
     return { authUrl };
   }
 

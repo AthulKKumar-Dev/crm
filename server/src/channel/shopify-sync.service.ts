@@ -916,7 +916,22 @@ export class ShopifySyncService {
                     });
                     customerId = stub.id;
                 } catch {
-                    const existing = await this.prisma.customer.findFirst({ where: { channelId, externalId: String(so.customer.id) } });
+                    // Create can fail on (channelId, externalId) — a concurrent
+                    // stub — OR on the org-level (organizationId, email) unique
+                    // when a row with this email exists from a previous channel
+                    // connection. Link the order to whichever row matches; the
+                    // customers sync pass fully adopts it later.
+                    const existing = await this.prisma.customer.findFirst({
+                        where: {
+                            OR: [
+                                { channelId, externalId: String(so.customer.id) },
+                                ...(so.customer.email
+                                    ? [{ organizationId: orgId, email: so.customer.email }]
+                                    : []),
+                            ],
+                        },
+                        select: { id: true },
+                    });
                     customerId = existing?.id ?? null;
                 }
             }

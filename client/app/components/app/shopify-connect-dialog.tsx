@@ -23,20 +23,27 @@ interface ShopifyConnectDialogProps {
 }
 
 /**
- * Dialog for connecting a Shopify store.
+ * Dialog for connecting a Shopify store. Two self-contained paths:
  *
- * Primary path: public-app OAuth — the merchant enters their store domain
- * and is redirected to Shopify to approve the install; tokens are captured
- * server-side, no credentials ever pass through the browser.
+ * 1. PUBLIC APP (primary): store domain only — the platform's own Shopify
+ *    app is installed via OAuth; client id/secret come from server env.
  *
- * Fallback (collapsed "Advanced" section): the legacy custom-app credential
- * paste, for stores that can't install the public app.
+ * 2. CUSTOM APP (collapsed "Advanced" section): the merchant's own app.
+ *    Fields: store domain + Client ID + Client Secret + Access token
+ *    (optional).
+ *      • Access token filled  → app created in the STORE ADMIN → instant
+ *        manual connect, no redirect.
+ *      • Access token empty   → app created in the PARTNER DASHBOARD →
+ *        the same OAuth flow runs but with the entered credentials; the
+ *        token is fetched automatically.
  */
 export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: ShopifyConnectDialogProps) {
+  // ── Public app section ──
   const [shopDomain, setShopDomain] = useState("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // Legacy custom-app credentials (Advanced section only)
+  // ── Custom app section ──
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [customDomain, setCustomDomain] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [accessToken, setAccessToken] = useState("");
@@ -52,41 +59,59 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
     }
   }, [open, initialDomain]);
 
-  function handleInstall() {
+  function resetCustomForm() {
+    setCustomDomain("");
+    setApiKey("");
+    setApiSecret("");
+    setAccessToken("");
+  }
+
+  function handlePublicInstall() {
     if (!shopDomain.trim()) return;
     // Server normalizes authoritatively ("my-store" / full domain / URL all work)
     install.mutate({ shopDomain: shopDomain.trim() });
   }
 
-  function handleManualConnect() {
-    let domain = shopDomain.trim();
-    domain = domain.replace(/^https?:\/\//, "").replace(/\/$/, "").replace(/\/admin.*$/, "");
-    if (!domain.includes(".myshopify.com")) {
-      domain = `${domain}.myshopify.com`;
-    }
-
-    if (!domain || !apiKey.trim() || !apiSecret.trim() || !accessToken.trim()) return;
-
-    manualConnect.mutate(
-      {
-        shopDomain: domain,
-        apiKey: apiKey.trim(),
-        apiSecret: apiSecret.trim(),
-        accessToken: accessToken.trim(),
-      },
-      {
-        onSuccess: () => {
-          setShopDomain("");
-          setApiKey("");
-          setApiSecret("");
-          setAccessToken("");
-          onOpenChange(false);
-        },
-      },
-    );
+  function normalizeDomainForManual(input: string): string {
+    let domain = input.trim()
+      .replace(/^https?:\/\//, "").replace(/\/$/, "").replace(/\/admin.*$/, "");
+    if (!domain.includes(".myshopify.com")) domain = `${domain}.myshopify.com`;
+    return domain;
   }
 
-  const isManualFormValid = shopDomain.trim() && apiKey.trim() && apiSecret.trim() && accessToken.trim();
+  function handleCustomConnect() {
+    if (!customDomain.trim() || !apiKey.trim() || !apiSecret.trim()) return;
+
+    if (accessToken.trim()) {
+      // Store-admin custom app: the token was revealed once in the admin —
+      // connect instantly, no OAuth redirect.
+      manualConnect.mutate(
+        {
+          shopDomain: normalizeDomainForManual(customDomain),
+          apiKey: apiKey.trim(),
+          apiSecret: apiSecret.trim(),
+          accessToken: accessToken.trim(),
+        },
+        {
+          onSuccess: () => {
+            resetCustomForm();
+            onOpenChange(false);
+          },
+        },
+      );
+    } else {
+      // Partner-Dashboard custom app: run OAuth with the entered credentials;
+      // the access token is captured automatically by the callback.
+      install.mutate({
+        shopDomain: customDomain.trim(),
+        apiKey: apiKey.trim(),
+        apiSecret: apiSecret.trim(),
+      });
+    }
+  }
+
+  const isCustomFormValid = customDomain.trim() && apiKey.trim() && apiSecret.trim();
+  const customIsPending = install.isPending || manualConnect.isPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -113,7 +138,7 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
               <input
                 value={shopDomain}
                 onChange={(e) => setShopDomain(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleInstall()}
+                onKeyDown={(e) => e.key === "Enter" && handlePublicInstall()}
                 placeholder="my-store"
                 className="flex-1 rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#CEF17B]/50 placeholder:text-gray-400"
               />
@@ -132,7 +157,7 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
 
           <div className="flex items-center gap-2">
             <button
-              onClick={handleInstall}
+              onClick={handlePublicInstall}
               disabled={install.isPending || !shopDomain.trim()}
               className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 hover:bg-[#BADE6F] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
@@ -157,7 +182,7 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
           </div>
         </div>
 
-        {/* ── Advanced: legacy custom-app credentials (de-emphasized) ── */}
+        {/* ── Advanced: connect with your own custom app ── */}
         <div className="border-t pt-3">
           <button
             type="button"
@@ -170,42 +195,52 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
 
           {showAdvanced && (
             <div className="space-y-3 pt-3">
-              {/* Setup instructions */}
-              <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-900/10 dark:border-amber-800 p-4">
-                <p className="text-xs font-semibold text-amber-800 dark:text-amber-300 mb-2">How to get your credentials:</p>
-                <ol className="space-y-1.5 text-[11px] text-amber-700 dark:text-amber-400 list-decimal list-inside">
-                  <li>Go to Shopify Admin → <strong>Settings</strong> → <strong>Apps and sales channels</strong></li>
-                  <li>Click <strong>Develop apps</strong> → <strong>Allow custom app development</strong></li>
-                  <li>Click <strong>Create an app</strong> → name it (e.g., "Collabo CRM")</li>
-                  <li>Go to <strong>Configuration</strong> → <strong>Admin API integration</strong> → select scopes:
-                    <span className="block mt-0.5 font-mono text-[10px] bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 rounded">
-                      read_products, read_orders, read_customers, read_inventory
-                    </span>
-                  </li>
-                  <li>Save the configuration, then click <strong>Install app</strong> and confirm</li>
-                  <li>Go to <strong>API credentials</strong> tab → copy <strong>API key</strong> and <strong>API secret key</strong></li>
-                  <li>Under <strong>Admin API access token</strong>, click <strong>Reveal token once</strong> and copy it
-                    <span className="block mt-0.5 text-[10px] text-amber-600 dark:text-amber-500 font-medium">
-                      This token is only shown once — save it somewhere safe!
-                    </span>
-                  </li>
-                </ol>
+              <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-900/10 dark:border-amber-800 p-3">
+                <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                  Use your own Shopify app&apos;s credentials.{" "}
+                  <strong>App created in the Partner Dashboard?</strong> Enter the Client ID and
+                  Client Secret, leave the access token empty — we&apos;ll fetch it automatically.
+                  Make sure the app has been installed on the store once via its Distribution
+                  install link.{" "}
+                  <strong>App created in your store admin</strong> (Settings → Apps → Develop
+                  apps)? Also paste the Admin API access token shown when you installed it.
+                </p>
               </div>
 
-              {/* API Key */}
+              {/* Store domain */}
               <div>
-                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">API Key <span className="text-red-500">*</span></label>
+                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Store domain <span className="text-red-500">*</span>
+                </label>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    value={customDomain}
+                    onChange={(e) => setCustomDomain(e.target.value)}
+                    placeholder="my-store"
+                    className="flex-1 rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[#CEF17B]/50 placeholder:text-gray-400"
+                  />
+                  <span className="shrink-0 text-xs text-muted-foreground">.myshopify.com</span>
+                </div>
+              </div>
+
+              {/* Client ID */}
+              <div>
+                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Client ID (API key) <span className="text-red-500">*</span>
+                </label>
                 <input
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="From your custom app's API credentials tab"
+                  placeholder="From the app's API credentials"
                   className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-[#CEF17B]/50 placeholder:text-gray-400"
                 />
               </div>
 
-              {/* API Secret */}
+              {/* Client Secret */}
               <div>
-                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">API Secret Key <span className="text-red-500">*</span></label>
+                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Client Secret <span className="text-red-500">*</span>
+                </label>
                 <div className="relative mt-1">
                   <input
                     type={showSecret ? "text" : "password"}
@@ -224,15 +259,18 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
                 </div>
               </div>
 
-              {/* Admin API Access Token */}
+              {/* Admin API Access Token — optional */}
               <div>
-                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">Admin API Access Token <span className="text-red-500">*</span></label>
+                <label className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                  Admin API access token{" "}
+                  <span className="text-muted-foreground font-normal">(only for store-admin apps)</span>
+                </label>
                 <div className="relative mt-1">
                   <input
                     type={showToken ? "text" : "password"}
                     value={accessToken}
                     onChange={(e) => setAccessToken(e.target.value)}
-                    placeholder="shpat_xxxxxxxxxxxxxxxxxxxxx"
+                    placeholder="shpat_xxxxxxxxxxxxxxxxxxxxx — leave empty for Partner Dashboard apps"
                     className="w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 pr-10 text-sm font-mono outline-none focus:ring-2 focus:ring-[#CEF17B]/50 placeholder:text-gray-400"
                   />
                   <button
@@ -246,17 +284,22 @@ export function ShopifyConnectDialog({ open, onOpenChange, initialDomain }: Shop
               </div>
 
               <button
-                onClick={handleManualConnect}
-                disabled={manualConnect.isPending || !isManualFormValid}
+                onClick={handleCustomConnect}
+                disabled={customIsPending || !isCustomFormValid}
                 className="flex w-full items-center justify-center gap-2 rounded-lg border border-input bg-white dark:bg-gray-900 px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {manualConnect.isPending ? (
+                {customIsPending ? (
                   <>
                     <Loader2 className="size-4 animate-spin" />
-                    Connecting...
+                    {accessToken.trim() ? "Connecting…" : "Redirecting to Shopify…"}
                   </>
+                ) : accessToken.trim() ? (
+                  "Connect with access token"
                 ) : (
-                  "Connect with custom app credentials"
+                  <>
+                    Connect via Shopify
+                    <ExternalLink className="size-3.5" />
+                  </>
                 )}
               </button>
             </div>
