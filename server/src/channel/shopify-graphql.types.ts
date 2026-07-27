@@ -1061,6 +1061,599 @@ export const DRAFT_ORDER_INVOICE_SEND_MUTATION = /* GraphQL */ `
   }
 `;
 
+// ─── Shop info ──────────────────────────────────────────────────────────────
+// Replaces REST `shop.json` (403 for apps created after Shopify's REST
+// sunset). Used by the OAuth callback and manual-connect validation.
+
+export interface ShopInfoResponse {
+  shop: {
+    id: string; // gid://shopify/Shop/123
+    name: string;
+    currencyCode: string;
+  };
+}
+
+export const SHOP_INFO_QUERY = /* GraphQL */ `
+  query ShopInfo {
+    shop {
+      id
+      name
+      currencyCode
+    }
+  }
+`;
+
+// ─── Webhook subscriptions ──────────────────────────────────────────────────
+// Replaces REST `webhooks.json`. Topic enum values are the REST topic
+// uppercased with `/` → `_` (products/create → PRODUCTS_CREATE).
+
+export interface WebhookSubscriptionCreateVariables {
+  topic: string;
+  webhookSubscription: {
+    callbackUrl: string;
+    format: 'JSON';
+  };
+}
+
+export interface WebhookSubscriptionCreateResponse {
+  webhookSubscriptionCreate: {
+    webhookSubscription: { id: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const WEBHOOK_SUBSCRIPTION_CREATE_MUTATION = /* GraphQL */ `
+  mutation WebhookSubscriptionCreate(
+    $topic: WebhookSubscriptionTopic!
+    $webhookSubscription: WebhookSubscriptionInput!
+  ) {
+    webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+      webhookSubscription { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+export interface WebhookSubscriptionsListResponse {
+  webhookSubscriptions: {
+    nodes: Array<{ id: string; topic: string }>;
+  };
+}
+
+export const WEBHOOK_SUBSCRIPTIONS_QUERY = /* GraphQL */ `
+  query WebhookSubscriptions($first: Int!) {
+    webhookSubscriptions(first: $first) {
+      nodes { id topic }
+    }
+  }
+`;
+
+export interface WebhookSubscriptionDeleteResponse {
+  webhookSubscriptionDelete: {
+    deletedWebhookSubscriptionId: string | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const WEBHOOK_SUBSCRIPTION_DELETE_MUTATION = /* GraphQL */ `
+  mutation WebhookSubscriptionDelete($id: ID!) {
+    webhookSubscriptionDelete(id: $id) {
+      deletedWebhookSubscriptionId
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── Entity counts (sync progress estimates) ────────────────────────────────
+// Replace REST `/{resource}/count.json`. Informational only — callers treat
+// failures as "unknown" (0), never fatal.
+
+export interface ProductsCountResponse {
+  productsCount: { count: number } | null;
+}
+export const PRODUCTS_COUNT_QUERY = /* GraphQL */ `
+  query ProductsCount { productsCount { count } }
+`;
+
+export interface CustomersCountResponse {
+  customersCount: { count: number } | null;
+}
+export const CUSTOMERS_COUNT_QUERY = /* GraphQL */ `
+  query CustomersCount { customersCount { count } }
+`;
+
+export interface OrdersCountResponse {
+  ordersCount: { count: number } | null;
+}
+export const ORDERS_COUNT_QUERY = /* GraphQL */ `
+  query OrdersCount { ordersCount { count } }
+`;
+
+// ─── Products list (sync) ───────────────────────────────────────────────────
+// Feeds `transformGraphqlProduct` → the REST snake_case shape `upsertProduct`
+// consumes (shared with the products/* webhooks). The optional vendor
+// metafield is inlined via @include so multi-vendor orgs don't need a
+// follow-up call per product.
+
+export interface ProductVariantSyncNode {
+  id: string;
+  title: string | null;
+  sku: string | null;
+  barcode: string | null;
+  price: string;
+  compareAtPrice: string | null;
+  position: number;
+  taxable: boolean;
+  inventoryQuantity: number | null;
+  selectedOptions: Array<{ name: string; value: string }>;
+  inventoryItem: {
+    id: string;
+    requiresShipping: boolean;
+    measurement: { weight: { value: number; unit: string } | null } | null;
+  } | null;
+}
+
+export interface ProductSyncNode {
+  id: string;
+  title: string;
+  descriptionHtml: string | null;
+  vendor: string | null;
+  productType: string | null;
+  status: string;
+  tags: string[];
+  handle: string | null;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  options: Array<{ name: string; values: string[]; position: number }>;
+  media: {
+    nodes: Array<{
+      id: string;
+      image?: { url: string; altText: string | null } | null;
+    }>;
+  };
+  variants: { nodes: ProductVariantSyncNode[] };
+  vendorMetafield?: { value: string } | null;
+}
+
+export interface ProductsListVariables {
+  first: number;
+  after?: string | null;
+  withMetafield: boolean;
+  mfNamespace: string;
+  mfKey: string;
+}
+
+export interface ProductsListResponse {
+  products: {
+    pageInfo: PageInfo;
+    nodes: ProductSyncNode[];
+  };
+}
+
+export const PRODUCTS_LIST_QUERY = /* GraphQL */ `
+  query ProductsList(
+    $first: Int!
+    $after: String
+    $withMetafield: Boolean!
+    $mfNamespace: String
+    $mfKey: String!
+  ) {
+    products(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        title
+        descriptionHtml
+        vendor
+        productType
+        status
+        tags
+        handle
+        publishedAt
+        createdAt
+        updatedAt
+        options { name values position }
+        media(first: 50) {
+          nodes {
+            id
+            ... on MediaImage {
+              image { url altText }
+            }
+          }
+        }
+        variants(first: 100) {
+          nodes {
+            id
+            title
+            sku
+            barcode
+            price
+            compareAtPrice
+            position
+            taxable
+            inventoryQuantity
+            selectedOptions { name value }
+            inventoryItem {
+              id
+              requiresShipping
+              measurement { weight { value unit } }
+            }
+          }
+        }
+        vendorMetafield: metafield(namespace: $mfNamespace, key: $mfKey) @include(if: $withMetafield) {
+          value
+        }
+      }
+    }
+  }
+`;
+
+// Lightweight variant-only products query for the inventory sync pass.
+export interface ProductsInventoryResponse {
+  products: {
+    pageInfo: PageInfo;
+    nodes: Array<{
+      id: string;
+      variants: { nodes: Array<{ id: string; inventoryQuantity: number | null }> };
+    }>;
+  };
+}
+
+export const PRODUCTS_INVENTORY_QUERY = /* GraphQL */ `
+  query ProductsInventory($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        variants(first: 100) {
+          nodes {
+            id
+            inventoryQuantity
+          }
+        }
+      }
+    }
+  }
+`;
+
+// ─── Customers list (sync) ──────────────────────────────────────────────────
+// NOTE: reading customer PII with a public app requires "Protected customer
+// data access" to be enabled for the app in the Partner Dashboard.
+
+export interface CustomerSyncNode {
+  id: string;
+  email: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  state: string;
+  verifiedEmail: boolean;
+  note: string | null;
+  tags: string[];
+  numberOfOrders: string;
+  amountSpent: MoneyV2 | null;
+  emailMarketingConsent: { marketingState: string } | null;
+  addresses: MailingAddress[];
+  defaultAddress: MailingAddress | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomersListVariables {
+  first: number;
+  after?: string | null;
+}
+
+export interface CustomersListResponse {
+  customers: {
+    pageInfo: PageInfo;
+    nodes: CustomerSyncNode[];
+  };
+}
+
+export const CUSTOMERS_LIST_QUERY = /* GraphQL */ `
+  query CustomersList($first: Int!, $after: String) {
+    customers(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        email
+        firstName
+        lastName
+        phone
+        state
+        verifiedEmail
+        note
+        tags
+        numberOfOrders
+        amountSpent { amount currencyCode }
+        emailMarketingConsent { marketingState }
+        addresses {
+          address1 address2 city province provinceCode country countryCodeV2
+          zip firstName lastName name phone company
+        }
+        defaultAddress {
+          address1 address2 city province provinceCode country countryCodeV2
+          zip firstName lastName name phone company
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+`;
+
+// ─── Collections list (sync) ────────────────────────────────────────────────
+// One connection covers both custom and smart collections — `ruleSet` is
+// non-null only for smart collections. Product membership (previously REST
+// `collects.json`) is inlined; oversized collections are drained with
+// COLLECTION_PRODUCTS_QUERY.
+
+export interface CollectionSyncNode {
+  id: string;
+  title: string;
+  handle: string | null;
+  sortOrder: string | null;
+  updatedAt: string;
+  ruleSet: { appliedDisjunctively: boolean } | null;
+  products: {
+    pageInfo: PageInfo;
+    nodes: Array<{ id: string }>;
+  };
+}
+
+export interface CollectionsListVariables {
+  first: number;
+  after?: string | null;
+}
+
+export interface CollectionsListResponse {
+  collections: {
+    pageInfo: PageInfo;
+    nodes: CollectionSyncNode[];
+  };
+}
+
+export const COLLECTIONS_LIST_QUERY = /* GraphQL */ `
+  query CollectionsList($first: Int!, $after: String) {
+    collections(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        title
+        handle
+        sortOrder
+        updatedAt
+        ruleSet { appliedDisjunctively }
+        products(first: 100) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes { id }
+        }
+      }
+    }
+  }
+`;
+
+export interface CollectionProductsResponse {
+  collection: {
+    products: {
+      pageInfo: PageInfo;
+      nodes: Array<{ id: string }>;
+    };
+  } | null;
+}
+
+export const COLLECTION_PRODUCTS_QUERY = /* GraphQL */ `
+  query CollectionProducts($id: ID!, $first: Int!, $after: String) {
+    collection(id: $id) {
+      products(first: $first, after: $after) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes { id }
+      }
+    }
+  }
+`;
+
+// ─── Locations ──────────────────────────────────────────────────────────────
+// Replaces REST `locations.json` (used to resolve the primary location for
+// inventory seeding / order fulfillment).
+
+export interface LocationsResponse {
+  locations: {
+    nodes: Array<{ id: string; name: string; isActive: boolean; isPrimary: boolean }>;
+  };
+}
+
+export const LOCATIONS_QUERY = /* GraphQL */ `
+  query Locations {
+    locations(first: 50) {
+      nodes {
+        id
+        name
+        isActive
+        isPrimary
+      }
+    }
+  }
+`;
+
+// ─── orderCreate (push CRM offline orders into Shopify) ─────────────────────
+// Replaces REST `POST /orders.json`. A successful SALE transaction covering
+// the total marks the order paid; inventory behaviour rides on `options`.
+
+export interface OrderCreatePushVariables {
+  order: Record<string, unknown>;
+  options?: Record<string, unknown>;
+}
+
+export interface OrderCreatePushResponse {
+  orderCreate: {
+    order: { id: string; name: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const ORDER_CREATE_MUTATION = /* GraphQL */ `
+  mutation OrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
+    orderCreate(order: $order, options: $options) {
+      order { id name }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── productSet (one-shot product create) ───────────────────────────────────
+// Replaces REST `POST /products.json` + the follow-up inventory-item meta,
+// inventory seeding, and (partially) image handling — options, variants,
+// files, per-variant inventory quantities and inventory-item fields all ride
+// in a single synchronous mutation.
+
+export interface ProductSetResponse {
+  productSet: {
+    product: {
+      id: string;
+      variants: { nodes: Array<{ id: string; inventoryItem: { id: string } | null }> };
+      media: { nodes: Array<{ id: string }> };
+    } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const PRODUCT_SET_MUTATION = /* GraphQL */ `
+  mutation ProductSet($input: ProductSetInput!, $synchronous: Boolean!) {
+    productSet(input: $input, synchronous: $synchronous) {
+      product {
+        id
+        variants(first: 100) {
+          nodes {
+            id
+            inventoryItem { id }
+          }
+        }
+        media(first: 50) {
+          nodes { id }
+        }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── productUpdate (top-level fields of an already-synced product) ──────────
+
+export interface ProductUpdatePushResponse {
+  productUpdate: {
+    product: { id: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const PRODUCT_UPDATE_MUTATION = /* GraphQL */ `
+  mutation ProductUpdate($input: ProductInput!) {
+    productUpdate(input: $input) {
+      product { id }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── productVariantsBulkUpdate / Create ─────────────────────────────────────
+// Replace REST `PUT /variants/{id}.json`, `POST /products/{id}/variants.json`
+// and `PUT /inventory_items/{id}.json` — sku, cost, weight, HS code and
+// country-of-origin all live on `inventoryItem` in the bulk input.
+
+export interface ProductVariantsBulkResponse {
+  productVariants: Array<{ id: string; inventoryItem: { id: string } | null }> | null;
+  userErrors: ShopifyUserError[];
+}
+
+export interface ProductVariantsBulkUpdateResponse {
+  productVariantsBulkUpdate: ProductVariantsBulkResponse;
+}
+
+export const PRODUCT_VARIANTS_BULK_UPDATE_MUTATION = /* GraphQL */ `
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants {
+        id
+        inventoryItem { id }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
+export interface ProductVariantsBulkCreateResponse {
+  productVariantsBulkCreate: ProductVariantsBulkResponse;
+}
+
+export const PRODUCT_VARIANTS_BULK_CREATE_MUTATION = /* GraphQL */ `
+  mutation ProductVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants) {
+      productVariants {
+        id
+        inventoryItem { id }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── inventorySetQuantities ─────────────────────────────────────────────────
+// Replaces REST `POST /inventory_levels/set.json`.
+
+export interface InventorySetQuantitiesResponse {
+  inventorySetQuantities: {
+    inventoryAdjustmentGroup: { createdAt: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
+  mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
+    inventorySetQuantities(input: $input) {
+      inventoryAdjustmentGroup { createdAt }
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── Variant → inventory item backfill ──────────────────────────────────────
+// Replaces REST `GET /variants/{id}.json` (older pulls didn't persist
+// inventory_item_id locally).
+
+export interface VariantInventoryItemResponse {
+  productVariant: { id: string; inventoryItem: { id: string } | null } | null;
+}
+
+export const VARIANT_INVENTORY_ITEM_QUERY = /* GraphQL */ `
+  query VariantInventoryItem($id: ID!) {
+    productVariant(id: $id) {
+      id
+      inventoryItem { id }
+    }
+  }
+`;
+
 // ─── shopifyqlQuery ────────────────────────────────────────────────────────
 // Runs a ShopifyQL string against the Analytics API. In API version 2026-01
 // the field returns a concrete `ShopifyqlQueryResponse` object (NOT a union)
@@ -1115,4 +1708,45 @@ export const SHOPIFYQL_QUERY = /* GraphQL */ `
       }
     }
   }
+`;
+
+
+// ─── Web Pixel (storefront analytics extension) ─────────────────────────────
+
+export interface WebPixelCreateResponse {
+  webPixelCreate: {
+    webPixel: { id: string; settings: string } | null;
+    userErrors: Array<{ code?: string; field?: string[]; message: string }>;
+  };
+}
+export const WEB_PIXEL_CREATE_MUTATION = /* GraphQL */ `
+  mutation WebPixelCreate($webPixel: WebPixelInput!) {
+    webPixelCreate(webPixel: $webPixel) {
+      webPixel { id settings }
+      userErrors { code field message }
+    }
+  }
+`;
+
+export interface WebPixelUpdateResponse {
+  webPixelUpdate: {
+    webPixel: { id: string; settings: string } | null;
+    userErrors: Array<{ code?: string; field?: string[]; message: string }>;
+  };
+}
+export const WEB_PIXEL_UPDATE_MUTATION = /* GraphQL */ `
+  mutation WebPixelUpdate($id: ID!, $webPixel: WebPixelInput!) {
+    webPixelUpdate(id: $id, webPixel: $webPixel) {
+      webPixel { id settings }
+      userErrors { code field message }
+    }
+  }
+`;
+
+export interface WebPixelQueryResponse {
+  webPixel: { id: string; settings: string } | null;
+}
+// Returns THIS app's pixel on the shop (used to recover the id when create says TAKEN).
+export const WEB_PIXEL_QUERY = /* GraphQL */ `
+  query WebPixel { webPixel { id settings } }
 `;
