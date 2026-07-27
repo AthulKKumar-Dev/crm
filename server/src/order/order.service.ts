@@ -1482,10 +1482,10 @@ export class OrderService {
 
   /**
    * A vendor's view of an order: ONLY their line items (with image + unit price +
-   * line total) + a per-vendor subtotal + ship-to (name + postal address, no
-   * contact) + the fulfilments touching their items. Still hides the order's
-   * overall totals/tax/shipping, payment/financial status, refunds, timeline,
-   * customer contact, and other vendors' items.
+   * line total) + a per-vendor subtotal + ship-to / bill-to (incl. phone) +
+   * customer name/email + order note + the fulfilments touching their items.
+   * Still hides the order's overall totals/tax/shipping, payment/financial
+   * status, refunds, timeline, and other vendors' items.
    */
   async findOneForVendor(id: string, orgId: string, vendorScope: string) {
     const order = await this.prisma.order.findFirst({
@@ -1496,6 +1496,9 @@ export class OrderService {
         lineItems: { some: { vendor: vendorScope } },
       },
       include: {
+        customer: {
+          select: { firstName: true, lastName: true, email: true, phone: true },
+        },
         lineItems: {
           where: { vendor: vendorScope },
           select: {
@@ -1575,6 +1578,17 @@ export class OrderService {
       currency: order.currency,
       createdAt: order.externalCreatedAt ?? order.createdAt,
       shipTo: this.sanitizeShipTo(order.shippingAddress),
+      billingAddress: this.sanitizeShipTo(order.billingAddress),
+      email: order.customer?.email ?? null,
+      phone: order.customer?.phone ?? null,
+      note: order.note,
+      customer: order.customer
+        ? {
+            firstName: order.customer.firstName,
+            lastName: order.customer.lastName,
+            email: order.customer.email,
+          }
+        : null,
       lineItems,
       vendorSubtotal,
       fulfillments,
@@ -1805,7 +1819,7 @@ export class OrderService {
     return map;
   }
 
-  /** Ship-to name + postal address only — drops phone/email. */
+  /** Flatten a raw address bag to name + postal address + phone. */
   private sanitizeShipTo(addr: Prisma.JsonValue | null) {
     if (!addr || typeof addr !== 'object' || Array.isArray(addr)) return null;
     const a = addr as Record<string, unknown>;
@@ -1821,6 +1835,7 @@ export class OrderService {
       province: str('province') ?? str('province_code'),
       zip: str('zip'),
       country: str('country') ?? str('country_code'),
+      phone: str('phone'),
     };
   }
 

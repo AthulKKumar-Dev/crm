@@ -84,7 +84,7 @@ function resolveAddress(a: Record<string, unknown> | null | undefined): SlipAddr
 
 /** Normalise ship-to from either the vendor projection or a raw owner address. */
 function resolveShipTo(order: SlipOrder): SlipAddress | null {
-  if (order.shipTo) return { ...order.shipTo, phone: null };
+  if (order.shipTo) return { ...order.shipTo, phone: order.shipTo.phone ?? null };
   const resolved = resolveAddress(order.shippingAddress);
   if (resolved) return resolved;
   const nm = [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(" ");
