@@ -142,6 +142,7 @@ export interface VendorShipTo {
   province: string | null;
   zip: string | null;
   country: string | null;
+  phone?: string | null;
 }
 
 export interface VendorOrderLine {
@@ -172,7 +173,7 @@ export interface VendorOrderFulfillment {
   createdAt: string;
 }
 
-/** What `GET /orders/:id` returns to a VENDOR — their items only, no money/customer. */
+/** What `GET /orders/:id` returns to a VENDOR — their items only, no order-level money. */
 export interface VendorOrderDetail {
   id: string;
   orderNumber: number;
@@ -181,6 +182,11 @@ export interface VendorOrderDetail {
   currency: string;
   createdAt: string;
   shipTo: VendorShipTo | null;
+  billingAddress: VendorShipTo | null;
+  email: string | null;
+  phone: string | null;
+  note: string | null;
+  customer: { firstName: string | null; lastName: string | null; email: string | null } | null;
   lineItems: VendorOrderLine[];
   vendorSubtotal: number;
   fulfillments: VendorOrderFulfillment[];
