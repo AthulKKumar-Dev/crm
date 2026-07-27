@@ -576,9 +576,8 @@ export interface TriggerSyncRequest {
 
 /** Payload for starting Shopify OAuth with merchant's custom app credentials. */
 export interface ShopifyInstallRequest {
+  // "my-store" | "my-store.myshopify.com" | full URL — server normalizes
   shopDomain: string;
-  apiKey: string;
-  apiSecret: string;
 }
 
 /** Payload for manually connecting a Shopify store with custom app credentials. */

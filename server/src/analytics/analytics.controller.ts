@@ -2,11 +2,13 @@ import { Controller, Get, Logger, Post, Query } from '@nestjs/common';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AnalyticsService } from './analytics.service';
+import { AnalyticsDashboardService } from './analytics-dashboard.service';
 import {
   RefreshResult,
   ShopifyAnalyticsService,
 } from '../channel/shopify-analytics.service';
 import { CartEventsAggregator } from './cart-events-aggregator.service';
+import { PixelEventsAggregator } from './pixel-events-aggregator.service';
 import { QueryAnalyticsDto, rangeToDays } from './dto/query-analytics.dto';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -16,8 +18,10 @@ export class AnalyticsController {
 
   constructor(
     private readonly analytics: AnalyticsService,
+    private readonly dashboard: AnalyticsDashboardService,
     private readonly shopifyAnalytics: ShopifyAnalyticsService,
     private readonly cartAggregator: CartEventsAggregator,
+    private readonly pixelAggregator: PixelEventsAggregator,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -28,6 +32,18 @@ export class AnalyticsController {
     @Query() query: QueryAnalyticsDto,
   ) {
     return this.analytics.getOverview(user.orgId!, query);
+  }
+
+  // GET /api/v1/analytics/dashboard?range=30d|6m|12m&channel=all|shopify|instagram|whatsapp
+  // Pixel-first dashboard: 3 stat cards, top pages, top add-to-cart
+  // products, and the cart→checkout→orders trend. Returns the same shape
+  // for every channel filter.
+  @Get('dashboard')
+  getDashboard(
+    @CurrentUser() user: JwtPayload,
+    @Query() query: QueryAnalyticsDto,
+  ) {
+    return this.dashboard.getDashboard(user.orgId!, query);
   }
 
   // POST /api/v1/analytics/refresh?channelId=xxx
@@ -89,6 +105,16 @@ export class AnalyticsController {
     } catch (err) {
       this.logger.warn(
         `[analytics] Cart aggregation failed during refresh: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    // Same for the last 24h of Web Pixel events — feeds the pixel-first
+    // dashboard (pages, add-to-cart, abandoned carts) immediately.
+    try {
+      await this.pixelAggregator.rollupRecentDay();
+    } catch (err) {
+      this.logger.warn(
+        `[analytics] Pixel aggregation failed during refresh: ${err instanceof Error ? err.message : err}`,
       );
     }
 

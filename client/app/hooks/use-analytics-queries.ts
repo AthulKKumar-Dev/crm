@@ -8,19 +8,19 @@ import {
 /** React Query key factory for the analytics page. */
 export const analyticsKeys = {
   all: ["analytics"] as const,
-  overview: (params?: AnalyticsQueryParams) =>
-    [...analyticsKeys.all, "overview", params] as const,
+  dashboard: (params?: AnalyticsQueryParams) =>
+    [...analyticsKeys.all, "dashboard", params] as const,
 };
 
-/** Fetch the analytics overview (stats, trend, channel breakdown). */
-export function useAnalyticsOverview(params?: AnalyticsQueryParams) {
+/** Fetch the pixel-first analytics dashboard. */
+export function useAnalyticsDashboard(params?: AnalyticsQueryParams) {
   return useQuery({
-    queryKey: analyticsKeys.overview(params),
-    queryFn: () => analyticsService.getOverview(params),
+    queryKey: analyticsKeys.dashboard(params),
+    queryFn: () => analyticsService.getDashboard(params),
   });
 }
 
-/** Trigger an on-demand Shopify analytics refresh for the current org. */
+/** Trigger an on-demand analytics refresh (ShopifyQL + pixel rollup). */
 export function useRefreshAnalytics() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -34,8 +34,6 @@ export function useRefreshAnalytics() {
         return;
       }
 
-      // Surface per-channel errors so the user can see WHY data isn't loading
-      // (missing scope, plan tier, etc.) without digging through server logs.
       const errored = result.results.filter((r) => r.error);
       if (errored.length > 0) {
         const first = errored[0];

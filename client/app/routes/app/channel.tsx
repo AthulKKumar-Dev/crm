@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   ShoppingBag, Package, Plus,
   ExternalLink, CheckCircle, AlertCircle, Clock, Search,
@@ -11,7 +14,8 @@ import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
 import { WhatsAppConnectDialog } from "~/components/app/whatsapp-connect-dialog";
-import { useChannels } from "~/hooks/use-channel-queries";
+import { useChannels, channelKeys } from "~/hooks/use-channel-queries";
+import { orgKeys } from "~/hooks/use-org-queries";
 import { useTriggerSyncMutation, useDisconnectChannelMutation } from "~/hooks/use-channel-mutations";
 import type { ChannelPlatform, ChannelStatus, SyncStatus } from "~/types/api";
 
@@ -109,15 +113,60 @@ const INTEGRATIONS: Integration[] = [
 
 /* ─── Channel page component ──────────────────────────────────── */
 
+/** Maps callback error slugs from the server to human-readable messages. */
+const SHOPIFY_ERROR_MESSAGES: Record<string, string> = {
+  invalid_state: "The connection link expired — please try again.",
+  cancelled: "Installation was cancelled in Shopify.",
+  shop_taken: "This store is already connected to another organization.",
+  invalid_hmac: "The request could not be verified. Please try again.",
+  connect_failed: "Could not connect to Shopify. Please try again.",
+};
+
 export default function ChannelPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isShopifyDialogOpen, setIsShopifyDialogOpen] = useState(false);
   const [isWhatsAppDialogOpen, setIsWhatsAppDialogOpen] = useState(false);
   const [integrationSearch, setIntegrationSearch] = useState("");
+  // Pre-fills the Shopify dialog when arriving from the embedded Shopify
+  // app's "Open CRM" button (?install_shop=my-store.myshopify.com)
+  const [installDomain, setInstallDomain] = useState<string | undefined>();
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
 
   const { data: channels, isLoading } = useChannels();
   const triggerSync = useTriggerSyncMutation();
   const disconnectChannel = useDisconnectChannelMutation();
+
+  // Handle query params set by OAuth redirects and the embedded Shopify app
+  useEffect(() => {
+    const connected = searchParams.get("connected");
+    const error = searchParams.get("error");
+    const installShop = searchParams.get("install_shop");
+
+    if (connected) {
+      toast.success(
+        connected === "shopify"
+          ? "Shopify store connected — initial sync started"
+          : connected === "instagram"
+            ? "Instagram account connected"
+            : "Channel connected",
+      );
+      queryClient.invalidateQueries({ queryKey: channelKeys.all });
+      // Org currency is auto-synced from the Shopify shop on connect
+      queryClient.invalidateQueries({ queryKey: orgKeys.all });
+      setSearchParams({}, { replace: true });
+    } else if (error === "shopify_connect_failed") {
+      const reason = searchParams.get("reason") ?? "connect_failed";
+      toast.error(SHOPIFY_ERROR_MESSAGES[reason] ?? SHOPIFY_ERROR_MESSAGES.connect_failed);
+      setSearchParams({}, { replace: true });
+    } else if (installShop) {
+      setInstallDomain(installShop);
+      setIsShopifyDialogOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   const filteredIntegrations = INTEGRATIONS.filter((integration) => {
     return !integrationSearch || integration.name.toLowerCase().includes(integrationSearch.toLowerCase()) || integration.description.toLowerCase().includes(integrationSearch.toLowerCase());
@@ -195,6 +244,24 @@ export default function ChannelPage() {
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
+                    {/* Reconnect: shown when the store's token is dead
+                        (app uninstalled from Shopify / auth revoked).
+                        Re-opens the connect dialog — the server updates the
+                        existing channel row instead of creating a new one. */}
+                    {channel.platform === 'SHOPIFY' && channel.status === 'DISCONNECTED' && (
+                      <button
+                        onClick={() => {
+                          setInstallDomain(
+                            channel.externalStoreUrl?.replace(/^https?:\/\//, "") || undefined,
+                          );
+                          setIsShopifyDialogOpen(true);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors"
+                      >
+                        <RefreshCw className="size-3" />
+                        Reconnect
+                      </button>
+                    )}
                     {/* Sync button:
                         • SHOPIFY  → "Sync Now"        (pull from Shopify + bulk-push local items)
                         • MANUAL   → "Push to Shopify" (no pull; bulk-push products/orders/drafts created in the CRM)
@@ -299,10 +366,14 @@ export default function ChannelPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Shopify manual connect dialog */}
+      {/* Shopify connect dialog (public-app OAuth + advanced custom-app fallback) */}
       <ShopifyConnectDialog
         open={isShopifyDialogOpen}
-        onOpenChange={setIsShopifyDialogOpen}
+        onOpenChange={(open) => {
+          setIsShopifyDialogOpen(open);
+          if (!open) setInstallDomain(undefined);
+        }}
+        initialDomain={installDomain}
       />
 
       {/* WhatsApp Embedded Signup dialog */}

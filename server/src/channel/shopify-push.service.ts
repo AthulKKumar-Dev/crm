@@ -2,8 +2,38 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
-import { ShopifyGraphqlClient } from './shopify-graphql.client';
+import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import {
+  LOCATIONS_QUERY,
+  LocationsResponse,
+  ORDER_CREATE_MUTATION,
+  OrderCreatePushResponse,
+  PRODUCT_SET_MUTATION,
+  ProductSetResponse,
+  PRODUCT_UPDATE_MUTATION,
+  ProductUpdatePushResponse,
+  PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+  ProductVariantsBulkUpdateResponse,
+  PRODUCT_VARIANTS_BULK_CREATE_MUTATION,
+  ProductVariantsBulkCreateResponse,
+  INVENTORY_SET_QUANTITIES_MUTATION,
+  InventorySetQuantitiesResponse,
+  VARIANT_INVENTORY_ITEM_QUERY,
+  VariantInventoryItemResponse,
+  ORDER_FULFILLMENT_ORDERS_QUERY,
+  OrderFulfillmentOrdersResponse,
+  FULFILLMENT_CREATE_MUTATION,
+  FulfillmentCreateResponse,
+} from './shopify-graphql.types';
+
+// CRM weight_unit strings (REST heritage: kg/g/lb/oz) → GraphQL WeightUnit enum.
+const WEIGHT_UNIT_TO_GRAPHQL: Record<string, string> = {
+  kg: 'KILOGRAMS',
+  g: 'GRAMS',
+  lb: 'POUNDS',
+  oz: 'OUNCES',
+};
 
 /** Shape persisted on Order.metadata.shopifySync to track push state. */
 export interface ShopifySyncMetadata {
@@ -31,11 +61,6 @@ export class ShopifyPushService {
     private readonly graphql: ShopifyGraphqlClient,
     private readonly orgSettings: OrganizationSettingsService,
   ) { }
-
-  /** Resolves the configured Shopify Admin API version (env-driven). */
-  private get apiVersion(): string {
-    return this.graphql.getApiVersion();
-  }
 
   /** Resolve the org's connected SHOPIFY channel (if any). Null = nothing to push. */
   async findShopifyChannel(orgId: string) {
@@ -83,99 +108,129 @@ export class ShopifyPushService {
     // against the location set on the order's fulfillment.
     const locationId = await this.resolveLocationId(channel.id, shopDomain, token);
 
-    // Build the Shopify order payload. Variants with a real Shopify variant_id
-    // (externalId on the local ProductVariant) reference that variant directly.
+    // Build the orderCreate input. Variants with a real Shopify variant_id
+    // (externalId on the local ProductVariant) reference that variant by GID.
     // CRM-only items (no Shopify mapping; externalId starts with `manual_`)
-    // fall back to a custom line item — Shopify accepts `{title, price, quantity}`
-    // without a variant_id and records the item as a one-off on the order.
-    const lineItems: Array<
-      | { variant_id: number; quantity: number; price: string }
-      | { title: string; quantity: number; price: string }
-    > = [];
-    for (const li of order.lineItems) {
+    // fall back to a custom line item — `{title, priceSet, quantity}` without
+    // a variantId records the item as a one-off on the order.
+    const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
+    const currency = order.currency;
+    const money = (amount: string) => ({ shopMoney: { amount, currencyCode: currency } });
+
+    const lineItems = order.lineItems.map((li) => {
       const externalId = li.variant?.externalId;
-      const hasShopifyVariant =
-        !!externalId && !externalId.startsWith('manual_');
+      const hasShopifyVariant = !!externalId && !externalId.startsWith('manual_');
+      return hasShopifyVariant
+        ? {
+            variantId: ShopifyGraphqlClient.toGid('ProductVariant', externalId!),
+            quantity: li.quantity,
+            priceSet: money(li.price.toString()),
+          }
+        : {
+            title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title,
+            quantity: li.quantity,
+            priceSet: money(li.price.toString()),
+          };
+    });
 
-      if (hasShopifyVariant) {
-        lineItems.push({
-          variant_id: Number(externalId),
-          quantity: li.quantity,
-          price: li.price.toString(),
-        });
-      } else {
-        lineItems.push({
-          title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title,
-          quantity: li.quantity,
-          price: li.price.toString(),
-        });
-      }
-    }
-
-    const customerBlock = this.buildCustomerBlock(order.customer);
+    // Customers originally synced from Shopify are associated by GID so no
+    // duplicate is created; manual customers ride as email/phone on the order.
+    const customerExternalId = order.customer?.externalId;
+    const customerBlock =
+      customerExternalId && !customerExternalId.startsWith('manual_') && /^\d+$/.test(customerExternalId)
+        ? { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', customerExternalId) } }
+        : undefined;
 
     const grandTotal = order.totalPrice.toString();
 
-    const payload = {
-      order: {
-        email: order.customer?.email ?? undefined,
-        phone: order.customer?.phone ?? undefined,
-        send_receipt: false,
-        send_fulfillment_receipt: false,
-        inventory_behaviour: 'decrement_obeying_policy',
-        financial_status: 'paid',
-        currency: order.currency,
-        tags: 'offline,collabo-crm,pos',
-        note: order.note ?? undefined,
-        line_items: lineItems,
-        source_name: 'collabo-crm',
-        source_identifier: String(order.id || ''),
-        source_url: `${process.env.APP_URL}/orders/${order.id}`,
-        ...(customerBlock ? { customer: customerBlock } : {}),
-        transactions: [
-          {
-            kind: 'sale',
-            status: 'success',
-            amount: grandTotal,
-            gateway: this.resolveGateway(order.metadata),
-          },
-        ],
-        // Attach a fulfillment at the resolved location to mirror the local
-        // PAID + FULFILLED state. If locations couldn't be read (403 missing
-        // read_locations), we skip this block — the order still lands paid,
-        // but unfulfilled. Merchant can mark fulfilled manually or add the
-        // scope and retry.
-        ...(locationId
-          ? {
-            fulfillments: [
-              {
-                location_id: locationId,
-                tracking_info: null,
-                notify_customer: false,
-              },
-            ],
-          }
-          : {}),
-      },
+    const orderInput: Record<string, unknown> = {
+      currency,
+      email: order.customer?.email ?? undefined,
+      phone: order.customer?.phone ?? undefined,
+      note: order.note ?? undefined,
+      tags: ['offline', 'collabo-crm', 'pos'],
+      sourceName: 'collabo-crm',
+      sourceIdentifier: String(order.id || ''),
+      lineItems,
+      ...(customerBlock ? { customer: customerBlock } : {}),
+      // A successful SALE transaction covering the total marks the order paid.
+      transactions: [
+        {
+          kind: 'SALE',
+          status: 'SUCCESS',
+          amountSet: money(grandTotal),
+          gateway: this.resolveGateway(order.metadata),
+        },
+      ],
     };
 
-    const result = await this.postShopify<{
-      order: { id: number; name: string };
-    }>(shopDomain, token, '/orders.json', payload);
-
-    if (!result?.order?.id) {
+    const result = await this.graphql.request<OrderCreatePushResponse>(auth, ORDER_CREATE_MUTATION, {
+      order: orderInput,
+      options: {
+        sendReceipt: false,
+        sendFulfillmentReceipt: false,
+        inventoryBehaviour: 'DECREMENT_OBEYING_POLICY',
+      },
+    });
+    ShopifyGraphqlClient.throwIfUserErrors(
+      result.orderCreate?.userErrors,
+      `orderCreate for CRM order ${order.name}`,
+    );
+    const remoteOrder = result.orderCreate?.order;
+    if (!remoteOrder?.id) {
       throw new Error('Shopify order create returned no id');
+    }
+
+    // Mirror the local PAID + FULFILLED state by fulfilling the new order's
+    // fulfillment orders at the resolved location. Best-effort — if locations
+    // couldn't be read (missing read_locations) or fulfillment fails, the
+    // order still lands paid but unfulfilled.
+    if (locationId) {
+      try {
+        await this.fulfillEntireOrder(auth, remoteOrder.id);
+      } catch (err) {
+        this.logger.warn(
+          `Could not auto-fulfill pushed order ${remoteOrder.name}: ${err instanceof Error ? err.message : err}`,
+        );
+      }
     }
 
     await this.recordSuccess(
       orderId,
-      String(result.order.id),
-      result.order.name,
+      ShopifyGraphqlClient.extractId(remoteOrder.id),
+      remoteOrder.name,
     );
 
     this.logger.log(
-      `Pushed CRM order ${order.name} → Shopify order ${result.order.name} (${result.order.id})`,
+      `Pushed CRM order ${order.name} → Shopify order ${remoteOrder.name} (${ShopifyGraphqlClient.extractId(remoteOrder.id)})`,
     );
+  }
+
+  /** Fulfill every open fulfillment order on a just-created Shopify order. */
+  private async fulfillEntireOrder(auth: ShopifyAuthContext, orderGid: string): Promise<void> {
+    const res = await this.graphql.request<OrderFulfillmentOrdersResponse>(
+      auth,
+      ORDER_FULFILLMENT_ORDERS_QUERY,
+      { id: orderGid },
+    );
+    for (const fo of res.order?.fulfillmentOrders?.nodes ?? []) {
+      const createRes = await this.graphql.request<FulfillmentCreateResponse>(
+        auth,
+        FULFILLMENT_CREATE_MUTATION,
+        {
+          fulfillment: {
+            lineItemsByFulfillmentOrder: [{ fulfillmentOrderId: fo.id }],
+            notifyCustomer: false,
+          },
+        },
+      );
+      const errors = createRes.fulfillmentCreate?.userErrors ?? [];
+      if (errors.length > 0) {
+        this.logger.warn(
+          `fulfillmentCreate for ${fo.id}: ${errors.map((e) => e.message).join('; ')}`,
+        );
+      }
+    }
   }
 
   /**
@@ -196,74 +251,49 @@ export class ShopifyPushService {
     const cached = (channel?.metadata as any)?.shopifyLocationId;
     if (typeof cached === 'number') return cached;
 
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${this.apiVersion}/locations.json`,
-      { headers: { 'X-Shopify-Access-Token': token } },
-    );
-    if (res.status === 403) {
-      this.logger.warn(
-        `Cannot read Shopify locations for channel ${channelId} (403). ` +
-        `Add 'read_locations' scope to your Shopify app to enable fulfillment at the primary location. ` +
-        `Order/product push will continue without an explicit location.`,
+    let nodes: LocationsResponse['locations']['nodes'];
+    try {
+      const res = await this.graphql.request<LocationsResponse>(
+        { shopDomain, accessToken: token },
+        LOCATIONS_QUERY,
       );
-      return null;
+      nodes = res.locations?.nodes ?? [];
+    } catch (err) {
+      // Missing read_locations scope (or similar access errors) degrade
+      // gracefully — order push without fulfillments, product push without
+      // an inventory seed. Same behavior as the old REST 403 path.
+      if (err instanceof ShopifyGraphqlError) {
+        this.logger.warn(
+          `Cannot read Shopify locations for channel ${channelId} (${err.code}). ` +
+          `Ensure the app has the 'read_locations' scope to enable fulfillment at the primary location. ` +
+          `Order/product push will continue without an explicit location.`,
+        );
+        return null;
+      }
+      throw err;
     }
-    if (!res.ok) {
-      throw new Error(`Failed to fetch Shopify locations: ${res.status}`);
-    }
-    const data = (await res.json()) as {
-      locations: Array<{ id: number; primary: boolean; active: boolean }>;
-    };
+
     const primary =
-      data.locations.find((l) => l.primary && l.active) ??
-      data.locations.find((l) => l.active) ??
-      data.locations[0];
+      nodes.find((l) => l.isPrimary && l.isActive) ??
+      nodes.find((l) => l.isActive) ??
+      nodes[0];
     if (!primary) {
       this.logger.warn(`Shop ${shopDomain} has no active locations`);
       return null;
     }
+
+    const numericId = Number(ShopifyGraphqlClient.extractId(primary.id));
 
     // Cache for next time
     const meta = (channel?.metadata as Prisma.JsonObject) ?? {};
     await this.prisma.channel.update({
       where: { id: channelId },
       data: {
-        metadata: { ...meta, shopifyLocationId: primary.id } as Prisma.InputJsonObject,
+        metadata: { ...meta, shopifyLocationId: numericId } as Prisma.InputJsonObject,
       },
     });
 
-    return primary.id;
-  }
-
-  /**
-   * Build the `customer` block for the order. If the local Customer was
-   * originally synced from Shopify (its externalId is a numeric Shopify ID,
-   * not a synthetic `manual_*` one), we reference by id so Shopify doesn't
-   * create a duplicate. Otherwise we embed details and let Shopify dedup
-   * by email.
-   */
-  private buildCustomerBlock(
-    customer: {
-      externalId: string;
-      email: string | null;
-      phone: string | null;
-      firstName: string | null;
-      lastName: string | null;
-    } | null,
-  ): Record<string, unknown> | null {
-    if (!customer) return null;
-
-    const isShopifyId = !customer.externalId.startsWith('manual_');
-    if (isShopifyId && /^\d+$/.test(customer.externalId)) {
-      return { id: Number(customer.externalId) };
-    }
-
-    return {
-      email: customer.email ?? undefined,
-      phone: customer.phone ?? undefined,
-      first_name: customer.firstName ?? undefined,
-      last_name: customer.lastName ?? undefined,
-    };
+    return numericId;
   }
 
   /** Map our paymentMethod to a Shopify gateway label (display only). */
@@ -364,55 +394,6 @@ export class ShopifyPushService {
     });
   }
 
-  // ─── REST HELPER ───
-
-  private async postShopify<T>(
-    shopDomain: string,
-    token: string,
-    endpoint: string,
-    body: unknown,
-  ): Promise<T> {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token,
-        },
-        body: JSON.stringify(body),
-      },
-    );
-    if (res.status === 403) {
-      const text = await res.text();
-      const scopeNeeded = this.scopeForEndpoint(endpoint);
-      throw new Error(
-        `Shopify denied this request (403)` +
-        (scopeNeeded
-          ? `: your Shopify app is missing the '${scopeNeeded}' scope. ` +
-          `Open Shopify Admin → Apps → your custom app → API access and enable it. `
-          : '. ') +
-        `Details: ${text}`,
-      );
-    }
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify ${res.status} on ${endpoint}: ${text}`);
-    }
-    return res.json() as Promise<T>;
-  }
-
-  /** Map our REST endpoints back to the Shopify OAuth scope they need.
-   *  Used to turn 403s into actionable error messages stamped on
-   *  `metadata.shopifySync.error`. */
-  private scopeForEndpoint(endpoint: string): string | null {
-    if (endpoint.startsWith('/orders')) return 'write_orders';
-    if (endpoint.startsWith('/products')) return 'write_products';
-    if (endpoint.startsWith('/inventory_levels')) return 'write_inventory';
-    if (endpoint.startsWith('/locations')) return 'read_locations';
-    return null;
-  }
-
   // ───────────────────────────────────────────────────────────────────────────
   // PRODUCT PUSH (CRM → Shopify)
   // ───────────────────────────────────────────────────────────────────────────
@@ -423,12 +404,13 @@ export class ShopifyPushService {
    * using the new Shopify IDs. After this completes, the existing read-
    * direction sync handles future updates.
    *
-   * Now supports:
+   * Supports:
    *   - Multiple variants (each with its own option1/2/3, sku, price, stock).
    *   - Product-level option types (Size, Color, …).
-   *   - Multiple images (uploaded to /uploads/, sent to Shopify by `src` URL).
-   *   - Variant→image linkage (a second `PUT /variants/{id}.json` per variant
-   *     because Shopify REST won't accept `image_id` in the create payload).
+   *   - Multiple images (uploaded to /uploads/, sent to Shopify by `src` URL
+   *     as productSet `files`).
+   * Not carried over from the REST era: per-variant image linkage — merchants
+   * can set variant images in Shopify Admin if needed.
    */
   async pushProduct(productId: string, orgId: string): Promise<void> {
     const shopify = await this.findShopifyChannel(orgId);
@@ -488,103 +470,206 @@ export class ShopifyPushService {
       return;
     }
 
-    const payload = this.buildShopifyProductPayload(
-      product,
-      oversellGlobally,
-      trackGlobally,
+    // One-shot create via productSet — options, variants, images, per-variant
+    // inventory quantities AND inventory-item fields (cost / HS code / country
+    // of origin / weight / tracked) all ride in a single synchronous mutation.
+    const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
+    const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
+    const input = this.buildProductSetInput(product, oversellGlobally, trackGlobally, locationId);
+
+    const result = await this.graphql.request<ProductSetResponse>(auth, PRODUCT_SET_MUTATION, {
+      input,
+      synchronous: true,
+    });
+    ShopifyGraphqlClient.throwIfUserErrors(
+      result.productSet?.userErrors,
+      `productSet for "${product.title}"`,
     );
-
-    const result = await this.postShopify<{
-      product: {
-        id: number;
-        variants: Array<{ id: number; inventory_item_id: number; option1?: string; option2?: string; option3?: string }>;
-        images?: Array<{ id: number; src: string; position: number }>;
-      };
-    }>(shopDomain, token, '/products.json', payload);
-
-    if (!result?.product?.id) {
+    const remote = result.productSet?.product;
+    if (!remote?.id) {
       throw new Error('Shopify product create returned no id');
     }
 
     // Rebadge transaction: switch product + variants + images to SHOPIFY
     // channel/IDs. Variants are zip-aligned by index, which is safe because
-    // Shopify preserves the order we sent. Images likewise zip by position.
+    // Shopify preserves the order we sent. Media likewise zips by order.
+    const remoteProductId = ShopifyGraphqlClient.extractId(remote.id);
     await this.prisma.$transaction(async (tx) => {
       await tx.product.update({
         where: { id: product.id },
         data: {
           channelId: shopify.id,
-          externalId: String(result.product.id),
+          externalId: remoteProductId,
           externalCreatedAt: new Date(),
         },
       });
 
-      for (let i = 0; i < product.variants.length && i < result.product.variants.length; i++) {
+      const remoteVariants = remote.variants.nodes;
+      for (let i = 0; i < product.variants.length && i < remoteVariants.length; i++) {
         const localVariant = product.variants[i];
-        const remoteVariant = result.product.variants[i];
+        const remoteVariant = remoteVariants[i];
         await tx.productVariant.update({
           where: { id: localVariant.id },
           data: {
-            externalId: String(remoteVariant.id),
-            inventoryItemId: String(remoteVariant.inventory_item_id),
+            externalId: ShopifyGraphqlClient.extractId(remoteVariant.id),
+            inventoryItemId: remoteVariant.inventoryItem
+              ? ShopifyGraphqlClient.extractId(remoteVariant.inventoryItem.id)
+              : null,
           },
         });
       }
 
-      const remoteImages = result.product.images ?? [];
-      for (let i = 0; i < product.images.length && i < remoteImages.length; i++) {
-        const localImage = product.images[i];
-        const remoteImage = remoteImages[i];
+      const remoteMedia = remote.media.nodes;
+      for (let i = 0; i < product.images.length && i < remoteMedia.length; i++) {
         await tx.productImage.update({
-          where: { id: localImage.id },
-          data: { externalId: String(remoteImage.id) },
+          where: { id: product.images[i].id },
+          data: { externalId: ShopifyGraphqlClient.extractId(remoteMedia[i].id) },
         });
       }
     });
 
-    // Bind variant→image after create (Shopify REST quirk — variants.image_id
-    // can't be set inline). Best-effort; failures don't undo the push.
-    await this.bindVariantImages(
-      shopDomain,
-      token,
-      product.variants,
-      product.images,
-      result.product.variants,
-      result.product.images ?? [],
-    );
-
-    // Push per-variant inventory_item metadata (cost, hsCode, countryOfOrigin).
-    await this.pushInventoryItemMetadata(
-      shopDomain,
-      token,
-      product.variants,
-      result.product.variants,
-    );
-
-    // Seed inventory per variant at the primary location.
-    await this.seedInventoryPerVariant(
-      shopify.id,
-      shopDomain,
-      token,
-      product.variants,
-      result.product.variants,
-    );
-
-    await this.recordProductSuccess(productId, String(result.product.id));
+    await this.recordProductSuccess(productId, remoteProductId);
 
     this.logger.log(
-      `Pushed CRM product "${product.title}" → Shopify product ${result.product.id} (${product.variants.length} variants, ${product.images.length} images)`,
+      `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
     );
   }
 
   /**
-   * Push CRM-side edits of an already-synced product back to Shopify:
-   *   - PUT  /products/{id}.json           — title / body / vendor / type / tags / status
-   *   - POST /products/{id}/variants.json  — variants added locally (admin only)
-   *   - PUT  /variants/{id}.json           — per-existing-variant pricing / sku / barcode /
-   *                                          weight / inventory policy / shipping / taxable
-   *   - PUT  /inventory_items/{id}.json    — cost / hsCode / countryOfOrigin (when set)
-   *   - POST /inventory_levels/set.json    — stock (available) per variant at the location
+   * Build the ProductSetInput for a one-shot GraphQL product create. Handles
+   * both single-variant (placeholder Title/Default Title option) and
+   * multi-variant products.
+   */
+  private buildProductSetInput(
+    product: {
+      title: string;
+      bodyHtml: string | null;
+      vendor: string | null;
+      productType: string | null;
+      status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
+      tags: string[];
+      options: Prisma.JsonValue;
+      variants: Array<{
+        price: any;
+        sku: string | null;
+        option1: string | null;
+        option2: string | null;
+        option3: string | null;
+        compareAtPrice: any;
+        requiresShipping: boolean;
+        taxable: boolean;
+        barcode: string | null;
+        weight: any;
+        weightUnit: string | null;
+        cost: any;
+        hsCode: string | null;
+        countryOfOrigin: string | null;
+        inventoryQuantity: number;
+        trackQuantity: boolean;
+        continueSellingWhenOutOfStock: boolean;
+      }>;
+      images: Array<{ src: string; alt: string | null; position: number }>;
+    },
+    oversellGlobally: boolean,
+    trackGlobally: boolean,
+    locationId: number | null,
+  ): Record<string, unknown> {
+    const optionNames = this.deriveOptionTypes(product);
+    const hasRealOptions = optionNames.length > 0;
+    // Shopify's placeholder for "no options" — mirrors what REST did
+    // implicitly with option1: 'Default Title'.
+    const effectiveOptions = hasRealOptions ? optionNames : ['Title'];
+    const optionKeys = ['option1', 'option2', 'option3'] as const;
+
+    const valuesForOption = (idx: number): string[] => {
+      if (!hasRealOptions) return ['Default Title'];
+      const distinct = new Set<string>();
+      for (const v of product.variants) {
+        const value = v[optionKeys[idx]];
+        if (value) distinct.add(value);
+      }
+      return distinct.size > 0 ? [...distinct] : ['Default'];
+    };
+
+    const productOptions = effectiveOptions.map((name, i) => ({
+      name,
+      position: i + 1,
+      values: valuesForOption(i).map((v) => ({ name: v })),
+    }));
+
+    const variants = product.variants.map((v) => ({
+      optionValues: hasRealOptions
+        ? effectiveOptions.map((name, i) => ({
+            optionName: name,
+            name: v[optionKeys[i]] ?? 'Default',
+          }))
+        : [{ optionName: 'Title', name: 'Default Title' }],
+      price: v.price.toString(),
+      ...(v.compareAtPrice != null ? { compareAtPrice: v.compareAtPrice.toString() } : {}),
+      ...(v.sku ? { sku: v.sku } : {}),
+      ...(v.barcode ? { barcode: v.barcode } : {}),
+      taxable: v.taxable,
+      inventoryPolicy:
+        oversellGlobally || v.continueSellingWhenOutOfStock ? 'CONTINUE' : 'DENY',
+      inventoryItem: {
+        tracked: trackGlobally || v.trackQuantity,
+        requiresShipping: v.requiresShipping,
+        ...(v.cost != null ? { cost: Number(v.cost).toFixed(2) } : {}),
+        ...(v.hsCode ? { harmonizedSystemCode: v.hsCode } : {}),
+        ...(v.countryOfOrigin ? { countryCodeOfOrigin: v.countryOfOrigin } : {}),
+        ...(v.weight
+          ? {
+              measurement: {
+                weight: {
+                  value: Number(v.weight),
+                  unit: WEIGHT_UNIT_TO_GRAPHQL[v.weightUnit ?? ''] ?? 'KILOGRAMS',
+                },
+              },
+            }
+          : {}),
+      },
+      ...(locationId && v.inventoryQuantity > 0
+        ? {
+            inventoryQuantities: [
+              {
+                locationId: ShopifyGraphqlClient.toGid('Location', locationId),
+                name: 'available',
+                quantity: v.inventoryQuantity,
+              },
+            ],
+          }
+        : {}),
+    }));
+
+    return {
+      title: product.title,
+      ...(product.bodyHtml ? { descriptionHtml: product.bodyHtml } : {}),
+      ...(product.vendor ? { vendor: product.vendor } : {}),
+      ...(product.productType ? { productType: product.productType } : {}),
+      status: product.status,
+      tags: product.tags ?? [],
+      productOptions,
+      variants,
+      ...(product.images.length > 0
+        ? {
+            files: product.images.map((img) => ({
+              originalSource: img.src,
+              ...(img.alt ? { alt: img.alt } : {}),
+              contentType: 'IMAGE',
+            })),
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Push CRM-side edits of an already-synced product back to Shopify (GraphQL):
+   *   - productUpdate              — title / body / vendor / type / tags / status
+   *   - productVariantsBulkCreate  — variants added locally (admin only)
+   *   - productVariantsBulkUpdate  — pricing / sku / barcode / weight / policy /
+   *                                  tracked / cost / HS code / country-of-origin
+   *                                  (sku, cost, weight etc. live on inventoryItem)
+   *   - inventorySetQuantities     — stock (available) per variant at the location
    *
    * Option-structure changes (adding options / converting single→multi) are NOT
    * synced here — that path was intentionally removed. Vendors cannot add or
@@ -601,6 +686,7 @@ export class ShopifyPushService {
       productType: string | null;
       status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
       tags: string[];
+      options: Prisma.JsonValue;
       variants: Array<{
         id: string;
         externalId: string;
@@ -631,352 +717,254 @@ export class ShopifyPushService {
     oversellGlobally: boolean,
     trackGlobally: boolean,
   ): Promise<void> {
-    // Resolve the primary location once. Shopify sets stock via
-    // /inventory_levels/set.json (not the variant endpoint), so we need it to
-    // push per-variant inventory below. Null when read_locations scope is
-    // missing — inventory is then skipped (already logged by resolveLocationId).
+    const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
+    // Resolve the primary location once — needed for the stock push below.
+    // Null when read_locations is missing; inventory is then skipped.
     const locationId = await this.resolveLocationId(channelId, shopDomain, token);
+    const productGid = ShopifyGraphqlClient.toGid('Product', product.externalId);
 
     // Top-level product fields.
-    await this.putShopify(shopDomain, token, `/products/${product.externalId}.json`, {
-      product: {
-        id: Number(product.externalId),
-        title: product.title,
-        body_html: product.bodyHtml ?? undefined,
-        vendor: product.vendor ?? undefined,
-        product_type: product.productType ?? undefined,
-        status: this.mapStatusToShopify(product.status),
-        tags: (product.tags ?? []).join(', '),
+    const updateRes = await this.graphql.request<ProductUpdatePushResponse>(
+      auth,
+      PRODUCT_UPDATE_MUTATION,
+      {
+        input: {
+          id: productGid,
+          title: product.title,
+          descriptionHtml: product.bodyHtml ?? null,
+          vendor: product.vendor ?? null,
+          productType: product.productType ?? null,
+          status: product.status,
+          tags: product.tags ?? [],
+        },
+      },
+    );
+    ShopifyGraphqlClient.throwIfUserErrors(
+      updateRes.productUpdate?.userErrors,
+      `productUpdate ${product.externalId}`,
+    );
+
+    type PushVariant = (typeof product.variants)[number];
+
+    // Shared per-variant input — sku / cost / weight / HS code / country /
+    // tracked all live on inventoryItem in the GraphQL bulk inputs.
+    const sharedVariantInput = (v: PushVariant): Record<string, unknown> => ({
+      price: v.price.toString(),
+      compareAtPrice: v.compareAtPrice != null ? v.compareAtPrice.toString() : null,
+      ...(v.barcode ? { barcode: v.barcode } : {}),
+      taxable: v.taxable,
+      inventoryPolicy:
+        oversellGlobally || v.continueSellingWhenOutOfStock ? 'CONTINUE' : 'DENY',
+      inventoryItem: {
+        tracked: trackGlobally || v.trackQuantity,
+        requiresShipping: v.requiresShipping,
+        ...(v.sku ? { sku: v.sku } : {}),
+        ...(v.cost != null ? { cost: Number(v.cost).toFixed(2) } : {}),
+        ...(v.hsCode ? { harmonizedSystemCode: v.hsCode } : {}),
+        ...(v.countryOfOrigin ? { countryCodeOfOrigin: v.countryOfOrigin } : {}),
+        ...(v.weight
+          ? {
+              measurement: {
+                weight: {
+                  value: Number(v.weight),
+                  unit: WEIGHT_UNIT_TO_GRAPHQL[v.weightUnit ?? ''] ?? 'KILOGRAMS',
+                },
+              },
+            }
+          : {}),
       },
     });
 
-    for (const variant of product.variants) {
-      const isNewLocal =
-        !variant.externalId || variant.externalId.startsWith('manual_');
+    const newLocal = product.variants.filter(
+      (v) => !v.externalId || v.externalId.startsWith('manual_'),
+    );
+    const existing = product.variants.filter(
+      (v) => v.externalId && !v.externalId.startsWith('manual_'),
+    );
 
-      if (isNewLocal) {
-        // Brand-new variant added locally (admin only — vendors can't add).
-        // Create it on Shopify, then rewrite the local externalId / itemId.
-        try {
-          const result = await this.postShopify<{
-            variant: { id: number; inventory_item_id: number };
-          }>(shopDomain, token, `/products/${product.externalId}/variants.json`, {
-            variant: {
-              option1: variant.option1 ?? variant.title ?? 'Default Title',
-              ...(variant.option2 ? { option2: variant.option2 } : {}),
-              ...(variant.option3 ? { option3: variant.option3 } : {}),
-              price: variant.price.toString(),
-              sku: variant.sku ?? undefined,
-              compare_at_price: variant.compareAtPrice?.toString() ?? undefined,
-              barcode: variant.barcode ?? undefined,
-              weight: variant.weight ? Number(variant.weight) : undefined,
-              weight_unit: variant.weightUnit ?? undefined,
-              inventory_management: variant.trackQuantity ? 'shopify' : null,
-              inventory_policy:
-                oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
-              requires_shipping: variant.requiresShipping,
-              taxable: variant.taxable,
-            },
-          });
-          if (result?.variant?.id) {
-            await this.prisma.productVariant.update({
-              where: { id: variant.id },
-              data: {
-                externalId: String(result.variant.id),
-                inventoryItemId: String(result.variant.inventory_item_id),
-              },
-            });
-            await this.pushInventoryItemMetaForVariant(
-              shopDomain,
-              token,
-              variant,
-              String(result.variant.inventory_item_id),
-            );
-            if (locationId && (trackGlobally || variant.trackQuantity)) {
-              await this.setInventoryLevel(
-                shopDomain,
-                token,
-                locationId,
-                String(result.variant.inventory_item_id),
-                variant.inventoryQuantity,
-              );
-            }
-          }
-        } catch (err) {
+    // inventoryItemId per local variant id — sourced from the DB and topped up
+    // from mutation responses; drives the stock push at the end.
+    const inventoryItemIds = new Map<string, string>();
+    for (const v of existing) {
+      if (v.inventoryItemId) inventoryItemIds.set(v.id, v.inventoryItemId);
+    }
+
+    // Brand-new variants added locally (admin only — vendors can't add).
+    if (newLocal.length > 0) {
+      const optionNames = this.deriveOptionTypes(product);
+      try {
+        const res = await this.graphql.request<ProductVariantsBulkCreateResponse>(
+          auth,
+          PRODUCT_VARIANTS_BULK_CREATE_MUTATION,
+          {
+            productId: productGid,
+            variants: newLocal.map((v) => ({
+              optionValues:
+                optionNames.length > 0
+                  ? optionNames.map((name, i) => ({
+                      optionName: name,
+                      name: [v.option1, v.option2, v.option3][i] ?? 'Default',
+                    }))
+                  : [{ optionName: 'Title', name: v.option1 ?? v.title ?? 'Default Title' }],
+              ...sharedVariantInput(v),
+            })),
+          },
+        );
+        const errors = res.productVariantsBulkCreate?.userErrors ?? [];
+        if (errors.length > 0) {
           this.logger.warn(
-            `Failed to create new variant for synced product ${product.externalId}: ${err}`,
+            `Failed to create new variant(s) for synced product ${product.externalId}: ${errors.map((e) => e.message).join('; ')}`,
           );
         }
-        continue;
-      }
-
-      // Existing variant — field update only (no option/structure changes).
-      try {
-        await this.putShopify(shopDomain, token, `/variants/${variant.externalId}.json`, {
-          variant: {
-            id: Number(variant.externalId),
-            price: variant.price.toString(),
-            sku: variant.sku ?? undefined,
-            compare_at_price: variant.compareAtPrice?.toString() ?? null,
-            barcode: variant.barcode ?? undefined,
-            weight: variant.weight ? Number(variant.weight) : undefined,
-            weight_unit: variant.weightUnit ?? undefined,
-            inventory_management:
-              trackGlobally || variant.trackQuantity ? 'shopify' : null,
-            inventory_policy:
-              oversellGlobally || variant.continueSellingWhenOutOfStock ? 'continue' : 'deny',
-            requires_shipping: variant.requiresShipping,
-            taxable: variant.taxable,
-          },
-        });
+        const created = res.productVariantsBulkCreate?.productVariants ?? [];
+        for (let i = 0; i < newLocal.length && i < created.length; i++) {
+          const rv = created[i];
+          const invId = rv.inventoryItem
+            ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
+            : null;
+          await this.prisma.productVariant.update({
+            where: { id: newLocal[i].id },
+            data: {
+              externalId: ShopifyGraphqlClient.extractId(rv.id),
+              inventoryItemId: invId,
+            },
+          });
+          if (invId) inventoryItemIds.set(newLocal[i].id, invId);
+        }
       } catch (err) {
         this.logger.warn(
-          `Variant update failed for ${variant.externalId}: ${err}`,
+          `Failed to create new variant(s) for synced product ${product.externalId}: ${err}`,
         );
       }
+    }
 
-      // Resolve inventory_item_id (older pulls didn't persist it) for stock + meta.
-      let inventoryItemId = variant.inventoryItemId;
-      if (!inventoryItemId) {
-        inventoryItemId = await this.backfillInventoryItemId(
-          shopDomain,
-          token,
-          variant.id,
-          variant.externalId,
+    // Existing variants — one bulk field-update call (no option/structure changes).
+    if (existing.length > 0) {
+      try {
+        const res = await this.graphql.request<ProductVariantsBulkUpdateResponse>(
+          auth,
+          PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+          {
+            productId: productGid,
+            variants: existing.map((v) => ({
+              id: ShopifyGraphqlClient.toGid('ProductVariant', v.externalId),
+              ...sharedVariantInput(v),
+            })),
+          },
         );
+        const errors = res.productVariantsBulkUpdate?.userErrors ?? [];
+        if (errors.length > 0) {
+          this.logger.warn(
+            `Variant update failed for product ${product.externalId}: ${errors.map((e) => e.message).join('; ')}`,
+          );
+        }
+        // Backfill inventoryItemIds from the response for variants where older
+        // pulls didn't persist them.
+        const returned = res.productVariantsBulkUpdate?.productVariants ?? [];
+        const byExternalId = new Map(
+          returned.map((rv) => [ShopifyGraphqlClient.extractId(rv.id), rv]),
+        );
+        for (const v of existing) {
+          if (inventoryItemIds.has(v.id)) continue;
+          const rv = byExternalId.get(v.externalId);
+          const invId = rv?.inventoryItem
+            ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
+            : null;
+          if (invId) {
+            inventoryItemIds.set(v.id, invId);
+            await this.prisma.productVariant.update({
+              where: { id: v.id },
+              data: { inventoryItemId: invId },
+            });
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`Variant bulk update failed for ${product.externalId}: ${err}`);
       }
+    }
 
-      // Inventory-item meta (cost / hsCode / countryOfOrigin).
-      await this.pushInventoryItemMetaForVariant(
-        shopDomain,
-        token,
-        variant,
-        inventoryItemId,
-      );
-
-      // Push current stock (available) at the primary location.
-      if (
-        locationId &&
-        inventoryItemId &&
-        (trackGlobally || variant.trackQuantity)
-      ) {
-        await this.setInventoryLevel(
-          shopDomain,
-          token,
-          locationId,
-          inventoryItemId,
-          variant.inventoryQuantity,
-        );
+    // Push current stock (available) at the primary location — one mutation
+    // for every tracked variant.
+    if (locationId) {
+      const quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
+      for (const v of product.variants) {
+        if (!(trackGlobally || v.trackQuantity)) continue;
+        let invId = inventoryItemIds.get(v.id) ?? null;
+        if (!invId && v.externalId && !v.externalId.startsWith('manual_')) {
+          invId = await this.backfillInventoryItemId(auth, v.id, v.externalId);
+        }
+        if (!invId) continue;
+        quantities.push({
+          inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
+          locationId: ShopifyGraphqlClient.toGid('Location', locationId),
+          quantity: v.inventoryQuantity,
+        });
+      }
+      if (quantities.length > 0) {
+        await this.setInventoryQuantities(auth, quantities);
       }
     }
   }
 
-  /** GET helper — mirrors `postShopify` for read operations. */
-  private async getShopify<T>(
-    shopDomain: string,
-    token: string,
-    endpoint: string,
-  ): Promise<T> {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
-      { headers: { 'X-Shopify-Access-Token': token } },
-    );
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify ${res.status} on ${endpoint}: ${text}`);
+  /** Set absolute available quantities in one mutation. Best-effort — a
+   *  failure is logged and never aborts the push. */
+  private async setInventoryQuantities(
+    auth: ShopifyAuthContext,
+    quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }>,
+  ): Promise<void> {
+    try {
+      const res = await this.graphql.request<InventorySetQuantitiesResponse>(
+        auth,
+        INVENTORY_SET_QUANTITIES_MUTATION,
+        {
+          input: {
+            name: 'available',
+            reason: 'correction',
+            ignoreCompareQuantity: true,
+            quantities,
+          },
+        },
+      );
+      const errors = res.inventorySetQuantities?.userErrors ?? [];
+      if (errors.length > 0) {
+        this.logger.warn(
+          `inventorySetQuantities: ${errors.map((e) => e.message).join('; ')}`,
+        );
+      } else {
+        this.logger.log(`Inventory set for ${quantities.length} variant(s)`);
+      }
+    } catch (err) {
+      this.logger.warn(`Inventory update failed: ${err instanceof Error ? err.message : err}`);
     }
-    return res.json() as Promise<T>;
   }
 
   /** Older product pulls didn't persist inventory_item_id. Fetch it from
-   *  Shopify for an existing variant and cache it locally so inventory (and
-   *  inventory-item meta) can be pushed. Best-effort → null on failure. */
+   *  Shopify for an existing variant and cache it locally so inventory can be
+   *  pushed. Best-effort → null on failure. */
   private async backfillInventoryItemId(
-    shopDomain: string,
-    token: string,
+    auth: ShopifyAuthContext,
     variantId: string,
     variantExternalId: string,
   ): Promise<string | null> {
     try {
-      const res = await this.getShopify<{
-        variant: { inventory_item_id: number };
-      }>(shopDomain, token, `/variants/${variantExternalId}.json`);
-      const invId = res?.variant?.inventory_item_id;
-      if (!invId) return null;
+      const res = await this.graphql.request<VariantInventoryItemResponse>(
+        auth,
+        VARIANT_INVENTORY_ITEM_QUERY,
+        { id: ShopifyGraphqlClient.toGid('ProductVariant', variantExternalId) },
+      );
+      const invGid = res.productVariant?.inventoryItem?.id;
+      if (!invGid) return null;
+      const invId = ShopifyGraphqlClient.extractId(invGid);
       await this.prisma.productVariant.update({
         where: { id: variantId },
-        data: { inventoryItemId: String(invId) },
+        data: { inventoryItemId: invId },
       });
-      return String(invId);
+      return invId;
     } catch (err) {
       this.logger.warn(
         `Failed to resolve inventory_item_id for variant ${variantExternalId}: ${err}`,
       );
       return null;
-    }
-  }
-
-  /** Single-variant version of pushInventoryItemMetadata, used by both the
-   *  create-then-rebadge flow's loop and the update flow above. */
-  private async pushInventoryItemMetaForVariant(
-    shopDomain: string,
-    token: string,
-    variant: { cost: any; hsCode: string | null; countryOfOrigin: string | null },
-    inventoryItemId: string | null,
-  ): Promise<void> {
-    const hasMeta =
-      variant.cost != null ||
-      variant.hsCode != null ||
-      variant.countryOfOrigin != null;
-    if (!hasMeta || !inventoryItemId) return;
-    try {
-      await this.putShopify(
-        shopDomain,
-        token,
-        `/inventory_items/${inventoryItemId}.json`,
-        {
-          inventory_item: {
-            id: Number(inventoryItemId),
-            cost: variant.cost != null ? Number(variant.cost).toFixed(2) : undefined,
-            harmonized_system_code: variant.hsCode ?? undefined,
-            country_code_of_origin: variant.countryOfOrigin ?? undefined,
-          },
-        },
-      );
-    } catch (err) {
-      this.logger.warn(
-        `Inventory item update failed for ${inventoryItemId}: ${err}`,
-      );
-    }
-  }
-
-  /**
-   * Build the `POST /products.json` payload from a CRM product. Handles both
-   * single-variant (`Default Title` / no options) and multi-variant cases.
-   *
-   * Note: cost / hsCode / countryOfOrigin live on the `inventory_item` resource,
-   * not on the variant — those are sent via `seedInventoryItemMeta` after the
-   * product create returns and we know the inventory_item_ids.
-   */
-  private buildShopifyProductPayload(
-    product: {
-      title: string;
-      bodyHtml: string | null;
-      vendor: string | null;
-      productType: string | null;
-      status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED';
-      tags: string[];
-      options: Prisma.JsonValue;
-      variants: Array<{
-        price: any;
-        sku: string | null;
-        option1: string | null;
-        option2: string | null;
-        option3: string | null;
-        compareAtPrice: any;
-        requiresShipping: boolean;
-        taxable: boolean;
-        barcode: string | null;
-        weight: any;
-        weightUnit: string | null;
-        trackQuantity: boolean;
-        continueSellingWhenOutOfStock: boolean;
-      }>;
-      images: Array<{ src: string; alt: string | null; position: number }>;
-    },
-    oversellGlobally: boolean,
-    trackGlobally: boolean,
-  ) {
-    const optionsArr = this.deriveOptionTypes(product);
-
-    return {
-      product: {
-        title: product.title,
-        body_html: product.bodyHtml ?? undefined,
-        vendor: product.vendor ?? undefined,
-        product_type: product.productType ?? undefined,
-        status: this.mapStatusToShopify(product.status),
-        tags: (product.tags ?? []).join(', '),
-        ...(optionsArr.length > 0 ? { options: optionsArr.map((name) => ({ name })) } : {}),
-        variants: product.variants.map((v) => ({
-          price: v.price.toString(),
-          sku: v.sku ?? undefined,
-          option1: v.option1 ?? 'Default Title',
-          ...(v.option2 ? { option2: v.option2 } : {}),
-          ...(v.option3 ? { option3: v.option3 } : {}),
-          compare_at_price: v.compareAtPrice?.toString() ?? undefined,
-          barcode: v.barcode ?? undefined,
-          weight: v.weight ? Number(v.weight) : undefined,
-          weight_unit: v.weightUnit ?? undefined,
-          // null inventory_management = "Don't track quantity" in Shopify.
-          // Global override forces tracking on for every variant when ON.
-          inventory_management:
-            trackGlobally || v.trackQuantity ? 'shopify' : null,
-          // Global override forces continue-sell on for every variant when ON.
-          inventory_policy:
-            oversellGlobally || v.continueSellingWhenOutOfStock ? 'continue' : 'deny',
-          requires_shipping: v.requiresShipping,
-          taxable: v.taxable,
-        })),
-        ...(product.images.length > 0
-          ? {
-              images: product.images.map((img) => ({
-                src: img.src,
-                alt: img.alt ?? undefined,
-                position: img.position,
-              })),
-            }
-          : {}),
-      },
-    };
-  }
-
-  /**
-   * Set per-variant inventory_item metadata (cost, harmonized_system_code,
-   * country_code_of_origin) via Shopify's `/inventory_items/:id.json` REST
-   * resource. Required because these fields don't ride on the product or
-   * variant objects in the create payload — they live on inventory_item.
-   *
-   * Best-effort: a failure on one variant logs a warning and continues. If
-   * the merchant's app lacks `write_inventory` scope, this whole step is a
-   * no-op (postShopify throws an actionable 403).
-   */
-  private async pushInventoryItemMetadata(
-    shopDomain: string,
-    token: string,
-    localVariants: Array<{
-      cost: any;
-      hsCode: string | null;
-      countryOfOrigin: string | null;
-    }>,
-    remoteVariants: Array<{ inventory_item_id: number }>,
-  ): Promise<void> {
-    for (let i = 0; i < localVariants.length && i < remoteVariants.length; i++) {
-      const lv = localVariants[i];
-      const rv = remoteVariants[i];
-      const hasMeta =
-        lv.cost != null || lv.hsCode != null || lv.countryOfOrigin != null;
-      if (!hasMeta || !rv?.inventory_item_id) continue;
-
-      try {
-        await this.putShopify(
-          shopDomain,
-          token,
-          `/inventory_items/${rv.inventory_item_id}.json`,
-          {
-            inventory_item: {
-              id: rv.inventory_item_id,
-              cost: lv.cost != null ? Number(lv.cost).toFixed(2) : undefined,
-              harmonized_system_code: lv.hsCode ?? undefined,
-              country_code_of_origin: lv.countryOfOrigin ?? undefined,
-            },
-          },
-        );
-      } catch (err) {
-        this.logger.warn(
-          `Failed to set inventory_item ${rv.inventory_item_id} metadata: ${err}`,
-        );
-      }
     }
   }
 
@@ -1006,135 +994,8 @@ export class ShopifyPushService {
   }
 
   /**
-   * After create, walk each local variant that has a linked image and PUT
-   * the matching Shopify image_id onto the corresponding remote variant.
-   * Failures are logged but don't fail the push — variant images can be set
-   * manually in Shopify Admin if this step fails.
-   */
-  private async bindVariantImages(
-    shopDomain: string,
-    token: string,
-    localVariants: Array<{ id: string; imageId: string | null; option1: string | null; option2: string | null; option3: string | null }>,
-    localImages: Array<{ id: string; position: number }>,
-    remoteVariants: Array<{ id: number; option1?: string; option2?: string; option3?: string }>,
-    remoteImages: Array<{ id: number; position: number }>,
-  ): Promise<void> {
-    const linksToCreate = localVariants
-      .map((lv, idx) => {
-        if (!lv.imageId) return null;
-        const localImg = localImages.find((i) => i.id === lv.imageId);
-        if (!localImg) return null;
-        const remoteImg = remoteImages.find((ri) => ri.position === localImg.position);
-        if (!remoteImg) return null;
-        const remoteVariant = remoteVariants[idx];
-        if (!remoteVariant) return null;
-        return { variantId: remoteVariant.id, imageId: remoteImg.id };
-      })
-      .filter(Boolean) as Array<{ variantId: number; imageId: number }>;
-
-    for (const link of linksToCreate) {
-      try {
-        await this.putShopify(shopDomain, token, `/variants/${link.variantId}.json`, {
-          variant: { id: link.variantId, image_id: link.imageId },
-        });
-      } catch (err) {
-        this.logger.warn(
-          `Failed to bind variant ${link.variantId} → image ${link.imageId}: ${err}`,
-        );
-      }
-    }
-  }
-
-  /**
-   * Set inventory levels at the primary location for each variant that has
-   * stock > 0. Best-effort: a failure on one variant is logged and the rest
-   * still run. Skipped entirely when `read_locations` scope is missing.
-   */
-  private async seedInventoryPerVariant(
-    channelId: string,
-    shopDomain: string,
-    token: string,
-    localVariants: Array<{ inventoryQuantity: number }>,
-    remoteVariants: Array<{ inventory_item_id: number }>,
-  ): Promise<void> {
-    const haveStock = localVariants.some((v) => v.inventoryQuantity > 0);
-    if (!haveStock) return;
-
-    const locationId = await this.resolveLocationId(channelId, shopDomain, token);
-    if (!locationId) return;
-
-    for (let i = 0; i < localVariants.length && i < remoteVariants.length; i++) {
-      const lv = localVariants[i];
-      const rv = remoteVariants[i];
-      if (lv.inventoryQuantity <= 0 || !rv?.inventory_item_id) continue;
-
-      try {
-        await this.postShopify(shopDomain, token, '/inventory_levels/set.json', {
-          location_id: locationId,
-          inventory_item_id: rv.inventory_item_id,
-          available: lv.inventoryQuantity,
-        });
-      } catch (err) {
-        this.logger.warn(
-          `Inventory seed failed for inventory_item ${rv.inventory_item_id}: ${err}`,
-        );
-      }
-    }
-  }
-
-  /** Set a single variant's available stock at the given location. Best-effort:
-   *  a failure is logged and does not abort the rest of the sync. */
-  private async setInventoryLevel(
-    shopDomain: string,
-    token: string,
-    locationId: number,
-    inventoryItemId: string,
-    quantity: number,
-  ): Promise<void> {
-    try {
-      await this.postShopify(shopDomain, token, '/inventory_levels/set.json', {
-        location_id: locationId,
-        inventory_item_id: Number(inventoryItemId),
-        available: quantity,
-      });
-      this.logger.log(
-        `Inventory set: inventory_item ${inventoryItemId} → available=${quantity} @ location ${locationId}`,
-      );
-    } catch (err) {
-      this.logger.warn(
-        `Inventory update failed for inventory_item ${inventoryItemId}: ${err}`,
-      );
-    }
-  }
-
-  /** PUT helper — mirrors `postShopify` but for update operations. */
-  private async putShopify<T>(
-    shopDomain: string,
-    token: string,
-    endpoint: string,
-    body: unknown,
-  ): Promise<T> {
-    const res = await fetch(
-      `https://${shopDomain}/admin/api/${this.apiVersion}${endpoint}`,
-      {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': token,
-        },
-        body: JSON.stringify(body),
-      },
-    );
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify PUT ${res.status} on ${endpoint}: ${text}`);
-    }
-    return res.json() as Promise<T>;
-  }
-
-  /**
    * Push every CRM-only (MANUAL channel) product for the org. Called when a
-   * Shopify store is freshly connected. Sequential to respect Shopify's REST
+   * Shopify store is freshly connected. Sequential to respect Shopify's
    * rate limits.
    */
   /**
@@ -1270,10 +1131,6 @@ export class ShopifyPushService {
     const sync = (metadata as Prisma.JsonObject).shopifySync;
     if (!sync || typeof sync !== 'object' || Array.isArray(sync)) return false;
     return (sync as Prisma.JsonObject).status === 'SYNCED';
-  }
-
-  private mapStatusToShopify(status: 'ACTIVE' | 'DRAFT' | 'ARCHIVED'): string {
-    return ({ ACTIVE: 'active', DRAFT: 'draft', ARCHIVED: 'archived' } as const)[status];
   }
 
   // ─── PRODUCT METADATA WRITERS ───

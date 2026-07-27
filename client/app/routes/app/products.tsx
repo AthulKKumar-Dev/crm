@@ -282,6 +282,7 @@ export default function ProductsPage() {
           STAT_CARDS.map(({ key, label, icon }, i, arr) => (
             <div key={key} className="flex items-center gap-4">
               <StatCard
+                variant="inline"
                 label={label}
                 value={stats[key].toLocaleString()}
                 change={0}
@@ -295,7 +296,7 @@ export default function ProductsPage() {
           ))
         ) : (
           STAT_CARDS.map(({ key, label, icon }) => (
-            <StatCard key={key} label={label} value="—" change={0} icon={icon} />
+            <StatCard key={key} variant="inline" label={label} value="—" change={0} icon={icon} />
           ))
         )}
       </div>
