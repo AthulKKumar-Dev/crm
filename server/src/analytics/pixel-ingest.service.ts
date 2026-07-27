@@ -95,6 +95,15 @@ export class PixelIngestService {
         const out: Record<string, unknown> = { pixelEventId: event.id };
 
         switch (event.name) {
+            case 'page_viewed': {
+                // Sent by the pixel extension as data.page — the standard
+                // page_viewed event carries no location in `data`, so the
+                // extension copies it from event.context.document.
+                const page = (data.page ?? {}) as { pathname?: string; title?: string };
+                out.pagePath = page.pathname ?? null;
+                out.pageTitle = page.title ?? null;
+                break;
+            }
             case 'product_viewed': {
                 const v = data.productVariant;
                 out.productId = v?.product?.id ?? null;

@@ -8,10 +8,13 @@ interface PixelDay {
     organizationId: string;
     date: string;
     viewersByProduct: Map<string, Set<string>>;
+    addToCartsByProduct: Map<string, number>;
+    viewsByPage: Map<string, { title: string | null; views: number }>;
     visitors: Set<string>;
     pageviews: number;
     addToCartVisitors: Set<string>;
     checkoutStartedVisitors: Set<string>;
+    checkoutCompletedVisitors: Set<string>;
 }
 
 /**
@@ -41,7 +44,10 @@ export class PixelEventsAggregator {
                 occurredAt: { gte: since },
                 visitorId: { not: null },
                 eventName: {
-                    in: ['page_viewed', 'product_viewed', 'product_added_to_cart', 'checkout_started'],
+                    in: [
+                        'page_viewed', 'product_viewed', 'product_added_to_cart',
+                        'checkout_started', 'checkout_completed',
+                    ],
                 },
             },
             orderBy: { occurredAt: 'asc' },
@@ -65,18 +71,30 @@ export class PixelEventsAggregator {
                 organizationId: evt.organizationId,
                 date,
                 viewersByProduct: new Map(),
+                addToCartsByProduct: new Map(),
+                viewsByPage: new Map(),
                 visitors: new Set(),
                 pageviews: 0,
                 addToCartVisitors: new Set(),
                 checkoutStartedVisitors: new Set(),
+                checkoutCompletedVisitors: new Set(),
             };
             const visitor = evt.visitorId!;
             slot.visitors.add(visitor);
 
             switch (evt.eventName) {
-                case 'page_viewed':
+                case 'page_viewed': {
                     slot.pageviews += 1;
+                    const p = evt.payload as { pagePath?: string; pageTitle?: string } | null;
+                    if (p?.pagePath) {
+                        const entry = slot.viewsByPage.get(p.pagePath)
+                            ?? { title: p.pageTitle ?? null, views: 0 };
+                        entry.views += 1;
+                        if (!entry.title && p.pageTitle) entry.title = p.pageTitle;
+                        slot.viewsByPage.set(p.pagePath, entry);
+                    }
                     break;
+                }
                 case 'product_viewed': {
                     const title = (evt.payload as { productTitle?: string } | null)?.productTitle;
                     if (title) {
@@ -86,11 +104,22 @@ export class PixelEventsAggregator {
                     }
                     break;
                 }
-                case 'product_added_to_cart':
+                case 'product_added_to_cart': {
                     slot.addToCartVisitors.add(visitor);
+                    const title = (evt.payload as { productTitle?: string } | null)?.productTitle;
+                    if (title) {
+                        slot.addToCartsByProduct.set(
+                            title,
+                            (slot.addToCartsByProduct.get(title) ?? 0) + 1,
+                        );
+                    }
                     break;
+                }
                 case 'checkout_started':
                     slot.checkoutStartedVisitors.add(visitor);
+                    break;
+                case 'checkout_completed':
+                    slot.checkoutCompletedVisitors.add(visitor);
                     break;
             }
             buckets.set(key, slot);
@@ -133,14 +162,28 @@ export class PixelEventsAggregator {
             slot.productViews = viewers.size;
             byProduct.set(title, slot);
         }
+        // Pixel-counted add-to-carts per product. Webhooks may have already
+        // written an addToCarts count for the same product — keep whichever
+        // is larger so re-running the rollup never shrinks a count.
+        for (const [title, count] of bucket.addToCartsByProduct) {
+            const slot = byProduct.get(title) ?? { productViews: 0, addToCarts: 0, checkouts: 0, orders: 0 };
+            slot.addToCarts = Math.max(slot.addToCarts, count);
+            byProduct.set(title, slot);
+        }
 
         const nextMetrics = {
             ...existingMetrics,
             byProduct: Array.from(byProduct.entries()).map(([productTitle, v]) => ({ productTitle, ...v })),
+            byPage: Array.from(bucket.viewsByPage.entries()).map(([path, v]) => ({
+                path,
+                title: v.title,
+                views: v.views,
+            })),
             pixelSessions: bucket.visitors.size,
             pixelPageviews: bucket.pageviews,
             pixelAddToCartSessions: bucket.addToCartVisitors.size,
             pixelCheckoutStartedSessions: bucket.checkoutStartedVisitors.size,
+            pixelCheckoutCompletedSessions: bucket.checkoutCompletedVisitors.size,
         };
 
         await this.prisma.analyticsSnapshot.upsert({

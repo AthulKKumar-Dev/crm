@@ -7,7 +7,7 @@ import {
     Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ChannelPlatform, ChannelStatus, SyncStatus } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, SyncStatus, Prisma } from '@prisma/client';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -92,20 +92,22 @@ export class ShopifyOAuthService {
         }
         const shopDomain = this.normalizeShopDomain(rawShopDomain);
 
-        // One CRM org per store — webhook routing is by shop domain, so a
-        // second org connecting the same store would silently steal the
-        // other's events.
+        // One CRM org per store — (platform, externalStoreId) is globally
+        // unique and webhook routing is by shop domain, so ANY other org's
+        // channel row holding this store blocks the connect. Disconnecting in
+        // that org releases the claim (clears the store ids).
         const takenByOtherOrg = await this.prisma.channel.findFirst({
             where: {
                 platform: ChannelPlatform.SHOPIFY,
                 externalStoreUrl: `https://${shopDomain}`,
                 organizationId: { not: orgId },
-                status: ChannelStatus.CONNECTED,
             },
             select: { id: true },
         });
         if (takenByOtherOrg) {
-            throw new ConflictException('This Shopify store is already connected to another organization');
+            throw new ConflictException(
+                'This Shopify store is already linked to another organization. Disconnect it there first.',
+            );
         }
 
         // A DISCONNECTED channel (app uninstalled / dead token) may
@@ -266,27 +268,40 @@ export class ShopifyOAuthService {
         // storefront is set to, so we inherit it here instead of asking
         // during onboarding. Only updates if Shopify returned a non-empty
         // currency; otherwise leaves the existing org currency alone.
-        const channel = await this.prisma.$transaction(async (tx) => {
-            const ch = stateData.reconnectChannelId
-                ? await tx.channel.update({
-                    where: { id: stateData.reconnectChannelId },
-                    data: channelData,
-                })
-                : await tx.channel.create({
-                    data: {
-                        organizationId: stateData.orgId,
-                        platform: ChannelPlatform.SHOPIFY,
-                        ...channelData,
-                    },
-                });
-            if (shopData.shop.currency) {
-                await tx.organization.update({
-                    where: { id: stateData.orgId },
-                    data: { currency: shopData.shop.currency },
-                });
+        let channel;
+        try {
+            channel = await this.prisma.$transaction(async (tx) => {
+                const ch = stateData.reconnectChannelId
+                    ? await tx.channel.update({
+                        where: { id: stateData.reconnectChannelId },
+                        data: channelData,
+                    })
+                    : await tx.channel.create({
+                        data: {
+                            organizationId: stateData.orgId,
+                            platform: ChannelPlatform.SHOPIFY,
+                            ...channelData,
+                        },
+                    });
+                if (shopData.shop.currency) {
+                    await tx.organization.update({
+                        where: { id: stateData.orgId },
+                        data: { currency: shopData.shop.currency },
+                    });
+                }
+                return ch;
+            });
+        } catch (error) {
+            // Unique (platform, externalStoreId) — another org's channel row
+            // still holds this store (e.g. a connect race, or a claim from
+            // before disconnect released store ids).
+            if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+                throw new ConflictException(
+                    'This Shopify store is already linked to another organization. Disconnect it there first.',
+                );
             }
-            return ch;
-        });
+            throw error;
+        }
 
         this.logger.log(
             `Shopify store connected (public app): ${query.shop} → org ${stateData.orgId} ` +

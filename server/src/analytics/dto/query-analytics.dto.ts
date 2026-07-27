@@ -1,7 +1,14 @@
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { IsEnum, IsIn, IsOptional, IsString } from 'class-validator';
 
 export const ANALYTICS_RANGES = ['30d', '6m', '12m'] as const;
 export type AnalyticsRange = (typeof ANALYTICS_RANGES)[number];
+
+/// Platform-level filter for the analytics dashboard. `all` (default) spans
+/// every connected channel; the others narrow to that platform's channels.
+/// Adding a new platform later = extend this list + map it in
+/// AnalyticsDashboardService.PLATFORM_BY_FILTER.
+export const ANALYTICS_CHANNELS = ['all', 'shopify', 'instagram', 'whatsapp'] as const;
+export type AnalyticsChannelFilter = (typeof ANALYTICS_CHANNELS)[number];
 
 /// Single source of truth for how an `AnalyticsRange` enum maps to a
 /// trailing-day window. Used by both the GET (read snapshots) and POST
@@ -21,4 +28,9 @@ export class QueryAnalyticsDto {
   range?: AnalyticsRange;
 
   @IsOptional() @IsString() channelId?: string;
+
+  /// Platform filter for the dashboard endpoint. Defaults to `all`.
+  @IsOptional()
+  @IsIn(ANALYTICS_CHANNELS)
+  channel?: AnalyticsChannelFilter;
 }

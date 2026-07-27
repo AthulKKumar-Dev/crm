@@ -46,6 +46,28 @@ export class ChannelController {
     return { authUrl };
   }
 
+  // GET /channels/shopify/app — target for the Shopify app's application_url.
+  // Shopify sends the merchant's browser here right after an install-link
+  // install and whenever they click the app inside their Shopify admin
+  // (?hmac&host&shop&timestamp). We simply land them on the CRM channels page
+  // with the shop pre-filled so connecting is one click. No state is changed
+  // here, so HMAC verification is unnecessary — but the shop param is
+  // format-validated before being embedded in our own redirect.
+  @Public()
+  @Get('shopify/app')
+  shopifyAppEntry(@Query('shop') shop: string | undefined, @Res() res: Response) {
+    const frontendUrl = this.config.get<string>('frontendUrl');
+    const validShop =
+      typeof shop === 'string' && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(shop)
+        ? shop
+        : null;
+    return res.redirect(
+      validShop
+        ? `${frontendUrl}/channel?install_shop=${validShop}`
+        : `${frontendUrl}/channel`,
+    );
+  }
+
   // GET /channels/shopify/callback — Shopify redirects here after the merchant
   // approves (or cancels) the install. The merchant's browser is sitting on
   // this URL, so EVERY outcome must end in a redirect back to the frontend —
@@ -97,8 +119,10 @@ export class ChannelController {
       return res.redirect(result.redirectUrl);
     } catch (error) {
       const message = error instanceof Error ? error.message : '';
+      // Match precisely — a bare 'state' also matches identifiers inside
+      // Prisma code frames (e.g. "stateData"), mislabeling DB errors.
       const reason =
-        message.includes('state') ? 'invalid_state'
+        message.includes('state parameter') ? 'invalid_state'
           : message.includes('cancelled') ? 'cancelled'
             : message.includes('another organization') ? 'shop_taken'
               : message.includes('HMAC') ? 'invalid_hmac'

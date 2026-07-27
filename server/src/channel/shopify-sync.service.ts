@@ -8,6 +8,7 @@ import {
     OrderFulfillmentStatus,
     OrderCancelReason,
     CustomerState,
+    Prisma,
 } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -1140,30 +1141,59 @@ export class ShopifySyncService {
         const externalId = String(sc.id);
         const tags = sc.tags ? sc.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
 
-        const customer = await this.prisma.customer.upsert({
-            where: { channelId_externalId: { channelId, externalId } },
-            create: {
-                organizationId: orgId, channelId, externalId,
-                email: sc.email, firstName: sc.first_name, lastName: sc.last_name, phone: sc.phone,
-                state: this.mapCustomerState(sc.state), verifiedEmail: sc.verified_email ?? false,
-                acceptsMarketing: sc.accepts_marketing ?? false, ordersCount: sc.orders_count ?? 0,
-                totalSpent: sc.total_spent || '0', tags, note: sc.note,
-                addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
-                externalCreatedAt: sc.created_at ? new Date(sc.created_at) : null,
-                externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
-            },
-            update: {
-                email: sc.email, firstName: sc.first_name, lastName: sc.last_name, phone: sc.phone,
-                state: this.mapCustomerState(sc.state), verifiedEmail: sc.verified_email ?? false,
-                acceptsMarketing: sc.accepts_marketing ?? false, ordersCount: sc.orders_count ?? 0,
-                totalSpent: sc.total_spent || '0', tags, note: sc.note,
-                addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
-                externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
-                // NOTE: vipLevel is auto-assigned by LoyaltyService below (based on org thresholds).
-                // internalNotes, segments are still NOT overwritten (CRM-only fields).
-            },
-            select: { id: true },
-        });
+        const updateFields = {
+            email: sc.email, firstName: sc.first_name, lastName: sc.last_name, phone: sc.phone,
+            state: this.mapCustomerState(sc.state), verifiedEmail: sc.verified_email ?? false,
+            acceptsMarketing: sc.accepts_marketing ?? false, ordersCount: sc.orders_count ?? 0,
+            totalSpent: sc.total_spent || '0', tags, note: sc.note,
+            addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
+            externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
+            // NOTE: vipLevel is auto-assigned by LoyaltyService below (based on org thresholds).
+            // internalNotes, segments are still NOT overwritten (CRM-only fields).
+        };
+
+        let customer: { id: string };
+        try {
+            customer = await this.prisma.customer.upsert({
+                where: { channelId_externalId: { channelId, externalId } },
+                create: {
+                    organizationId: orgId, channelId, externalId,
+                    ...updateFields,
+                    externalCreatedAt: sc.created_at ? new Date(sc.created_at) : null,
+                },
+                update: updateFields,
+                select: { id: true },
+            });
+        } catch (err) {
+            // Customer also has a unique (organizationId, email). A row with
+            // this email can already exist under a DIFFERENT (channel,
+            // externalId) identity — e.g. the store was reconnected as a new
+            // channel, or Shopify holds two customer records sharing an email
+            // (guest checkout / merged accounts). Adopt that row: re-point it
+            // to the current identity and update its fields, preserving all
+            // CRM-side data attached to it.
+            if (
+                err instanceof Prisma.PrismaClientKnownRequestError &&
+                err.code === 'P2002' &&
+                sc.email
+            ) {
+                const existing = await this.prisma.customer.findFirst({
+                    where: { organizationId: orgId, email: sc.email },
+                    select: { id: true },
+                });
+                if (!existing) throw err;
+                customer = await this.prisma.customer.update({
+                    where: { id: existing.id },
+                    data: { channelId, externalId, ...updateFields },
+                    select: { id: true },
+                });
+                this.logger.log(
+                    `Customer ${externalId} adopted existing row ${existing.id} by email match`,
+                );
+            } else {
+                throw err;
+            }
+        }
 
         // Auto-tier the customer against the org's loyalty thresholds.
         // Failures here must not fail the whole customer sync.
