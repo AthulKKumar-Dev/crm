@@ -43,6 +43,16 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         await this.client.del(REDIS_PREFIX + key);
     }
 
+    /**
+     * Best-effort distributed lock (SET NX EX). Returns true when this caller
+     * acquired the lock; release with `del(key)`. The TTL guarantees the lock
+     * can never dead-lock if the holder crashes.
+     */
+    async acquireLock(key: string, ttlSeconds: number): Promise<boolean> {
+        const result = await this.client.set(REDIS_PREFIX + key, '1', 'EX', ttlSeconds, 'NX');
+        return result === 'OK';
+    }
+
     // ─── SESSION CACHE ───
 
     async setSession(userId: string, data: Record<string, unknown>): Promise<void> {

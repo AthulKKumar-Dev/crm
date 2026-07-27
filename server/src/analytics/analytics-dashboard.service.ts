@@ -1,0 +1,320 @@
+import { Injectable } from '@nestjs/common';
+import { ChannelPlatform, Prisma } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
+import {
+  AnalyticsChannelFilter,
+  QueryAnalyticsDto,
+  rangeToDays,
+} from './dto/query-analytics.dto';
+
+// ─── DTOs returned to the client ─────────────────────────────────────────
+
+export interface DashboardStat {
+  key: 'totalAddToCart' | 'totalCheckout' | 'totalAbandonedCarts';
+  label: string;
+  value: number;
+  /// Percent change vs the previous comparable window. Positive = up.
+  change: number;
+  changeLabel: string;
+}
+
+export interface DashboardTrendPoint {
+  /// Day ("MM-DD") for 30d windows, month ("Jan") for longer ones.
+  label: string;
+  addToCart: number;
+  reachedCheckout: number;
+  completedOrders: number;
+}
+
+export interface DashboardPageRow {
+  path: string;
+  title: string | null;
+  views: number;
+}
+
+export interface DashboardProductRow {
+  title: string;
+  addToCarts: number;
+}
+
+export interface DashboardViewedProductRow {
+  title: string;
+  views: number;
+}
+
+export interface AnalyticsDashboard {
+  stats: DashboardStat[];
+  topPages: DashboardPageRow[];
+  topViewedProducts: DashboardViewedProductRow[];
+  topAddedToCart: DashboardProductRow[];
+  trend: DashboardTrendPoint[];
+  meta: {
+    channel: AnalyticsChannelFilter;
+    lastRefreshedAt: string | null;
+  };
+}
+
+/// Subset of the AnalyticsSnapshot.metrics JSONB blob this service reads.
+interface MetricBlob {
+  pixelAddToCartSessions?: number;
+  pixelCheckoutStartedSessions?: number;
+  pixelCheckoutCompletedSessions?: number;
+  cartsCreatedFromWebhook?: number;
+  checkoutsStartedFromWebhook?: number;
+  orders?: number;
+  byPage?: Array<{ path: string; title: string | null; views: number }>;
+  byProduct?: Array<{ productTitle: string; productViews?: number; addToCarts?: number }>;
+}
+
+const MONTH_NAMES = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+const PLATFORM_BY_FILTER: Partial<Record<AnalyticsChannelFilter, ChannelPlatform>> = {
+  shopify: ChannelPlatform.SHOPIFY,
+  instagram: ChannelPlatform.INSTAGRAM,
+  whatsapp: ChannelPlatform.WHATSAPP,
+};
+
+/**
+ * Read side of the pixel-first analytics dashboard. Channel-agnostic by
+ * design: it only reads `AnalyticsSnapshot` rows, which are keyed per
+ * channel per day — supporting a new platform means writing snapshot rows
+ * for its channels with the same metric keys; nothing here changes.
+ *
+ * Metric sources (one source per metric, pixel preferred):
+ *   addToCart / reachedCheckout — pixel session counts, falling back to
+ *     webhook counts for days before the pixel was activated.
+ *   completedOrders — Order-table-derived `orders` (written by the Shopify
+ *     analytics refresher), the most reliable count.
+ *   abandoned carts — addToCart − pixelCheckoutCompletedSessions, ≥ 0.
+ */
+@Injectable()
+export class AnalyticsDashboardService {
+  constructor(private readonly prisma: PrismaService) { }
+
+  async getDashboard(orgId: string, query: QueryAnalyticsDto): Promise<AnalyticsDashboard> {
+    const channel = query.channel ?? 'all';
+    const days = rangeToDays(query.range);
+    const since = this.daysAgo(days);
+    const prevSince = this.daysAgo(days * 2);
+
+    const channelIds = await this.resolveChannelIds(orgId, channel);
+    // Filter requested but the org has no channels on that platform —
+    // return the consistent empty shape instead of erroring.
+    if (channelIds !== undefined && channelIds.length === 0) {
+      return this.empty(channel);
+    }
+
+    // One query covers both the current window and the previous
+    // comparison window; split in memory.
+    const where: Prisma.AnalyticsSnapshotWhereInput = {
+      organizationId: orgId,
+      granularity: 'DAILY',
+      date: { gte: prevSince },
+      ...(channelIds && { channelId: { in: channelIds } }),
+    };
+    const rows = await this.prisma.analyticsSnapshot.findMany({
+      where,
+      orderBy: { date: 'asc' },
+    });
+
+    const current = rows.filter((r) => r.date >= since);
+    const previous = rows.filter((r) => r.date < since);
+    const currentMetrics = current.map((r) => (r.metrics ?? {}) as MetricBlob);
+
+    const cur = this.totals(currentMetrics);
+    const prev = this.totals(previous.map((r) => (r.metrics ?? {}) as MetricBlob));
+    const changeLabel = this.changeLabel(days);
+
+    const lastRefreshedAt =
+      current.length > 0
+        ? current
+          .map((r) => r.updatedAt)
+          .reduce((a, b) => (a > b ? a : b))
+          .toISOString()
+        : null;
+
+    return {
+      stats: [
+        this.stat('totalAddToCart', 'Total Add to Cart', cur.addToCart, prev.addToCart, changeLabel),
+        this.stat('totalCheckout', 'Total Checkout', cur.checkout, prev.checkout, changeLabel),
+        this.stat('totalAbandonedCarts', 'Total Abandoned Carts', cur.abandoned, prev.abandoned, changeLabel),
+      ],
+      topPages: this.topPages(currentMetrics),
+      topViewedProducts: this.topViewedProducts(currentMetrics),
+      topAddedToCart: this.topAddedToCart(currentMetrics),
+      trend: this.buildTrend(current, days),
+      meta: { channel, lastRefreshedAt },
+    };
+  }
+
+  /// undefined = no filter (spans all channels).
+  private async resolveChannelIds(
+    orgId: string,
+    filter: AnalyticsChannelFilter,
+  ): Promise<string[] | undefined> {
+    if (filter === 'all') return undefined;
+    const platform = PLATFORM_BY_FILTER[filter];
+    if (!platform) return [];
+    const channels = await this.prisma.channel.findMany({
+      where: { organizationId: orgId, platform },
+      select: { id: true },
+    });
+    return channels.map((c) => c.id);
+  }
+
+  private totals(metrics: MetricBlob[]) {
+    const sum = (pick: (m: MetricBlob) => number | undefined) =>
+      metrics.reduce((acc, m) => acc + (pick(m) ?? 0), 0);
+
+    const pixelAtc = sum((m) => m.pixelAddToCartSessions);
+    const webhookAtc = sum((m) => m.cartsCreatedFromWebhook);
+    const pixelCheckout = sum((m) => m.pixelCheckoutStartedSessions);
+    const webhookCheckout = sum((m) => m.checkoutsStartedFromWebhook);
+    const completed = sum((m) => m.pixelCheckoutCompletedSessions);
+
+    const addToCart = pixelAtc > 0 ? pixelAtc : webhookAtc;
+    const checkout = pixelCheckout > 0 ? pixelCheckout : webhookCheckout;
+    const abandoned = Math.max(0, addToCart - completed);
+    return { addToCart, checkout, abandoned };
+  }
+
+  private stat(
+    key: DashboardStat['key'],
+    label: string,
+    value: number,
+    prevValue: number,
+    changeLabel: string,
+  ): DashboardStat {
+    // 0 when there's no previous data — a flat trend beats a misleading
+    // "+100%" during cold start.
+    const change = prevValue > 0 ? Math.round(((value - prevValue) / prevValue) * 100) : 0;
+    return { key, label, value, change, changeLabel };
+  }
+
+  private topPages(metrics: MetricBlob[]): DashboardPageRow[] {
+    const totals = new Map<string, { title: string | null; views: number }>();
+    for (const m of metrics) {
+      for (const p of m.byPage ?? []) {
+        const slot = totals.get(p.path) ?? { title: p.title, views: 0 };
+        slot.views += p.views ?? 0;
+        if (!slot.title && p.title) slot.title = p.title;
+        totals.set(p.path, slot);
+      }
+    }
+    return Array.from(totals.entries())
+      .map(([path, v]) => ({ path, title: v.title, views: v.views }))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 5);
+  }
+
+  private topViewedProducts(metrics: MetricBlob[]): DashboardViewedProductRow[] {
+    const totals = new Map<string, number>();
+    for (const m of metrics) {
+      for (const p of m.byProduct ?? []) {
+        if (!p.productViews) continue;
+        totals.set(p.productTitle, (totals.get(p.productTitle) ?? 0) + p.productViews);
+      }
+    }
+    return Array.from(totals.entries())
+      .map(([title, views]) => ({ title, views }))
+      .sort((a, b) => b.views - a.views)
+      .slice(0, 5);
+  }
+
+  private topAddedToCart(metrics: MetricBlob[]): DashboardProductRow[] {
+    const totals = new Map<string, number>();
+    for (const m of metrics) {
+      for (const p of m.byProduct ?? []) {
+        if (!p.addToCarts) continue;
+        totals.set(p.productTitle, (totals.get(p.productTitle) ?? 0) + p.addToCarts);
+      }
+    }
+    return Array.from(totals.entries())
+      .map(([title, addToCarts]) => ({ title, addToCarts }))
+      .sort((a, b) => b.addToCarts - a.addToCarts)
+      .slice(0, 5);
+  }
+
+  private buildTrend(
+    rows: Array<{ date: Date; metrics: unknown }>,
+    days: number,
+  ): DashboardTrendPoint[] {
+    const byMonth = days > 60;
+    const buckets = new Map<string, DashboardTrendPoint>();
+    const now = new Date();
+
+    // Pre-populate every bucket with zeros so the chart renders a
+    // continuous series even when traffic is sparse.
+    if (byMonth) {
+      const monthsBack = Math.ceil(days / 30);
+      for (let i = monthsBack - 1; i >= 0; i--) {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+        buckets.set(`${d.getUTCFullYear()}-${d.getUTCMonth()}`, {
+          label: MONTH_NAMES[d.getUTCMonth()],
+          addToCart: 0,
+          reachedCheckout: 0,
+          completedOrders: 0,
+        });
+      }
+    } else {
+      for (let i = days - 1; i >= 0; i--) {
+        const d = new Date();
+        d.setUTCHours(0, 0, 0, 0);
+        d.setUTCDate(d.getUTCDate() - i);
+        const key = d.toISOString().slice(0, 10);
+        buckets.set(key, {
+          label: key.slice(5),
+          addToCart: 0,
+          reachedCheckout: 0,
+          completedOrders: 0,
+        });
+      }
+    }
+
+    for (const row of rows) {
+      const m = (row.metrics ?? {}) as MetricBlob;
+      const key = byMonth
+        ? `${row.date.getUTCFullYear()}-${row.date.getUTCMonth()}`
+        : row.date.toISOString().slice(0, 10);
+      const slot = buckets.get(key);
+      if (!slot) continue;
+      const atc = m.pixelAddToCartSessions ?? m.cartsCreatedFromWebhook ?? 0;
+      const chk = m.pixelCheckoutStartedSessions ?? m.checkoutsStartedFromWebhook ?? 0;
+      slot.addToCart += atc;
+      slot.reachedCheckout += chk;
+      slot.completedOrders += m.orders ?? 0;
+    }
+    return Array.from(buckets.values());
+  }
+
+  private empty(channel: AnalyticsChannelFilter): AnalyticsDashboard {
+    return {
+      stats: [
+        { key: 'totalAddToCart', label: 'Total Add to Cart', value: 0, change: 0, changeLabel: '' },
+        { key: 'totalCheckout', label: 'Total Checkout', value: 0, change: 0, changeLabel: '' },
+        { key: 'totalAbandonedCarts', label: 'Total Abandoned Carts', value: 0, change: 0, changeLabel: '' },
+      ],
+      topPages: [],
+      topViewedProducts: [],
+      topAddedToCart: [],
+      trend: [],
+      meta: { channel, lastRefreshedAt: null },
+    };
+  }
+
+  private daysAgo(n: number): Date {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d;
+  }
+
+  private changeLabel(days: number): string {
+    if (days <= 30) return 'vs last 30 days';
+    if (days <= 182) return 'vs last 6 months';
+    return 'vs last year';
+  }
+}

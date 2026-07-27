@@ -18,11 +18,18 @@ async function bootstrap() {
   }));
   app.use(cookieParser());
 
-  // CORS
-  app.enableCors({
-    origin: config.get<string>('frontendUrl'),
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  // CORS — pixel ingest must accept any storefront origin; everything else
+  // stays locked to the CRM frontend.
+  app.enableCors((req, cb) => {
+    if (req.url?.startsWith('/api/v1/analytics/pixel')) {
+      cb(null, { origin: true, credentials: false, methods: ['POST', 'OPTIONS'], maxAge: 86400 });
+    } else {
+      cb(null, {
+        origin: config.get<string>('frontendUrl'),
+        credentials: true,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      });
+    }
   });
 
   // API versioning

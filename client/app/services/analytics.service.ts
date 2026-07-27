@@ -1,80 +1,55 @@
 import { apiClient } from "~/lib/api-client";
 
 export type AnalyticsRange = "30d" | "6m" | "12m";
+export type AnalyticsChannelFilter = "all" | "shopify" | "instagram" | "whatsapp";
 
 export interface AnalyticsQueryParams {
   range?: AnalyticsRange;
   channelId?: string;
+  channel?: AnalyticsChannelFilter;
 }
 
-export interface AnalyticsStat {
-  key:
-    | "totalRevenue"
-    | "conversionRate"
-    | "avgOrderValue"
-    | "returningCustomers"
-    | "bounceRate"
-    | "avgSessionDuration"
-    | "cartToCheckoutRate"
-    | "checkoutToOrderRate"
-    | "cartAbandonmentRate";
+export interface DashboardStat {
+  key: "totalAddToCart" | "totalCheckout" | "totalAbandonedCarts";
   label: string;
-  value: string;
+  value: number;
   change: number;
   changeLabel: string;
 }
 
-export interface AnalyticsTrendPoint {
-  month: string;
-  revenue: number;
-  sessions: number;
-  orders: number;
-}
-
-export interface AnalyticsChannelRow {
-  channel: string;
-  sessions: number;
-  orders: number;
-  revenue: number;
-}
-
-export interface AnalyticsFunnel {
-  sessions: number;
-  /// Total pages viewed across all sessions. Surfaced as a parallel
-  /// metric because it can exceed `sessions` (each session views many
-  /// pages) and so doesn't belong inside the monotonic funnel.
-  pageviews: number;
-  /// Count of sessions where the visitor added ≥1 item to cart.
-  addToCarts: number;
-  /// Count of sessions that reached the checkout page.
+export interface DashboardTrendPoint {
+  label: string;
+  addToCart: number;
   reachedCheckout: number;
-  orders: number;
+  completedOrders: number;
 }
 
-export interface AnalyticsProductRow {
+export interface DashboardPageRow {
+  path: string;
+  title: string | null;
+  views: number;
+}
+
+export interface DashboardProductRow {
   title: string;
-  productViews: number;
   addToCarts: number;
-  checkouts: number;
-  orders: number;
 }
 
-export interface AnalyticsOverview {
-  stats: AnalyticsStat[];
-  trend: AnalyticsTrendPoint[];
-  channels: AnalyticsChannelRow[];
-  funnel: AnalyticsFunnel;
-  topViewedProducts: AnalyticsProductRow[];
-  topAddedToCart: AnalyticsProductRow[];
-  /// "shopify_ql" — full Shopify analytics data (Advanced/Plus).
-  /// "shopify_orders_fb" — order-derived fallback (Basic plan or
-  ///                       `read_reports` not granted). Sessions/pageviews
-  ///                       will be zero in this mode.
-  /// "none" — no snapshots yet (first load, refresh in flight).
-  source: "shopify_ql" | "shopify_orders_fb" | "none" | string;
-  currency: string;
-  /// ISO timestamp of the freshest snapshot. Null on first load.
-  lastRefreshedAt: string | null;
+export interface DashboardViewedProductRow {
+  title: string;
+  views: number;
+}
+
+export interface AnalyticsDashboard {
+  stats: DashboardStat[];
+  topPages: DashboardPageRow[];
+  topViewedProducts: DashboardViewedProductRow[];
+  topAddedToCart: DashboardProductRow[];
+  trend: DashboardTrendPoint[];
+  meta: {
+    channel: AnalyticsChannelFilter;
+    lastRefreshedAt: string | null;
+  };
 }
 
 export interface RefreshChannelResult {
@@ -91,9 +66,9 @@ export interface RefreshResponse {
 }
 
 export const analyticsService = {
-  getOverview: (params?: AnalyticsQueryParams) =>
+  getDashboard: (params?: AnalyticsQueryParams) =>
     apiClient
-      .get<AnalyticsOverview>("/analytics/overview", { params })
+      .get<AnalyticsDashboard>("/analytics/dashboard", { params })
       .then((response) => response.data),
 
   refresh: (params?: AnalyticsQueryParams) =>

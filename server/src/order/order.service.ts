@@ -31,6 +31,7 @@ import { ShopifyPushService } from '../channel/shopify-push.service';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { displayVariantTitle } from '../product/variant-title.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -582,8 +583,9 @@ export class OrderService {
           const allowOversell =
             oversellGlobally || v.continueSellingWhenOutOfStock === true;
           if (tracks && !allowOversell && v.inventoryQuantity < li.quantity) {
+            const vt = displayVariantTitle(v.title);
             throw new BadRequestException(
-              `Insufficient stock for "${v.product.title}${v.title && v.title !== 'Default Title' ? ` — ${v.title}` : ''}": ${v.inventoryQuantity} available, ${li.quantity} requested.`,
+              `Insufficient stock for "${v.product.title}${vt ? ` — ${vt}` : ''}": ${v.inventoryQuantity} available, ${li.quantity} requested.`,
             );
           }
         }
@@ -675,7 +677,7 @@ export class OrderService {
           lineItemsToCreate.push({
             variantId: v.id,
             title: v.product.title,
-            variantTitle: v.title || null,
+            variantTitle: displayVariantTitle(v.title),
             sku: v.sku ?? null,
             vendor: v.product.vendorKey ?? v.product.vendor,
             quantity: li.quantity,

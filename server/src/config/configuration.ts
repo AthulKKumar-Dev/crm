@@ -26,8 +26,12 @@ export default () => ({
     shopify: {
         clientId: process.env.SHOPIFY_CLIENT_ID,
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
-        webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || undefined,
         apiVersion: process.env.SHOPIFY_API_VERSION || '2026-01',
+        // MUST mirror [access_scopes] in the public app's shopify.app.toml —
+        // with include_config_on_deploy, Shopify grants what the TOML declares,
+        // regardless of the scope param in the authorize URL.
+        scopes: process.env.SHOPIFY_SCOPES ||
+            'read_products,write_products,read_orders,write_orders,read_customers,read_inventory,write_inventory,read_locations,read_reports,write_pixels,read_customer_events',
     },
     instagram: {
         appId: process.env.META_APP_ID,

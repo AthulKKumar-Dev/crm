@@ -110,7 +110,15 @@ export class ChannelService {
 
       await this.prisma.channel.update({
         where: { id: channelId },
-        data: { status: ChannelStatus.DISCONNECTED, credentials: Prisma.JsonNull },
+        data: {
+          status: ChannelStatus.DISCONNECTED,
+          credentials: Prisma.JsonNull,
+          // Release the store claim: (platform, externalStoreId) is globally
+          // unique, so keeping the ids here would block every other
+          // organization from ever connecting this store.
+          externalStoreId: null,
+          externalStoreUrl: null,
+        },
       });
 
       return { message: 'Channel disconnected' };

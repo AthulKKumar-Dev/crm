@@ -1,8 +1,9 @@
-import { Controller, Post, Req, Headers, HttpCode, Logger } from '@nestjs/common';
+import { Controller, Post, Req, Headers, HttpCode, Logger, UnauthorizedException } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { ChannelPlatform } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { Public } from '../auth/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from './encryption.service';
@@ -18,6 +19,7 @@ export class ShopifyWebhookController {
         private readonly encryption: EncryptionService,
         private readonly syncService: ShopifySyncService,
         private readonly whatsappTrigger: WhatsAppTriggerService,
+        private readonly config: ConfigService,
     ) { }
 
     @Public()
@@ -31,11 +33,15 @@ export class ShopifyWebhookController {
     ) {
         const rawBody = req.rawBody;
         if (!rawBody || !hmac) {
+            // Shopify's automated compliance checks require 401 (not 200)
+            // for unauthenticated webhook requests.
             this.logger.warn('Webhook missing body or HMAC');
-            return { received: false };
+            throw new UnauthorizedException('Missing HMAC or body');
         }
 
-        // 1. Find the channel by shop domain to get its API secret
+        // 1. Find the channel by shop domain (may be null for lifecycle /
+        // compliance topics arriving after disconnect — those are still
+        // acknowledged below).
         const channel = await this.prisma.channel.findFirst({
             where: {
                 platform: ChannelPlatform.SHOPIFY,
@@ -43,33 +49,96 @@ export class ShopifyWebhookController {
             },
         });
 
-        if (!channel || !channel.credentials) {
-            this.logger.warn(`No channel found for shop domain: ${shopDomain}`);
-            return { received: false };
+        // 2a. Primary HMAC verification: the public app's client secret is
+        // the signing key for every webhook Shopify sends on its behalf.
+        const appSecret = this.config.get<string>('shopify.clientSecret');
+        let verified = appSecret ? this.hmacMatches(rawBody, hmac, appSecret) : false;
+
+        // 2b. Legacy fallback: channels connected via the old custom-app
+        // flow receive webhooks signed with the merchant's own app secret
+        // (stored encrypted in credentials.apiSecret). Keeps existing
+        // stores working without forcing a reconnect.
+        const legacySecret = (channel?.credentials as { apiSecret?: string } | null)?.apiSecret;
+        if (!verified && legacySecret) {
+            try {
+                verified = this.hmacMatches(rawBody, hmac, this.encryption.decrypt(legacySecret));
+            } catch {
+                // undecryptable secret → treat as unverified
+            }
         }
 
-        // 2. Verify HMAC using the channel's own API secret
-        const creds = channel.credentials as { apiSecret: string };
-        const apiSecret = this.encryption.decrypt(creds.apiSecret);
-
-        const generatedHmac = createHmac('sha256', apiSecret)
-            .update(rawBody)
-            .digest('base64');
-
-        const hmacBuffer = Buffer.from(hmac, 'base64');
-        const generatedBuffer = Buffer.from(generatedHmac, 'base64');
-
-        if (
-            hmacBuffer.length !== generatedBuffer.length ||
-            !timingSafeEqual(hmacBuffer, generatedBuffer)
-        ) {
-            this.logger.warn(`Invalid webhook HMAC from ${shopDomain}`);
-            return { received: false };
+        if (!verified) {
+            this.logger.warn(`Invalid webhook HMAC from ${shopDomain} (topic: ${topic})`);
+            throw new UnauthorizedException('Invalid HMAC signature');
         }
 
         // 3. Parse body and process by topic
         const body = JSON.parse(rawBody.toString());
         this.logger.log(`Webhook received: ${topic} from ${shopDomain}`);
+
+        // ─── Lifecycle + GDPR compliance topics ────────────────────────
+        // Handled before the channel guard: they must be acknowledged with
+        // 200 even when the channel row is already gone.
+        switch (topic) {
+            case 'app/uninstalled':
+                // Merchant removed the app — the access token is already
+                // revoked. Don't call unregisterWebhooks (it would 401);
+                // Shopify removed the subscriptions with the install.
+                if (channel) {
+                    await this.prisma.channel.update({
+                        where: { id: channel.id },
+                        data: {
+                            status: ChannelStatus.DISCONNECTED,
+                            credentials: Prisma.JsonNull,
+                            isEnabled: false,
+                        },
+                    });
+                    this.logger.warn(
+                        `App uninstalled from ${shopDomain} — channel ${channel.id} disconnected, credentials cleared`,
+                    );
+                }
+                return { received: true };
+
+            case 'customers/data_request':
+                // The merchant must be provided the customer's data within
+                // 30 days. Logged for operational follow-up; the payload
+                // identifies the customer and the orders requested.
+                this.logger.warn(
+                    `GDPR data request from ${shopDomain}: customer ${(body as { customer?: { id?: number } }).customer?.id}, ` +
+                    `orders ${JSON.stringify((body as { orders_requested?: number[] }).orders_requested ?? [])}`,
+                );
+                return { received: true };
+
+            case 'customers/redact':
+                if (channel) {
+                    const externalId = (body as { customer?: { id?: number } }).customer?.id;
+                    if (externalId) {
+                        await this.anonymizeCustomers(channel.organizationId, {
+                            channelId: channel.id,
+                            externalId: String(externalId),
+                        });
+                    }
+                    this.logger.warn(`GDPR customer redact from ${shopDomain}: customer ${externalId}`);
+                }
+                return { received: true };
+
+            case 'shop/redact':
+                // Arrives ~48h after uninstall. Credentials were already
+                // nulled by app/uninstalled; anonymize all customer PII
+                // synced from this shop. Orders/products are retained —
+                // they are non-personal business records once the customer
+                // fields are blanked.
+                if (channel) {
+                    await this.anonymizeCustomers(channel.organizationId, { channelId: channel.id });
+                    this.logger.warn(`GDPR shop redact completed for ${shopDomain}`);
+                }
+                return { received: true };
+        }
+
+        if (!channel) {
+            this.logger.warn(`No channel found for shop domain: ${shopDomain}`);
+            return { received: true };
+        }
 
         try {
             switch (topic) {
@@ -211,6 +280,42 @@ export class ShopifyWebhookController {
         }
 
         return { received: true };
+    }
+
+    // Constant-time base64 HMAC comparison against a given signing secret.
+    private hmacMatches(rawBody: Buffer, hmac: string, secret: string): boolean {
+        const generated = createHmac('sha256', secret).update(rawBody).digest('base64');
+        const a = Buffer.from(hmac, 'base64');
+        const b = Buffer.from(generated, 'base64');
+        return a.length === b.length && timingSafeEqual(a, b);
+    }
+
+    // Blank every PII field on matching customers; non-personal commerce
+    // data (order counts, totals, tags, segments) is retained. Omitting
+    // externalId anonymizes every customer synced from the channel
+    // (shop/redact).
+    private async anonymizeCustomers(
+        orgId: string,
+        filter: { channelId: string; externalId?: string },
+    ) {
+        await this.prisma.customer.updateMany({
+            where: {
+                organizationId: orgId,
+                channelId: filter.channelId,
+                ...(filter.externalId ? { externalId: filter.externalId } : {}),
+            },
+            data: {
+                email: null,
+                firstName: 'Redacted',
+                lastName: null,
+                phone: null,
+                addresses: Prisma.JsonNull,
+                defaultAddress: Prisma.JsonNull,
+                note: null,
+                gstin: null,
+                verifiedEmail: false,
+            },
+        });
     }
 
     private async handleProductDelete(channelId: string, body: { id: number }) {
