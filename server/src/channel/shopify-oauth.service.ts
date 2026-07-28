@@ -83,9 +83,30 @@ export class ShopifyOAuthService {
         return domain;
     }
 
-    // Step 1: Generate the Shopify authorization URL for the public app
-    async getInstallUrl(orgId: string, userId: string, rawShopDomain: string): Promise<string> {
-        if (!this.clientId || !this.clientSecret) {
+    // Step 1: Generate the Shopify authorization URL.
+    //
+    // Two credential modes:
+    //   • No apiKey/apiSecret → the platform's PUBLIC app (env
+    //     SHOPIFY_CLIENT_ID/SECRET).
+    //   • apiKey+apiSecret provided → a merchant-supplied CUSTOM app
+    //     (Partner Dashboard custom distribution). The OAuth dance runs with
+    //     those credentials, and they are persisted (encrypted) on the channel
+    //     so webhook HMAC verification and token refresh work per channel.
+    async getInstallUrl(
+        orgId: string,
+        userId: string,
+        rawShopDomain: string,
+        apiKey?: string,
+        apiSecret?: string,
+    ): Promise<string> {
+        const customKey = apiKey?.trim() || undefined;
+        const customSecret = apiSecret?.trim() || undefined;
+        if ((customKey && !customSecret) || (!customKey && customSecret)) {
+            throw new BadRequestException(
+                'Provide BOTH the Client ID and Client Secret of your custom app, or neither.',
+            );
+        }
+        if (!customKey && (!this.clientId || !this.clientSecret)) {
             throw new ServiceUnavailableException(
                 'Shopify app credentials are not configured (SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET)',
             );
@@ -127,16 +148,22 @@ export class ShopifyOAuthService {
         }
 
         const state = randomBytes(16).toString('hex');
+        // Custom-app credentials ride in the short-lived state (10-min TTL,
+        // deleted on first use) so the callback can verify the HMAC and
+        // exchange the code with the right app identity.
         await this.redis.set(`oauth:shopify:${state}`, {
             userId, orgId, shopDomain,
             reconnectChannelId: existing?.id,
+            ...(customKey && customSecret
+                ? { clientId: customKey, clientSecret: customSecret }
+                : {}),
         }, REDIS_TTL.OAUTH_STATE);
 
         const redirectUri = `${this.appUrl}/api/v1/channels/shopify/callback`;
 
         return (
             `https://${shopDomain}/admin/oauth/authorize` +
-            `?client_id=${this.clientId}` +
+            `?client_id=${customKey ?? this.clientId}` +
             `&scope=${this.scopes}` +
             `&redirect_uri=${encodeURIComponent(redirectUri)}` +
             `&state=${state}`
@@ -155,19 +182,26 @@ export class ShopifyOAuthService {
         const stateData = await this.redis.get<{
             userId: string; orgId: string; shopDomain: string;
             reconnectChannelId?: string;
+            clientId?: string; clientSecret?: string;
         }>(`oauth:shopify:${query.state}`);
         if (!stateData) {
             throw new UnauthorizedException('Invalid or expired state parameter');
         }
         await this.redis.del(`oauth:shopify:${query.state}`);
 
+        // Custom-app connects carry their own credentials in the state;
+        // otherwise this is the platform public app (env credentials).
+        const clientId = stateData.clientId ?? this.clientId;
+        const clientSecret = stateData.clientSecret ?? this.clientSecret;
+        const isCustomApp = !!stateData.clientId;
+
         // 2. Merchant hit "cancel" on the grant screen → redirect without a code
         if (!query.code) {
             throw new BadRequestException('Installation was cancelled');
         }
 
-        // 3. Validate HMAC with the app's client secret
-        this.verifyHmac(query as unknown as Record<string, string>);
+        // 3. Validate HMAC with the secret of whichever app is installing
+        this.verifyHmacWithSecret(query as unknown as Record<string, string>, clientSecret);
 
         // 4. Shop param must be a valid myshopify domain AND the one we started with
         if (
@@ -187,8 +221,8 @@ export class ShopifyOAuthService {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    client_id: this.clientId,
-                    client_secret: this.clientSecret,
+                    client_id: clientId,
+                    client_secret: clientSecret,
                     code: query.code,
                     expiring: '1',
                 }),
@@ -252,6 +286,15 @@ export class ShopifyOAuthService {
                         refreshTokenExpiresAt: new Date(
                             Date.now() + (tokenData.refresh_token_expires_in ?? 7776000) * 1000,
                         ).toISOString(),
+                    }
+                    : {}),
+                // Custom-app connects persist their app identity so webhook
+                // HMAC verification (per-channel fallback) and token refresh
+                // use the right credentials for this channel.
+                ...(isCustomApp
+                    ? {
+                        apiKey: this.encryption.encrypt(clientId),
+                        apiSecret: this.encryption.encrypt(clientSecret),
                     }
                     : {}),
                 shopDomain: query.shop,
@@ -496,6 +539,8 @@ export class ShopifyOAuthService {
                 shopDomain: string;
                 refreshToken?: string;
                 accessTokenExpiresAt?: string;
+                apiKey?: string;
+                apiSecret?: string;
             } | null;
             if (!current?.refreshToken) {
                 throw new BadRequestException(`Shopify channel ${channelId} has no refresh token`);
@@ -507,12 +552,17 @@ export class ShopifyOAuthService {
                 return { token: this.encryption.decrypt(current.accessToken), shopDomain: current.shopDomain };
             }
 
+            // Channels connected with a merchant-supplied custom app carry
+            // their own app identity — refresh with it, not the env app.
+            const clientId = current.apiKey ? this.encryption.decrypt(current.apiKey) : this.clientId;
+            const clientSecret = current.apiSecret ? this.encryption.decrypt(current.apiSecret) : this.clientSecret;
+
             const res = await fetch(`https://${current.shopDomain}/admin/oauth/access_token`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    client_id: this.clientId,
-                    client_secret: this.clientSecret,
+                    client_id: clientId,
+                    client_secret: clientSecret,
                     grant_type: 'refresh_token',
                     refresh_token: this.encryption.decrypt(current.refreshToken),
                 }),
@@ -589,11 +639,6 @@ export class ShopifyOAuthService {
         if (hmacBuffer.length !== generatedBuffer.length || !timingSafeEqual(hmacBuffer, generatedBuffer)) {
             throw new UnauthorizedException('Invalid HMAC signature');
         }
-    }
-
-    // Primary: verify using the public app's client secret
-    private verifyHmac(query: Record<string, string>): void {
-        this.verifyHmacWithSecret(query, this.clientSecret);
     }
 
     // ─── WEBHOOK MANAGEMENT ───

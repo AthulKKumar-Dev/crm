@@ -2,15 +2,15 @@ import { Body, Controller, Get, Post } from '@nestjs/common';
 
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { NoOrgRequired } from '../auth/decorators/no-org-required.decorator';
 import { BillingService } from './billing.service';
 import { RazorpayService } from './razorpay.service';
 import { StartOnboardingCheckoutDto } from './dto/start-onboarding-checkout.dto';
 
-// JWT is enforced globally by JwtAuthGuard (see app.module.ts) — no need for
-// @UseGuards. OrgRequiredGuard's hardcoded list does not include this
-// controller, so these endpoints work pre-org-creation, which is exactly what
-// onboarding needs.
+// JWT is enforced globally by JwtAuthGuard (see app.module.ts).
+// @NoOrgRequired: onboarding checkout runs before the user has an org.
 @Controller('billing')
+@NoOrgRequired()
 export class BillingController {
     constructor(
         private readonly billing: BillingService,

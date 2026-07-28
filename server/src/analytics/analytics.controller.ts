@@ -1,6 +1,5 @@
 import { Controller, Get, Logger, Post, Query } from '@nestjs/common';
-import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { OrgId } from '../auth/decorators/org-id.decorator';
 import { AnalyticsService } from './analytics.service';
 import { AnalyticsDashboardService } from './analytics-dashboard.service';
 import {
@@ -28,10 +27,10 @@ export class AnalyticsController {
   // GET /api/v1/analytics/overview?range=30d|6m|12m&channelId=xxx
   @Get('overview')
   getOverview(
-    @CurrentUser() user: JwtPayload,
+    @OrgId() orgId: string,
     @Query() query: QueryAnalyticsDto,
   ) {
-    return this.analytics.getOverview(user.orgId!, query);
+    return this.analytics.getOverview(orgId, query);
   }
 
   // GET /api/v1/analytics/dashboard?range=30d|6m|12m&channel=all|shopify|instagram|whatsapp
@@ -40,10 +39,10 @@ export class AnalyticsController {
   // for every channel filter.
   @Get('dashboard')
   getDashboard(
-    @CurrentUser() user: JwtPayload,
+    @OrgId() orgId: string,
     @Query() query: QueryAnalyticsDto,
   ) {
-    return this.dashboard.getDashboard(user.orgId!, query);
+    return this.dashboard.getDashboard(orgId, query);
   }
 
   // POST /api/v1/analytics/refresh?channelId=xxx
@@ -56,12 +55,12 @@ export class AnalyticsController {
   // produce a generic "Could not refresh" toast.
   @Post('refresh')
   async refresh(
-    @CurrentUser() user: JwtPayload,
+    @OrgId() orgId: string,
     @Query() query: QueryAnalyticsDto,
   ) {
     const channels = await this.prisma.channel.findMany({
       where: {
-        organizationId: user.orgId!,
+        organizationId: orgId,
         platform: 'SHOPIFY',
         ...(query.channelId && { id: query.channelId }),
       },

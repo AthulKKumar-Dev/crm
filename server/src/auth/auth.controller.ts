@@ -3,6 +3,7 @@ import type { Request } from 'express';
 
 import { AuthService } from './auth.service';
 import { Public } from './decorators/public.decorator';
+import { NoOrgRequired } from './decorators/no-org-required.decorator';
 import { AllowVendor } from './decorators/allow-vendor.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
 import type { JwtPayload } from './interfaces/jwt-payload.interface';
@@ -17,6 +18,7 @@ import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 
 @Controller('auth')
+@NoOrgRequired()
 export class AuthController {
   constructor(private readonly authService: AuthService) { }
 

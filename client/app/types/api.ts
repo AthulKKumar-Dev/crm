@@ -584,6 +584,11 @@ export interface TriggerSyncRequest {
 export interface ShopifyInstallRequest {
   // "my-store" | "my-store.myshopify.com" | full URL — server normalizes
   shopDomain: string;
+  // Optional custom-app credentials (Partner Dashboard custom-distribution
+  // apps) — when set, the OAuth flow runs with these instead of the
+  // platform's public app.
+  apiKey?: string;
+  apiSecret?: string;
 }
 
 /** Payload for manually connecting a Shopify store with custom app credentials. */
