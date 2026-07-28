@@ -1,8 +1,7 @@
 import { Controller, HttpCode, Post } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { OrgId } from '../auth/decorators/org-id.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
-import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { LoyaltyService } from './loyalty.service';
 
 @Controller('loyalty')
@@ -14,7 +13,7 @@ export class LoyaltyController {
     @Post('recompute')
     @HttpCode(200)
     @Roles(UserRole.OWNER, UserRole.ADMIN)
-    recompute(@CurrentUser() user: JwtPayload) {
-        return this.loyalty.recomputeAll(user.orgId!);
+    recompute(@OrgId() orgId: string) {
+        return this.loyalty.recomputeAll(orgId);
     }
 }

@@ -2,6 +2,7 @@ import { Controller, Post, Get, Patch, Delete, Body, Param } from '@nestjs/commo
 
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { NoOrgRequired } from '../auth/decorators/no-org-required.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { UserService } from '../user/user.service';
 import { OrganizationService } from './organization.service';
@@ -10,8 +11,9 @@ import { CreatePersonalDto } from './dto/create-personal.dto';
 import { UpdateOrganizationDto } from './dto/update-organization.dto';
 import { UpgradeToOrganizationDto } from './dto/upgrade-to-organization.dto';
 
-// All routes require JWT (no @Public()) — user must be logged in
+// JWT required. @NoOrgRequired: create/list orgs must work before JWT has orgId.
 @Controller('organizations')
+@NoOrgRequired()
 export class OrganizationController {
   constructor(
     private readonly orgService: OrganizationService,

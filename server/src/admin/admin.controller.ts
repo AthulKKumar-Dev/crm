@@ -1,6 +1,7 @@
 import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { NoOrgRequired } from '../auth/decorators/no-org-required.decorator';
 import { SuperAdmin } from '../auth/decorators/super-admin.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { AuthService } from '../auth/auth.service';
@@ -17,9 +18,12 @@ import { QueryUsersDto } from './dto/query-users.dto';
  * guard accepts `JwtPayload.impersonatedBy` as a sibling credential. This is
  * intentional and safe: the underlying service re-validates the super admin
  * via that claim before issuing any new tokens.
+ *
+ * @NoOrgRequired: super admins operate across tenants and may have no orgId.
  */
 @Controller('admin')
 @SuperAdmin()
+@NoOrgRequired()
 export class AdminController {
     constructor(
         private readonly admin: AdminService,
