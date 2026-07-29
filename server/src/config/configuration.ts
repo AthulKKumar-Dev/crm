@@ -31,7 +31,7 @@ export default () => ({
         // with include_config_on_deploy, Shopify grants what the TOML declares,
         // regardless of the scope param in the authorize URL.
         scopes: process.env.SHOPIFY_SCOPES ||
-            'read_products,write_products,read_orders,write_orders,read_customers,read_inventory,write_inventory,read_locations,read_reports,write_pixels,read_customer_events',
+            'read_products,write_products,read_orders,write_orders,read_customers,read_inventory,write_inventory,read_locations,read_reports,read_draft_orders,write_draft_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,write_fulfillments,write_pixels,read_customer_events',
     },
     instagram: {
         appId: process.env.META_APP_ID,
