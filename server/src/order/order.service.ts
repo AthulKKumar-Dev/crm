@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,6 +9,7 @@ import {
 import {
   ChannelPlatform,
   ChannelStatus,
+  InvoiceStatus,
   OrderFinancialStatus,
   OrderFulfillmentStatus,
   Prisma,
@@ -32,6 +34,11 @@ import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { displayVariantTitle } from '../product/variant-title.util';
+import {
+  retryOnNumberingConflict,
+  uniqueViolationTargets,
+} from '../common/utils/serialization-retry.util';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -291,6 +298,22 @@ export class OrderService {
         fulfillments: true,
         refunds: true,
         timeline: { orderBy: { createdAt: 'desc' } },
+        // The order's live GST invoice (at most one — enforced by the partial
+        // unique index invoices_order_id_active_key). Lets the client show the
+        // invoice card / gate the Generate button without scanning the
+        // paginated invoice list.
+        invoices: {
+          where: { status: { not: InvoiceStatus.CANCELLED } },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            invoiceDate: true,
+            status: true,
+            grandTotal: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
       },
     });
 
@@ -526,7 +549,7 @@ export class OrderService {
       );
     }
 
-    const result = await this.prisma.$transaction(
+    const runSale = () => this.prisma.$transaction(
       async (tx) => {
         // 1. Resolve or lazy-create the org's MANUAL channel.
         const channel = await tx.channel.upsert({
@@ -693,11 +716,17 @@ export class OrderService {
         totalTax = round(totalTax);
         const grandTotal = round(subtotal + totalTax);
 
-        // 6. Generate next sequential orderNumber. Serializable isolation +
-        //    @@unique([channelId, externalId]) keep this collision-free under
-        //    concurrency; the runtime will retry on serialization conflict.
+        // 6. Generate the next sequential orderNumber for the MANUAL channel.
+        //    Scoped to this channel so offline sales run their own sequence
+        //    instead of consuming the number Shopify is about to assign to its
+        //    next online order. Collision safety comes from the PARTIAL unique
+        //    index orders_channel_id_order_number_manual_key (manual rows only;
+        //    Shopify legitimately re-issues numbers after store resets) plus
+        //    the caller's bounded retry on P2002/P2034 — Serializable alone
+        //    does not prevent this, and Prisma does not auto-retry
+        //    serialization failures.
         const last = await tx.order.findFirst({
-          where: { organizationId: orgId },
+          where: { channelId: channel.id },
           orderBy: { orderNumber: 'desc' },
           select: { orderNumber: true },
         });
@@ -712,7 +741,9 @@ export class OrderService {
             customerId: customer.id,
             externalId: `manual_${randomUUID()}`,
             orderNumber: nextNumber,
-            name: `#${nextNumber}`,
+            // "M" marks the order as manual/offline so it can never be confused
+            // with a Shopify order carrying the same number on its own channel.
+            name: `#M${nextNumber}`,
             financialStatus:
               dto.financialStatus ?? OrderFinancialStatus.PAID,
             fulfillmentStatus:
@@ -723,6 +754,15 @@ export class OrderService {
             totalTax,
             totalDiscounts: 0,
             totalShippingPrice: 0,
+            // Prefer explicit order addresses (e.g. draft completion); else
+            // customer.address so GST place-of-supply / packing slips aren't blank.
+            shippingAddress: (dto.shippingAddress ??
+              dto.customer.address ??
+              null) as Prisma.InputJsonValue | undefined,
+            billingAddress: (dto.billingAddress ??
+              dto.shippingAddress ??
+              dto.customer.address ??
+              null) as Prisma.InputJsonValue | undefined,
             note: dto.note,
             metadata: {
               source: 'offline',
@@ -814,9 +854,24 @@ export class OrderService {
               },
             );
           } catch (err) {
-            // Soft-fail: a missing GST detail (no seller GSTIN, etc.) must not
-            // block a walk-in sale. Log it and proceed; the merchant can issue
-            // the invoice later from the order detail page.
+            // Soft-fail ONLY deliberate application-level rejections (missing
+            // seller GSTIN, GST disabled, an invoice already issued). Those are
+            // thrown after a successful query, so the transaction is still
+            // healthy and the walk-in sale can proceed without its invoice.
+            //
+            // Every other error is a database failure, and swallowing one here
+            // is never safe for two reasons:
+            //   1. Postgres puts the transaction into aborted state (25P02) as
+            //      soon as a statement errors, so every later statement in this
+            //      transaction fails and COMMIT silently degrades to ROLLBACK —
+            //      we would return a "successful" sale referencing an order row
+            //      that was never persisted.
+            //   2. Transient conflicts (P2002 on invoice number, P2034
+            //      serialization abort, P2010 carrying SQLSTATE 40001) must
+            //      reach retryOnNumberingConflict below to be retried at all.
+            if (!(err instanceof HttpException)) {
+              throw err;
+            }
             invoiceError =
               err instanceof Error ? err.message : 'Invoice generation failed.';
             this.logger.warn(
@@ -839,6 +894,21 @@ export class OrderService {
       },
     );
 
+    // Retry the whole sale on a numbering collision — order number OR invoice
+    // number (the two sequences are both read-max-then-increment inside this
+    // transaction). Safe to re-run because every side effect — numbers, stock
+    // decrement — is allocated inside the transaction and only persists on
+    // commit, so a rolled-back attempt consumes nothing.
+    const result = await retryOnNumberingConflict(runSale, {
+      isRetriableUniqueViolation: (e) =>
+        uniqueViolationTargets(e, 'orderNumber') ||
+        uniqueViolationTargets(e, 'invoiceNumber'),
+      onRetry: (attempt) =>
+        this.logger.warn(
+          `Numbering collision on attempt ${attempt} — retrying sale`,
+        ),
+    });
+
     // Auto-push to Shopify — only if the org has opted in via
     // orderSettings.autoSyncToShopify. Default is OFF: offline orders stay
     // local and must be pushed manually (POST /orders/:id/sync) or in bulk
@@ -854,7 +924,7 @@ export class OrderService {
         if (shopifyChannel?.status === 'CONNECTED') {
           // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
           // even before the worker picks the job up.
-          await this.markPendingSync(result.order.id);
+          await this.markPendingSync(result.order.id, orgId);
           await this.shopifyPushEnqueuer.enqueueOrderPush({
             type: 'order',
             orderId: result.order.id,
@@ -903,7 +973,15 @@ export class OrderService {
       return { status: 'ALREADY_QUEUED' as const, orderId: order.id };
     }
 
-    await this.markPendingSync(order.id);
+    // The status read above is a snapshot; a worker can finish a push between
+    // it and this claim. markPendingSync refuses to demote a SYNCED order, so a
+    // lost claim means exactly that happened — report it rather than enqueueing
+    // a duplicate push.
+    const claimed = await this.markPendingSync(order.id, orgId);
+    if (!claimed) {
+      return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
+    }
+
     await this.shopifyPushEnqueuer.enqueueOrderPush({
       type: 'order',
       orderId: order.id,
@@ -912,25 +990,31 @@ export class OrderService {
     return { status: 'QUEUED' as const, orderId: order.id };
   }
 
-  /** Stamp metadata.shopifySync = { status: 'PENDING', attempts: 0 }. */
-  private async markPendingSync(orderId: string): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      select: { metadata: true },
-    });
-    const meta =
-      order?.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
-        ? (order.metadata as Prisma.JsonObject)
-        : {};
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        metadata: {
-          ...meta,
-          shopifySync: { status: 'PENDING', attempts: 0 },
-        } as Prisma.InputJsonObject,
-      },
-    });
+  /**
+   * Claim an order for a Shopify push by stamping
+   * metadata.shopifySync = { status: 'PENDING', attempts: 0 }.
+   *
+   * Atomic JSONB merge (H7) — does not read-modify-write the whole blob — and
+   * guarded so it can never demote an order a worker has already marked
+   * SYNCED. Without that guard a push completing between the caller's status
+   * read and this write would be overwritten with PENDING, and the order would
+   * be pushed to Shopify a second time.
+   *
+   * Returns true when this call won the claim.
+   */
+  private async markPendingSync(
+    orderId: string,
+    organizationId: string,
+  ): Promise<boolean> {
+    const updated = await mergeJsonMetadata(
+      this.prisma,
+      'orders',
+      orderId,
+      organizationId,
+      { shopifySync: { status: 'PENDING', attempts: 0 } },
+      Prisma.sql`AND COALESCE("metadata" -> 'shopifySync' ->> 'status', '') <> 'SYNCED'`,
+    );
+    return updated > 0;
   }
 
   private async resolveCustomer(

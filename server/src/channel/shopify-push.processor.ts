@@ -48,10 +48,12 @@ export class ShopifyPushProcessor extends WorkerHost {
       // can see the error in the UI. Bulk jobs already write per-product
       // failures inside bulkPushManualProducts, so we skip there.
       if (data.type === 'order') {
-        await this.pushService.recordFailure(data.orderId, msg).catch(() => undefined);
+        await this.pushService
+          .recordFailure(data.orderId, data.organizationId, msg)
+          .catch(() => undefined);
       } else if (data.type === 'product') {
         await this.pushService
-          .recordProductFailure(data.productId, msg)
+          .recordProductFailure(data.productId, data.organizationId, msg)
           .catch(() => undefined);
       }
 

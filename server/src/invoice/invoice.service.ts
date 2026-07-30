@@ -1,10 +1,15 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
 import { GstType, InvoiceStatus, Prisma } from '@prisma/client';
+import {
+  retryOnNumberingConflict,
+  uniqueViolationTargets,
+} from '../common/utils/serialization-retry.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { GstService } from '../gst/gst.service';
 import {
@@ -21,6 +26,8 @@ import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
 
 @Injectable()
 export class InvoiceService {
+  private readonly logger = new Logger(InvoiceService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly gstService: GstService,
@@ -32,9 +39,28 @@ export class InvoiceService {
   // ─── GENERATE INVOICE ───
   // Creates a GST-compliant invoice for an order.
   // Snapshots all seller/buyer data at creation time.
+  // Serializable + bounded retry: invoice numbers are read-max-then-increment,
+  // so two concurrent requests can compute the same number. The loser's
+  // transaction rolls back (consuming no number — the sequence stays gapless)
+  // and the retry re-reads the new max.
   async create(orgId: string, dto: CreateInvoiceDto) {
-    return this.prisma.$transaction((tx) =>
-      this.createForOrderTx(tx, orgId, dto.orderId, dto),
+    return retryOnNumberingConflict(
+      () =>
+        this.prisma.$transaction(
+          (tx) => this.createForOrderTx(tx, orgId, dto.orderId, dto),
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            timeout: 10000,
+          },
+        ),
+      {
+        isRetriableUniqueViolation: (e) =>
+          uniqueViolationTargets(e, 'invoiceNumber'),
+        onRetry: (attempt) =>
+          this.logger.warn(
+            `Invoice number collision on attempt ${attempt} — retrying`,
+          ),
+      },
     );
   }
 
@@ -74,6 +100,21 @@ export class InvoiceService {
 
     if (!order) {
       throw new NotFoundException('Order not found');
+    }
+
+    // 1b. One live invoice per order. Friendly guard for the common case; the
+    // partial unique index invoices_order_id_active_key backstops the race
+    // where two requests pass this check simultaneously (loser gets P2002 →
+    // 409 via the global filter). Cancelled invoices don't count — cancel-
+    // then-reissue is the statutory correction flow.
+    const existingInvoice = await tx.invoice.findFirst({
+      where: { orderId, status: { not: InvoiceStatus.CANCELLED } },
+      select: { invoiceNumber: true },
+    });
+    if (existingInvoice) {
+      throw new ConflictException(
+        `Invoice ${existingInvoice.invoiceNumber} already exists for this order. Cancel it first to issue a corrected one.`,
+      );
     }
 
     // 2. Check if GST is enabled for the org

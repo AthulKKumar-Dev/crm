@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -83,6 +84,7 @@ export class ShopifyPushService {
       );
       await this.recordFailure(
         orderId,
+        orgId,
         'No connected Shopify channel.',
         /* incrementAttempt */ false,
       );
@@ -197,6 +199,7 @@ export class ShopifyPushService {
 
     await this.recordSuccess(
       orderId,
+      orgId,
       ShopifyGraphqlClient.extractId(remoteOrder.id),
       remoteOrder.name,
     );
@@ -311,14 +314,17 @@ export class ShopifyPushService {
   }
 
   // ─── METADATA WRITERS ───
+  // Atomic JSONB merges (H7). Reads are only used to compute the next
+  // shopifySync.attempts value; the write never replaces the whole blob.
 
   private async recordSuccess(
     orderId: string,
+    organizationId: string,
     shopifyOrderId: string,
     shopifyOrderName: string,
   ): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readSyncMeta(order?.metadata);
@@ -329,7 +335,7 @@ export class ShopifyPushService {
       syncedAt: new Date().toISOString(),
       attempts: (prev?.attempts ?? 0) + 1,
     };
-    await this.writeSyncMeta(orderId, order?.metadata, next);
+    await this.writeSyncMeta(orderId, organizationId, next);
   }
 
   /**
@@ -338,11 +344,12 @@ export class ShopifyPushService {
    */
   async recordFailure(
     orderId: string,
+    organizationId: string,
     error: string,
     incrementAttempt = true,
   ): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readSyncMeta(order?.metadata);
@@ -357,7 +364,7 @@ export class ShopifyPushService {
         ? { shopifyOrderName: prev.shopifyOrderName }
         : {}),
     };
-    await this.writeSyncMeta(orderId, order?.metadata, next);
+    await this.writeSyncMeta(orderId, organizationId, next);
   }
 
   private readSyncMeta(metadata: Prisma.JsonValue | null | undefined):
@@ -376,21 +383,11 @@ export class ShopifyPushService {
 
   private async writeSyncMeta(
     orderId: string,
-    current: Prisma.JsonValue | null | undefined,
+    organizationId: string,
     next: ShopifySyncMetadata,
   ): Promise<void> {
-    const base =
-      current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
-        : {};
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        metadata: {
-          ...base,
-          shopifySync: next as unknown as Prisma.InputJsonValue,
-        } as Prisma.InputJsonObject,
-      },
+    await mergeJsonMetadata(this.prisma, 'orders', orderId, organizationId, {
+      shopifySync: next,
     });
   }
 
@@ -420,6 +417,7 @@ export class ShopifyPushService {
       );
       await this.recordProductFailure(
         productId,
+        orgId,
         'No connected Shopify channel.',
         false,
       );
@@ -463,7 +461,7 @@ export class ShopifyPushService {
         oversellGlobally,
         trackGlobally,
       );
-      await this.recordProductSuccess(productId, product.externalId);
+      await this.recordProductSuccess(productId, orgId, product.externalId);
       this.logger.log(
         `Pushed update for Shopify product "${product.title}" (${product.externalId}).`,
       );
@@ -528,7 +526,7 @@ export class ShopifyPushService {
       }
     });
 
-    await this.recordProductSuccess(productId, remoteProductId);
+    await this.recordProductSuccess(productId, orgId, remoteProductId);
 
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
@@ -1055,7 +1053,7 @@ export class ShopifyPushService {
         failed++;
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`Bulk push: product ${p.id} failed: ${msg}`);
-        await this.recordProductFailure(p.id, msg).catch(() => undefined);
+        await this.recordProductFailure(p.id, orgId, msg).catch(() => undefined);
       }
     }
 
@@ -1112,7 +1110,7 @@ export class ShopifyPushService {
         failed++;
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`Bulk push: order ${o.id} failed: ${msg}`);
-        await this.recordFailure(o.id, msg, /* incrementAttempt */ true).catch(
+        await this.recordFailure(o.id, orgId, msg, /* incrementAttempt */ true).catch(
           () => undefined,
         );
       }
@@ -1137,10 +1135,11 @@ export class ShopifyPushService {
 
   private async recordProductSuccess(
     productId: string,
+    organizationId: string,
     shopifyProductId: string,
   ): Promise<void> {
-    const product = await this.prisma.product.findUnique({
-      where: { id: productId },
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readProductSyncMeta(product?.metadata);
@@ -1150,16 +1149,17 @@ export class ShopifyPushService {
       syncedAt: new Date().toISOString(),
       attempts: (prev?.attempts ?? 0) + 1,
     };
-    await this.writeProductSyncMeta(productId, product?.metadata, next);
+    await this.writeProductSyncMeta(productId, organizationId, next);
   }
 
   async recordProductFailure(
     productId: string,
+    organizationId: string,
     error: string,
     incrementAttempt = true,
   ): Promise<void> {
-    const product = await this.prisma.product.findUnique({
-      where: { id: productId },
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readProductSyncMeta(product?.metadata);
@@ -1169,7 +1169,7 @@ export class ShopifyPushService {
       attempts: (prev?.attempts ?? 0) + (incrementAttempt ? 1 : 0),
       ...(prev?.shopifyProductId ? { shopifyProductId: prev.shopifyProductId } : {}),
     };
-    await this.writeProductSyncMeta(productId, product?.metadata, next);
+    await this.writeProductSyncMeta(productId, organizationId, next);
   }
 
   private readProductSyncMeta(metadata: Prisma.JsonValue | null | undefined):
@@ -1182,21 +1182,11 @@ export class ShopifyPushService {
 
   private async writeProductSyncMeta(
     productId: string,
-    current: Prisma.JsonValue | null | undefined,
+    organizationId: string,
     next: object,
   ): Promise<void> {
-    const base =
-      current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
-        : {};
-    await this.prisma.product.update({
-      where: { id: productId },
-      data: {
-        metadata: {
-          ...base,
-          shopifySync: next as unknown as Prisma.InputJsonValue,
-        } as Prisma.InputJsonObject,
-      },
+    await mergeJsonMetadata(this.prisma, 'products', productId, organizationId, {
+      shopifySync: next,
     });
   }
 }

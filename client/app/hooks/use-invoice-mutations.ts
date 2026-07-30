@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { invoiceService } from "~/services/invoice.service";
 import { invoiceKeys } from "~/hooks/use-invoice-queries";
+import { orderKeys } from "~/hooks/use-order-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type { CreateInvoiceRequest } from "~/types/api";
 
@@ -13,6 +14,9 @@ export function useCreateInvoiceMutation() {
     mutationFn: (data: CreateInvoiceRequest) => invoiceService.create(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      // The order detail embeds its live invoice — refresh it so the invoice
+      // card appears and the Generate button hides.
+      queryClient.invalidateQueries({ queryKey: orderKeys.all });
       toast.success("GST invoice generated successfully.");
     },
     onError: (error) =>
@@ -28,6 +32,9 @@ export function useCancelInvoiceMutation() {
     mutationFn: (id: string) => invoiceService.cancel(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      // Cancelling frees the one-live-invoice slot — refresh order detail so
+      // the Generate button reappears.
+      queryClient.invalidateQueries({ queryKey: orderKeys.all });
       toast.success("Invoice cancelled.");
     },
     onError: (error) =>

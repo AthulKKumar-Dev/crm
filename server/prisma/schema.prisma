@@ -1,8 +1,12 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Prisma schema for Collabo CRM.
+//
+// Deploy policy (H13): shared / staging / production MUST use
+// `prisma migrate deploy` only. Do not use `prisma db push` on those
+// environments — it updates the live DB without a migration record and
+// makes the production index set unverifiable. Partial unique indexes that
+// Prisma cannot express live in SQL migrations (see
+// 20260729120000_manual_order_number_unique, 20260729130000_one_active_invoice_per_order,
+// 20260729140000_h13_migrate_deploy_baseline).
 
 generator client {
   provider = "prisma-client-js"
@@ -644,6 +648,14 @@ model Order {
   draftOrderOrigin DraftOrder?          @relation("DraftOrderCompletedOrder")
 
   @@unique([channelId, externalId])
+  // NOTE (not expressible in Prisma): a PARTIAL unique index
+  //   orders_channel_id_order_number_manual_key
+  //     ON (channel_id, order_number) WHERE external_id LIKE 'manual\_%'
+  // guards the read-max-then-increment numbering of MANUAL (offline) orders —
+  // see migration 20260729120000_manual_order_number_unique. It is deliberately
+  // NOT a full unique: Shopify assigns its own order numbers and can re-issue
+  // them (e.g. a dev store's test-data wipe resets its counter — observed in
+  // production data), so Shopify-channel rows must stay exempt.
   @@index([organizationId])
   @@index([channelId])
   @@index([customerId])
@@ -953,6 +965,11 @@ model Invoice {
   lineItems      InvoiceLineItem[]
 
   @@unique([organizationId, invoiceNumber])
+  // NOTE (not expressible in Prisma): a PARTIAL unique index
+  //   invoices_order_id_active_key ON (order_id) WHERE status <> 'CANCELLED'
+  // enforces at most one LIVE invoice per order — see migration
+  // 20260729130000_one_active_invoice_per_order. Cancelled invoices are exempt
+  // so the statutory cancel-then-reissue flow keeps working.
   @@index([organizationId])
   @@index([orderId])
   @@index([sellerGstinId])

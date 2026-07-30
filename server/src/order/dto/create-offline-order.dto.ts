@@ -86,4 +86,12 @@ export class CreateOfflineOrderDto {
   fulfillmentStatus?: OrderFulfillmentStatus;
 
   @IsOptional() @IsBoolean() generateInvoice?: boolean;
+
+  /** Optional ship-to; when omitted, falls back to customer.address. */
+  @IsOptional() @IsObject()
+  shippingAddress?: Record<string, unknown>;
+
+  /** Optional bill-to; when omitted, falls back to shipping then customer.address. */
+  @IsOptional() @IsObject()
+  billingAddress?: Record<string, unknown>;
 }

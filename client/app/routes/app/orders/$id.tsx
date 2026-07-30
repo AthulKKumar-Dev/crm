@@ -17,7 +17,6 @@ import { useOrder } from "~/hooks/use-order-queries";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
-import { useInvoices } from "~/hooks/use-invoice-queries";
 import { OrderActionsMenu } from "~/components/app/order-actions";
 import { OrderFulfillmentsSection } from "~/components/app/order-fulfillments";
 import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
@@ -32,7 +31,6 @@ import {
 } from "~/components/ui/select";
 import { cn, formatCurrency } from "~/lib/utils";
 import type {
-  Invoice,
   OrderDetail,
   OrganizationGstin,
 } from "~/types/api";
@@ -66,11 +64,10 @@ export default function OrderDetailPage() {
   const currency = order?.currency ?? org?.currency ?? "INR";
   const gstEnabled = org?.gstEnabled ?? false;
 
-  // Linked invoice (if any) for this order — search the invoice list.
-  const { data: invoiceList } = useInvoices(undefined);
-  const invoice = invoiceList?.data.find(
-    (inv) => (inv as Invoice & { order?: { name: string } }).order?.name === order?.name,
-  );
+  // The order's live invoice comes embedded in the order response (at most
+  // one — enforced server-side). No list-scan: correct at any invoice count,
+  // and vendors never trigger a forbidden /invoices request.
+  const invoice = order?.invoices?.[0] ?? null;
 
   const [showInvoiceDialog, setShowInvoiceDialog] = useState(false);
 

@@ -973,6 +973,12 @@ export interface OrderDetail extends Order {
   fulfillments: OrderFulfillment[];
   refunds: OrderRefund[];
   timeline: OrderTimeline[];
+  /** The order's live (non-cancelled) GST invoice — at most one, enforced by
+   *  a partial unique index server-side. Empty array when not invoiced. */
+  invoices?: Pick<
+    Invoice,
+    "id" | "invoiceNumber" | "invoiceDate" | "status" | "grandTotal"
+  >[];
 }
 
 /** Query parameters for the order list endpoint. */
