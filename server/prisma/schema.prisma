@@ -626,6 +626,14 @@ model Order {
   cancelReason       OrderCancelReason?     @map("cancel_reason")
   cancelledAt        DateTime?              @map("cancelled_at")
   closedAt           DateTime?              @map("closed_at")
+  /// GST place of supply resolved AT THE TIME THE ORDER WAS TAXED, plus the
+  /// resulting CGST+SGST vs IGST split. Persisted so the invoice reports what
+  /// the customer was actually charged instead of re-deriving it later from
+  /// data that may have changed (the two derivations previously disagreed and
+  /// could produce a different tax head and a different amount). Null for
+  /// orders created before this was introduced, and for non-GST orgs.
+  placeOfSupplyCode  String?                @map("place_of_supply_code")
+  gstType            GstType?               @map("gst_type")
   metadata           Json?                  @db.JsonB
   deletedAt          DateTime?              @map("deleted_at")
   createdAt          DateTime               @default(now()) @map("created_at")

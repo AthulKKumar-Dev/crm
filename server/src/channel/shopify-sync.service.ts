@@ -1086,6 +1086,13 @@ export class ShopifySyncService {
             totalDiscounts: sd.total_discounts || '0',
             totalShippingPrice:
                 sd.shipping_line?.price ?? sd.total_shipping_price ?? '0',
+            // Carried so draft completion can hand them to the real order.
+            // Without these a Shopify-mirrored draft completes into an order
+            // with no address, which leaves the GST invoice's buyer address
+            // blank and drops the delivery state out of place-of-supply
+            // resolution (so an interstate order is taxed CGST+SGST).
+            shippingAddress: sd.shipping_address ?? null,
+            billingAddress: sd.billing_address ?? null,
             note: sd.note ?? null,
             tags,
             invoiceUrl: sd.invoice_url ?? null,
@@ -1159,11 +1166,17 @@ export class ShopifySyncService {
         const updateFields = {
             email: sc.email, firstName: sc.first_name, lastName: sc.last_name, phone: sc.phone,
             state: this.mapCustomerState(sc.state), verifiedEmail: sc.verified_email ?? false,
-            acceptsMarketing: sc.accepts_marketing ?? false, ordersCount: sc.orders_count ?? 0,
-            totalSpent: sc.total_spent || '0', tags, note: sc.note,
+            acceptsMarketing: sc.accepts_marketing ?? false,
+            tags, note: sc.note,
             addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
             externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
-            // NOTE: vipLevel is auto-assigned by LoyaltyService below (based on org thresholds).
+            // NOTE: ordersCount / totalSpent are deliberately NOT written from
+            // sc.orders_count / sc.total_spent. Those figures describe Shopify
+            // orders only, so writing them wholesale wiped every in-store
+            // purchase for a customer who shops on both channels. Both fields
+            // are derived from the local order table by
+            // LoyaltyService.recomputeForCustomer, called at the end of this
+            // method — which also assigns vipLevel from the org thresholds.
             // internalNotes, segments are still NOT overwritten (CRM-only fields).
         };
 

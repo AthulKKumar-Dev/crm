@@ -9,11 +9,13 @@ import {
 import {
   ChannelPlatform,
   ChannelStatus,
+  GstType,
   InvoiceStatus,
   OrderFinancialStatus,
   OrderFulfillmentStatus,
   Prisma,
 } from '@prisma/client';
+import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryOrdersDto } from './dto/query-orders.dto';
@@ -33,6 +35,7 @@ import { ShopifyPushService } from '../channel/shopify-push.service';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import { displayVariantTitle } from '../product/variant-title.util';
 import {
   retryOnNumberingConflict,
@@ -106,6 +109,7 @@ export class OrderService {
     private readonly graphql: ShopifyGraphqlClient,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly settings: OrganizationSettingsService,
+    private readonly loyalty: LoyaltyService,
   ) { }
 
   async findAll(orgId: string, query: QueryOrdersDto, vendorScope?: string) {
@@ -489,6 +493,9 @@ export class OrderService {
         channel: { select: { name: true } },
       },
       orderBy: { externalCreatedAt: 'desc' },
+      // Bounded: the export builds the whole CSV/JSON in memory, so an
+      // unlimited query on a large tenant could OOM the process for everyone.
+      take: 10_000,
     });
 
     return orders.map((o) => ({
@@ -643,12 +650,21 @@ export class OrderService {
         }
 
         // 5. Compute pricing per line item.
-        const placeOfSupplyCode =
-          dto.placeOfSupplyCode ||
-          dto.customer.billingStateCode ||
-          customer.billingStateCode ||
-          sellerGstin?.stateCode ||
-          '00';
+        //    Uses the SHARED resolver so the invoice cannot disagree with what
+        //    the order was taxed with, and so the delivery address actually
+        //    participates (Section 10(1)(a): place of supply for goods is where
+        //    they are delivered). The resolved code is persisted on the order
+        //    below and read back by the invoice.
+        const placeOfSupplyCode = resolvePlaceOfSupply({
+          explicitCode: dto.placeOfSupplyCode,
+          shippingAddress: dto.shippingAddress ?? dto.customer.address,
+          billingAddress:
+            dto.billingAddress ?? dto.shippingAddress ?? dto.customer.address,
+          customerBillingStateCode:
+            dto.customer.billingStateCode ?? customer.billingStateCode,
+          buyerGstin: dto.customer.gstin ?? customer.gstin,
+          sellerStateCode: sellerGstin?.stateCode,
+        });
 
         const isIntraState = sellerGstin
           ? this.calculator.isIntraState(
@@ -656,6 +672,9 @@ export class OrderService {
             placeOfSupplyCode,
           )
           : true;
+        const resolvedGstType = isIntraState
+          ? GstType.CGST_SGST
+          : GstType.IGST;
 
         const lineItemsToCreate: Array<{
           variantId: string;
@@ -679,12 +698,28 @@ export class OrderService {
             li.unitPriceOverride ?? this.calculator.toNumber(v.price);
           const discount = li.discount ?? 0;
 
-          const productGstRate = this.calculator.toNumber(v.product.gstRate);
+          // Validated here, not in the DTO: the unit price may come from the
+          // variant rather than the payload, so the ceiling isn't knowable at
+          // validation time. An over-large discount would otherwise produce a
+          // negative taxable value, a negative invoice, and a decremented
+          // customer lifetime value.
+          const lineGross = this.calculator.round2(unitPrice * li.quantity);
+          if (discount > lineGross) {
+            throw new BadRequestException(
+              `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+            );
+          }
+
+          // toNullableNumber, not toNumber: null (no rate configured) and 0
+          // (explicitly exempt) must stay distinguishable for the resolver.
+          const productGstRate = this.calculator.toNullableNumber(
+            v.product.gstRate,
+          );
           const gstRate = sellerGstin
             ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
             : 0;
@@ -763,6 +798,10 @@ export class OrderService {
               dto.shippingAddress ??
               dto.customer.address ??
               null) as Prisma.InputJsonValue | undefined,
+            // What this order was ACTUALLY taxed with — the invoice reads these
+            // back instead of re-deriving and possibly disagreeing.
+            placeOfSupplyCode: sellerGstin ? placeOfSupplyCode : null,
+            gstType: sellerGstin ? resolvedGstType : null,
             note: dto.note,
             metadata: {
               source: 'offline',
@@ -816,14 +855,12 @@ export class OrderService {
           });
         }
 
-        // 9. Update customer denormalized counters.
-        await tx.customer.update({
-          where: { id: customer.id },
-          data: {
-            ordersCount: { increment: 1 },
-            totalSpent: { increment: grandTotal },
-          },
-        });
+        // 9. Customer counters are NOT incremented here. `ordersCount` and
+        //    `totalSpent` are derived from the order table by
+        //    LoyaltyService.recomputeForCustomer, which runs after this
+        //    transaction commits. Incrementing in place is what allowed a later
+        //    Shopify customer sync — which overwrites both fields wholesale —
+        //    to wipe in-store purchase history.
 
         // 10. Timeline event.
         await tx.orderTimelineEvent.create({
@@ -849,7 +886,10 @@ export class OrderService {
               order.id,
               {
                 sellerGstinId: dto.sellerGstinId,
-                placeOfSupplyCode: dto.placeOfSupplyCode,
+                // The RESOLVED code, not the raw (usually undefined) DTO field.
+                // Passing the raw one made the invoice re-derive independently
+                // and disagree with the tax the order just charged.
+                placeOfSupplyCode,
                 notes: dto.note,
               },
             );
@@ -937,6 +977,17 @@ export class OrderService {
         `Skipping Shopify push enqueue for order ${result.order.id}: ${err}`,
       );
     }
+
+    // The sale just moved ordersCount/totalSpent, and the loyalty tier is
+    // derived from them. Non-fatal and outside the transaction — a tier refresh
+    // must never roll back a completed sale.
+    await this.loyalty
+      .recomputeForCustomer(result.order.customerId!, orgId)
+      .catch((err) =>
+        this.logger.warn(
+          `Loyalty recompute failed for order ${result.order.id}: ${err}`,
+        ),
+      );
 
     return result;
   }
@@ -1184,6 +1235,10 @@ export class OrderService {
    */
   async cancel(id: string, orgId: string, userId: string, dto: CancelOrderDto) {
     const order = await this.loadOrderWithChannel(id, orgId);
+    // Fast, friendly path for the common case. This read is NOT the real guard
+    // — `cancelledAt` is written much later, inside the transaction below — so
+    // the atomic claim there is what actually prevents two concurrent cancels
+    // from both restocking inventory and both decrementing customer counters.
     if (order.cancelledAt) {
       throw new BadRequestException('Order is already cancelled');
     }
@@ -1240,14 +1295,29 @@ export class OrderService {
       });
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const data: Prisma.OrderUpdateInput = {
+    const cancelled = await this.prisma.$transaction(async (tx) => {
+      const data: Prisma.OrderUpdateManyMutationInput = {
         cancelReason: dto.reason,
         cancelledAt: new Date(),
       };
       if (dto.refund) data.financialStatus = OrderFinancialStatus.REFUNDED;
       if (dto.restock) data.fulfillmentStatus = OrderFulfillmentStatus.RESTOCKED;
-      const updated = await tx.order.update({ where: { id }, data });
+
+      // Atomic claim. `cancelledAt: null` is the precondition, so exactly one
+      // concurrent caller can transition the order — the loser matches zero
+      // rows and bails out before the restock and counter reversal below.
+      // No compensating revert is needed: the claim shares this transaction
+      // with every side effect, so a rollback releases it automatically.
+      // Same exception as the early check above, so a race-loser and a late
+      // arrival are indistinguishable to the client.
+      const claimed = await tx.order.updateMany({
+        where: { id, organizationId: orgId, cancelledAt: null },
+        data,
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException('Order is already cancelled');
+      }
+      const updated = await tx.order.findUniqueOrThrow({ where: { id } });
 
       // Local restock for MANUAL channel orders. Shopify orders are restocked
       // server-side by the orderCancel mutation we already sent — adjusting
@@ -1282,6 +1352,10 @@ export class OrderService {
         }
       }
 
+      // Customer counters are not adjusted here — they are derived from the
+      // order table, and the `cancelledAt` we just set removes this order from
+      // that derivation. The recompute below applies it.
+
       await tx.orderTimelineEvent.create({
         data: {
           orderId: id,
@@ -1298,6 +1372,24 @@ export class OrderService {
       });
       return updated;
     });
+
+    // Re-derive the customer's counters (and therefore their tier) now that
+    // this order is cancelled. Every channel, not just MANUAL — the counters
+    // are derived from all orders. Non-fatal and outside the transaction: a
+    // tier refresh must never roll back a cancellation, and because the values
+    // are derived rather than incremental, a failure here is repaired by the
+    // next recompute rather than lost.
+    if (order.customerId) {
+      await this.loyalty
+        .recomputeForCustomer(order.customerId, orgId)
+        .catch((err) =>
+          this.logger.warn(
+            `Loyalty recompute failed after cancelling order ${id}: ${err}`,
+          ),
+        );
+    }
+
+    return cancelled;
   }
 
   /** Archive (close) an order. Reversible via `open()`. */

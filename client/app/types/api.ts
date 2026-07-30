@@ -1020,6 +1020,30 @@ export interface OfflineLineItemInput {
   discount?: number;
 }
 
+/**
+ * Address bag stored on an order.
+ *
+ * Shopify-compatible snake_case keys so synced and offline orders share one
+ * shape, plus `stateCode` — the 2-digit GST state code, which is what drives
+ * place-of-supply resolution (and therefore CGST+SGST vs IGST). Send both
+ * `province` (the display name) and `stateCode`: slips and invoices render the
+ * former, the tax resolver reads the latter.
+ */
+export interface OrderAddressInput {
+  first_name?: string;
+  last_name?: string;
+  company?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  province?: string;
+  stateCode?: string;
+  zip?: string;
+  country?: string;
+  country_code?: string;
+  phone?: string;
+}
+
 /** Payload for creating an offline (in-store) order. */
 export interface CreateOfflineOrderRequest {
   customer: OfflineCustomerInput;
@@ -1031,6 +1055,9 @@ export interface CreateOfflineOrderRequest {
   financialStatus?: FinancialStatus;
   fulfillmentStatus?: FulfillmentStatus;
   generateInvoice?: boolean;
+  /** Omit for a counter sale. When present, the state sets GST place of supply. */
+  shippingAddress?: OrderAddressInput;
+  billingAddress?: OrderAddressInput;
 }
 
 /** Server response from POST /orders/offline. */
@@ -1222,8 +1249,8 @@ export interface CreateDraftOrderRequest {
   lineItems: DraftLineItemInput[];
   note?: string;
   tags?: string[];
-  shippingAddress?: Record<string, unknown>;
-  billingAddress?: Record<string, unknown>;
+  shippingAddress?: OrderAddressInput;
+  billingAddress?: OrderAddressInput;
   placeOfSupplyCode?: string;
 }
 

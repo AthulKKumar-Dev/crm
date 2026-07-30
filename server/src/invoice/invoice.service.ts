@@ -17,7 +17,31 @@ import {
   GstCalculationResult,
 } from '../gst/gst-calculator.service';
 import { getStateName, isValidStateCode } from '../gst/constants/indian-states';
-import { extractStateCodeFromGstin } from '../gst/constants/gst-rates';
+import {
+  extractStateFromAddress,
+  resolvePlaceOfSupply,
+} from '../gst/place-of-supply.util';
+import {
+  gstPeriodRange,
+  INDIA_TZ,
+  resolveGstTimeZone,
+  zonedDayEndExclusive,
+  zonedDayStart,
+} from '../common/utils/zoned-date.util';
+
+/**
+ * Hard ceiling on rows an export may materialise. Exports build the whole
+ * result set in memory before serialising, so an unbounded query on a large
+ * tenant is an out-of-memory risk for every tenant on the instance.
+ */
+const EXPORT_ROW_CAP = 10_000;
+
+/**
+ * Organizations already warned about running GST on an untouched UTC timezone.
+ * Process-local and deliberately unbounded-in-practice (one entry per org) —
+ * the point is to surface the misconfiguration once, not once per invoice.
+ */
+const gstTimeZoneFallbackWarned = new Set<string>();
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
@@ -85,7 +109,10 @@ export class InvoiceService {
   ) {
     // 1. Fetch the order with line items and customer
     const order = await tx.order.findFirst({
-      where: { id: orderId, organizationId: orgId },
+      // deletedAt filter matches every other order read path — without it a
+      // soft-deleted order could still be issued a fresh, numbered, statutory
+      // invoice.
+      where: { id: orderId, organizationId: orgId, deletedAt: null },
       include: {
         lineItems: {
           include: {
@@ -117,10 +144,13 @@ export class InvoiceService {
       );
     }
 
-    // 2. Check if GST is enabled for the org
+    // 2. Check if GST is enabled for the org. `timezone` is needed for the
+    //    financial-year stamp below — servers run UTC, so deriving the FY in
+    //    server-local time files a 00:30 IST sale on 1 April into the PREVIOUS
+    //    financial year and burns a serial from that (possibly filed) year.
     const org = await tx.organization.findUnique({
       where: { id: orgId },
-      select: { gstEnabled: true },
+      select: { gstEnabled: true, timezone: true },
     });
 
     if (!org?.gstEnabled) {
@@ -154,8 +184,13 @@ export class InvoiceService {
       );
     }
 
-    // 4. Determine place of supply
-    const placeOfSupplyCode = this.resolvePlaceOfSupply(dto, order);
+    // 4. Determine place of supply. Prefers the code the order was taxed with;
+    //    the seller's state is the over-the-counter fallback for walk-ins.
+    const placeOfSupplyCode = this.resolvePlaceOfSupply(
+      dto,
+      order,
+      sellerGstin.stateCode,
+    );
     const placeOfSupplyName =
       getStateName(placeOfSupplyCode) || placeOfSupplyCode;
 
@@ -175,12 +210,16 @@ export class InvoiceService {
 
     for (const item of order.lineItems) {
       // Use TaxResolver priority chain: Product > Collection > State > 0%
-      const productGstRate = this.calculator.toNumber(item.variant?.product?.gstRate);
+      // toNullableNumber preserves the null (unset) vs 0 (explicitly exempt)
+      // distinction that the resolver's priority chain depends on.
+      const productGstRate = this.calculator.toNullableNumber(
+        item.variant?.product?.gstRate,
+      );
       const productId = item.variant?.product?.id ?? null;
       const gstRate = await this.taxResolver.resolveGstRate(
         orgId,
         productId,
-        productGstRate || null,
+        productGstRate,
         placeOfSupplyCode,
       );
       const hsnCode = item.variant?.product?.hsnCode || '0000';
@@ -198,16 +237,33 @@ export class InvoiceService {
       lineItemResults.push({ orderLineItem: item, calculation, hsnCode });
     }
 
-    // 7. Calculate invoice totals
+    // 7. Calculate invoice totals.
+    //    The discount reported is the sum of the discounts ACTUALLY applied to
+    //    these lines — each is already subtracted inside `taxableValue`, so it
+    //    must not be deducted again. Using `order.totalDiscounts` here would
+    //    print 0.00 on every offline invoice (that column is hardcoded 0) and
+    //    would double-count on Shopify orders (it already includes the per-line
+    //    allocations). Shipping is carried through so the invoice total agrees
+    //    with the order total.
     const calculations = lineItemResults.map((r) => r.calculation);
+    const appliedDiscount = this.calculator.round2(
+      lineItemResults.reduce(
+        (sum, r) => sum + this.calculator.toNumber(r.orderLineItem.totalDiscount),
+        0,
+      ),
+    );
     const totals = this.calculator.calculateInvoiceTotals(
       calculations,
-      this.calculator.toNumber(order.totalDiscounts),
+      appliedDiscount,
+      this.calculator.toNumber(order.totalShippingPrice),
     );
 
     // 8. Generate invoice number (passes the same tx so it's atomic with the create below)
     const invoiceDate = new Date();
-    const financialYear = this.calculator.getFinancialYear(invoiceDate);
+    const financialYear = this.calculator.getFinancialYear(
+      invoiceDate,
+      this.gstTimeZone(orgId, org),
+    );
     const invoiceNum = await this.invoiceNumber.getNextInvoiceNumber(
       orgId,
       financialYear,
@@ -269,7 +325,13 @@ export class InvoiceService {
               : r.orderLineItem.title,
             hsnCode: r.hsnCode,
             quantity: r.orderLineItem.quantity,
-            unitPrice: r.calculation.taxableValue / r.orderLineItem.quantity + r.calculation.taxableValue === 0 ? 0 : this.calculator.toNumber(r.orderLineItem.price),
+            // The gross per-unit price. (This previously read as
+            // `taxable/qty + taxable === 0 ? 0 : price` — `+` and `===` bind
+            // tighter than `?:`, so the division was computed and discarded and
+            // a fully-discounted line was written with unitPrice 0 while
+            // `discount` still held the full amount, breaking the row's own
+            // invariant taxableValue = unitPrice*qty - discount.)
+            unitPrice: this.calculator.toNumber(r.orderLineItem.price),
             discount: this.calculator.toNumber(r.orderLineItem.totalDiscount),
             taxableValue: r.calculation.taxableValue,
             gstRate: r.calculation.gstRate,
@@ -296,6 +358,20 @@ export class InvoiceService {
     const limit = query.limit || 20;
     const skip = (page - 1) * limit;
 
+    // Date filters name calendar days in the merchant's timezone, so resolve it
+    // the same way the statutory date math does — otherwise the list disagrees
+    // with the GST return sitting next to it.
+    const timeZone =
+      query.dateFrom || query.dateTo
+        ? this.gstTimeZone(
+            orgId,
+            await this.prisma.organization.findUnique({
+              where: { id: orgId },
+              select: { timezone: true, gstEnabled: true },
+            }),
+          )
+        : 'UTC';
+
     const where: any = {
       organizationId: orgId,
       ...(query.financialYear && { financialYear: query.financialYear }),
@@ -308,11 +384,18 @@ export class InvoiceService {
           { buyerGstin: { contains: query.search, mode: 'insensitive' } },
         ],
       }),
+      // `lt` on an exclusive next-day bound, not `lte` on the day itself: a
+      // bare "2026-04-30" parsed as an instant is that day's FIRST moment, so
+      // an inclusive bound excluded almost the whole day the user asked for.
       ...(query.dateFrom || query.dateTo
         ? {
             invoiceDate: {
-              ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-              ...(query.dateTo && { lte: new Date(query.dateTo) }),
+              ...(query.dateFrom && {
+                gte: zonedDayStart(query.dateFrom, timeZone),
+              }),
+              ...(query.dateTo && {
+                lt: zonedDayEndExclusive(query.dateTo, timeZone),
+              }),
             },
           }
         : {}),
@@ -380,9 +463,20 @@ export class InvoiceService {
 
   // ─── GST RETURN SUMMARY ───
   async getGstReturn(orgId: string, query: QueryGstReturnDto) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true },
+    });
+
+    // Period boundaries are anchored to the merchant's timezone. On a UTC
+    // server, naive local-time math shifted every month/quarter edge by the
+    // offset — for IST that meant sales in the first 5.5 hours of a month were
+    // missing from its return, and sales in the first 5.5 hours of the NEXT
+    // month were reported inside it.
     const dateRange = this.getDateRangeForPeriod(
       query.financialYear,
       query.period,
+      this.gstTimeZone(orgId, org),
     );
 
     const where: any = {
@@ -391,7 +485,9 @@ export class InvoiceService {
       status: InvoiceStatus.ISSUED,
       invoiceDate: {
         gte: dateRange.from,
-        lte: dateRange.to,
+        // Half-open. The previous inclusive `23:59:59` bound carried no
+        // milliseconds, so an invoice at 23:59:59.500 was silently dropped.
+        lt: dateRange.toExclusive,
       },
       ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
     };
@@ -399,6 +495,8 @@ export class InvoiceService {
     const invoices = await this.prisma.invoice.findMany({
       where,
       include: { lineItems: true },
+      // Bounded — this hydrates every line item of every invoice in the period.
+      take: EXPORT_ROW_CAP,
     });
 
     if (query.returnType === GstReturnType.GSTR3B) {
@@ -566,6 +664,10 @@ export class InvoiceService {
 
     const invoices = await this.prisma.invoice.findMany({
       where,
+      // Bounded: this used to be unlimited, so one request on a large tenant
+      // could hydrate the whole table into memory and OOM the process for
+      // every tenant. See EXPORT_ROW_CAP.
+      take: EXPORT_ROW_CAP,
       orderBy: { invoiceDate: 'desc' },
       include: {
         order: { select: { name: true } },
@@ -700,98 +802,80 @@ export class InvoiceService {
     return rows;
   }
 
+  /**
+   * Timezone for this org's GST date math, warning once if it had to fall back
+   * to IST because GST is on but the timezone is still the untouched default.
+   */
+  private gstTimeZone(
+    orgId: string,
+    org: { timezone?: string | null; gstEnabled?: boolean | null } | null,
+  ): string {
+    const timeZone = resolveGstTimeZone(org ?? {});
+
+    if (
+      timeZone === INDIA_TZ &&
+      (!org?.timezone || org.timezone === 'UTC') &&
+      !gstTimeZoneFallbackWarned.has(orgId)
+    ) {
+      gstTimeZoneFallbackWarned.add(orgId);
+      this.logger.warn(
+        `Org ${orgId} has GST enabled but no timezone set (still "UTC"); ` +
+          `using ${INDIA_TZ} for financial-year and GST period boundaries. ` +
+          `Set the organization timezone in Settings to make this explicit.`,
+      );
+    }
+
+    return timeZone;
+  }
+
   // ─── HELPER: Resolve place of supply ───
+  /**
+   * Trust the code the ORDER was actually taxed with when it has one, so the
+   * invoice can never report a different tax head or amount than the customer
+   * was charged. Only orders created before `Order.placeOfSupplyCode` existed
+   * (or an explicit caller override) fall through to the shared resolver.
+   */
   private resolvePlaceOfSupply(
     dto: { placeOfSupplyCode?: string; buyerGstin?: string },
     order: any,
+    sellerStateCode?: string | null,
   ): string {
-    // Priority: explicit > shipping address > billing address > customer > fallback
     if (dto.placeOfSupplyCode && isValidStateCode(dto.placeOfSupplyCode)) {
       return dto.placeOfSupplyCode;
     }
 
-    const shippingState = this.extractStateFromAddress(order.shippingAddress);
-    if (shippingState) return shippingState;
-
-    const billingState = this.extractStateFromAddress(order.billingAddress);
-    if (billingState) return billingState;
-
-    if (order.customer?.billingStateCode) {
-      return order.customer.billingStateCode;
+    if (order.placeOfSupplyCode && isValidStateCode(order.placeOfSupplyCode)) {
+      return order.placeOfSupplyCode;
     }
 
-    // If buyer has GSTIN, extract state from it
-    const buyerGstin = dto.buyerGstin || order.customer?.gstin;
-    if (buyerGstin) {
-      return extractStateCodeFromGstin(buyerGstin);
-    }
-
-    return '00'; // Unknown — will need manual correction
+    return resolvePlaceOfSupply({
+      shippingAddress: order.shippingAddress,
+      billingAddress: order.billingAddress,
+      customerBillingStateCode: order.customer?.billingStateCode,
+      buyerGstin: dto.buyerGstin || order.customer?.gstin,
+      // Over-the-counter default. Previously this chain bottomed out at '00',
+      // which matches no StateTaxRate row, so a walk-in invoice could compute
+      // 0% tax on a sale the order had charged the full rate for.
+      sellerStateCode,
+    });
   }
 
-  // ─── HELPER: Extract state code from address JSON ───
-  private extractStateFromAddress(address: any): string | null {
-    if (!address) return null;
-
-    // Shopify format: province_code (e.g. "MH" for Maharashtra)
-    // We need to map this or use a direct state code field
-    if (address.province_code) {
-      const provinceToState = this.getProvinceToStateMapping();
-      return provinceToState[address.province_code] || null;
-    }
-
-    // Direct state code
-    if (address.stateCode) return address.stateCode;
-
-    return null;
+  private extractStateFromAddress(address: unknown): string | null {
+    return extractStateFromAddress(address);
   }
 
-  // ─── HELPER: Map Shopify province codes to Indian state codes ───
-  private getProvinceToStateMapping(): Record<string, string> {
-    return {
-      AN: '35', AP: '37', AR: '12', AS: '18', BR: '10',
-      CG: '22', CH: '04', DD: '26', DL: '07', GA: '30',
-      GJ: '24', HP: '02', HR: '06', JH: '20', JK: '01',
-      KA: '29', KL: '32', LA: '38', LD: '31', MH: '27',
-      ML: '17', MN: '14', MP: '23', MZ: '15', NL: '13',
-      OR: '21', PB: '03', PY: '34', RJ: '08', SK: '11',
-      TN: '33', TS: '36', UK: '05', UP: '09', WB: '19',
-    };
-  }
-
-  // ─── HELPER: Get date range for return period ───
+  /**
+   * Half-open [from, toExclusive) instants for a GST return period, anchored to
+   * the merchant's timezone rather than the server's (which is UTC on every
+   * deployment target). Delegates to the shared helper so the financial-year
+   * stamp and the period window can't drift apart.
+   */
   private getDateRangeForPeriod(
     financialYear: string,
     period: string,
-  ): { from: Date; to: Date } {
-    // Parse financial year: "2025-26" → startYear=2025
-    const startYear = parseInt(financialYear.split('-')[0], 10);
-
-    if (period.startsWith('Q')) {
-      // Quarterly: Q1=Apr-Jun, Q2=Jul-Sep, Q3=Oct-Dec, Q4=Jan-Mar
-      const quarter = parseInt(period.substring(1), 10);
-      const quarterMonths: Record<number, [number, number, number]> = {
-        1: [3, startYear, 5],     // Apr-Jun (month 3-5, 0-indexed)
-        2: [6, startYear, 8],     // Jul-Sep
-        3: [9, startYear, 11],    // Oct-Dec
-        4: [0, startYear + 1, 2], // Jan-Mar (next calendar year)
-      };
-      const [fromMonth, fromYear, toMonth] = quarterMonths[quarter] || quarterMonths[1];
-      const toYear = quarter === 4 ? startYear + 1 : startYear;
-      return {
-        from: new Date(fromYear, fromMonth, 1),
-        to: new Date(toYear, toMonth + 1, 0, 23, 59, 59),
-      };
-    }
-
-    // Monthly: "04" = April, "01" = January (of next year if Jan-Mar)
-    const month = parseInt(period, 10) - 1; // Convert to 0-indexed
-    const year = month >= 3 ? startYear : startYear + 1;
-
-    return {
-      from: new Date(year, month, 1),
-      to: new Date(year, month + 1, 0, 23, 59, 59),
-    };
+    timeZone: string,
+  ): { from: Date; toExclusive: Date } {
+    return gstPeriodRange(financialYear, period, timeZone);
   }
 
   private sumField(items: any[], field: string): number {

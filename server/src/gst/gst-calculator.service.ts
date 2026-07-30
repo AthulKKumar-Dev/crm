@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Decimal } from '@prisma/client/runtime/library';
+import { getFinancialYear } from '../common/utils/zoned-date.util';
 
 export interface GstCalculationInput {
   unitPrice: number;
@@ -53,8 +54,15 @@ export class GstCalculatorService {
     input: GstCalculationInput,
     isIntraState: boolean,
   ): GstCalculationResult {
-    const taxableValue = this.round(
-      input.unitPrice * input.quantity - input.discount,
+    // Floored at zero. A discount larger than the line total would otherwise
+    // produce a negative taxable value and negative CGST/SGST/IGST, which flows
+    // into the order total, decrements the customer's lifetime value, and lands
+    // in the GSTR-1 HSN summary and GSTR-3B rate buckets as fabricated negative
+    // output liability. Callers reject over-large discounts up front; this is
+    // the arithmetic backstop.
+    const taxableValue = Math.max(
+      0,
+      this.round(input.unitPrice * input.quantity - input.discount),
     );
 
     const gstRate = input.gstRate;
@@ -96,11 +104,25 @@ export class GstCalculatorService {
   }
 
   /**
-   * Calculate invoice totals from an array of line item results
+   * Calculate invoice totals from an array of line item results.
+   *
+   * `totalDiscount` is INFORMATIONAL only and must be the sum of the discounts
+   * already applied to those line items — every line's discount is subtracted
+   * inside `calculateLineItem`, so it is already reflected in `subtotal` and
+   * must not be subtracted a second time here. (Passing `Order.totalDiscounts`
+   * for a Shopify order would double-count, because that field already
+   * includes the per-line allocations.)
+   *
+   * `shipping` IS added to the grand total: it is part of what the customer
+   * owes, and omitting it made `Invoice.grandTotal` disagree with
+   * `Order.totalPrice` on every shipped order. Shipping is not taxed here —
+   * treating it as a composite supply would change the tax charged and is a
+   * deliberate decision, not a bug fix.
    */
   calculateInvoiceTotals(
     lineItems: GstCalculationResult[],
     totalDiscount: number = 0,
+    shipping: number = 0,
   ): InvoiceTotals {
     const subtotal = this.round(
       lineItems.reduce((sum, item) => sum + item.taxableValue, 0),
@@ -115,7 +137,7 @@ export class GstCalculatorService {
       lineItems.reduce((sum, item) => sum + item.igstAmount, 0),
     );
     const totalTax = this.round(totalCgst + totalSgst + totalIgst);
-    const grandTotal = this.round(subtotal + totalTax);
+    const grandTotal = this.round(subtotal + totalTax + shipping);
 
     return {
       subtotal,
@@ -129,38 +151,61 @@ export class GstCalculatorService {
   }
 
   /**
-   * Get the Indian financial year for a given date.
-   * Financial year runs April 1 through March 31.
+   * Get the Indian financial year (1 April – 31 March) for a given instant,
+   * as observed in the merchant's timezone.
    *
-   * Examples:
-   *   Jan 2025 → "2024-25"
-   *   Apr 2025 → "2025-26"
-   *   Mar 2026 → "2025-26"
+   * `timeZone` is required because servers run UTC: without it, a sale at
+   * 00:30 IST on 1 April is 2025-03-31T19:00Z and gets filed into the PREVIOUS
+   * financial year — consuming a serial from a year that may already be filed.
+   * Pass `Organization.timezone`.
+   *
+   * Examples (Asia/Kolkata):
+   *   2026-03-31T19:00Z (00:30 IST, 1 Apr) → "2026-27"
+   *   2026-03-31T17:00Z (22:30 IST, 31 Mar) → "2025-26"
    */
-  getFinancialYear(date: Date): string {
-    const month = date.getMonth(); // 0-indexed, April = 3
-    const year = date.getFullYear();
-
-    if (month >= 3) {
-      // April onwards → current year - next year
-      return `${year}-${(year + 1).toString().slice(2)}`;
-    }
-    // Jan-Mar → previous year - current year
-    return `${year - 1}-${year.toString().slice(2)}`;
+  getFinancialYear(date: Date, timeZone: string): string {
+    return getFinancialYear(date, timeZone);
   }
 
   /**
-   * Round to 2 decimal places (standard for currency)
+   * Round to 2 decimal places (standard for currency).
+   *
+   * Public so callers stop redeclaring `const round = (n) => Math.round(n*100)/100`
+   * locally — that helper had four independent copies across order, draft-order
+   * and invoice services, which meant any change to rounding policy had to find
+   * all of them.
    */
-  private round(value: number): number {
+  round2(value: number): number {
     return Math.round(value * 100) / 100;
   }
 
+  private round(value: number): number {
+    return this.round2(value);
+  }
+
   /**
-   * Convert Prisma Decimal to number for calculations
+   * Convert Prisma Decimal to number for calculations.
+   * Null/undefined collapse to 0 — use `toNullableNumber` when the difference
+   * between "not configured" and "explicitly zero" matters.
    */
   toNumber(decimal: Decimal | number | null | undefined): number {
     if (decimal === null || decimal === undefined) return 0;
+    if (typeof decimal === 'number') return decimal;
+    return parseFloat(decimal.toString());
+  }
+
+  /**
+   * Convert Prisma Decimal to number, PRESERVING null.
+   *
+   * Required for GST rates: `toNumber` maps both `null` and `Decimal(0.00)` to
+   * `0`, which destroyed the distinction between "no rate configured" (fall
+   * through to collection/product-type/state rates) and "explicitly exempt at
+   * 0%" (stop here). Callers resolving a product's GST rate must use this.
+   */
+  toNullableNumber(
+    decimal: Decimal | number | null | undefined,
+  ): number | null {
+    if (decimal === null || decimal === undefined) return null;
     if (typeof decimal === 'number') return decimal;
     return parseFloat(decimal.toString());
   }

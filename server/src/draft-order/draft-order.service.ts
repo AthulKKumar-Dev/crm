@@ -293,12 +293,24 @@ export class DraftOrderService {
         const unitPrice = li.unitPriceOverride ?? this.calculator.toNumber(v.price);
         const discount = li.discount ?? 0;
 
-        const productGstRate = this.calculator.toNumber(v.product.gstRate);
+        // Validated here rather than in the DTO — the unit price can come from
+        // the variant, so the ceiling isn't knowable at validation time.
+        const lineGross = this.calculator.round2(unitPrice * li.quantity);
+        if (discount > lineGross) {
+          throw new BadRequestException(
+            `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+          );
+        }
+
+        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
+        const productGstRate = this.calculator.toNullableNumber(
+          v.product.gstRate,
+        );
         const gstRate = sellerState
           ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
           : 0;
@@ -569,12 +581,24 @@ export class DraftOrderService {
           li.unitPriceOverride ?? this.calculator.toNumber(v.price);
         const discount = li.discount ?? 0;
 
-        const productGstRate = this.calculator.toNumber(v.product.gstRate);
+        // Validated here rather than in the DTO — the unit price can come from
+        // the variant, so the ceiling isn't knowable at validation time.
+        const lineGross = this.calculator.round2(unitPrice * li.quantity);
+        if (discount > lineGross) {
+          throw new BadRequestException(
+            `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+          );
+        }
+
+        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
+        const productGstRate = this.calculator.toNullableNumber(
+          v.product.gstRate,
+        );
         const gstRate = sellerState
           ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
           : 0;
