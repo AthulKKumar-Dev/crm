@@ -18,6 +18,7 @@ import { UpdateCollectionOverrideDto } from './dto/update-collection-override.dt
 import { CreateProductTypeTaxRateDto } from './dto/create-product-type-tax-rate.dto';
 import { UpdateProductTypeTaxRateDto } from './dto/update-product-type-tax-rate.dto';
 import { INDIAN_STATES } from './constants/indian-states';
+import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('gst')
 export class GstController {
@@ -38,11 +39,13 @@ export class GstController {
   }
 
   @Post('gstins')
+  @Roles(...ORG_MANAGERS)
   createGstin(@OrgId() orgId: string, @Body() dto: CreateGstinDto) {
     return this.gstService.create(orgId, dto);
   }
 
   @Patch('gstins/:id')
+  @Roles(...ORG_MANAGERS)
   updateGstin(
     @Param('id') id: string,
     @OrgId() orgId: string,
@@ -52,6 +55,7 @@ export class GstController {
   }
 
   @Delete('gstins/:id')
+  @Roles(...ORG_MANAGERS)
   deactivateGstin(@Param('id') id: string, @OrgId() orgId: string) {
     return this.gstService.deactivate(id, orgId);
   }
@@ -64,11 +68,13 @@ export class GstController {
   }
 
   @Post('state-tax-rates')
+  @Roles(...ORG_MANAGERS)
   createStateTaxRate(@OrgId() orgId: string, @Body() dto: CreateStateTaxRateDto) {
     return this.gstService.createStateTaxRate(orgId, dto);
   }
 
   @Patch('state-tax-rates/:id')
+  @Roles(...ORG_MANAGERS)
   updateStateTaxRate(
     @Param('id') id: string,
     @OrgId() orgId: string,
@@ -78,6 +84,7 @@ export class GstController {
   }
 
   @Delete('state-tax-rates/:id')
+  @Roles(...ORG_MANAGERS)
   deleteStateTaxRate(@Param('id') id: string, @OrgId() orgId: string) {
     return this.gstService.deleteStateTaxRate(id, orgId);
   }
@@ -97,11 +104,13 @@ export class GstController {
   }
 
   @Post('collection-overrides')
+  @Roles(...ORG_MANAGERS)
   createCollectionOverride(@OrgId() orgId: string, @Body() dto: CreateCollectionOverrideDto) {
     return this.gstService.createCollectionOverride(orgId, dto);
   }
 
   @Patch('collection-overrides/:id')
+  @Roles(...ORG_MANAGERS)
   updateCollectionOverride(
     @Param('id') id: string,
     @OrgId() orgId: string,
@@ -111,6 +120,7 @@ export class GstController {
   }
 
   @Delete('collection-overrides/:id')
+  @Roles(...ORG_MANAGERS)
   deleteCollectionOverride(@Param('id') id: string, @OrgId() orgId: string) {
     return this.gstService.deleteCollectionOverride(id, orgId);
   }
@@ -123,11 +133,13 @@ export class GstController {
   }
 
   @Post('product-type-tax-rates')
+  @Roles(...ORG_MANAGERS)
   createProductTypeTaxRate(@OrgId() orgId: string, @Body() dto: CreateProductTypeTaxRateDto) {
     return this.gstService.createProductTypeTaxRate(orgId, dto);
   }
 
   @Patch('product-type-tax-rates/:id')
+  @Roles(...ORG_MANAGERS)
   updateProductTypeTaxRate(
     @Param('id') id: string,
     @OrgId() orgId: string,
@@ -137,6 +149,7 @@ export class GstController {
   }
 
   @Delete('product-type-tax-rates/:id')
+  @Roles(...ORG_MANAGERS)
   deleteProductTypeTaxRate(@Param('id') id: string, @OrgId() orgId: string) {
     return this.gstService.deleteProductTypeTaxRate(id, orgId);
   }

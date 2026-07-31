@@ -31,7 +31,15 @@ export default () => ({
         // with include_config_on_deploy, Shopify grants what the TOML declares,
         // regardless of the scope param in the authorize URL.
         scopes: process.env.SHOPIFY_SCOPES ||
-            'read_products,write_products,read_orders,write_orders,read_customers,read_inventory,write_inventory,read_locations,read_reports,read_draft_orders,write_draft_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,write_fulfillments,write_pixels,read_customer_events',
+            // `read_all_orders` accompanies (does not replace) `read_orders`:
+            // without it Shopify only returns the last 60 DAYS of orders, so a
+            // merchant's historical import silently truncates and still reports
+            // success. It is a protected scope — Shopify requires a written
+            // justification for a public app — and, like every scope change, it
+            // only applies to stores that authorise AFTER it ships. Existing
+            // channels keep their old grant until reconnected, which is what
+            // `describeScopeStatus` surfaces.
+            'read_products,write_products,read_orders,read_all_orders,write_orders,read_customers,write_customers,read_inventory,write_inventory,read_locations,read_reports,read_draft_orders,write_draft_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_third_party_fulfillment_orders,write_third_party_fulfillment_orders,write_fulfillments,write_pixels,read_customer_events',
     },
     instagram: {
         appId: process.env.META_APP_ID,

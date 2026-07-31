@@ -1941,18 +1941,47 @@ export class OrderService {
   ) {
     const f = await this.prisma.orderFulfillment.findFirst({
       where: { id: fulfillmentId, orderId },
-      select: { metadata: true },
+      select: { metadata: true, externalId: true },
     });
     if (!f) throw new NotFoundException('Fulfillment not found');
-    const ids = this.fulfillmentLineItemIds(f.metadata);
-    if (ids.length === 0) {
-      throw new ForbiddenException('This fulfilment is not attributable to your items.');
-    }
-    const lines = await this.prisma.orderLineItem.findMany({
-      where: { id: { in: ids } },
-      select: { vendor: true },
+
+    // Who else has items on this order? Scoped to the order — the previous
+    // query looked line items up by id ALONE, so it trusted the metadata to
+    // name lines that actually belong here.
+    const orderLines = await this.prisma.orderLineItem.findMany({
+      where: { orderId },
+      select: { id: true, vendor: true },
     });
-    if (lines.some((l) => l.vendor !== vendorScope)) {
+    const foreignLines = orderLines.filter((l) => l.vendor !== vendorScope);
+
+    // Whole order belongs to this vendor ⇒ no fulfilment on it can touch
+    // anyone else's goods, whatever the metadata says. This is what keeps
+    // vendors working on Shopify-synced fulfilments, which carry no
+    // lineItemIds until `resolveFulfillmentForLine` lazily backfills them.
+    if (foreignLines.length === 0) return;
+
+    // Mixed-vendor order: attribution has to be proven.
+    const ids = this.fulfillmentLineItemIds(f.metadata);
+
+    // A Shopify-created fulfilment's lineItemIds are backfilled one line at a
+    // time, so they are a SUBSET of its real contents — never evidence that it
+    // excludes another vendor. Refuse rather than guess.
+    const isShopifyFulfillment =
+      !!f.externalId && !f.externalId.startsWith('manual_');
+    if (isShopifyFulfillment) {
+      throw new ForbiddenException(
+        'This shipment also contains another supplier\'s items, so it cannot be edited here. Update tracking on your own item instead.',
+      );
+    }
+
+    // Manual fulfilment: we wrote the metadata, so it is complete. Fail CLOSED
+    // — `[].some()` is false, so unresolvable ids used to PASS this check.
+    const claimed = orderLines.filter((l) => ids.includes(l.id));
+    if (
+      ids.length === 0 ||
+      claimed.length !== ids.length ||
+      claimed.some((l) => l.vendor !== vendorScope)
+    ) {
       throw new ForbiddenException('You can only update your own fulfilments.');
     }
   }
@@ -2544,7 +2573,18 @@ export class OrderService {
     if (!fulfillment) {
       throw new BadRequestException('Fulfil this item before adding tracking.');
     }
-    return this.updateTracking(orderId, fulfillment.id, orgId, userId, dto);
+    // Forward the scope. Owning the LINE is not the same as owning the
+    // FULFILMENT — a shipment can span several vendors, and writing tracking
+    // on it rewrites the number every one of their customers sees. Dropping
+    // `vendorScope` here silently skipped that check.
+    return this.updateTracking(
+      orderId,
+      fulfillment.id,
+      orgId,
+      userId,
+      dto,
+      vendorScope,
+    );
   }
 
   async updateTracking(

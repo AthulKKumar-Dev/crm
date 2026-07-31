@@ -13,6 +13,7 @@ import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto } from './dto/query-gst-return.dto';
+import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('invoices')
 export class InvoiceController {
@@ -20,6 +21,7 @@ export class InvoiceController {
 
   // POST /api/v1/invoices — generate a GST invoice for an order
   @Post()
+  @Roles(...ORG_MANAGERS)
   create(@OrgId() orgId: string, @Body() dto: CreateInvoiceDto) {
     return this.invoiceService.create(orgId, dto);
   }
@@ -121,6 +123,7 @@ export class InvoiceController {
 
   // POST /api/v1/invoices/:id/cancel — cancel an issued invoice
   @Post(':id/cancel')
+  @Roles(...ORG_MANAGERS)
   cancel(@Param('id') id: string, @OrgId() orgId: string) {
     return this.invoiceService.cancel(id, orgId);
   }

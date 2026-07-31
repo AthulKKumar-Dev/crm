@@ -2,6 +2,12 @@ import { Body, Controller, Get, Param, Patch, Post, Query, Res } from '@nestjs/c
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
+import {
+  ORG_MANAGERS,
+  ORG_OPERATORS,
+  ORG_OPERATORS_AND_VENDORS,
+  Roles,
+} from '../auth/decorators/roles.decorator';
 import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { OrderService } from './order.service';
 import { QueryDashboardDto } from '../dashboard/dto/query-dashboard.dto';
@@ -29,6 +35,7 @@ export class OrderController {
   // POST /api/v1/orders/offline — create an offline (in-store) order with
   // optional auto-invoice and inventory decrement.
   @Post('offline')
+  @Roles(...ORG_OPERATORS)
   createOffline(
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateOfflineOrderDto,
@@ -94,6 +101,7 @@ export class OrderController {
   // shipping address / customAttributes. For SHOPIFY orders this fires the
   // `orderUpdate` mutation; for MANUAL orders it just touches the local row.
   @Patch(':id')
+  @Roles(...ORG_OPERATORS)
   update(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -103,7 +111,9 @@ export class OrderController {
   }
 
   // POST /api/v1/orders/:id/cancel — cancel an order with optional refund + restock.
+  // Manager+: reverses inventory and the customer's lifetime value.
   @Post(':id/cancel')
+  @Roles(...ORG_MANAGERS)
   cancel(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -113,25 +123,32 @@ export class OrderController {
   }
 
   // POST /api/v1/orders/:id/close — archive a completed order.
+  // Reversible via open(), so operators may do it.
   @Post(':id/close')
+  @Roles(...ORG_OPERATORS)
   close(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.close(id, user.orgId!, user.sub);
   }
 
   // POST /api/v1/orders/:id/open — un-archive a previously closed order.
   @Post(':id/open')
+  @Roles(...ORG_OPERATORS)
   open(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.open(id, user.orgId!, user.sub);
   }
 
   // POST /api/v1/orders/:id/mark-paid — flip financial status to PAID.
+  // Manager+: asserts money was received.
   @Post(':id/mark-paid')
+  @Roles(...ORG_MANAGERS)
   markPaid(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.markPaid(id, user.orgId!, user.sub);
   }
 
   // POST /api/v1/orders/:id/capture — capture an authorized Shopify payment.
+  // Manager+: moves real money.
   @Post(':id/capture')
+  @Roles(...ORG_MANAGERS)
   capture(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -154,6 +171,7 @@ export class OrderController {
   // Create a fulfillment with optional tracking info.
   @Post(':id/fulfillments')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   createFulfillment(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -165,6 +183,7 @@ export class OrderController {
   // POST /api/v1/orders/:id/items/status — vendor sets their items to in_progress / on_hold.
   @Post(':id/items/status')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   setItemsStatus(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -184,6 +203,7 @@ export class OrderController {
   // POST /api/v1/orders/:id/items/:lineId/delivered — vendor marks ONE product delivered.
   @Post(':id/items/:lineId/delivered')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   markItemDelivered(
     @Param('id') id: string,
     @Param('lineId') lineId: string,
@@ -201,6 +221,7 @@ export class OrderController {
   // POST /api/v1/orders/:id/items/:lineId/unfulfill — vendor switches ONE product back to unfulfilled.
   @Post(':id/items/:lineId/unfulfill')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   unfulfillItem(
     @Param('id') id: string,
     @Param('lineId') lineId: string,
@@ -218,6 +239,7 @@ export class OrderController {
   // PATCH /api/v1/orders/:id/items/:lineId/tracking — add/update tracking for ONE product.
   @Patch(':id/items/:lineId/tracking')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   updateItemTracking(
     @Param('id') id: string,
     @Param('lineId') lineId: string,
@@ -237,6 +259,7 @@ export class OrderController {
   // PATCH /api/v1/orders/:id/fulfillments/:fid/tracking
   @Patch(':id/fulfillments/:fid/tracking')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   updateTracking(
     @Param('id') id: string,
     @Param('fid') fid: string,
@@ -249,6 +272,7 @@ export class OrderController {
   // POST /api/v1/orders/:id/fulfillments/:fid/delivered — mark a shipment delivered.
   @Post(':id/fulfillments/:fid/delivered')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   markFulfillmentDelivered(
     @Param('id') id: string,
     @Param('fid') fid: string,
@@ -267,6 +291,7 @@ export class OrderController {
   // "switch back to unfulfilled" action (scoped to their own fulfilments).
   @Post(':id/fulfillments/:fid/cancel')
   @AllowVendor()
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   cancelFulfillment(
     @Param('id') id: string,
     @Param('fid') fid: string,
@@ -279,6 +304,7 @@ export class OrderController {
   // connected Shopify store. Idempotent; returns { status, orderId } where
   // status is one of: ALREADY_SYNCED | ALREADY_QUEUED | QUEUED.
   @Post(':id/sync')
+  @Roles(...ORG_OPERATORS)
   syncToShopify(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.syncToShopify(id, user.orgId!);
   }

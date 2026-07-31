@@ -1,10 +1,11 @@
-import { BadRequestException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response, Request } from 'express';
 import { ChannelPlatform, ChannelStatus, SyncStatus, UserRole } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { SYNC_QUEUE, SyncJobData } from './sync.queue';
+import { SYNC_RESUME_MAX_AGE_MS } from './shopify-sync.service';
 
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -232,14 +233,19 @@ export class ChannelController {
 
   // POST /channels/:id/sync — trigger manual sync
   //
-  // Self-heals stuck channels: if a previous sync attempt crashed before
-  // its `finally` block (e.g. credential resolution threw before runSync
-  // entered its try/finally), the row can be pinned to IN_PROGRESS and the
-  // UI button gets disabled forever. Before queueing a new job we always
-  // reset the row to IDLE so the next attempt has a clean state. The
-  // BullMQ queue handles concurrent runs separately — even if a real job
-  // is still in flight, the reset is harmless: that job's `finally` will
-  // overwrite the status when it finishes.
+  // IN_PROGRESS means one of two very different things, and this endpoint has
+  // to tell them apart:
+  //
+  //   * a sync really is running  → starting a second one is harmful. Both
+  //     runs resolve the SAME SyncLog row and both write `cursor` into it, so
+  //     they overwrite each other's checkpoint. Refuse.
+  //   * a previous attempt died before its `finally` (e.g. credential
+  //     resolution threw before `runSync` entered its try/finally) → the row
+  //     is pinned and the UI button is disabled for ever. Reset and queue.
+  //
+  // The age of the channel's most recent sync log is what separates them.
+  // This used to reset unconditionally, which fixed the second case by
+  // permanently enabling the first.
   @Post(':id/sync')
   async triggerSync(
     @Param('id') id: string,
@@ -270,8 +276,23 @@ export class ChannelController {
       );
     }
     if (existing.syncStatus === SyncStatus.IN_PROGRESS) {
+      const latestLog = await this.prisma.syncLog.findFirst({
+        where: { channelId: id, status: SyncStatus.IN_PROGRESS },
+        orderBy: { startedAt: 'desc' },
+        select: { startedAt: true },
+      });
+      const live =
+        !!latestLog &&
+        latestLog.startedAt.getTime() > Date.now() - SYNC_RESUME_MAX_AGE_MS;
+
+      if (live) {
+        throw new ConflictException(
+          'A sync is already in progress for this channel. Wait for it to finish before starting another.',
+        );
+      }
+
       this.logger.warn(
-        `Channel ${id} was IN_PROGRESS at sync trigger — resetting to IDLE before queueing a fresh job.`,
+        `Channel ${id} was pinned to IN_PROGRESS with no live sync log — resetting to IDLE before queueing a fresh job.`,
       );
       await this.prisma.channel.update({
         where: { id },

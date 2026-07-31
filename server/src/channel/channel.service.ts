@@ -73,9 +73,17 @@ export class ChannelService {
     });
     if (!channel) throw new NotFoundException('Channel not found');
 
-    // Don't expose credentials in the response
+    // Don't expose credentials in the response — but do report whether the
+    // grant inside them still covers what the app needs. Additive field; no
+    // existing property changes shape.
     const { credentials, ...safeChannel } = channel;
-    return safeChannel;
+    return {
+      ...safeChannel,
+      scopeStatus:
+        channel.platform === ChannelPlatform.SHOPIFY
+          ? this.shopifyOAuth.describeScopeStatus(credentials)
+          : { known: true, missing: [], reconnectRequired: false },
+    };
   }
 
   async update(channelId: string, orgId: string, userId: string, dto: UpdateChannelDto) {

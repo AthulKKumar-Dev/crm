@@ -34,6 +34,7 @@ import {
   useSyncOrderMutation,
 } from "~/hooks/use-order-mutations";
 import { formatCurrency } from "~/lib/utils";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import type { OrderDetail, OrderCancelReason } from "~/types/api";
 import {
   ModalShell,
@@ -74,15 +75,24 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
   const openMutation = useOpenOrderMutation(order.id);
   const syncMutation = useSyncOrderMutation(order.id);
 
+  // Financial actions (cancel / capture / mark-paid) are manager-only on the
+  // server. Mirror that here so a VIEWER or AGENT isn't shown buttons that can
+  // only answer 403 — the server remains the actual boundary.
+  const { role } = useCurrentRole();
+  const canManage =
+    role === "OWNER" || role === "ADMIN" || role === "MANAGER";
+
   const isShopify = order.channel.platform === "SHOPIFY";
   const isManual = order.channel.platform === "MANUAL";
   const isCancelled = !!order.cancelledAt;
   const isClosed = !!order.closedAt;
   const canMarkPaid =
+    canManage &&
     order.financialStatus !== "PAID" &&
     order.financialStatus !== "REFUNDED" &&
     order.financialStatus !== "VOIDED";
   const canCapture =
+    canManage &&
     isShopify &&
     (order.financialStatus === "AUTHORIZED" ||
       order.financialStatus === "PARTIALLY_PAID");
@@ -160,7 +170,7 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
             </DropdownMenuItem>
           )}
 
-          {!isCancelled && (
+          {canManage && !isCancelled && (
             <DropdownMenuItem
               variant="destructive"
               onSelect={() => setDialog("cancel")}

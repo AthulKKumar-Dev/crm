@@ -400,6 +400,20 @@ model Channel {
   rawAnalyticsEvents RawAnalyticsEvent[]
 
   @@unique([organizationId, platform]) // ← ONE store per platform per org
+  /// NOTE (not expressible in Prisma): two further guarantees live as SQL.
+  ///   channels_platform_external_store_id_key   UNIQUE (platform, external_store_id)
+  ///   channels_platform_external_store_url_key  UNIQUE (platform, external_store_url)
+  ///                                             WHERE external_store_url IS NOT NULL
+  /// Together they stop two organizations claiming the same Shopify store —
+  /// the tenant-isolation guarantee the webhook router depends on, since HMAC
+  /// is verified with the app-level secret and so cannot identify a tenant.
+  /// See migration 20260731140000_channel_store_url_unique.
+  ///
+  /// WARNING: the @@unique above is declared here but is NOT currently present
+  /// in the database — it was lost in the migration divergence (only a
+  /// non-unique channels_organization_id_platform_idx exists). Restoring it is
+  /// a deliberate product decision (it permanently forbids an org connecting
+  /// two stores of one platform) and is tracked separately.
   @@index([organizationId])
   @@map("channels")
 }
