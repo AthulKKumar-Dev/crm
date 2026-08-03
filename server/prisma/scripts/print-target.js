@@ -8,7 +8,19 @@
 //
 // Chained ahead of any destructive db:fix:* script so the target is always on
 // screen before the change happens.
-require('dotenv/config');
+
+// Optional: dotenv is a devDependency, and the runtime image builds with
+// `npm ci --omit=dev`, so the module is absent inside the container. It isn't
+// needed there — server/docker-compose.yml passes `env_file: .env`, so
+// DATABASE_URL is already a real environment variable. Only a developer shell
+// needs the .env load. Do NOT make this require unconditional: it would throw
+// MODULE_NOT_FOUND in the container and, because the npm script chains with
+// `&&`, the SQL would silently never run.
+try {
+  require('dotenv/config');
+} catch {
+  // Running without dotenv — env vars are expected to be set already.
+}
 
 const url = process.env.DATABASE_URL;
 if (!url) {
