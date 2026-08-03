@@ -17,6 +17,7 @@ import { ShopifyOAuthService } from './shopify-oauth.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -95,6 +96,7 @@ export class ShopifySyncService {
         private readonly loyalty: LoyaltyService,
         private readonly graphql: ShopifyGraphqlClient,
         private readonly pushEnqueuer: ShopifyPushEnqueuer,
+        private readonly inventoryLedger: InventoryLedgerService,
         @InjectQueue(DRAFT_MIRROR_QUEUE)
         private readonly draftMirrorQueue: Queue<DraftMirrorJobData>,
     ) { }
@@ -776,6 +778,18 @@ export class ShopifySyncService {
         let processed = 0;
         let failed = 0;
 
+        // Warehousing orgs own their physical stock — the Shopify aggregate
+        // must not overwrite the bucket-derived cache. Reconciliation for
+        // those orgs is the Phase D drift flow; until then this pass is a
+        // no-op for them.
+        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+            this.logger.log(
+                `Skipping inventory pull for warehousing-enabled org ${orgId}`,
+            );
+            await this.completeSyncLog(syncLog.id, 0, 0);
+            return;
+        }
+
         try {
             const auth = { shopDomain, accessToken: token };
             let cursor: string | null = syncLog.cursor ?? null;
@@ -974,13 +988,29 @@ export class ShopifySyncService {
             },
         });
 
+        // Warehousing orgs: variant.inventoryQuantity is a derived cache
+        // (SUM of StockLevel.available) — the product pull must never stomp
+        // it. Quantity reconciliation for those orgs is the Phase D drift
+        // flow. Legacy orgs keep the pull-writes-quantity behavior, now WITH
+        // ledger events (previously this path mutated stock silently).
+        const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
+        const priorVariants = await this.prisma.productVariant.findMany({
+            where: { productId: product.id },
+            select: { externalId: true, inventoryQuantity: true, sku: true },
+        });
+        const priorByExt = new Map(priorVariants.map((v) => [v.externalId, v]));
+
         for (const sv of sp.variants || []) {
-            await this.prisma.productVariant.upsert({
+            const incomingQty = sv.inventory_quantity ?? 0;
+            const prior = priorByExt.get(String(sv.id));
+            const row = await this.prisma.productVariant.upsert({
                 where: { productId_externalId: { productId: product.id, externalId: String(sv.id) } },
                 create: {
-                    productId: product.id, externalId: String(sv.id), title: sv.title || 'Default',
+                    productId: product.id, organizationId: orgId,
+                    externalId: String(sv.id), title: sv.title || 'Default',
                     sku: sv.sku, barcode: sv.barcode, price: sv.price,
-                    compareAtPrice: sv.compare_at_price, inventoryQuantity: sv.inventory_quantity ?? 0,
+                    compareAtPrice: sv.compare_at_price,
+                    inventoryQuantity: warehousing ? 0 : incomingQty,
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : null,
                     weight: sv.weight ? String(sv.weight) : null, weightUnit: sv.weight_unit,
                     option1: sv.option1, option2: sv.option2, option3: sv.option3,
@@ -990,12 +1020,27 @@ export class ShopifySyncService {
                 update: {
                     title: sv.title || 'Default', sku: sv.sku, barcode: sv.barcode,
                     price: sv.price, compareAtPrice: sv.compare_at_price,
-                    inventoryQuantity: sv.inventory_quantity ?? 0,
+                    ...(warehousing ? {} : { inventoryQuantity: incomingQty }),
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : undefined,
                     weight: sv.weight ? String(sv.weight) : null, weightUnit: sv.weight_unit,
                     option1: sv.option1, option2: sv.option2, option3: sv.option3, position: sv.position ?? 1,
                 },
             });
+            if (!warehousing) {
+                const before = prior?.inventoryQuantity ?? 0;
+                if (before !== incomingQty) {
+                    await this.inventoryLedger.recordQuantityChange(this.prisma, {
+                        orgId,
+                        variantId: row.id,
+                        quantityBefore: before,
+                        quantityAfter: incomingQty,
+                        reason: 'sync',
+                        referenceType: 'product_sync',
+                        referenceId: externalId,
+                        sku: row.sku,
+                    });
+                }
+            }
         }
 
         for (const si of sp.images || []) {

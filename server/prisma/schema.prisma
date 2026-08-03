@@ -918,6 +918,10 @@ model InventoryEvent {
   locationId     String?      @map("location_id") // plain string snapshot, no FK (audit survives location changes)
   fromBucket     StockBucket? @map("from_bucket")
   toBucket       StockBucket? @map("to_bucket")
+  // Units this movement touched (always positive; direction = from/to buckets).
+  // Needed because changeAmount is the signed delta to the SELLABLE quantity,
+  // which is 0 for bucket-to-bucket transfers. NULL on legacy rows.
+  movedQty       Int?         @map("moved_qty")
   skuSnapshot    String?      @map("sku_snapshot") // variant SKU at event time; survives variant deletion
   actorId        String?      @map("actor_id") // userId that caused the movement, when known
   // Dedup key for webhook/BullMQ retries, e.g. "shopify:order:123:reserve".

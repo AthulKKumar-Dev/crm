@@ -25,6 +25,7 @@ import { WHATSAPP_MESSAGING_QUEUE } from './whatsapp.queue';
 import { DRAFT_MIRROR_QUEUE } from '../draft-order/draft-mirror.queue';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
 import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
+import { InventoryModule } from '../inventory/inventory.module';
 
 @Module({
   imports: [
@@ -38,6 +39,11 @@ import { OrganizationSettingsModule } from '../organization-settings/organizatio
     BullModule.registerQueue({ name: DRAFT_MIRROR_QUEUE }),
     LoyaltyModule,
     OrganizationSettingsModule,
+    // InventoryLedgerService — sync/webhook paths must respect the
+    // warehousing flag and write ledger events. The reverse direction
+    // (inventory → Shopify pushes) rides the shopify-push queue directly, so
+    // no module cycle exists.
+    InventoryModule,
   ],
   controllers: [ChannelController, ShopifyWebhookController, InstagramWebhookController],
   providers: [

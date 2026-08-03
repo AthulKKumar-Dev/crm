@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from './encryption.service';
 import { ShopifySyncService } from './shopify-sync.service';
 import { WhatsAppTriggerService } from './whatsapp-trigger.service';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 
 /**
  * Exempt from the global 60 req/min throttler.
@@ -32,6 +33,7 @@ export class ShopifyWebhookController {
         private readonly syncService: ShopifySyncService,
         private readonly whatsappTrigger: WhatsAppTriggerService,
         private readonly config: ConfigService,
+        private readonly inventoryLedger: InventoryLedgerService,
     ) { }
 
     @Public()
@@ -461,6 +463,19 @@ export class ShopifyWebhookController {
         orgId: string,
         body: { inventory_item_id: number; available: number; location_id: number },
     ) {
+        // Warehousing orgs own their physical stock: variant.inventoryQuantity
+        // is a derived cache (SUM of StockLevel.available) and must not be
+        // overwritten by Shopify's last-writer-wins aggregate. Reconcile-with-
+        // drift-detection for these orgs is the Phase D flow; until then the
+        // webhook is a no-op for them (legacy orgs keep the existing behavior,
+        // including its known multi-location limitation).
+        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+            this.logger.debug(
+                `inventory_levels/update ignored for warehousing-enabled org ${orgId}`,
+            );
+            return;
+        }
+
         const variant = await this.prisma.productVariant.findFirst({
             where: {
                 product: { channelId },

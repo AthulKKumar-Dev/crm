@@ -1012,6 +1012,65 @@ export class ShopifyPushService {
     }
   }
 
+  /**
+   * Push the current sellable quantity (variant.inventoryQuantity — for
+   * warehousing orgs the SUM of StockLevel.available) for specific variants to
+   * the primary Shopify location. Runs as a `push-availability` queue job
+   * after CRM-origin stock operations (adjustment, enable-seed, receipt,
+   * return restock). Variants that never existed on Shopify (manual_ external
+   * ids without an inventory item) are skipped — nothing to sync.
+   */
+  async pushAvailability(orgId: string, variantIds: string[]): Promise<void> {
+    if (variantIds.length === 0) return;
+    const shopify = await this.findShopifyChannel(orgId);
+    if (!shopify || shopify.status !== ChannelStatus.CONNECTED) {
+      this.logger.log(
+        `Skipping availability push for org ${orgId}: no connected Shopify channel`,
+      );
+      return;
+    }
+    const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(shopify.id);
+    const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
+    const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
+    if (!locationId) {
+      this.logger.warn(
+        `Skipping availability push for org ${orgId}: no resolvable Shopify location`,
+      );
+      return;
+    }
+
+    const variants = await this.prisma.productVariant.findMany({
+      where: {
+        id: { in: variantIds },
+        organizationId: orgId,
+        product: { deletedAt: null },
+      },
+      select: {
+        id: true,
+        externalId: true,
+        inventoryItemId: true,
+        inventoryQuantity: true,
+      },
+    });
+
+    const quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
+    for (const v of variants) {
+      let invId = v.inventoryItemId;
+      if (!invId && v.externalId && !v.externalId.startsWith('manual_')) {
+        invId = await this.backfillInventoryItemId(auth, v.id, v.externalId);
+      }
+      if (!invId) continue;
+      quantities.push({
+        inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
+        locationId: ShopifyGraphqlClient.toGid('Location', locationId),
+        quantity: v.inventoryQuantity,
+      });
+    }
+    if (quantities.length > 0) {
+      await this.setInventoryQuantities(auth, quantities);
+    }
+  }
+
   /** Set absolute available quantities in one mutation. Best-effort — a
    *  failure is logged and never aborts the push. */
   private async setInventoryQuantities(

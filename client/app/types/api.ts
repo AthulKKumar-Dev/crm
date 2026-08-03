@@ -1865,3 +1865,248 @@ export interface CreateCollectionOverrideRequest {
 export interface UpdateCollectionOverrideRequest {
   gstRate: number;
 }
+
+// ─── Inventory (Warehousing) Types ──────────────────────────────────────────
+
+/** Physical stock buckets. Picked/Packed are pick-task states, not buckets. */
+export type StockBucket = "AVAILABLE" | "RESERVED" | "QC" | "DAMAGED";
+
+export interface InventoryStatus {
+  warehousingEnabled: boolean;
+  seeding: boolean;
+  qcOnReceiving: boolean;
+  requireScanToPick: boolean;
+  skuPrefix: string;
+  lowStockThreshold: number;
+  warehouseCount: number;
+}
+
+export interface Warehouse {
+  id: string;
+  name: string;
+  code: string;
+  shopifyLocationId: string | null;
+  address: Record<string, unknown> | null;
+  isDefault: boolean;
+  isActive: boolean;
+  locationCount: number;
+  stockLineCount: number;
+  createdAt: string;
+}
+
+export interface WarehouseLocation {
+  id: string;
+  parentId: string | null;
+  type: "ZONE" | "RACK" | "SHELF" | "BIN";
+  code: string;
+  fullCode: string;
+}
+
+/** One stock line: variant × warehouse with bucket quantities. */
+export interface StockLine {
+  id: string;
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  variantTitle: string;
+  imageUrl: string | null;
+  sku: string | null;
+  barcode: string | null;
+  cost: number | string | null;
+  price: number | string;
+  warehouse: { id: string; name: string; code: string };
+  defaultLocation: string | null;
+  available: number;
+  reserved: number;
+  qc: number;
+  damaged: number;
+  onHand: number;
+  updatedAt: string;
+}
+
+export interface StockStats {
+  unitsAvailable: number;
+  unitsReserved: number;
+  unitsQc: number;
+  unitsDamaged: number;
+  unitsOnHand: number;
+  lowStockLines: number;
+  oversoldLines: number;
+  stockValue: number;
+  lowStockThreshold: number;
+}
+
+export interface StockListParams {
+  page?: number;
+  limit?: number;
+  warehouseId?: string;
+  q?: string;
+  stockFilter?: "low" | "out" | "oversold";
+  sortBy?: "available" | "onHand" | "updatedAt" | "sku";
+  sortOrder?: "asc" | "desc";
+}
+
+export interface InventoryEvent {
+  id: string;
+  variantId: string;
+  quantityBefore: number;
+  quantityAfter: number;
+  changeAmount: number;
+  movedQty: number | null;
+  reason: string;
+  referenceType: string | null;
+  referenceId: string | null;
+  warehouseId: string | null;
+  fromBucket: StockBucket | null;
+  toBucket: StockBucket | null;
+  skuSnapshot: string | null;
+  createdAt: string;
+  // Enriched by the ledger endpoint:
+  variantTitle: string | null;
+  productTitle: string | null;
+  sku: string | null;
+}
+
+export interface LedgerParams {
+  page?: number;
+  limit?: number;
+  variantId?: string;
+  warehouseId?: string;
+  reason?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+export interface CreateAdjustmentRequest {
+  variantId: string;
+  warehouseId?: string;
+  bucket: StockBucket;
+  delta?: number;
+  setTo?: number;
+  reason?: "adjustment" | "count" | "damage" | "found" | "correction";
+  note?: string;
+}
+
+export interface GenerateCodesRequest {
+  variantIds?: string[];
+  filter?: "missing-sku" | "missing-barcode" | "all";
+  overwrite?: boolean;
+}
+
+export interface GenerateCodesResult {
+  generated: number;
+  skipped: number;
+  conflicts: Array<{ variantId: string; reason: string }>;
+}
+
+export interface InventoryLookupResult {
+  code: string;
+  matchedBy: "barcode" | "sku" | null;
+  matches: Array<{
+    id: string;
+    title: string;
+    sku: string | null;
+    barcode: string | null;
+    price: number | string;
+    inventoryQuantity: number;
+    product: { id: string; title: string; images: Array<{ src: string }> };
+    stockLevels: Array<{
+      warehouseId: string;
+      available: number;
+      reserved: number;
+      qc: number;
+      damaged: number;
+      defaultLocation: { fullCode: string } | null;
+    }>;
+  }>;
+}
+
+export interface VariantStockDetail {
+  variant: {
+    id: string;
+    title: string;
+    sku: string | null;
+    barcode: string | null;
+    inventoryQuantity: number;
+    product: { id: string; title: string };
+  };
+  levels: Array<{
+    id: string;
+    warehouseId: string;
+    available: number;
+    reserved: number;
+    qc: number;
+    damaged: number;
+    warehouse: { id: string; name: string; code: string };
+    defaultLocation: { fullCode: string } | null;
+  }>;
+  reservations: Array<{
+    id: string;
+    orderId: string;
+    quantity: number;
+    status: string;
+    createdAt: string;
+  }>;
+  recentEvents: Array<{
+    id: string;
+    reason: string;
+    changeAmount: number;
+    movedQty: number | null;
+    fromBucket: StockBucket | null;
+    toBucket: StockBucket | null;
+    createdAt: string;
+  }>;
+}
+
+export interface CreateWarehouseRequest {
+  name: string;
+  code: string;
+  address?: Record<string, unknown>;
+  isDefault?: boolean;
+}
+
+export interface UpdateWarehouseRequest {
+  name?: string;
+  address?: Record<string, unknown>;
+  isDefault?: boolean;
+  isActive?: boolean;
+}
+
+export interface BulkLocationsRequest {
+  racks: number;
+  shelvesPerRack: number;
+  binsPerShelf: number;
+  letterRacks?: boolean;
+}
+
+export interface DuplicateCodesReport {
+  duplicateSkus: Array<{ code: string; count: number; variantIds: string[] }>;
+  duplicateBarcodes: Array<{ code: string; count: number; variantIds: string[] }>;
+}
+
+export interface InventorySettings {
+  warehousingEnabled: boolean;
+  qcOnReceiving: boolean;
+  requireScanToPick: boolean;
+  skuPrefix: string;
+  skuSequence: number;
+  updateCostOnReceipt: boolean;
+}
+
+export interface UpdateInventorySettingsRequest {
+  qcOnReceiving?: boolean;
+  requireScanToPick?: boolean;
+  skuPrefix?: string;
+  updateCostOnReceipt?: boolean;
+}
+
+/** One printable label definition (per variant; qty chosen at print time). */
+export interface LabelData {
+  variantId: string;
+  productTitle: string;
+  variantTitle: string;
+  sku: string | null;
+  barcode: string | null;
+  price: number | string;
+  defaultQty: number;
+}
