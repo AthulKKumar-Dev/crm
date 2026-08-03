@@ -78,10 +78,13 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
     // hook). Top-level hooks like `useSyncOrderMutation` are not called here.
     <Table>
       <TableHeader>
+        {/* No select-all column: the checkboxes here were uncontrolled inputs
+            with no state and no bulk action to feed, so "select all" ticked one
+            box and nothing happened. Removed rather than left as an affordance
+            for something the app cannot do. `products.tsx` has a working
+            selection pattern (`selectedIds` + `BulkActionBar`) to copy if order
+            bulk actions are ever added. */}
         <TableRow className="hover:bg-transparent">
-          <TableHead className="w-8">
-            <input type="checkbox" className="rounded border-border" />
-          </TableHead>
           <TableHead>Order</TableHead>
           <TableHead>Items</TableHead>
           {showCustomerName && <TableHead>Customer</TableHead>}
@@ -105,9 +108,6 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
               }
             }}
           >
-            <TableCell onClick={(e) => e.stopPropagation()}>
-              <input type="checkbox" className="rounded border-border" />
-            </TableCell>
             <TableCell className="font-medium text-gray-900 dark:text-gray-100">
               {order.financialStatus === "PAID" && (
                 <span className="mr-1.5 inline-block size-4 rounded-full bg-[#CEF17B]/30 text-[#084734] text-center text-[10px] leading-4">✓</span>

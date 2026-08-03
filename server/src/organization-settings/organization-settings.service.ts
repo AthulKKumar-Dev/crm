@@ -13,6 +13,12 @@ import {
   parseOrderSettings,
   OrderSettingsSchema,
 } from './schemas/order-settings.schema';
+import {
+  InventorySettings,
+  UpdateInventorySettingsInput,
+  parseInventorySettings,
+  InventorySettingsSchema,
+} from './schemas/inventory-settings.schema';
 
 /**
  * Resolves and persists per-org settings. Each domain (product, order, …)
@@ -35,6 +41,7 @@ export class OrganizationSettingsService {
   async get(orgId: string): Promise<{
     productSettings: ProductSettings;
     orderSettings: OrderSettings;
+    inventorySettings: InventorySettings;
   }> {
     this.assertOrgId(orgId);
     const row = await this.prisma.organizationSettings.findUnique({
@@ -43,6 +50,7 @@ export class OrganizationSettingsService {
     return {
       productSettings: parseProductSettings(row?.productSettings ?? null),
       orderSettings: parseOrderSettings(row?.orderSettings ?? null),
+      inventorySettings: parseInventorySettings(row?.inventorySettings ?? null),
     };
   }
 
@@ -64,6 +72,45 @@ export class OrganizationSettingsService {
       select: { orderSettings: true },
     });
     return parseOrderSettings(row?.orderSettings ?? null);
+  }
+
+  /** Read just inventory settings. Convenience for ledger/scan hot paths. */
+  async getInventorySettings(orgId: string): Promise<InventorySettings> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { inventorySettings: true },
+    });
+    return parseInventorySettings(row?.inventorySettings ?? null);
+  }
+
+  /**
+   * Merge-patch inventory settings; validate via Zod before write. The patch
+   * schema cannot express `warehousingEnabled` or `skuSequence` — those flip
+   * through `setWarehousingEnabled` / the atomic sequence claim only.
+   */
+  async updateInventorySettings(
+    orgId: string,
+    patch: UpdateInventorySettingsInput,
+  ): Promise<InventorySettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getInventorySettings(orgId);
+    const next = InventorySettingsSchema.parse({ ...current, ...patch });
+    await this.upsert(orgId, { inventorySettings: next as Prisma.InputJsonValue });
+    return next;
+  }
+
+  /**
+   * Flip the warehousing master switch. Called ONLY by the inventory enable
+   * flow, at the very end of the seed job (so legacy and bucket paths never
+   * overlap for an org).
+   */
+  async setWarehousingEnabled(orgId: string, enabled: boolean): Promise<InventorySettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getInventorySettings(orgId);
+    const next = InventorySettingsSchema.parse({ ...current, warehousingEnabled: enabled });
+    await this.upsert(orgId, { inventorySettings: next as Prisma.InputJsonValue });
+    return next;
   }
 
   /** Merge-patch product settings; validate via Zod before write. */

@@ -9,11 +9,14 @@ import { StatCard } from "~/components/app/stat-card";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
+import { QueryErrorState } from "~/components/app/query-error-state";
+import { useDebounced } from "~/hooks/use-debounced";
 import { Skeleton } from "~/components/ui/skeleton";
 import { formatCurrency } from "~/lib/utils";
 import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { invoiceService } from "~/services/invoice.service";
+import { orderService } from "~/services/order.service";
+import { dashboardService } from "~/services/dashboard.service";
 import { toast } from "sonner";
 import type { OrderListParams, DashboardQueryParams } from "~/types/api";
 
@@ -34,6 +37,25 @@ function daysAgo(days: number): string {
 
 const DATE_RANGE_MAP: Record<string, number | null> = { all: null, "7d": 7, "30d": 30, "90d": 90 };
 
+/** Fetch a Blob and save it, surfacing failures as a toast rather than silence. */
+async function downloadBlob(
+  fetchBlob: () => Promise<Blob>,
+  filename: string,
+  errorMessage: string,
+): Promise<void> {
+  try {
+    const blob = await fetchBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch {
+    toast.error(errorMessage);
+  }
+}
+
 export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
@@ -46,16 +68,21 @@ export default function OrdersPage() {
   const daysBack = DATE_RANGE_MAP[dateRange];
   const dateFrom = daysBack != null ? daysAgo(daysBack) : undefined;
 
+  // The input stays bound to the raw value so typing feels instant; only the
+  // debounced copy reaches the query key. Without this every keystroke was a
+  // fresh cache key and therefore its own request — "shirt" was five.
+  const debouncedSearch = useDebounced(searchQuery, 350);
+
   const params: OrderListParams = {
     page: currentPage,
     limit: PAGE_SIZE,
-    search: searchQuery || undefined,
+    search: debouncedSearch || undefined,
     dateFrom,
   };
 
   const statsParams: DashboardQueryParams | undefined = dateFrom ? { dateFrom } : undefined;
 
-  const { data, isLoading } = useOrders(params);
+  const { data, isLoading, isError, refetch } = useOrders(params);
   const { data: stats, isLoading: statsLoading } = useOrderStats(statsParams);
   const orders = data?.data ?? [];
   const meta = data?.meta;
@@ -93,25 +120,30 @@ export default function OrdersPage() {
             <Plus className="size-3.5" />
             Create Order
           </Link>
-          <button className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 shadow-sm hover:bg-gray-50 dark:hover:bg-gray-800/60">
+          {/* Exports exactly what the page is showing: `params` carries the
+              active search and date range, and the server's export route takes
+              the same DTO as the list. This button had no onClick at all. */}
+          <button
+            onClick={() => downloadBlob(
+              () => orderService.exportCsv(params),
+              `orders-${dateRange}.csv`,
+              "Failed to export orders.",
+            )}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 shadow-sm hover:bg-gray-50 dark:hover:bg-gray-800/60"
+          >
             <Upload className="size-3.5" />
             Export CSV
           </button>
+          {/* The dashboard's summary report. This used to call
+              `invoiceService.exportCsv` and save `gst-invoices-*.csv` — a
+              copy-paste from the invoices page that also ignored the search box
+              and forced `dateTo` to today. */}
           <button
-            onClick={async () => {
-              try {
-                const blob = await invoiceService.exportCsv({
-                  dateFrom,
-                  dateTo: new Date().toISOString().split("T")[0],
-                });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `gst-invoices-${dateRange}.csv`;
-                a.click();
-                URL.revokeObjectURL(url);
-              } catch { toast.error("Failed to download report."); }
-            }}
+            onClick={() => downloadBlob(
+              () => dashboardService.exportCsv(statsParams),
+              `orders-report-${dateRange}.csv`,
+              "Failed to download report.",
+            )}
             className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
           >
             <Download className="size-3.5" />
@@ -173,10 +205,13 @@ export default function OrdersPage() {
           </>
         ) : (
           <>
-            <StatCard label="Total New Orders" value="—" change={0} icon={<ShoppingBag className="size-4" />} />
-            <StatCard label="Pending Orders" value="—" change={0} icon={<Package className="size-4" />} />
-            <StatCard label="Total Sales" value="—" change={0} icon={<Target className="size-4" />} />
-            <StatCard label="Products Sold" value="—" change={0} icon={<Box className="size-4" />} />
+            {/* No `change` — passing 0 rendered a GREEN "0%" up-trend badge
+                (the card treats `change >= 0` as positive), so a failed stats
+                request came out looking like four healthy metrics. */}
+            <StatCard label="Total New Orders" value="—" icon={<ShoppingBag className="size-4" />} />
+            <StatCard label="Pending Orders" value="—" icon={<Package className="size-4" />} />
+            <StatCard label="Total Sales" value="—" icon={<Target className="size-4" />} />
+            <StatCard label="Products Sold" value="—" icon={<Box className="size-4" />} />
           </>
         )}
       </div>
@@ -205,7 +240,17 @@ export default function OrdersPage() {
         </div>
 
         {/* Table body */}
-        {isLoading ? (
+        {/* The error branch MUST precede the loading and empty branches. A
+            failed request leaves isLoading false and data undefined, so
+            `orders.length === 0` was reached and the user was told the store
+            had simply synced with nothing in it. `!data` keeps a failed
+            background refetch from replacing a table that is already on
+            screen. */}
+        {isError && !data ? (
+          <div className="p-8">
+            <QueryErrorState resource="orders" onRetry={() => refetch()} />
+          </div>
+        ) : isLoading ? (
           <div className="p-4">
             <TableSkeleton rows={PAGE_SIZE} columns={7} />
           </div>

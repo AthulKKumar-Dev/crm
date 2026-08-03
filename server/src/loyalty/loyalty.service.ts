@@ -11,12 +11,32 @@ interface LoyaltyConfig {
 }
 
 /**
- * Compute-and-assign loyalty tier logic for customers.
+ * Owns `Customer.ordersCount`, `Customer.totalSpent` and `Customer.vipLevel`.
  *
- * Call `recomputeForCustomer` any time a write touches `Customer.ordersCount`
- * or `Customer.totalSpent` so the tier stays in sync. Today the only such
- * write is `ShopifySyncService.upsertCustomer`, but add this hook everywhere
- * those fields get touched in the future.
+ * Those two counters are DERIVED — recomputed from the customer's Order rows,
+ * never incremented in place. Nothing else may write them.
+ *
+ * They used to be maintained by three writers that disagreed: offline sales
+ * incremented, cancellations decremented, and Shopify customer sync OVERWROTE
+ * both wholesale from Shopify's `orders_count` / `total_spent`. Since Shopify's
+ * figures only describe Shopify orders, that last writer wiped every in-store
+ * purchase for any customer who shopped on both channels (or was adopted by
+ * email match during sync). Deriving makes the order table the single source of
+ * truth, so the three can no longer fight — and it is self-healing: any later
+ * recompute repairs a counter that drifted for any reason.
+ *
+ * Call `recomputeForCustomer` after anything that creates, cancels or deletes
+ * an order. `recomputeAll` does the same for an entire organization and doubles
+ * as the repair button for historical drift.
+ *
+ * Counted: orders that are neither soft-deleted nor cancelled, on any channel.
+ * (Refunds are not deducted — nothing in the system adjusts for them today, and
+ * changing that would alter tier outcomes.)
+ *
+ * Staleness note: a Shopify `customers/*` webhook can land before the matching
+ * `orders/*` one, leaving a customer briefly counted low. Shopify fires
+ * `customers/update` when an order is placed, and a full sync processes orders
+ * before customers, so this converges on its own.
  */
 @Injectable()
 export class LoyaltyService {
@@ -25,6 +45,62 @@ export class LoyaltyService {
     private readonly recomputingOrgs = new Set<string>();
 
     constructor(private readonly prisma: PrismaService) {}
+
+    /**
+     * Recompute one customer's `ordersCount` / `totalSpent` from their orders.
+     *
+     * A single statement, so it is inherently race-free: concurrent callers all
+     * compute the same answer from the same rows rather than applying deltas
+     * that can be lost or double-applied. The `IS DISTINCT FROM` guard skips
+     * the write (and the `updatedAt` bump) when nothing actually changed.
+     */
+    private async deriveCounters(customerId: string, orgId: string): Promise<void> {
+        await this.prisma.$executeRaw`
+            UPDATE "customers" c
+            SET "orders_count" = s.cnt,
+                "total_spent"  = s.total,
+                "updated_at"   = CURRENT_TIMESTAMP
+            FROM (
+                SELECT COUNT(*)::int AS cnt,
+                       COALESCE(SUM("total_price"), 0) AS total
+                FROM "orders"
+                WHERE "customer_id" = ${customerId}
+                  AND "organization_id" = ${orgId}
+                  AND "deleted_at" IS NULL
+                  AND "cancelled_at" IS NULL
+            ) s
+            WHERE c."id" = ${customerId}
+              AND c."organization_id" = ${orgId}
+              AND (c."orders_count" IS DISTINCT FROM s.cnt
+                   OR c."total_spent" IS DISTINCT FROM s.total)
+        `;
+    }
+
+    /** Same derivation across a whole organization, in one statement. */
+    private async deriveCountersForOrg(orgId: string): Promise<number> {
+        return this.prisma.$executeRaw`
+            UPDATE "customers" c
+            SET "orders_count" = s.cnt,
+                "total_spent"  = s.total,
+                "updated_at"   = CURRENT_TIMESTAMP
+            FROM (
+                SELECT cu."id" AS customer_id,
+                       COUNT(o."id")::int AS cnt,
+                       COALESCE(SUM(o."total_price"), 0) AS total
+                FROM "customers" cu
+                LEFT JOIN "orders" o
+                       ON o."customer_id" = cu."id"
+                      AND o."deleted_at" IS NULL
+                      AND o."cancelled_at" IS NULL
+                WHERE cu."organization_id" = ${orgId}
+                  AND cu."deleted_at" IS NULL
+                GROUP BY cu."id"
+            ) s
+            WHERE c."id" = s.customer_id
+              AND (c."orders_count" IS DISTINCT FROM s.cnt
+                   OR c."total_spent" IS DISTINCT FROM s.total)
+        `;
+    }
 
     /**
      * Pure: decides a customer's tier from org thresholds + the chosen metric.
@@ -48,6 +124,9 @@ export class LoyaltyService {
      * and records one CustomerActivityLog row tagged `vip_auto_recompute`.
      */
     async recomputeForCustomer(customerId: string, orgId: string): Promise<VipLevel | null> {
+        // Counters first — the tier below is decided from them.
+        await this.deriveCounters(customerId, orgId);
+
         const [org, customer] = await Promise.all([
             this.prisma.organization.findUnique({
                 where: { id: orgId },
@@ -113,6 +192,11 @@ export class LoyaltyService {
                 },
             });
             if (!org) return { updated: 0, total: 0 };
+
+            // Repair every counter in the org before tiering, so this endpoint
+            // also fixes historical drift (e.g. customers whose in-store
+            // purchases were previously clobbered by a Shopify sync).
+            await this.deriveCountersForOrg(orgId);
 
             const total = await this.prisma.customer.count({
                 where: { organizationId: orgId, deletedAt: null },

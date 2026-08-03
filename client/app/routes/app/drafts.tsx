@@ -31,6 +31,7 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { MoreHorizontal } from "lucide-react";
 import type { DraftOrder, DraftOrderListParams, DraftOrderStatus } from "~/types/api";
+import { useDebounced } from "~/hooks/use-debounced";
 
 export function meta() {
   return [{ title: "Drafts | Collabo CRM" }];
@@ -59,10 +60,14 @@ export default function DraftsPage() {
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<DraftOrderStatus | "all">("all");
 
+  // Debounced into the query key only — the input keeps the raw value, so
+  // typing stays instant without a request per keystroke.
+  const debouncedSearch = useDebounced(search, 350);
+
   const params: DraftOrderListParams = {
     page,
     limit: PAGE_SIZE,
-    search: search || undefined,
+    search: debouncedSearch || undefined,
     status: status === "all" ? undefined : status,
   };
 

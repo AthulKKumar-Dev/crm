@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -83,6 +84,7 @@ export class ShopifyPushService {
       );
       await this.recordFailure(
         orderId,
+        orgId,
         'No connected Shopify channel.',
         /* incrementAttempt */ false,
       );
@@ -93,11 +95,32 @@ export class ShopifyPushService {
       where: { id: orderId, organizationId: orgId },
       include: {
         customer: true,
+        channel: { select: { platform: true } },
         lineItems: { include: { variant: true } },
       },
     });
     if (!order) {
       throw new NotFoundException(`Order ${orderId} not found`);
+    }
+
+    // Re-entry guard. If the order already sits on the SHOPIFY channel, the
+    // `orders/create` webhook has already rebadged it — pushing again would
+    // create a SECOND Shopify order. Same if metadata already records a
+    // successful push. This closes the window where `orderCreate` succeeded
+    // but `recordSuccess` failed and BullMQ retried the job.
+    if (order.channel.platform === ChannelPlatform.SHOPIFY) {
+      this.logger.log(
+        `Order ${orderId} is already on the Shopify channel (rebadged) — skipping push.`,
+      );
+      await this.recordSuccess(orderId, orgId, order.externalId, order.name);
+      return;
+    }
+    const priorSync = this.readSyncMeta(order.metadata);
+    if (priorSync?.status === 'SYNCED' && priorSync.shopifyOrderId) {
+      this.logger.log(
+        `Order ${orderId} already synced to Shopify order ${priorSync.shopifyOrderId} — skipping push.`,
+      );
+      return;
     }
 
     const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(
@@ -181,6 +204,8 @@ export class ShopifyPushService {
       throw new Error('Shopify order create returned no id');
     }
 
+    await this.adoptShopifyLineItemIds(order.lineItems, remoteOrder);
+
     // Mirror the local PAID + FULFILLED state by fulfilling the new order's
     // fulfillment orders at the resolved location. Best-effort — if locations
     // couldn't be read (missing read_locations) or fulfillment fails, the
@@ -197,6 +222,7 @@ export class ShopifyPushService {
 
     await this.recordSuccess(
       orderId,
+      orgId,
       ShopifyGraphqlClient.extractId(remoteOrder.id),
       remoteOrder.name,
     );
@@ -204,6 +230,91 @@ export class ShopifyPushService {
     this.logger.log(
       `Pushed CRM order ${order.name} → Shopify order ${remoteOrder.name} (${ShopifyGraphqlClient.extractId(remoteOrder.id)})`,
     );
+  }
+
+  /**
+   * Stamp Shopify's line-item ids onto the local rows we just pushed.
+   *
+   * Offline line items are created with `manual_<uuid>` external ids. Shopify's
+   * copy of the same order uses Shopify's ids, so when the `orders/create`
+   * webhook comes back and rebadges the order (C4), the line-item upsert keyed
+   * on (orderId, externalId) matches nothing and inserts a SECOND set of rows —
+   * the order then holds every item twice, and everything counted from line
+   * items double-counts it. Adopting the ids here means the webhook updates our
+   * rows in place instead, which also preserves each row's link to the local
+   * product variant (Shopify returns CRM-only items as custom lines with no
+   * variant, so a delete-and-recreate would lose that link).
+   *
+   * Best-effort by design: the Shopify order already exists by this point, so
+   * throwing would send the job back to BullMQ and push a SECOND order. On any
+   * doubt we log and leave the ids alone — the H2 reconcile in the sync path
+   * then cleans up the duplicates instead.
+   */
+  private async adoptShopifyLineItemIds(
+    localLines: Array<{ id: string; externalId: string; variant: { externalId: string | null } | null }>,
+    remoteOrder: { name: string; lineItems?: { nodes: Array<{ id: string; variant: { id: string } | null }> } },
+  ): Promise<void> {
+    try {
+      const remoteNodes = remoteOrder.lineItems?.nodes ?? [];
+      if (remoteNodes.length === 0) return;
+
+      // We submitted the lines in `order.lineItems` order, so index ↔ index
+      // holds — but only trust it when the counts agree. A mismatch means
+      // Shopify merged, split or dropped something, and mislabelling a row is
+      // worse than leaving it alone.
+      if (remoteNodes.length !== localLines.length) {
+        this.logger.warn(
+          `Shopify returned ${remoteNodes.length} line item(s) for ${remoteOrder.name} but ${localLines.length} were pushed — ` +
+          `leaving local line ids untouched.`,
+        );
+        return;
+      }
+
+      const remoteByVariantGid = new Map<string, { id: string }>();
+      for (const node of remoteNodes) {
+        if (node.variant?.id) remoteByVariantGid.set(node.variant.id, node);
+      }
+
+      const claimed = new Set<string>();
+      const updates: Array<{ id: string; externalId: string }> = [];
+
+      localLines.forEach((local, index) => {
+        // Only rows still carrying a local id are candidates; a re-run must not
+        // rewrite an id we already adopted.
+        if (!local.externalId?.startsWith('manual_')) return;
+
+        const variantExternalId = local.variant?.externalId;
+        const hasShopifyVariant = !!variantExternalId && !variantExternalId.startsWith('manual_');
+        const byVariant = hasShopifyVariant
+          ? remoteByVariantGid.get(
+            ShopifyGraphqlClient.toGid('ProductVariant', variantExternalId!),
+          )
+          : undefined;
+
+        const match = byVariant ?? remoteNodes[index];
+        if (!match || claimed.has(match.id)) return;
+        claimed.add(match.id);
+        updates.push({ id: local.id, externalId: ShopifyGraphqlClient.extractId(match.id) });
+      });
+
+      if (updates.length === 0) return;
+
+      await this.prisma.$transaction(
+        updates.map((u) =>
+          this.prisma.orderLineItem.update({
+            where: { id: u.id },
+            data: { externalId: u.externalId },
+          }),
+        ),
+      );
+      this.logger.log(
+        `Adopted ${updates.length} Shopify line-item id(s) for ${remoteOrder.name} — the order webhook will now update these rows instead of duplicating them.`,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Could not adopt Shopify line-item ids for ${remoteOrder.name}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
   }
 
   /** Fulfill every open fulfillment order on a just-created Shopify order. */
@@ -311,14 +422,17 @@ export class ShopifyPushService {
   }
 
   // ─── METADATA WRITERS ───
+  // Atomic JSONB merges (H7). Reads are only used to compute the next
+  // shopifySync.attempts value; the write never replaces the whole blob.
 
   private async recordSuccess(
     orderId: string,
+    organizationId: string,
     shopifyOrderId: string,
     shopifyOrderName: string,
   ): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readSyncMeta(order?.metadata);
@@ -329,7 +443,7 @@ export class ShopifyPushService {
       syncedAt: new Date().toISOString(),
       attempts: (prev?.attempts ?? 0) + 1,
     };
-    await this.writeSyncMeta(orderId, order?.metadata, next);
+    await this.writeSyncMeta(orderId, organizationId, next);
   }
 
   /**
@@ -338,11 +452,12 @@ export class ShopifyPushService {
    */
   async recordFailure(
     orderId: string,
+    organizationId: string,
     error: string,
     incrementAttempt = true,
   ): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
+    const order = await this.prisma.order.findFirst({
+      where: { id: orderId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readSyncMeta(order?.metadata);
@@ -357,7 +472,7 @@ export class ShopifyPushService {
         ? { shopifyOrderName: prev.shopifyOrderName }
         : {}),
     };
-    await this.writeSyncMeta(orderId, order?.metadata, next);
+    await this.writeSyncMeta(orderId, organizationId, next);
   }
 
   private readSyncMeta(metadata: Prisma.JsonValue | null | undefined):
@@ -376,21 +491,11 @@ export class ShopifyPushService {
 
   private async writeSyncMeta(
     orderId: string,
-    current: Prisma.JsonValue | null | undefined,
+    organizationId: string,
     next: ShopifySyncMetadata,
   ): Promise<void> {
-    const base =
-      current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
-        : {};
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        metadata: {
-          ...base,
-          shopifySync: next as unknown as Prisma.InputJsonValue,
-        } as Prisma.InputJsonObject,
-      },
+    await mergeJsonMetadata(this.prisma, 'orders', orderId, organizationId, {
+      shopifySync: next,
     });
   }
 
@@ -420,6 +525,7 @@ export class ShopifyPushService {
       );
       await this.recordProductFailure(
         productId,
+        orgId,
         'No connected Shopify channel.',
         false,
       );
@@ -463,7 +569,7 @@ export class ShopifyPushService {
         oversellGlobally,
         trackGlobally,
       );
-      await this.recordProductSuccess(productId, product.externalId);
+      await this.recordProductSuccess(productId, orgId, product.externalId);
       this.logger.log(
         `Pushed update for Shopify product "${product.title}" (${product.externalId}).`,
       );
@@ -528,7 +634,7 @@ export class ShopifyPushService {
       }
     });
 
-    await this.recordProductSuccess(productId, remoteProductId);
+    await this.recordProductSuccess(productId, orgId, remoteProductId);
 
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
@@ -906,6 +1012,65 @@ export class ShopifyPushService {
     }
   }
 
+  /**
+   * Push the current sellable quantity (variant.inventoryQuantity — for
+   * warehousing orgs the SUM of StockLevel.available) for specific variants to
+   * the primary Shopify location. Runs as a `push-availability` queue job
+   * after CRM-origin stock operations (adjustment, enable-seed, receipt,
+   * return restock). Variants that never existed on Shopify (manual_ external
+   * ids without an inventory item) are skipped — nothing to sync.
+   */
+  async pushAvailability(orgId: string, variantIds: string[]): Promise<void> {
+    if (variantIds.length === 0) return;
+    const shopify = await this.findShopifyChannel(orgId);
+    if (!shopify || shopify.status !== ChannelStatus.CONNECTED) {
+      this.logger.log(
+        `Skipping availability push for org ${orgId}: no connected Shopify channel`,
+      );
+      return;
+    }
+    const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(shopify.id);
+    const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
+    const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
+    if (!locationId) {
+      this.logger.warn(
+        `Skipping availability push for org ${orgId}: no resolvable Shopify location`,
+      );
+      return;
+    }
+
+    const variants = await this.prisma.productVariant.findMany({
+      where: {
+        id: { in: variantIds },
+        organizationId: orgId,
+        product: { deletedAt: null },
+      },
+      select: {
+        id: true,
+        externalId: true,
+        inventoryItemId: true,
+        inventoryQuantity: true,
+      },
+    });
+
+    const quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
+    for (const v of variants) {
+      let invId = v.inventoryItemId;
+      if (!invId && v.externalId && !v.externalId.startsWith('manual_')) {
+        invId = await this.backfillInventoryItemId(auth, v.id, v.externalId);
+      }
+      if (!invId) continue;
+      quantities.push({
+        inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
+        locationId: ShopifyGraphqlClient.toGid('Location', locationId),
+        quantity: v.inventoryQuantity,
+      });
+    }
+    if (quantities.length > 0) {
+      await this.setInventoryQuantities(auth, quantities);
+    }
+  }
+
   /** Set absolute available quantities in one mutation. Best-effort — a
    *  failure is logged and never aborts the push. */
   private async setInventoryQuantities(
@@ -1055,7 +1220,7 @@ export class ShopifyPushService {
         failed++;
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`Bulk push: product ${p.id} failed: ${msg}`);
-        await this.recordProductFailure(p.id, msg).catch(() => undefined);
+        await this.recordProductFailure(p.id, orgId, msg).catch(() => undefined);
       }
     }
 
@@ -1112,7 +1277,7 @@ export class ShopifyPushService {
         failed++;
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.error(`Bulk push: order ${o.id} failed: ${msg}`);
-        await this.recordFailure(o.id, msg, /* incrementAttempt */ true).catch(
+        await this.recordFailure(o.id, orgId, msg, /* incrementAttempt */ true).catch(
           () => undefined,
         );
       }
@@ -1137,10 +1302,11 @@ export class ShopifyPushService {
 
   private async recordProductSuccess(
     productId: string,
+    organizationId: string,
     shopifyProductId: string,
   ): Promise<void> {
-    const product = await this.prisma.product.findUnique({
-      where: { id: productId },
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readProductSyncMeta(product?.metadata);
@@ -1150,16 +1316,17 @@ export class ShopifyPushService {
       syncedAt: new Date().toISOString(),
       attempts: (prev?.attempts ?? 0) + 1,
     };
-    await this.writeProductSyncMeta(productId, product?.metadata, next);
+    await this.writeProductSyncMeta(productId, organizationId, next);
   }
 
   async recordProductFailure(
     productId: string,
+    organizationId: string,
     error: string,
     incrementAttempt = true,
   ): Promise<void> {
-    const product = await this.prisma.product.findUnique({
-      where: { id: productId },
+    const product = await this.prisma.product.findFirst({
+      where: { id: productId, organizationId },
       select: { metadata: true },
     });
     const prev = this.readProductSyncMeta(product?.metadata);
@@ -1169,7 +1336,7 @@ export class ShopifyPushService {
       attempts: (prev?.attempts ?? 0) + (incrementAttempt ? 1 : 0),
       ...(prev?.shopifyProductId ? { shopifyProductId: prev.shopifyProductId } : {}),
     };
-    await this.writeProductSyncMeta(productId, product?.metadata, next);
+    await this.writeProductSyncMeta(productId, organizationId, next);
   }
 
   private readProductSyncMeta(metadata: Prisma.JsonValue | null | undefined):
@@ -1182,21 +1349,11 @@ export class ShopifyPushService {
 
   private async writeProductSyncMeta(
     productId: string,
-    current: Prisma.JsonValue | null | undefined,
+    organizationId: string,
     next: object,
   ): Promise<void> {
-    const base =
-      current && typeof current === 'object' && !Array.isArray(current)
-        ? (current as Prisma.JsonObject)
-        : {};
-    await this.prisma.product.update({
-      where: { id: productId },
-      data: {
-        metadata: {
-          ...base,
-          shopifySync: next as unknown as Prisma.InputJsonValue,
-        } as Prisma.InputJsonObject,
-      },
+    await mergeJsonMetadata(this.prisma, 'products', productId, organizationId, {
+      shopifySync: next,
     });
   }
 }

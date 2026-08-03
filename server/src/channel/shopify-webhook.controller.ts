@@ -2,6 +2,7 @@ import { Controller, Post, Req, Headers, HttpCode, Logger, UnauthorizedException
 import type { RawBodyRequest } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
+import { SkipThrottle } from '@nestjs/throttler';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { Public } from '../auth/decorators/public.decorator';
@@ -9,7 +10,19 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from './encryption.service';
 import { ShopifySyncService } from './shopify-sync.service';
 import { WhatsAppTriggerService } from './whatsapp-trigger.service';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 
+/**
+ * Exempt from the global 60 req/min throttler.
+ *
+ * That limit exists for user-facing API callers. Webhooks are HMAC-
+ * authenticated machine traffic, arrive from Shopify's shared egress IPs (so
+ * the default per-IP bucket is shared across EVERY tenant), and cover 19
+ * topics including the chatty `carts/*` and `checkouts/*`. A busy store bursts
+ * past 60/min easily; Shopify counts each 429 as a failed delivery and
+ * eventually DELETES the webhook subscription — silently stopping sync.
+ */
+@SkipThrottle()
 @Controller('webhooks')
 export class ShopifyWebhookController {
     private readonly logger = new Logger(ShopifyWebhookController.name);
@@ -20,6 +33,7 @@ export class ShopifyWebhookController {
         private readonly syncService: ShopifySyncService,
         private readonly whatsappTrigger: WhatsAppTriggerService,
         private readonly config: ConfigService,
+        private readonly inventoryLedger: InventoryLedgerService,
     ) { }
 
     @Public()
@@ -42,12 +56,39 @@ export class ShopifyWebhookController {
         // 1. Find the channel by shop domain (may be null for lifecycle /
         // compliance topics arriving after disconnect — those are still
         // acknowledged below).
-        const channel = await this.prisma.channel.findFirst({
+        //
+        // findMany + explicit preference, NOT findFirst: `findFirst` with no
+        // `orderBy` returns whichever row Postgres hands back first, so if a
+        // store were ever claimed twice the tenant receiving the data would be
+        // arbitrary — and HMAC cannot disambiguate, because it is verified
+        // against the APP-level secret that is valid for every store installed
+        // on the app. A live, usable connection wins, so a stale or
+        // disconnected duplicate never steals traffic from the org actually
+        // using the store.
+        const candidates = await this.prisma.channel.findMany({
             where: {
                 platform: ChannelPlatform.SHOPIFY,
                 externalStoreUrl: `https://${shopDomain}`,
             },
+            orderBy: { updatedAt: 'desc' },
         });
+
+        const channel =
+            candidates.find(
+                (c) => c.status === ChannelStatus.CONNECTED && c.isEnabled,
+            ) ??
+            candidates.find((c) => c.status === ChannelStatus.CONNECTED) ??
+            candidates[0] ??
+            null;
+
+        if (candidates.length > 1) {
+            this.logger.error(
+                `Shop ${shopDomain} resolves to ${candidates.length} channels ` +
+                `across orgs [${candidates.map((c) => c.organizationId).join(', ')}]; ` +
+                `routing to ${channel?.organizationId}. This is a tenant-isolation ` +
+                `hazard — investigate immediately.`,
+            );
+        }
 
         // 2a. Primary HMAC verification: the public app's client secret is
         // the signing key for every webhook Shopify sends on its behalf.
@@ -221,18 +262,21 @@ export class ShopifyWebhookController {
                     );
                     break;
 
-                case 'fulfillments/create':
-                case 'fulfillments/update':
-                    // Shopify also fires orders/fulfilled / orders/partially_fulfilled
-                    // / orders/updated with the parent order (including the updated
-                    // fulfillments array) for the same actions, and those flow
-                    // through upsertOrder which is the authoritative reconcile.
-                    // We subscribe to fulfillments/* topics for observability and
-                    // future per-fulfillment fast paths.
-                    this.logger.log(
-                        `Fulfillment webhook ${topic}: fulfillment ${body?.id} on order ${body?.order_id}`,
-                    );
+                case 'refunds/create':
+                    // Storage only, by design: revenue aggregates stay gross
+                    // for now, so refund history accumulates and turning it
+                    // into net reporting later is a reporting change rather
+                    // than a "we never captured the data" problem.
+                    await this.syncService.upsertRefund(channel.id, body);
                     break;
+
+                // REMOVED: `fulfillments/create` / `fulfillments/update` cases.
+                // They were unreachable — those are not valid Shopify webhook
+                // topics (Shopify rejects them, see WEBHOOK_TOPICS in
+                // shopify-oauth.service.ts) so we correctly never subscribed,
+                // yet the comment beside them claimed we did. Fulfilment data
+                // arrives via orders/fulfilled and orders/updated, both of
+                // which flow through `upsertOrder`.
 
                 case 'draft_orders/create':
                 case 'draft_orders/update':
@@ -419,6 +463,19 @@ export class ShopifyWebhookController {
         orgId: string,
         body: { inventory_item_id: number; available: number; location_id: number },
     ) {
+        // Warehousing orgs own their physical stock: variant.inventoryQuantity
+        // is a derived cache (SUM of StockLevel.available) and must not be
+        // overwritten by Shopify's last-writer-wins aggregate. Reconcile-with-
+        // drift-detection for these orgs is the Phase D flow; until then the
+        // webhook is a no-op for them (legacy orgs keep the existing behavior,
+        // including its known multi-location limitation).
+        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+            this.logger.debug(
+                `inventory_levels/update ignored for warehousing-enabled org ${orgId}`,
+            );
+            return;
+        }
+
         const variant = await this.prisma.productVariant.findFirst({
             where: {
                 product: { channelId },

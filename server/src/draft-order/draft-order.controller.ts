@@ -16,6 +16,7 @@ import { UpdateDraftOrderDto } from './dto/update-draft-order.dto';
 import { CompleteDraftDto } from './dto/complete-draft.dto';
 import { SendDraftInvoiceDto } from './dto/send-invoice.dto';
 import { QueryDraftOrdersDto } from './dto/query-drafts.dto';
+import { ORG_OPERATORS, Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('draft-orders')
 export class DraftOrderController {
@@ -29,6 +30,7 @@ export class DraftOrderController {
 
   // POST /api/v1/draft-orders
   @Post()
+  @Roles(...ORG_OPERATORS)
   create(
     @CurrentUser() user: JwtPayload,
     @Body() dto: CreateDraftOrderDto,
@@ -44,6 +46,7 @@ export class DraftOrderController {
 
   // PATCH /api/v1/draft-orders/:id
   @Patch(':id')
+  @Roles(...ORG_OPERATORS)
   update(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -54,12 +57,14 @@ export class DraftOrderController {
 
   // DELETE /api/v1/draft-orders/:id
   @Delete(':id')
+  @Roles(...ORG_OPERATORS)
   softDelete(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.service.softDelete(id, user.orgId!);
   }
 
   // POST /api/v1/draft-orders/:id/complete — convert to a real Order.
   @Post(':id/complete')
+  @Roles(...ORG_OPERATORS)
   complete(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
@@ -70,6 +75,7 @@ export class DraftOrderController {
 
   // POST /api/v1/draft-orders/:id/send-invoice — SHOPIFY-only.
   @Post(':id/send-invoice')
+  @Roles(...ORG_OPERATORS)
   sendInvoice(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,

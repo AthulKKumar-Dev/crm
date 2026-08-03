@@ -16,6 +16,7 @@ import { useCancelInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { invoiceService } from "~/services/invoice.service";
 import { useGstins } from "~/hooks/use-gst-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useDebounced } from "~/hooks/use-debounced";
 import type {
   InvoiceListParams,
   GstReturnParams,
@@ -117,10 +118,14 @@ export default function InvoicesPage() {
       : (new Date().getMonth() + 1).toString().padStart(2, "0")
   );
 
+  // Debounced into the query key only — the input keeps the raw value, so
+  // typing stays instant without a request per keystroke.
+  const debouncedSearch = useDebounced(searchQuery, 350);
+
   const params: InvoiceListParams = {
     page: currentPage,
     limit: PAGE_SIZE,
-    search: searchQuery || undefined,
+    search: debouncedSearch || undefined,
     financialYear,
   };
 

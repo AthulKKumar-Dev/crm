@@ -27,6 +27,13 @@ import {
     WebhookSubscriptionDeleteResponse,
 } from './shopify-graphql.types';
 
+import { missingScopes, ShopifyScopeStatus } from './shopify-scopes.util';
+
+/// Hard limit on the OAuth token exchange and refresh calls. Neither had one,
+/// so both were bounded only by undici's ~300s default — and the refresh runs
+/// while holding a 15s Redis lock.
+const OAUTH_FETCH_TIMEOUT_MS = 30_000;
+
 @Injectable()
 export class ShopifyOAuthService {
     private readonly logger = new Logger(ShopifyOAuthService.name);
@@ -226,6 +233,10 @@ export class ShopifyOAuthService {
                     code: query.code,
                     expiring: '1',
                 }),
+                // Bound the exchange. Without a signal this is capped only by
+                // undici's ~300s default, which would hold the OAuth callback
+                // open long past any useful point.
+                signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
             },
         );
 
@@ -363,6 +374,22 @@ export class ShopifyOAuthService {
         return { channelId: channel.id, organizationId: stateData.orgId, redirectUrl };
     }
 
+    /**
+     * What a channel's stored grant is short of, if anything.
+     *
+     * Shopify pins a token to the scopes it was issued with, so widening the
+     * requested list does nothing for stores already connected — they keep the
+     * old grant until someone re-runs the install. Silently, until now: a store
+     * that predates the draft-order/fulfilment scopes simply fails those calls,
+     * and one without `read_all_orders` imports 60 days of history and reports
+     * success. This is what lets the UI say "reconnect required" instead.
+     */
+    describeScopeStatus(credentials: unknown): ShopifyScopeStatus {
+        const granted = (credentials as { scopes?: string } | null | undefined)?.scopes;
+        const missing = missingScopes(this.scopes, granted);
+        return { known: !!granted, missing, reconnectRequired: missing.length > 0 };
+    }
+
     // ─── MANUAL CONNECT (legacy fallback) ───
     // For merchants who create a custom app in their Shopify Admin and provide
     // credentials. Kept as the de-emphasized "Advanced" path in the connect
@@ -404,6 +431,36 @@ export class ShopifyOAuthService {
             this.logger.error('Failed to connect to Shopify', error);
             throw new BadRequestException(
                 'Could not connect to Shopify. Please verify your store URL and credentials.',
+            );
+        }
+
+        // Reject a store already claimed by ANOTHER organization.
+        //
+        // The database does enforce this via the unique index
+        // (platform, external_store_id) — but only as an insert-time
+        // constraint, so without this check the merchant sees a raw P2002
+        // instead of an explanation. The URL arm matters independently: the
+        // webhook router resolves tenants by external_store_url, and rows with
+        // a NULL external_store_id sit outside that unique index entirely
+        // (Postgres treats NULLs as distinct).
+        //
+        // The other organization is deliberately not named — that would leak
+        // tenant information to anyone probing store domains.
+        const claimedElsewhere = await this.prisma.channel.findFirst({
+            where: {
+                platform: ChannelPlatform.SHOPIFY,
+                organizationId: { not: orgId },
+                OR: [
+                    { externalStoreId: String(shopData.shop.id) },
+                    { externalStoreUrl: `https://${shopDomain}` },
+                ],
+            },
+            select: { id: true },
+        });
+        if (claimedElsewhere) {
+            throw new ConflictException(
+                `The Shopify store ${shopDomain} is already connected to another workspace. ` +
+                `Disconnect it there first, or contact support if you believe this is an error.`,
             );
         }
 
@@ -566,6 +623,11 @@ export class ShopifyOAuthService {
                     grant_type: 'refresh_token',
                     refresh_token: this.encryption.decrypt(current.refreshToken),
                 }),
+                // This call runs while holding a 15s Redis lock. Unbounded, a
+                // silent socket would outlive the lock by minutes — it would
+                // expire underneath us, other callers would assume no refresh
+                // was in flight, and they would all start their own.
+                signal: AbortSignal.timeout(OAUTH_FETCH_TIMEOUT_MS),
             });
 
             if (!res.ok) {
@@ -658,6 +720,10 @@ export class ShopifyOAuthService {
         'orders/cancelled',
         'orders/fulfilled',
         'orders/partially_fulfilled',
+        // A refund issued in Shopify admin fires this. Without it a standalone
+        // refund reaches us only if Shopify happens to send `orders/updated`
+        // too, so refund data arrived by luck rather than by subscription.
+        'refunds/create',
         // NOTE: `fulfillments/create` and `fulfillments/update` are NOT
         // valid Shopify webhook topics — Shopify rejects them with
         // "Invalid topic specified". The fulfillment data is already

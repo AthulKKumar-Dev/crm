@@ -17,6 +17,7 @@ import { ShopifyOAuthService } from './shopify-oauth.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -25,6 +26,9 @@ import {
     MailingAddress,
     OrdersListResponse,
     OrdersListVariables,
+    OrderLineItemsPageResponse,
+    OrderLineItemsPageVariables,
+    ORDER_LINE_ITEMS_PAGE_QUERY,
     OrderNode,
     ORDERS_LIST_QUERY,
     ORDERS_COUNT_QUERY,
@@ -52,6 +56,28 @@ import { parseProductSettings } from '../organization-settings/schemas/product-s
 
 const GRAPHQL_PAGE_SIZE = 50;
 
+/// Above this many line items in a single order payload we stop trusting the
+/// array to be complete and skip the H2 reconcile rather than risk deleting
+/// real lines. Shopify documents no completeness guarantee for very large
+/// order webhooks, and the largest order in this dataset has 8 items — so the
+/// cap costs nothing in practice and only bites on wholesale-sized orders.
+const LINE_ITEM_RECONCILE_CAP = 100;
+
+/// How far back to rewind the sync watermark from the run's start time.
+/// `updated_at` is stamped by SHOPIFY's clock and compared against OURS, so a
+/// few seconds of drift between the two servers would reopen the very window
+/// the start-time stamp exists to close. Re-reading a couple of minutes of
+/// orders is free: the upserts are idempotent and `upsertOrder`'s
+/// compare-and-set makes re-applying an unchanged order a no-op.
+const SYNC_WATERMARK_SKEW_MS = 2 * 60 * 1000;
+
+/// A saved pagination cursor is only worth resuming while Shopify still
+/// honours it and the run it belongs to is plausibly the one being retried.
+/// Past this age a log is retired rather than resurrected — the failure mode
+/// it guards against is a crashed run left pinned at IN_PROGRESS whose stale
+/// cursor would otherwise be picked up days later.
+export const SYNC_RESUME_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 // GraphQL WeightUnit enum → REST weight_unit strings the DB already stores.
 const WEIGHT_UNIT_MAP: Record<string, string> = {
     KILOGRAMS: 'kg',
@@ -70,6 +96,7 @@ export class ShopifySyncService {
         private readonly loyalty: LoyaltyService,
         private readonly graphql: ShopifyGraphqlClient,
         private readonly pushEnqueuer: ShopifyPushEnqueuer,
+        private readonly inventoryLedger: InventoryLedgerService,
         @InjectQueue(DRAFT_MIRROR_QUEUE)
         private readonly draftMirrorQueue: Queue<DraftMirrorJobData>,
     ) { }
@@ -153,6 +180,16 @@ export class ShopifySyncService {
         let token: string | null = null;
         let shopDomain: string | null = null;
 
+        // The watermark this run will claim, captured BEFORE any Shopify call.
+        //
+        // This used to be `new Date()` evaluated in the `finally` below, i.e.
+        // the moment the run FINISHED — while `syncOrders` asks Shopify for
+        // `updated_at >= lastSyncedAt`. Anything edited while the run was in
+        // flight was therefore already older than the new watermark and was
+        // never fetched again: not delayed, lost. Stamping the start instead
+        // means the next run re-covers the window this one was working in.
+        const syncStartedAt = new Date(Date.now() - SYNC_WATERMARK_SKEW_MS);
+
         // EVERYTHING below this point is wrapped in a try/finally so the
         // channel's syncStatus *cannot* get stuck on IN_PROGRESS. Previously
         // `getAccessToken` was outside the try, so a credential / decryption
@@ -216,7 +253,7 @@ export class ShopifySyncService {
                         : authFailed
                             ? ChannelStatus.DISCONNECTED
                             : ChannelStatus.ERROR,
-                    lastSyncedAt: allSucceeded ? new Date() : undefined,
+                    lastSyncedAt: allSucceeded ? syncStartedAt : undefined,
                 },
             }).catch((err) => {
                 this.logger.error(
@@ -407,6 +444,7 @@ export class ShopifySyncService {
             for await (const page of this.paginateOrdersGraphql(auth, syncLog.cursor, queryString)) {
                 for (const node of page.orders) {
                     try {
+                        await this.drainLineItems(auth, node);
                         const so = this.transformGraphqlOrder(node);
                         await this.upsertOrder(channelId, orgId, so);
                         processed++;
@@ -437,25 +475,90 @@ export class ShopifySyncService {
         queryString: string | null,
     ): AsyncGenerator<{ orders: OrderNode[]; nextCursor: string | null }> {
         let cursor: string | null = startCursor ?? null;
+        let pageSize = GRAPHQL_PAGE_SIZE;
         do {
             const variables: OrdersListVariables = {
-                first: GRAPHQL_PAGE_SIZE,
+                first: pageSize,
                 after: cursor,
                 query: queryString,
                 sortKey: 'UPDATED_AT',
                 reverse: false,
             };
-            const res = await this.graphql.request<OrdersListResponse, OrdersListVariables>(
-                auth,
-                ORDERS_LIST_QUERY,
-                variables,
-            );
+            let res: OrdersListResponse;
+            try {
+                res = await this.graphql.request<OrdersListResponse, OrdersListVariables>(
+                    auth,
+                    ORDERS_LIST_QUERY,
+                    variables,
+                );
+            } catch (error) {
+                // Shopify prices a query before running it and rejects anything
+                // over its cap. Retrying identically can never succeed, but
+                // asking for fewer orders can — and a cursor stays valid across
+                // a changed `first`. Degrade instead of failing the whole sync.
+                if (
+                    error instanceof ShopifyGraphqlError &&
+                    error.code === 'MAX_COST_EXCEEDED' &&
+                    pageSize > 1
+                ) {
+                    pageSize = Math.max(1, Math.floor(pageSize / 2));
+                    this.logger.warn(
+                        `Orders query rejected as too costly; retrying same cursor with first=${pageSize}.`,
+                    );
+                    continue;
+                }
+                throw error;
+            }
             const nextCursor = res.orders.pageInfo.hasNextPage
                 ? res.orders.pageInfo.endCursor
                 : null;
             yield { orders: res.orders.nodes, nextCursor };
             cursor = nextCursor;
         } while (cursor);
+    }
+
+    /**
+     * Pull the remaining line items for an order that has more than the first
+     * page, mutating `node.lineItems.nodes` in place.
+     *
+     * ORDERS_LIST_QUERY asks for 100. An order with more used to import a
+     * subset with NO signal: `totalPrice` comes from Shopify so the header
+     * stayed correct, while the GST invoice (built by walking line items)
+     * understated the sale and vendors whose items fell in the missing tail
+     * never saw the order. Raising the number is not a fix — Shopify caps it at
+     * 250 and a bigger `first` costs more; draining is the fix.
+     *
+     * Orders within one page (all of them, in practice) issue zero extra calls.
+     *
+     * NOTE: `fulfillments`/`refunds` are plain list fields, not connections —
+     * they expose no pageInfo and cannot be drained this way. Their 50-item
+     * caps remain.
+     */
+    private async drainLineItems(
+        auth: { shopDomain: string; accessToken: string },
+        node: OrderNode,
+    ): Promise<void> {
+        let page = node.lineItems.pageInfo;
+        let guard = 0;
+        while (page?.hasNextPage && page.endCursor && guard++ < 50) {
+            const res = await this.graphql.request<
+                OrderLineItemsPageResponse,
+                OrderLineItemsPageVariables
+            >(auth, ORDER_LINE_ITEMS_PAGE_QUERY, {
+                id: node.id,
+                first: 100,
+                after: page.endCursor,
+            });
+            const more = res.order?.lineItems;
+            if (!more || more.nodes.length === 0) break;
+            node.lineItems.nodes.push(...more.nodes);
+            page = more.pageInfo;
+        }
+        if (guard > 0) {
+            this.logger.log(
+                `Order ${node.id}: drained ${node.lineItems.nodes.length} line items across ${guard + 1} pages.`,
+            );
+        }
     }
 
     // ─── GRAPHQL → REST SHAPE TRANSFORMER ───
@@ -543,6 +646,11 @@ export class ShopifySyncService {
                         node.totalShippingPriceSet?.shopMoney?.currencyCode ?? node.currencyCode,
                 },
             },
+            // Carried through so the pull path can rebadge a pushed offline
+            // order, exactly as the webhook path does. Without these, a sync
+            // that beats the webhook would still create a duplicate.
+            source_identifier: node.sourceIdentifier ?? null,
+            source_name: node.sourceName ?? null,
             financial_status: node.displayFinancialStatus
                 ? node.displayFinancialStatus.toLowerCase()
                 : null,
@@ -669,6 +777,18 @@ export class ShopifySyncService {
         const syncLog = await this.createSyncLog(channelId, orgId, 'inventory');
         let processed = 0;
         let failed = 0;
+
+        // Warehousing orgs own their physical stock — the Shopify aggregate
+        // must not overwrite the bucket-derived cache. Reconciliation for
+        // those orgs is the Phase D drift flow; until then this pass is a
+        // no-op for them.
+        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+            this.logger.log(
+                `Skipping inventory pull for warehousing-enabled org ${orgId}`,
+            );
+            await this.completeSyncLog(syncLog.id, 0, 0);
+            return;
+        }
 
         try {
             const auth = { shopDomain, accessToken: token };
@@ -868,13 +988,29 @@ export class ShopifySyncService {
             },
         });
 
+        // Warehousing orgs: variant.inventoryQuantity is a derived cache
+        // (SUM of StockLevel.available) — the product pull must never stomp
+        // it. Quantity reconciliation for those orgs is the Phase D drift
+        // flow. Legacy orgs keep the pull-writes-quantity behavior, now WITH
+        // ledger events (previously this path mutated stock silently).
+        const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
+        const priorVariants = await this.prisma.productVariant.findMany({
+            where: { productId: product.id },
+            select: { externalId: true, inventoryQuantity: true, sku: true },
+        });
+        const priorByExt = new Map(priorVariants.map((v) => [v.externalId, v]));
+
         for (const sv of sp.variants || []) {
-            await this.prisma.productVariant.upsert({
+            const incomingQty = sv.inventory_quantity ?? 0;
+            const prior = priorByExt.get(String(sv.id));
+            const row = await this.prisma.productVariant.upsert({
                 where: { productId_externalId: { productId: product.id, externalId: String(sv.id) } },
                 create: {
-                    productId: product.id, externalId: String(sv.id), title: sv.title || 'Default',
+                    productId: product.id, organizationId: orgId,
+                    externalId: String(sv.id), title: sv.title || 'Default',
                     sku: sv.sku, barcode: sv.barcode, price: sv.price,
-                    compareAtPrice: sv.compare_at_price, inventoryQuantity: sv.inventory_quantity ?? 0,
+                    compareAtPrice: sv.compare_at_price,
+                    inventoryQuantity: warehousing ? 0 : incomingQty,
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : null,
                     weight: sv.weight ? String(sv.weight) : null, weightUnit: sv.weight_unit,
                     option1: sv.option1, option2: sv.option2, option3: sv.option3,
@@ -884,12 +1020,27 @@ export class ShopifySyncService {
                 update: {
                     title: sv.title || 'Default', sku: sv.sku, barcode: sv.barcode,
                     price: sv.price, compareAtPrice: sv.compare_at_price,
-                    inventoryQuantity: sv.inventory_quantity ?? 0,
+                    ...(warehousing ? {} : { inventoryQuantity: incomingQty }),
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : undefined,
                     weight: sv.weight ? String(sv.weight) : null, weightUnit: sv.weight_unit,
                     option1: sv.option1, option2: sv.option2, option3: sv.option3, position: sv.position ?? 1,
                 },
             });
+            if (!warehousing) {
+                const before = prior?.inventoryQuantity ?? 0;
+                if (before !== incomingQty) {
+                    await this.inventoryLedger.recordQuantityChange(this.prisma, {
+                        orgId,
+                        variantId: row.id,
+                        quantityBefore: before,
+                        quantityAfter: incomingQty,
+                        reason: 'sync',
+                        referenceType: 'product_sync',
+                        referenceId: externalId,
+                        sku: row.sku,
+                    });
+                }
+            }
         }
 
         for (const si of sp.images || []) {
@@ -940,62 +1091,257 @@ export class ShopifySyncService {
         const tags = so.tags ? so.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : [];
         const shippingPrice = so.total_shipping_price_set?.shop_money?.amount ?? so.total_shipping_price ?? '0';
 
-        const order = await this.prisma.order.upsert({
+        // REBADGE: is this an offline order WE pushed, coming back to us?
+        //
+        // `pushOrder` stamps the Shopify order with sourceIdentifier = the local
+        // order id. Without reading it back, the `orders/create` webhook for an
+        // order we just created finds no row under (shopifyChannel, shopifyId)
+        // and inserts a SECOND one — so every pushed counter sale existed twice
+        // and was counted twice in revenue, top products and customer totals.
+        //
+        // Adopt the existing row instead: re-point it at the Shopify identity
+        // and let the upsert below take its normal update branch. Adopting
+        // Shopify's number/name is deliberate — the row IS the Shopify order
+        // now, and dropping the `manual_` externalId also moves it cleanly out
+        // of the manual order-number index.
+        //
+        // Local ids are cuids, so a foreign source_identifier cannot collide;
+        // the MANUAL-platform filter closes the remaining gap.
+        let existing = await this.prisma.order.findUnique({
             where: { channelId_externalId: { channelId, externalId } },
-            create: {
-                organizationId: orgId, channelId, customerId, externalId,
-                orderNumber: so.order_number, name: so.name || `#${so.order_number}`,
-                financialStatus: this.mapFinancialStatus(so.financial_status),
-                fulfillmentStatus: this.mapFulfillmentStatus(so.fulfillment_status),
-                currency: so.currency || 'USD', subtotalPrice: so.subtotal_price || '0',
-                totalPrice: so.total_price || '0', totalTax: so.total_tax || '0',
-                totalDiscounts: so.total_discounts || '0', totalShippingPrice: shippingPrice,
-                shippingAddress: so.shipping_address || null, billingAddress: so.billing_address || null,
-                note: so.note, tags,
-                cancelReason: this.mapCancelReason(so.cancel_reason),
-                cancelledAt: so.cancelled_at ? new Date(so.cancelled_at) : null,
-                closedAt: so.closed_at ? new Date(so.closed_at) : null,
-                externalCreatedAt: so.created_at ? new Date(so.created_at) : null,
-                externalUpdatedAt: so.updated_at ? new Date(so.updated_at) : null,
-            },
-            update: {
-                customerId,
-                financialStatus: this.mapFinancialStatus(so.financial_status),
-                fulfillmentStatus: this.mapFulfillmentStatus(so.fulfillment_status),
-                totalPrice: so.total_price || '0', totalTax: so.total_tax || '0',
-                totalDiscounts: so.total_discounts || '0', totalShippingPrice: shippingPrice,
-                shippingAddress: so.shipping_address || null, billingAddress: so.billing_address || null,
-                note: so.note, tags,
-                cancelReason: this.mapCancelReason(so.cancel_reason),
-                cancelledAt: so.cancelled_at ? new Date(so.cancelled_at) : null,
-                closedAt: so.closed_at ? new Date(so.closed_at) : null,
-                externalUpdatedAt: so.updated_at ? new Date(so.updated_at) : null,
-            },
+            select: { id: true, externalUpdatedAt: true },
         });
+        if (
+            !existing &&
+            so.source_identifier &&
+            (!so.source_name || so.source_name === 'collabo-crm')
+        ) {
+            const pushedLocally = await this.prisma.order.findFirst({
+                where: {
+                    id: String(so.source_identifier),
+                    organizationId: orgId,
+                    channel: { platform: ChannelPlatform.MANUAL },
+                },
+                select: { id: true, name: true, customerId: true, externalUpdatedAt: true },
+            });
+            if (pushedLocally) {
+                await this.prisma.order.update({
+                    where: { id: pushedLocally.id },
+                    data: {
+                        channelId,
+                        externalId,
+                        orderNumber: so.order_number,
+                        name: so.name || `#${so.order_number}`,
+                    },
+                });
+                // Keep the buyer we already know. The upsert below runs its
+                // UPDATE branch on this row and would write `customerId: null`
+                // for a walk-in sale (Shopify carries no customer, so the
+                // lookup above resolved none) — orphaning the order from the
+                // customer whose revenue it counts towards. A customer the
+                // payload DOES resolve still wins.
+                if (!customerId) customerId = pushedLocally.customerId;
+                // The row now answers to the Shopify identity, so the write
+                // below must take its UPDATE path, not insert a second row.
+                existing = {
+                    id: pushedLocally.id,
+                    externalUpdatedAt: pushedLocally.externalUpdatedAt,
+                };
+                this.logger.log(
+                    `Rebadged locally-pushed order ${pushedLocally.name} (${pushedLocally.id}) ` +
+                    `as Shopify order ${externalId} — no duplicate created.`,
+                );
+            }
+        }
 
-        for (const li of so.line_items || []) {
-            let variantId: string | null = null;
-            let vendor: string | null = null;
-            if (li.variant_id) {
-                const variant = await this.prisma.productVariant.findFirst({
-                    where: { externalId: String(li.variant_id), product: { channelId } },
-                    include: { product: { select: { vendor: true, vendorKey: true } } },
+        // Resolve every variant/product the payload references in TWO reads.
+        // The line-item loop used to issue up to three serial queries per item;
+        // these run before the transaction opens, so the transaction below
+        // contains writes only and stays short.
+        const payloadLines: any[] = Array.isArray(so.line_items) ? so.line_items : [];
+        const variantExternalIds = [
+            ...new Set(
+                payloadLines.filter((li) => li.variant_id).map((li) => String(li.variant_id)),
+            ),
+        ];
+        const productExternalIds = [
+            ...new Set(
+                payloadLines.filter((li) => li.product_id).map((li) => String(li.product_id)),
+            ),
+        ];
+        const [variantRows, productRows] = await Promise.all([
+            variantExternalIds.length
+                ? this.prisma.productVariant.findMany({
+                    where: { externalId: { in: variantExternalIds }, product: { channelId } },
+                    select: {
+                        id: true,
+                        externalId: true,
+                        product: { select: { vendor: true, vendorKey: true } },
+                    },
+                })
+                : Promise.resolve([]),
+            productExternalIds.length
+                ? this.prisma.product.findMany({
+                    where: { channelId, externalId: { in: productExternalIds } },
+                    select: { externalId: true, vendor: true, vendorKey: true },
+                })
+                : Promise.resolve([]),
+        ]);
+        const variantByExternalId = new Map(variantRows.map((v) => [v.externalId, v] as const));
+        const productByExternalId = new Map(productRows.map((p) => [p.externalId, p] as const));
+
+        const incomingUpdatedAt = so.updated_at ? new Date(so.updated_at) : null;
+
+        // What an UPDATE is allowed to touch.
+        //
+        // `customerId`, `shippingAddress` and `billingAddress` are conditional
+        // on purpose. They used to be written unconditionally, so a payload
+        // that carried none of them wrote NULL over what we already held —
+        // which destroys real data for any order that started life here: a
+        // counter sale pushed to Shopify and rebadged holds a buyer and a
+        // delivery address Shopify never learned about. A value Shopify DOES
+        // send still wins. The trade-off is deliberate: removing a customer or
+        // an address in Shopify no longer clears it locally.
+        //
+        // `subtotalPrice`/`currency` were missing from the update path
+        // altogether, so an order edited in Shopify kept its original subtotal
+        // for ever while its total moved.
+        //
+        // `cancelledAt`/`closedAt`/`tags` stay unconditional — Shopify is the
+        // authority on those, and making them sticky would stop an un-cancel
+        // or a removed tag from ever propagating.
+        const patch: Prisma.OrderUncheckedUpdateManyInput = {
+            financialStatus: this.mapFinancialStatus(so.financial_status),
+            fulfillmentStatus: this.mapFulfillmentStatus(so.fulfillment_status),
+            totalPrice: so.total_price || '0', totalTax: so.total_tax || '0',
+            totalDiscounts: so.total_discounts || '0', totalShippingPrice: shippingPrice,
+            subtotalPrice: so.subtotal_price ?? undefined,
+            currency: so.currency ?? undefined,
+            note: so.note, tags,
+            cancelReason: this.mapCancelReason(so.cancel_reason),
+            cancelledAt: so.cancelled_at ? new Date(so.cancelled_at) : null,
+            closedAt: so.closed_at ? new Date(so.closed_at) : null,
+            externalUpdatedAt: incomingUpdatedAt,
+            ...(customerId ? { customerId } : {}),
+            ...(so.shipping_address ? { shippingAddress: so.shipping_address } : {}),
+            ...(so.billing_address ? { billingAddress: so.billing_address } : {}),
+        };
+
+        // One transaction for the order and all of its children. Previously the
+        // header, line items, fulfillments and refunds were four independent
+        // commits, so a failure part-way left a half-written order that the
+        // Shopify retry then landed on top of.
+        await this.prisma.$transaction(async (tx) => {
+            let orderId: string;
+
+            if (!existing) {
+                // upsert, not create: two webhooks for a brand-new order can
+                // race, and (channelId, externalId) is unique.
+                const created = await tx.order.upsert({
+                    where: { channelId_externalId: { channelId, externalId } },
+                    create: {
+                        organizationId: orgId, channelId, customerId, externalId,
+                        orderNumber: so.order_number, name: so.name || `#${so.order_number}`,
+                        financialStatus: this.mapFinancialStatus(so.financial_status),
+                        fulfillmentStatus: this.mapFulfillmentStatus(so.fulfillment_status),
+                        currency: so.currency || 'USD', subtotalPrice: so.subtotal_price || '0',
+                        totalPrice: so.total_price || '0', totalTax: so.total_tax || '0',
+                        totalDiscounts: so.total_discounts || '0', totalShippingPrice: shippingPrice,
+                        shippingAddress: so.shipping_address || null, billingAddress: so.billing_address || null,
+                        note: so.note, tags,
+                        cancelReason: this.mapCancelReason(so.cancel_reason),
+                        cancelledAt: so.cancelled_at ? new Date(so.cancelled_at) : null,
+                        closedAt: so.closed_at ? new Date(so.closed_at) : null,
+                        externalCreatedAt: so.created_at ? new Date(so.created_at) : null,
+                        externalUpdatedAt: incomingUpdatedAt,
+                    },
+                    update: patch,
+                    select: { id: true },
                 });
-                variantId = variant?.id ?? null;
-                vendor = variant?.product?.vendorKey ?? variant?.product?.vendor ?? null;
-            }
-            // Fallback when the variant is gone: resolve the vendor via the product's external id.
-            if (!vendor && li.product_id) {
-                const product = await this.prisma.product.findFirst({
-                    where: { channelId, externalId: String(li.product_id) },
-                    select: { vendor: true, vendorKey: true },
+                orderId = created.id;
+            } else {
+                // Compare-and-set on `externalUpdatedAt`. It was written on
+                // every upsert and never read, so an `orders/create` arriving
+                // after its own `orders/updated` silently reverted the order —
+                // a fulfilled order flipping back to unfulfilled, with nothing
+                // logged. `lte` (not `lt`) keeps an identical redelivery
+                // idempotent instead of making it look like a conflict.
+                const applied = await tx.order.updateMany({
+                    where: {
+                        id: existing.id,
+                        ...(incomingUpdatedAt
+                            ? {
+                                OR: [
+                                    { externalUpdatedAt: null },
+                                    { externalUpdatedAt: { lte: incomingUpdatedAt } },
+                                ],
+                            }
+                            : {}),
+                    },
+                    data: patch,
                 });
-                vendor = product?.vendorKey ?? product?.vendor ?? null;
+                if (applied.count === 0) {
+                    // Deliberately returns before the children are written —
+                    // a stale payload must not rewrite line items either.
+                    this.logger.debug(
+                        `Stale Shopify payload for order ${externalId} (updated_at=${so.updated_at}) — newer state already stored, skipping.`,
+                    );
+                    return;
+                }
+                orderId = existing.id;
             }
-            await this.prisma.orderLineItem.upsert({
-                where: { orderId_externalId: { orderId: order.id, externalId: String(li.id) } },
+
+            await this.writeOrderChildren(tx, orderId, so, payloadLines, {
+                variantByExternalId,
+                productByExternalId,
+            });
+        }, { timeout: 20000 });
+    }
+
+    /**
+     * Write an order's line items, fulfillments and refunds. Split out of
+     * `upsertOrder` so the transaction body stays readable; every lookup it
+     * needs has already been resolved into the maps it is handed, so it issues
+     * writes only.
+     *
+     * Line items are reconciled — a line removed in Shopify is removed here —
+     * under the guards documented at the delete below. Fulfillments and refunds
+     * are upsert-only and must stay that way: they arrive capped at 50 with no
+     * cursor to page them, so their arrays can never be treated as complete and
+     * "delete what's missing" would destroy records beyond the cap. The known,
+     * accepted cost is that a shipment cancelled in Shopify lingers locally.
+     */
+    private async writeOrderChildren(
+        tx: Prisma.TransactionClient,
+        orderId: string,
+        so: any,
+        payloadLines: any[],
+        maps: {
+            variantByExternalId: Map<string, { id: string; product: { vendor: string | null; vendorKey: string | null } | null }>;
+            productByExternalId: Map<string, { vendor: string | null; vendorKey: string | null }>;
+        },
+    ): Promise<void> {
+        for (const li of payloadLines) {
+            const variant = li.variant_id
+                ? maps.variantByExternalId.get(String(li.variant_id))
+                : undefined;
+            // Fallback when the variant is gone, or when it carries no vendor:
+            // resolve via the product's external id.
+            const product = li.product_id
+                ? maps.productByExternalId.get(String(li.product_id))
+                : undefined;
+            const variantId = variant?.id ?? null;
+            const vendor =
+                variant?.product?.vendorKey ??
+                variant?.product?.vendor ??
+                product?.vendorKey ??
+                product?.vendor ??
+                null;
+
+            await tx.orderLineItem.upsert({
+                where: { orderId_externalId: { orderId, externalId: String(li.id) } },
                 create: {
-                    orderId: order.id, variantId, externalId: String(li.id),
+                    orderId, variantId, externalId: String(li.id),
                     externalProductId: li.product_id ? String(li.product_id) : null,
                     externalVariantId: li.variant_id ? String(li.variant_id) : null,
                     title: li.title || 'Unknown', variantTitle: li.variant_title, sku: li.sku, vendor,
@@ -1007,22 +1353,113 @@ export class ShopifySyncService {
             });
         }
 
+        // H2: drop line items Shopify no longer lists. Without this an item
+        // removed from an order in Shopify survives here for ever — order
+        // totals stay right (they come from the header) but everything counted
+        // FROM items keeps counting it: top-selling products, units sold,
+        // sales by category, vendor splits.
+        //
+        // Three guards, each of which the naive one-liner gets wrong:
+        //
+        //  1. Only when the payload actually listed something. An empty array
+        //     means "no information", not "this order has no items" —
+        //     `transformGraphqlOrder` always emits `line_items`, `[]` included,
+        //     so an unguarded delete would wipe every item on the first pull
+        //     that came back empty.
+        //  2. Never at or above LINE_ITEM_RECONCILE_CAP. Shopify does not
+        //     document that a webhook payload carries every line of a very
+        //     large order (its published tool for oversized payloads,
+        //     `include_fields`, only REDUCES what you receive), so completeness
+        //     is unproven up there. Below the cap the payload is trustworthy;
+        //     at or above it we skip and say so.
+        //  3. Deletions are logged. This is the one operation here that can
+        //     destroy data, so it should never happen silently.
+        //
+        // Safe to delete: no foreign key references `order_line_items`, and
+        // refund line snapshots are JSON rather than links.
+        if (payloadLines.length > 0) {
+            if (payloadLines.length >= LINE_ITEM_RECONCILE_CAP) {
+                this.logger.warn(
+                    `Order ${so.id} arrived with ${payloadLines.length} line items — at or above the ${LINE_ITEM_RECONCILE_CAP} reconcile cap, ` +
+                    `so removed lines were NOT pruned (the payload may be truncated).`,
+                );
+            } else {
+                const removed = await tx.orderLineItem.deleteMany({
+                    where: {
+                        orderId,
+                        externalId: { notIn: payloadLines.map((li) => String(li.id)) },
+                    },
+                });
+                if (removed.count > 0) {
+                    this.logger.warn(
+                        `Removed ${removed.count} line item(s) from order ${so.id} that Shopify no longer lists.`,
+                    );
+                }
+            }
+        }
+
         for (const ff of so.fulfillments || []) {
-            await this.prisma.orderFulfillment.upsert({
-                where: { orderId_externalId: { orderId: order.id, externalId: String(ff.id) } },
-                create: { orderId: order.id, externalId: String(ff.id), status: ff.status || 'pending', trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url, trackingCompany: ff.tracking_company, shippedAt: ff.created_at ? new Date(ff.created_at) : null },
+            await tx.orderFulfillment.upsert({
+                where: { orderId_externalId: { orderId, externalId: String(ff.id) } },
+                create: { orderId, externalId: String(ff.id), status: ff.status || 'pending', trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url, trackingCompany: ff.tracking_company, shippedAt: ff.created_at ? new Date(ff.created_at) : null },
                 update: { status: ff.status || 'pending', trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url, trackingCompany: ff.tracking_company },
             });
         }
 
         for (const rf of so.refunds || []) {
             const refundAmount = rf.transactions?.[0]?.amount || '0';
-            await this.prisma.orderRefund.upsert({
-                where: { orderId_externalId: { orderId: order.id, externalId: String(rf.id) } },
-                create: { orderId: order.id, externalId: String(rf.id), amount: refundAmount, currency: so.currency || 'USD', reason: rf.note, note: rf.note, lineItems: rf.refund_line_items || null, processedAt: rf.processed_at ? new Date(rf.processed_at) : null },
+            await tx.orderRefund.upsert({
+                where: { orderId_externalId: { orderId, externalId: String(rf.id) } },
+                create: { orderId, externalId: String(rf.id), amount: refundAmount, currency: so.currency || 'USD', reason: rf.note, note: rf.note, lineItems: rf.refund_line_items || null, processedAt: rf.processed_at ? new Date(rf.processed_at) : null },
                 update: { amount: refundAmount, note: rf.note, lineItems: rf.refund_line_items || null },
             });
         }
+    }
+
+    /**
+     * Persist a standalone `refunds/create` payload.
+     *
+     * Refund rows could already be written, but only when refund data happened
+     * to ride along inside an order payload — there was no subscription, so a
+     * refund issued in Shopify admin reached us only if Shopify also sent
+     * `orders/updated`. Storage only: revenue aggregates stay gross for now.
+     *
+     * Idempotent via the `(orderId, externalId)` unique, so a redelivery is a
+     * no-op. Uses the same shape as the refund write in `writeOrderChildren`
+     * so the two paths cannot drift.
+     */
+    async upsertRefund(channelId: string, refund: any): Promise<void> {
+        const orderExternalId = refund?.order_id ? String(refund.order_id) : null;
+        if (!orderExternalId || !refund?.id) {
+            this.logger.warn('refunds/create payload had no order_id or id — skipping.');
+            return;
+        }
+
+        const order = await this.prisma.order.findUnique({
+            where: { channelId_externalId: { channelId, externalId: orderExternalId } },
+            select: { id: true, currency: true },
+        });
+        if (!order) {
+            // The parent order may simply not be synced yet; `upsertOrder`
+            // picks the refund up from the order payload when it arrives.
+            this.logger.warn(
+                `refunds/create for order ${orderExternalId}, which is not synced on channel ${channelId} — skipping.`,
+            );
+            return;
+        }
+
+        const amount = refund.transactions?.[0]?.amount ?? '0';
+        await this.prisma.orderRefund.upsert({
+            where: { orderId_externalId: { orderId: order.id, externalId: String(refund.id) } },
+            create: {
+                orderId: order.id, externalId: String(refund.id), amount,
+                currency: order.currency, reason: refund.note, note: refund.note,
+                lineItems: refund.refund_line_items ?? null,
+                processedAt: refund.processed_at ? new Date(refund.processed_at) : null,
+            },
+            update: { amount, note: refund.note, lineItems: refund.refund_line_items ?? null },
+        });
+        this.logger.log(`Recorded refund ${refund.id} on order ${orderExternalId}.`);
     }
 
     /**
@@ -1086,6 +1523,13 @@ export class ShopifySyncService {
             totalDiscounts: sd.total_discounts || '0',
             totalShippingPrice:
                 sd.shipping_line?.price ?? sd.total_shipping_price ?? '0',
+            // Carried so draft completion can hand them to the real order.
+            // Without these a Shopify-mirrored draft completes into an order
+            // with no address, which leaves the GST invoice's buyer address
+            // blank and drops the delivery state out of place-of-supply
+            // resolution (so an interstate order is taxed CGST+SGST).
+            shippingAddress: sd.shipping_address ?? null,
+            billingAddress: sd.billing_address ?? null,
             note: sd.note ?? null,
             tags,
             invoiceUrl: sd.invoice_url ?? null,
@@ -1159,11 +1603,17 @@ export class ShopifySyncService {
         const updateFields = {
             email: sc.email, firstName: sc.first_name, lastName: sc.last_name, phone: sc.phone,
             state: this.mapCustomerState(sc.state), verifiedEmail: sc.verified_email ?? false,
-            acceptsMarketing: sc.accepts_marketing ?? false, ordersCount: sc.orders_count ?? 0,
-            totalSpent: sc.total_spent || '0', tags, note: sc.note,
+            acceptsMarketing: sc.accepts_marketing ?? false,
+            tags, note: sc.note,
             addresses: sc.addresses || null, defaultAddress: sc.default_address || null,
             externalUpdatedAt: sc.updated_at ? new Date(sc.updated_at) : null,
-            // NOTE: vipLevel is auto-assigned by LoyaltyService below (based on org thresholds).
+            // NOTE: ordersCount / totalSpent are deliberately NOT written from
+            // sc.orders_count / sc.total_spent. Those figures describe Shopify
+            // orders only, so writing them wholesale wiped every in-store
+            // purchase for a customer who shops on both channels. Both fields
+            // are derived from the local order table by
+            // LoyaltyService.recomputeForCustomer, called at the end of this
+            // method — which also assigns vipLevel from the org thresholds.
             // internalNotes, segments are still NOT overwritten (CRM-only fields).
         };
 
@@ -1273,12 +1723,71 @@ export class ShopifySyncService {
     }
 
     // ─── SYNC LOG HELPERS ───
+    /**
+     * Open (or reopen) the log this sync will checkpoint into.
+     *
+     * Two defects used to live here, mirror images of one another:
+     *
+     *  - `failSyncLog` deliberately preserves the pagination cursor, but this
+     *    lookup only matched `IN_PROGRESS`, so a FAILED log was invisible and
+     *    its cursor unreachable. Every retry restarted at page 1 — three times
+     *    per trigger, given `attempts: 3` — so a large store failing near the
+     *    end could never finish.
+     *  - Conversely a crashed process leaves a log pinned at `IN_PROGRESS`
+     *    for ever, and that one WAS resumed, with no age check, potentially
+     *    days later against a cursor Shopify has long since expired.
+     *
+     * So: resume only what is genuinely resumable — recent, and holding a
+     * cursor — and retire anything stale instead of resurrecting it.
+     */
     private async createSyncLog(channelId: string, orgId: string, entityType: string) {
-        const existing = await this.prisma.syncLog.findFirst({
-            where: { channelId, entityType, status: SyncStatus.IN_PROGRESS },
+        const cutoff = new Date(Date.now() - SYNC_RESUME_MAX_AGE_MS);
+        const candidate = await this.prisma.syncLog.findFirst({
+            where: {
+                channelId,
+                entityType,
+                status: { in: [SyncStatus.IN_PROGRESS, SyncStatus.FAILED] },
+            },
             orderBy: { createdAt: 'desc' },
         });
-        if (existing) return existing;
+
+        if (candidate) {
+            const resumable = candidate.startedAt > cutoff && !!candidate.cursor;
+            if (resumable) {
+                if (candidate.status === SyncStatus.FAILED) {
+                    // Reopen it so progress reporting stays coherent while the
+                    // retry walks on from the saved cursor.
+                    const reopened = await this.prisma.syncLog.update({
+                        where: { id: candidate.id },
+                        data: { status: SyncStatus.IN_PROGRESS, completedAt: null, errorMessage: null },
+                    });
+                    this.logger.log(
+                        `Resuming ${entityType} sync for channel ${channelId} from the cursor saved by its failed run.`,
+                    );
+                    return reopened;
+                }
+                return candidate;
+            }
+
+            if (candidate.status === SyncStatus.IN_PROGRESS) {
+                // Stale and pinned: retire it so it stops being picked up, and
+                // so the channel-level guard can tell dead from live.
+                await this.prisma.syncLog.update({
+                    where: { id: candidate.id },
+                    data: {
+                        status: SyncStatus.FAILED,
+                        completedAt: new Date(),
+                        errorMessage:
+                            candidate.errorMessage ??
+                            'Abandoned: still marked in progress when a later sync started (process likely died mid-run).',
+                    },
+                });
+                this.logger.warn(
+                    `Retired a stale IN_PROGRESS ${entityType} sync log for channel ${channelId} (started ${candidate.startedAt.toISOString()}).`,
+                );
+            }
+        }
+
         return this.prisma.syncLog.create({ data: { organizationId: orgId, channelId, entityType, status: SyncStatus.IN_PROGRESS, startedAt: new Date() } });
     }
 

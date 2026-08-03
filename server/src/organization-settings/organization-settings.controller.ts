@@ -7,6 +7,9 @@ import { UpdateProductSettingsSchema } from './schemas/product-settings.schema';
 import type { UpdateProductSettingsInput } from './schemas/product-settings.schema';
 import { UpdateOrderSettingsSchema } from './schemas/order-settings.schema';
 import type { UpdateOrderSettingsInput } from './schemas/order-settings.schema';
+import { UpdateInventorySettingsSchema } from './schemas/inventory-settings.schema';
+import type { UpdateInventorySettingsInput } from './schemas/inventory-settings.schema';
+import { Roles, ORG_MANAGERS } from '../auth/decorators/roles.decorator';
 
 /**
  * Org-scoped settings, organized by domain. All endpoints implicitly target
@@ -49,5 +52,19 @@ export class OrganizationSettingsController {
     body: UpdateOrderSettingsInput,
   ) {
     return this.service.updateOrderSettings(user.orgId!, body);
+  }
+
+  // PATCH /api/v1/organization/settings/inventory
+  // Explicitly role-gated (unlike the older sibling routes): QC/scan policy
+  // changes alter warehouse-floor behavior. warehousingEnabled cannot be set
+  // here at all — it flips only via the inventory enable flow.
+  @Patch('inventory')
+  @Roles(...ORG_MANAGERS)
+  updateInventory(
+    @CurrentUser() user: JwtPayload,
+    @Body(new ZodValidationPipe(UpdateInventorySettingsSchema))
+    body: UpdateInventorySettingsInput,
+  ) {
+    return this.service.updateInventorySettings(user.orgId!, body);
   }
 }

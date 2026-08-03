@@ -34,6 +34,7 @@ import {
   useSyncOrderMutation,
 } from "~/hooks/use-order-mutations";
 import { formatCurrency } from "~/lib/utils";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import type { OrderDetail, OrderCancelReason } from "~/types/api";
 import {
   ModalShell,
@@ -74,15 +75,24 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
   const openMutation = useOpenOrderMutation(order.id);
   const syncMutation = useSyncOrderMutation(order.id);
 
+  // Financial actions (cancel / capture / mark-paid) are manager-only on the
+  // server. Mirror that here so a VIEWER or AGENT isn't shown buttons that can
+  // only answer 403 — the server remains the actual boundary.
+  const { role } = useCurrentRole();
+  const canManage =
+    role === "OWNER" || role === "ADMIN" || role === "MANAGER";
+
   const isShopify = order.channel.platform === "SHOPIFY";
   const isManual = order.channel.platform === "MANUAL";
   const isCancelled = !!order.cancelledAt;
   const isClosed = !!order.closedAt;
   const canMarkPaid =
+    canManage &&
     order.financialStatus !== "PAID" &&
     order.financialStatus !== "REFUNDED" &&
     order.financialStatus !== "VOIDED";
   const canCapture =
+    canManage &&
     isShopify &&
     (order.financialStatus === "AUTHORIZED" ||
       order.financialStatus === "PARTIALLY_PAID");
@@ -160,7 +170,7 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
             </DropdownMenuItem>
           )}
 
-          {!isCancelled && (
+          {canManage && !isCancelled && (
             <DropdownMenuItem
               variant="destructive"
               onSelect={() => setDialog("cancel")}
@@ -408,9 +418,24 @@ function CapturePaymentDialog({
   onClose: () => void;
 }) {
   const mutation = useCaptureOrderPaymentMutation(order.id);
-  const outstanding = Number(order.totalPrice);
-  const [amount, setAmount] = useState(outstanding.toFixed(2));
-  const [finalCapture, setFinalCapture] = useState(true);
+  // This was `Number(order.totalPrice)` — it subtracted nothing, and since the
+  // input is prefilled from it, the DEFAULT action was to submit too much. The
+  // dialog only opens for AUTHORIZED / PARTIALLY_PAID orders, i.e. exactly the
+  // states where the total is not the balance.
+  //
+  // Deliberately not labelled "outstanding balance": the true capturable figure
+  // is the authorisation minus what has already been captured, which lives in
+  // Shopify and is not on this response. This is the honest local approximation
+  // — the server enforces the real ceiling.
+  const totalRefunded = (order.refunds ?? []).reduce(
+    (sum, r) => sum + Number(r.amount),
+    0,
+  );
+  const totalLessRefunds = Math.max(0, Number(order.totalPrice) - totalRefunded);
+  const [amount, setAmount] = useState(totalLessRefunds.toFixed(2));
+  // Matches the DTO and service default. It was `true` here — the UI defaulted
+  // to closing the authorisation, the more destructive of the two.
+  const [finalCapture, setFinalCapture] = useState(false);
 
   function handleSubmit() {
     const numeric = parseFloat(amount);
@@ -444,7 +469,11 @@ function CapturePaymentDialog({
             className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs tabular-nums outline-none focus:ring-1 focus:ring-[#cdff8c]"
           />
           <p className="mt-1 text-[10px] text-muted-foreground">
-            Outstanding balance: {formatCurrency(outstanding, order.currency)}
+            Order total, less refunds:{" "}
+            {formatCurrency(totalLessRefunds, order.currency)}
+            {totalRefunded > 0 && (
+              <> · {formatCurrency(totalRefunded, order.currency)} refunded</>
+            )}
           </p>
         </div>
 
