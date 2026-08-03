@@ -107,6 +107,10 @@ export interface OrderNode {
   cancelReason: string | null;
   cancelledAt: string | null;
   closedAt: string | null;
+  /** Set by our own pushOrder so a pushed offline order can be re-adopted
+   *  instead of re-imported as a duplicate. */
+  sourceIdentifier: string | null;
+  sourceName: string | null;
   createdAt: string;
   updatedAt: string;
   currencyCode: string;
@@ -118,9 +122,58 @@ export interface OrderNode {
   shippingAddress: MailingAddress | null;
   billingAddress: MailingAddress | null;
   customer: OrderCustomerNode | null;
-  lineItems: { nodes: OrderLineItemNode[] };
+  lineItems: { pageInfo?: PageInfo; nodes: OrderLineItemNode[] };
   fulfillments: OrderFulfillmentNode[];
   refunds: OrderRefundNode[];
+}
+
+/**
+ * Fetch a further page of one order's line items.
+ *
+ * ORDERS_LIST_QUERY takes only the first 100. Without draining, an order with
+ * more items imports a subset SILENTLY: the order total comes from Shopify and
+ * stays correct, so nothing looks wrong, but the GST invoice (built from the
+ * line items) understates the sale and vendors whose items fall in the missing
+ * tail never see the order at all.
+ */
+export const ORDER_LINE_ITEMS_PAGE_QUERY = /* GraphQL */ `
+  query OrderLineItemsPage($id: ID!, $first: Int!, $after: String) {
+    order(id: $id) {
+      id
+      lineItems(first: $first, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          title
+          variantTitle
+          sku
+          quantity
+          originalUnitPriceSet { shopMoney { amount currencyCode } }
+          totalDiscountSet { shopMoney { amount currencyCode } }
+          requiresShipping
+          taxable
+          variant {
+            id
+            product { id }
+          }
+          customAttributes { key value }
+        }
+      }
+    }
+  }
+`;
+
+export interface OrderLineItemsPageResponse {
+  order: {
+    id: string;
+    lineItems: { pageInfo: PageInfo; nodes: OrderLineItemNode[] };
+  } | null;
+}
+
+export interface OrderLineItemsPageVariables {
+  id: string;
+  first: number;
+  after?: string | null;
 }
 
 export interface OrdersListResponse {
@@ -160,6 +213,8 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
         cancelReason
         cancelledAt
         closedAt
+        sourceIdentifier
+        sourceName
         createdAt
         updatedAt
         currencyCode
@@ -180,6 +235,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
           id email firstName lastName
         }
         lineItems(first: 100) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             title
@@ -1507,7 +1563,23 @@ export interface OrderCreatePushVariables {
 
 export interface OrderCreatePushResponse {
   orderCreate: {
-    order: { id: string; name: string } | null;
+    order: {
+      id: string;
+      name: string;
+      /// The line items Shopify just created. Read back so `pushOrder` can
+      /// stamp Shopify's line ids onto the local `OrderLineItem` rows — without
+      /// them the local rows keep their `manual_<uuid>` ids, the `orders/create`
+      /// webhook matches nothing, and the order ends up holding TWO copies of
+      /// every item.
+      lineItems: {
+        nodes: Array<{
+          id: string;
+          quantity: number;
+          sku: string | null;
+          variant: { id: string } | null;
+        }>;
+      };
+    } | null;
     userErrors: ShopifyUserError[];
   };
 }
@@ -1515,7 +1587,13 @@ export interface OrderCreatePushResponse {
 export const ORDER_CREATE_MUTATION = /* GraphQL */ `
   mutation OrderCreate($order: OrderCreateOrderInput!, $options: OrderCreateOptionsInput) {
     orderCreate(order: $order, options: $options) {
-      order { id name }
+      order {
+        id
+        name
+        lineItems(first: 100) {
+          nodes { id quantity sku variant { id } }
+        }
+      }
       userErrors { field message }
     }
   }

@@ -19,7 +19,9 @@ export class ShopifyGraphqlError extends Error {
       | 'AUTH_FAILED'
       | 'HTTP_ERROR'
       | 'GRAPHQL_ERROR'
+      | 'MAX_COST_EXCEEDED'
       | 'RETRY_EXHAUSTED'
+      | 'TIMEOUT'
       | 'EMPTY_RESPONSE',
     public readonly details?: unknown,
     /// HTTP status code when the failure came from the transport layer.
@@ -52,8 +54,31 @@ interface ShopifyGraphqlEnvelope<T> {
   };
 }
 
-const MAX_RETRIES = 5;
+/// Per-failure-class retry budgets.
+///
+/// These used to be a single shared counter of 5. Because 429s, 5xx responses
+/// and body-level THROTTLEDs all decremented it, a run that hit one of each
+/// twice exhausted the budget having genuinely retried nothing — and reported
+/// failure for three separately-recoverable conditions. Each class now gets its
+/// own allowance, with TOTAL_ATTEMPT_CEILING as the backstop so a pathological
+/// mixture still terminates.
+const THROTTLE_RETRIES = 5; // 429 + body-level THROTTLED — Shopify telling us to slow down
+const SERVER_RETRIES = 4; // 5xx — Shopify having a bad moment
+const TRANSPORT_RETRIES = 2; // timeouts — the connection went quiet
+const TOTAL_ATTEMPT_CEILING = 9;
+
 const BASE_BACKOFF_MS = 1000;
+/// Ceiling on the exponential 5xx backoff. Without one it doubles unbounded.
+const MAX_BACKOFF_MS = 16_000;
+/// `Retry-After` is a value Shopify chooses and we obeyed verbatim, so an
+/// unexpected number could park a worker for as long as it liked. Combined
+/// with the absence of a fetch timeout, nothing could interrupt it.
+const MAX_RETRY_AFTER_MS = 60_000;
+/// Hard time limit on a single Shopify request. Without a signal the only
+/// bound was undici's ~300s default — long enough for a silent socket to wedge
+/// the worker. Every other outbound integration in this codebase already sets
+/// one (Razorpay 5s, order service 15s, email service).
+const SHOPIFY_FETCH_TIMEOUT_MS = 30_000;
 
 /**
  * Thin Shopify Admin GraphQL client.
@@ -88,25 +113,65 @@ export class ShopifyGraphqlClient {
     const url = `https://${auth.shopDomain}/admin/api/${apiVersion ?? this.getApiVersion()}/graphql.json`;
     const body = JSON.stringify({ query, variables: variables ?? {} });
 
+    const budget = {
+      throttle: THROTTLE_RETRIES,
+      server: SERVER_RETRIES,
+      transport: TRANSPORT_RETRIES,
+    };
     let attempt = 0;
     let lastError: string = 'unknown';
 
-    while (attempt < MAX_RETRIES) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': auth.accessToken,
-        },
-        body,
-      });
+    while (attempt < TOTAL_ATTEMPT_CEILING) {
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': auth.accessToken,
+          },
+          body,
+          // Without this the request is bounded only by undici's ~300s
+          // default. A socket that connects and then goes silent would hold
+          // the worker for minutes with no way to interrupt it.
+          signal: AbortSignal.timeout(SHOPIFY_FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        const aborted =
+          err instanceof Error &&
+          (err.name === 'TimeoutError' || err.name === 'AbortError');
+        if (!aborted) throw err;
+        if (budget.transport-- <= 0) {
+          throw new ShopifyGraphqlError(
+            `Shopify GraphQL request to ${auth.shopDomain} timed out after ${SHOPIFY_FETCH_TIMEOUT_MS}ms (transport retries exhausted)`,
+            'TIMEOUT',
+            err,
+          );
+        }
+        this.logger.warn(
+          `GraphQL request to ${auth.shopDomain} timed out after ${SHOPIFY_FETCH_TIMEOUT_MS}ms — retrying (${budget.transport} transport retries left)`,
+        );
+        attempt++;
+        lastError = 'TIMEOUT';
+        continue;
+      }
 
       if (res.status === 429) {
-        const retryAfter = parseInt(res.headers.get('Retry-After') || '2', 10);
-        this.logger.warn(
-          `GraphQL 429 from ${auth.shopDomain}: waiting ${retryAfter}s (attempt ${attempt + 1}/${MAX_RETRIES})`,
+        const header = parseInt(res.headers.get('Retry-After') || '2', 10);
+        // Clamp: this value is chosen by the remote end, and we used to obey
+        // it verbatim.
+        const waitMs = Math.min(
+          MAX_RETRY_AFTER_MS,
+          Math.max(0, Number.isFinite(header) ? header * 1000 : 2000),
         );
-        await this.sleep(retryAfter * 1000);
+        if (budget.throttle-- <= 0) {
+          lastError = 'HTTP 429';
+          break;
+        }
+        this.logger.warn(
+          `GraphQL 429 from ${auth.shopDomain}: waiting ${waitMs}ms (${budget.throttle} throttle retries left)`,
+        );
+        await this.sleep(waitMs);
         attempt++;
         lastError = `HTTP 429`;
         continue;
@@ -119,9 +184,13 @@ export class ShopifyGraphqlClient {
         );
       }
       if (res.status >= 500) {
-        const backoff = BASE_BACKOFF_MS * Math.pow(2, attempt);
+        if (budget.server-- <= 0) {
+          lastError = `HTTP ${res.status}`;
+          break;
+        }
+        const backoff = this.backoffWithJitter(SERVER_RETRIES - budget.server - 1);
         this.logger.warn(
-          `GraphQL ${res.status} from ${auth.shopDomain}: backing off ${backoff}ms (attempt ${attempt + 1}/${MAX_RETRIES})`,
+          `GraphQL ${res.status} from ${auth.shopDomain}: backing off ${backoff}ms (${budget.server} server retries left)`,
         );
         await this.sleep(backoff);
         attempt++;
@@ -149,11 +218,15 @@ export class ShopifyGraphqlClient {
           envelope.extensions?.cost?.throttleStatus?.restoreRate ?? 50;
         const requested = envelope.extensions?.cost?.requestedQueryCost ?? 1000;
         const waitMs = Math.min(
-          16000,
+          MAX_BACKOFF_MS,
           Math.max(500, (requested / restoreRate) * 1000),
         );
+        if (budget.throttle-- <= 0) {
+          lastError = 'THROTTLED';
+          break;
+        }
         this.logger.warn(
-          `GraphQL THROTTLED for ${auth.shopDomain}: waiting ${waitMs}ms (attempt ${attempt + 1}/${MAX_RETRIES})`,
+          `GraphQL THROTTLED for ${auth.shopDomain}: waiting ${waitMs}ms (${budget.throttle} throttle retries left)`,
         );
         await this.sleep(waitMs);
         attempt++;
@@ -162,9 +235,18 @@ export class ShopifyGraphqlClient {
       }
 
       if (envelope.errors && envelope.errors.length > 0) {
+        // A cost rejection is deterministic — retrying the identical query can
+        // never succeed — but it IS recoverable by asking for less. Give it its
+        // own code so callers can shrink their page size instead of failing the
+        // whole sync on a generic error.
+        const costRejected = envelope.errors.some(
+          (e) =>
+            (e as { extensions?: { code?: string } }).extensions?.code ===
+            'MAX_COST_EXCEEDED',
+        );
         throw new ShopifyGraphqlError(
           `GraphQL errors: ${envelope.errors.map((e) => e.message).join('; ')}`,
-          'GRAPHQL_ERROR',
+          costRejected ? 'MAX_COST_EXCEEDED' : 'GRAPHQL_ERROR',
           envelope.errors,
         );
       }
@@ -172,6 +254,16 @@ export class ShopifyGraphqlClient {
       // Pre-emptive slow-down: avoid the next call getting THROTTLED.
       const throttleStatus = envelope.extensions?.cost?.throttleStatus;
       if (throttleStatus) {
+        // Cost is parsed for the sleep decisions above and was then thrown
+        // away, so there was no way to answer "which query is burning the
+        // rate limit". Debug level: one line per request is too noisy for
+        // info, but invaluable when a tenant starts getting throttled.
+        this.logger.debug(
+          `Shopify cost ${auth.shopDomain}: actual=${envelope.extensions?.cost?.actualQueryCost ?? '?'} ` +
+          `requested=${envelope.extensions?.cost?.requestedQueryCost ?? '?'} ` +
+          `bucket=${throttleStatus.currentlyAvailable}/${throttleStatus.maximumAvailable} ` +
+          `restore=${throttleStatus.restoreRate}/s`,
+        );
         const usage =
           1 - throttleStatus.currentlyAvailable / throttleStatus.maximumAvailable;
         if (usage > 0.8) {
@@ -191,9 +283,25 @@ export class ShopifyGraphqlClient {
     }
 
     throw new ShopifyGraphqlError(
-      `Shopify GraphQL request to ${auth.shopDomain} failed after ${MAX_RETRIES} retries (last: ${lastError})`,
+      `Shopify GraphQL request to ${auth.shopDomain} failed after ${attempt} retries (last: ${lastError})`,
       'RETRY_EXHAUSTED',
     );
+  }
+
+  /**
+   * Exponential backoff with full jitter, capped.
+   *
+   * The previous `BASE * 2 ** attempt` was both unbounded and perfectly
+   * deterministic, so every sync that hit the same Shopify wobble retried at
+   * the identical instant — a self-inflicted stampede at the worst possible
+   * moment. Full jitter spreads them across the window instead.
+   */
+  private backoffWithJitter(retryIndex: number): number {
+    const ceiling = Math.min(
+      MAX_BACKOFF_MS,
+      BASE_BACKOFF_MS * Math.pow(2, Math.max(0, retryIndex)),
+    );
+    return Math.max(100, Math.floor(Math.random() * ceiling));
   }
 
   /**

@@ -33,6 +33,8 @@ import {
 import { ProductOptionDto } from './dto/option.dto';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import { SkuGeneratorService } from '../inventory/sku-generator.service';
 import {
   type IImageStorage,
   IMAGE_STORAGE,
@@ -75,8 +77,27 @@ export class ProductService {
     private readonly prisma: PrismaService,
     private readonly shopifyPushEnqueuer: ShopifyPushEnqueuer,
     private readonly settings: OrganizationSettingsService,
+    private readonly inventoryLedger: InventoryLedgerService,
+    private readonly skuGenerator: SkuGeneratorService,
     @Inject(IMAGE_STORAGE) private readonly imageStorage: IImageStorage,
   ) { }
+
+  /**
+   * Manual SKU/barcode edits are policed for org-wide uniqueness (409 on
+   * collision). Only NEW duplicates are blocked — data synced from Shopify may
+   * legally contain duplicates (surfaced by the duplicates report instead).
+   * Empty strings clear the field and are always allowed.
+   */
+  private async assertVariantCodesFree(
+    orgId: string,
+    dto: { sku?: string | null; barcode?: string | null },
+    excludeVariantId?: string,
+  ) {
+    if (dto.sku) await this.skuGenerator.assertCodeFree(orgId, dto.sku, excludeVariantId);
+    if (dto.barcode && dto.barcode !== dto.sku) {
+      await this.skuGenerator.assertCodeFree(orgId, dto.barcode, excludeVariantId);
+    }
+  }
 
   async findAll(
     orgId: string,
@@ -474,9 +495,9 @@ export class ProductService {
       // Build variants payload.
       const variantsCreate = hasMulti
         ? dto.variants!.map((v, idx) =>
-          this.buildVariantCreate(v, idx + 1, dto.options),
+          this.buildVariantCreate(orgId, v, idx + 1, dto.options),
         )
-        : [this.buildVariantCreate(dto.variant!, 1, undefined)];
+        : [this.buildVariantCreate(orgId, dto.variant!, 1, undefined)];
 
       const created = await tx.product.create({
         data: {
@@ -509,6 +530,17 @@ export class ProductService {
           },
         },
       });
+
+      // Ledger: initial stock for variants created with a non-zero quantity.
+      await this.inventoryLedger.recordInitialQuantities(
+        tx,
+        orgId,
+        created.variants,
+        'initial',
+        'product',
+        created.id,
+        _userId,
+      );
 
       return created;
     });
@@ -563,6 +595,7 @@ export class ProductService {
    *   when provided on the DTO; Prisma defaults apply otherwise.
    */
   private buildVariantCreate(
+    orgId: string,
     v: CreateVariantDto,
     position: number,
     options: ProductOptionDto[] | undefined,
@@ -576,6 +609,7 @@ export class ProductService {
         ? optionLabels.join(' / ')
         : DEFAULT_VARIANT_TITLE;
     return {
+      organizationId: orgId,
       externalId: `manual_${randomUUID()}`,
       title,
       sku: v.sku ?? null,
@@ -716,10 +750,18 @@ export class ProductService {
             dto.variant.inventoryQuantity;
 
         if (Object.keys(variantPatch).length > 0) {
-          await tx.productVariant.update({
-            where: { id: product.variants[0].id },
-            data: variantPatch,
-          });
+          // Audited update — quantity changes always emit an InventoryEvent
+          // (this path historically mutated stock silently).
+          await this.inventoryLedger.auditedVariantUpdate(
+            {
+              orgId,
+              variantId: product.variants[0].id,
+              data: variantPatch,
+              reason: 'adjustment',
+              referenceType: 'manual',
+            },
+            tx,
+          );
         }
       }
 
@@ -873,9 +915,13 @@ export class ProductService {
         ? optionLabels.join(' / ')
         : DEFAULT_VARIANT_TITLE;
 
-    const created = await this.prisma.productVariant.create({
+    await this.assertVariantCodesFree(orgId, dto);
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.productVariant.create({
       data: {
         productId,
+        organizationId: orgId,
         externalId: `manual_${randomUUID()}`,
         title,
         sku: dto.sku ?? null,
@@ -900,6 +946,17 @@ export class ProductService {
         // Vendors cannot set the tax flag — always defaults to taxable.
         taxable: vendorScope ? true : (dto.taxable ?? true),
       },
+      });
+      // Ledger: initial stock when created with a non-zero quantity.
+      await this.inventoryLedger.recordInitialQuantities(
+        tx,
+        orgId,
+        [row],
+        'initial',
+        'variant',
+        row.id,
+      );
+      return row;
     });
 
     await this.markOutOfSyncIfNeeded(product.id);
@@ -984,10 +1041,17 @@ export class ProductService {
       orgId,
       vendorScope,
     );
+    await this.assertVariantCodesFree(orgId, dto, variantId);
 
-    const updated = await this.prisma.productVariant.update({
-      where: { id: variantId },
+    // Audited update — quantity changes always emit an InventoryEvent (this
+    // was THE historical ledger hole: stock edits via variant PATCH left no
+    // audit trail).
+    const updated = await this.inventoryLedger.auditedVariantUpdate({
+      orgId,
+      variantId,
       data: this.buildVariantPatch(dto, variant, vendorScope),
+      reason: 'adjustment',
+      referenceType: 'manual',
     });
 
     await this.markOutOfSyncIfNeeded(variant.product.id);
@@ -1024,19 +1088,33 @@ export class ProductService {
       );
     }
 
+    for (const u of dto.updates) {
+      await this.assertVariantCodesFree(orgId, u, u.variantId);
+    }
+
     const variants = await this.prisma.$transaction(async (tx) => {
       const updated: ProductVariant[] = [];
       for (const u of dto.updates) {
-        updated.push(
-          await tx.productVariant.update({
-            where: { id: u.variantId },
-            data: this.buildVariantPatch(
-              u,
-              byId.get(u.variantId)!,
-              vendorScope,
-            ),
-          }),
-        );
+        const before = byId.get(u.variantId)!;
+        const row = await tx.productVariant.update({
+          where: { id: u.variantId },
+          data: this.buildVariantPatch(
+            u,
+            before,
+            vendorScope,
+          ),
+        });
+        // Ledger: `before` was loaded above in this request, so no re-read.
+        await this.inventoryLedger.recordQuantityChange(tx, {
+          orgId,
+          variantId: u.variantId,
+          quantityBefore: before.inventoryQuantity,
+          quantityAfter: row.inventoryQuantity,
+          reason: 'adjustment',
+          referenceType: 'manual',
+          sku: row.sku ?? before.sku,
+        });
+        updated.push(row);
       }
       await this.markOutOfSyncIfNeeded(product.id, tx);
       return updated;
@@ -1092,7 +1170,13 @@ export class ProductService {
       };
     }
 
-    await this.prisma.productVariant.delete({ where: { id: variantId } });
+    await this.prisma.$transaction(async (tx) => {
+      // Warehousing: refuse deletion while any bucket is non-zero; remove
+      // all-zero StockLevel rows so the RESTRICT FK doesn't block the delete.
+      // No-op for legacy orgs (they have no stock rows).
+      await this.inventoryLedger.releaseStockRowsForDelete(tx, variantId);
+      await tx.productVariant.delete({ where: { id: variantId } });
+    });
     await this.markOutOfSyncIfNeeded(variant.product.id);
     return { id: variantId, deleted: true };
   }
@@ -1323,6 +1407,7 @@ export class ProductService {
         ].filter(Boolean) as string[];
         return {
           productId,
+          organizationId: orgId,
           externalId: `manual_${randomUUID()}`,
           title:
             labels.length > 0
@@ -1920,6 +2005,7 @@ export class ProductService {
         externalCreatedAt: new Date(),
         variants: {
           create: original.variants.map((v) => ({
+            organizationId: orgId,
             externalId: `manual_${randomUUID()}`,
             title: v.title,
             sku: v.sku,
@@ -1960,6 +2046,16 @@ export class ProductService {
         channel: { select: { id: true, name: true, platform: true } },
       },
     });
+    // Ledger: duplicated variants carry the original's stock — record it as
+    // their initial quantity so the ledger reconstructs to the right number.
+    await this.inventoryLedger.recordInitialQuantities(
+      this.prisma,
+      orgId,
+      created.variants,
+      'initial',
+      'product_duplicate',
+      created.id,
+    );
     return created;
   }
 
@@ -2188,7 +2284,7 @@ export class ProductService {
     manualChannelId: string,
     candidate: ParsedProductCandidate,
   ) {
-    return this.prisma.product.create({
+    const created = await this.prisma.product.create({
       data: {
         organizationId: orgId,
         channelId: manualChannelId,
@@ -2211,6 +2307,7 @@ export class ProductService {
               Boolean,
             ) as string[];
             return {
+              organizationId: orgId,
               externalId: `manual_${randomUUID()}`,
               title:
                 labels.length > 0
@@ -2245,7 +2342,18 @@ export class ProductService {
           })),
         },
       },
+      include: { variants: true },
     });
+    // Ledger: imported variants with a non-zero quantity get an initial event.
+    await this.inventoryLedger.recordInitialQuantities(
+      this.prisma,
+      orgId,
+      created.variants,
+      'initial',
+      'csv_import',
+      created.id,
+    );
+    return created;
   }
 
   /** Marshal a Prisma ProductImportJob row into the API view shape. */

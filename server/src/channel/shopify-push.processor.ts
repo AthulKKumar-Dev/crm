@@ -33,6 +33,12 @@ export class ShopifyPushProcessor extends WorkerHost {
         case 'bulk-orders':
           await this.pushService.bulkPushUnsyncedOrders(data.organizationId);
           break;
+        case 'push-availability':
+          await this.pushService.pushAvailability(
+            data.organizationId,
+            data.variantIds,
+          );
+          break;
         default: {
           // Exhaustiveness check — if a new job type is added without a
           // case here, TS will flag it.
@@ -48,10 +54,12 @@ export class ShopifyPushProcessor extends WorkerHost {
       // can see the error in the UI. Bulk jobs already write per-product
       // failures inside bulkPushManualProducts, so we skip there.
       if (data.type === 'order') {
-        await this.pushService.recordFailure(data.orderId, msg).catch(() => undefined);
+        await this.pushService
+          .recordFailure(data.orderId, data.organizationId, msg)
+          .catch(() => undefined);
       } else if (data.type === 'product') {
         await this.pushService
-          .recordProductFailure(data.productId, msg)
+          .recordProductFailure(data.productId, data.organizationId, msg)
           .catch(() => undefined);
       }
 

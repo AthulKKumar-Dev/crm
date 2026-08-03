@@ -66,6 +66,37 @@ export class MembersService {
         return updated;
     }
 
+    // ─── UPDATE PERMISSIONS ───
+    // Fine-grained inventory/report grants (see auth/permissions.ts). Wholesale
+    // replace — the team UI always sends the complete grant list. OWNER needs
+    // no grants (implicit full access), so editing the owner is pointless but
+    // harmless; we forbid it anyway for symmetry with updateRole.
+    async updatePermissions(
+        orgId: string,
+        memberId: string,
+        grants: string[],
+        preset?: string,
+    ) {
+        const member = await this.prisma.organizationMember.findFirst({
+            where: { id: memberId, organizationId: orgId, isActive: true },
+        });
+
+        if (!member) throw new NotFoundException('Member not found');
+        if (member.role === UserRole.OWNER) {
+            throw new ForbiddenException('The organization owner already has full access');
+        }
+
+        const updated = await this.prisma.organizationMember.update({
+            where: { id: memberId },
+            data: { permissions: { grants, ...(preset ? { preset } : {}) } },
+        });
+
+        // Same staleness story as role changes — force a fresh session.
+        await this.redis.deleteSession(member.userId);
+
+        return updated;
+    }
+
     // ─── REMOVE MEMBER ───
     // WHY isActive=false instead of DELETE? Soft removal preserves:
     // - Their notes/messages/assigned conversations still reference them

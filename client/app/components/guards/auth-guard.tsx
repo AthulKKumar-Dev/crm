@@ -1,17 +1,46 @@
+import { useEffect } from "react";
 import { Navigate } from "react-router";
 import { useAuthStore } from "~/stores/auth.store";
+import { readTokenOrgId } from "~/lib/jwt";
 
 /**
  * Protects /app/* routes.
  *
  * - Not authenticated → /auth/login
  * - No organizations → /onboarding/account-type
- * - No currentOrgId → auto-set first org
+ * - No currentOrgId → adopt the org the ACCESS TOKEN names (falling back to
+ *   the first membership), so the UI and the server agree on the tenant
  * - All checks pass → render children
  */
 export function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, accessToken, organizations, currentOrgId, setCurrentOrg } =
-    useAuthStore();
+  // Selectors rather than the whole store: subscribing to everything re-rendered
+  // this guard and its entire subtree on every token refresh.
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const organizations = useAuthStore((s) => s.organizations);
+  const currentOrgId = useAuthStore((s) => s.currentOrgId);
+  const setCurrentOrg = useAuthStore((s) => s.setCurrentOrg);
+
+  // Adopt an org when none is selected yet.
+  //
+  // Prefer the one the access token was minted for: the server resolves the
+  // tenant from that token, so defaulting to `organizations[0]` could leave the
+  // UI fetching org A's settings while every request is answered for org B.
+  // Runs in an effect, not the render body — setting store state during render
+  // triggers React's "cannot update a component while rendering" warning and an
+  // extra render pass on every guarded navigation.
+  useEffect(() => {
+    if (currentOrgId || organizations.length === 0) return;
+
+    const tokenOrgId = readTokenOrgId(accessToken);
+    const fromToken = tokenOrgId
+      ? organizations.find((m) => m.organization.id === tokenOrgId)
+      : undefined;
+
+    setCurrentOrg(
+      (fromToken ?? organizations[0]).organization.id,
+    );
+  }, [currentOrgId, organizations, accessToken, setCurrentOrg]);
 
   if (!isAuthenticated || !accessToken) {
     return <Navigate to="/auth/login" replace />;
@@ -19,11 +48,6 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
 
   if (organizations.length === 0) {
     return <Navigate to="/onboarding/account-type" replace />;
-  }
-
-  // Auto-set currentOrgId if not set
-  if (!currentOrgId && organizations.length > 0) {
-    setCurrentOrg(organizations[0].organization.id);
   }
 
   return <>{children}</>;

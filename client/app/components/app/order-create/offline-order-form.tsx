@@ -7,11 +7,13 @@ import { CustomerPickerOrCreate } from "./customer-picker-or-create";
 import { ProductPicker, type CartLineSeed } from "./product-picker";
 import { OrderCart, type CartLine } from "./order-cart";
 import { BillSummary } from "./bill-summary";
+import { AddressFields, cleanAddress } from "./address-fields";
 import type {
   CreateOfflineOrderRequest,
   CreateDraftOrderRequest,
   OfflineCustomerInput,
   OfflinePaymentMethod,
+  OrderAddressInput,
 } from "~/types/api";
 
 type CustomerSelection = {
@@ -47,6 +49,9 @@ export function OfflineOrderForm({
   const [paymentMethod, setPaymentMethod] =
     useState<OfflinePaymentMethod>("CASH");
   const [note, setNote] = useState("");
+  const [shipTo, setShipTo] = useState<OrderAddressInput>({});
+  const [billSame, setBillSame] = useState(true);
+  const [billTo, setBillTo] = useState<OrderAddressInput>({});
 
   function addLine(seed: CartLineSeed) {
     setLines((prev) => {
@@ -120,6 +125,19 @@ export function OfflineOrderForm({
       : customer.newCustomer ?? {};
   }
 
+  /**
+   * Shipping/billing as sent to the API. Both are `undefined` for a plain
+   * counter sale, which keeps place of supply falling back to the seller's
+   * state exactly as before this form captured addresses.
+   */
+  function buildAddresses() {
+    const shipping = cleanAddress(shipTo);
+    return {
+      shippingAddress: shipping,
+      billingAddress: billSame ? shipping : cleanAddress(billTo),
+    };
+  }
+
   function handleSubmit() {
     if (!canSubmit) return;
     const payload: CreateOfflineOrderRequest = {
@@ -131,6 +149,7 @@ export function OfflineOrderForm({
       })),
       paymentMethod,
       note: note || undefined,
+      ...buildAddresses(),
     };
 
     createOrder.mutate(payload, {
@@ -165,6 +184,7 @@ export function OfflineOrderForm({
         unitPriceOverride: l.unitPrice,
       })),
       note: note || undefined,
+      ...buildAddresses(),
     };
 
     createDraft.mutate(payload, {
@@ -205,6 +225,32 @@ export function OfflineOrderForm({
               currency={currency}
             />
           </div>
+        </Section>
+
+        <Section
+          title="Delivery address"
+          subtitle="Leave blank for a counter sale. For a delivered order the state here sets the GST place of supply — a different state from yours means IGST instead of CGST + SGST."
+        >
+          <AddressFields value={shipTo} onChange={setShipTo} />
+
+          <label className="mt-3 flex items-center gap-2 text-[11px] text-gray-700 dark:text-gray-300">
+            <input
+              type="checkbox"
+              checked={billSame}
+              onChange={(e) => setBillSame(e.target.checked)}
+              className="rounded border-border"
+            />
+            Billing address is the same as delivery
+          </label>
+
+          {!billSame && (
+            <div className="mt-3 border-t border-border pt-3">
+              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Billing address
+              </p>
+              <AddressFields value={billTo} onChange={setBillTo} />
+            </div>
+          )}
         </Section>
       </div>
 

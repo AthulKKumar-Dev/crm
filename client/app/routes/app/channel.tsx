@@ -12,6 +12,7 @@ import {
 } from "~/components/ui/dialog";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
+import { QueryErrorState } from "~/components/app/query-error-state";
 import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
 import { WhatsAppConnectDialog } from "~/components/app/whatsapp-connect-dialog";
 import { useChannels, channelKeys } from "~/hooks/use-channel-queries";
@@ -134,7 +135,7 @@ export default function ChannelPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
 
-  const { data: channels, isLoading } = useChannels();
+  const { data: channels, isLoading, isError, refetch } = useChannels();
   const triggerSync = useTriggerSyncMutation();
   const disconnectChannel = useDisconnectChannelMutation();
 
@@ -195,7 +196,12 @@ export default function ChannelPage() {
       </div>
 
       {/* Connected channels list */}
-      {isLoading ? (
+      {/* Error first, and deliberately so: this page's empty state offers an
+          "Add Channel" button, so rendering it on a failed request invited the
+          merchant to connect a store they had already connected. */}
+      {isError && !channels ? (
+        <QueryErrorState resource="your channels" onRetry={() => refetch()} />
+      ) : isLoading ? (
         <TableSkeleton rows={4} columns={4} />
       ) : !channels || channels.length === 0 ? (
         <EmptyState

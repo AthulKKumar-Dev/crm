@@ -5,6 +5,7 @@ import { GstModule } from '../gst/gst.module';
 import { InvoiceModule } from '../invoice/invoice.module';
 import { ChannelModule } from '../channel/channel.module';
 import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
+import { LoyaltyModule } from '../loyalty/loyalty.module';
 
 // WHY these imports?
 //   GstModule                  — tax math (GstCalculatorService, TaxResolverService).
@@ -12,8 +13,17 @@ import { OrganizationSettingsModule } from '../organization-settings/organizatio
 //   ChannelModule              — push the offline order to Shopify post-commit (via
 //                                 ShopifyPushEnqueuer + ShopifyPushService).
 //   OrganizationSettingsModule — gating auto-push on orderSettings.autoSyncToShopify.
+//   LoyaltyModule              — offline sales and cancellations move
+//                                 Customer.ordersCount / totalSpent, and the VIP
+//                                 tier is derived from them.
 @Module({
-  imports: [GstModule, InvoiceModule, ChannelModule, OrganizationSettingsModule],
+  imports: [
+    GstModule,
+    InvoiceModule,
+    ChannelModule,
+    OrganizationSettingsModule,
+    LoyaltyModule,
+  ],
   controllers: [OrderController],
   providers: [OrderService],
   exports: [OrderService],

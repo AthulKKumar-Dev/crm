@@ -4,6 +4,7 @@ import { useOrder } from "~/hooks/use-order-queries";
 import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
 import { cn } from "~/lib/utils";
 import type { VendorOrderDetail as VendorOrder } from "~/types/api";
+import { QueryErrorState } from "~/components/app/query-error-state";
 
 const STATUS_CLASS: Record<string, string> = {
   fulfilled: "bg-[#CEF17B]/30 text-[#084734]",
@@ -15,8 +16,18 @@ const STATUS_CLASS: Record<string, string> = {
 
 /** A VENDOR's view of an order — only their items, ship-to, and fulfilment actions. */
 export function VendorOrderDetail({ orderId }: { orderId: string }) {
-  const { data, isLoading } = useOrder(orderId);
+  const { data, isLoading, isError, refetch } = useOrder(orderId);
   const order = data as unknown as VendorOrder | undefined;
+
+  // Before the spinner: a failed request left isLoading false and order
+  // undefined, so the spinner arm below never resolved.
+  if (isError && !order) {
+    return (
+      <div className="p-8">
+        <QueryErrorState resource="this order" onRetry={() => refetch()} />
+      </div>
+    );
+  }
 
   if (isLoading || !order) {
     return (

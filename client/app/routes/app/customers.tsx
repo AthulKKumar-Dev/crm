@@ -14,6 +14,7 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useIndianStates } from "~/hooks/use-gst-queries";
 import { formatCurrency } from "~/lib/utils";
 import type { VipLevel, CustomerListParams, Customer } from "~/types/api";
+import { useDebounced } from "~/hooks/use-debounced";
 
 export function meta() {
   return [{ title: "Customers | Collabo CRM" }];
@@ -63,10 +64,14 @@ export default function CustomersPage() {
   const gstEnabled = org?.gstEnabled ?? false;
   const orgCurrency = org?.currency ?? "USD";
 
+  // Debounced into the query key only — the input keeps the raw value, so
+  // typing stays instant without a request per keystroke.
+  const debouncedSearch = useDebounced(searchQuery, 350);
+
   const params: CustomerListParams = {
     page: currentPage,
     limit: PAGE_SIZE,
-    search: searchQuery || undefined,
+    search: debouncedSearch || undefined,
     vipLevel: vipFilter !== "All" ? vipFilter : undefined,
   };
 

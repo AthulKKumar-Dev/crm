@@ -17,7 +17,6 @@ import { useOrder } from "~/hooks/use-order-queries";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
-import { useInvoices } from "~/hooks/use-invoice-queries";
 import { OrderActionsMenu } from "~/components/app/order-actions";
 import { OrderFulfillmentsSection } from "~/components/app/order-fulfillments";
 import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
@@ -31,8 +30,8 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { cn, formatCurrency } from "~/lib/utils";
+import { QueryErrorState } from "~/components/app/query-error-state";
 import type {
-  Invoice,
   OrderDetail,
   OrganizationGstin,
 } from "~/types/api";
@@ -61,22 +60,33 @@ const FULFILLMENT_CLASS: Record<string, string> = {
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { isVendor } = useCurrentRole();
-  const { data: order, isLoading } = useOrder(id);
+  const { data: order, isLoading, isError, refetch } = useOrder(id);
   const { data: org } = useCurrentOrg();
   const currency = order?.currency ?? org?.currency ?? "INR";
   const gstEnabled = org?.gstEnabled ?? false;
 
-  // Linked invoice (if any) for this order — search the invoice list.
-  const { data: invoiceList } = useInvoices(undefined);
-  const invoice = invoiceList?.data.find(
-    (inv) => (inv as Invoice & { order?: { name: string } }).order?.name === order?.name,
-  );
+  // The order's live invoice comes embedded in the order response (at most
+  // one — enforced server-side). No list-scan: correct at any invoice count,
+  // and vendors never trigger a forbidden /invoices request.
+  const invoice = order?.invoices?.[0] ?? null;
 
   const [showInvoiceDialog, setShowInvoiceDialog] = useState(false);
 
   // Vendors get a deliberately narrow, vendor-scoped view (their items only).
   if (isVendor) {
     return <VendorOrderDetail orderId={id!} />;
+  }
+
+  // Must precede the spinner below: on failure `isLoading` is false and
+  // `order` undefined, so `isLoading || !order` held the spinner on screen
+  // for ever with no retry and no way out. `!order` keeps a failed background
+  // refetch from replacing an order that is already rendered.
+  if (isError && !order) {
+    return (
+      <div className="p-8">
+        <QueryErrorState resource="this order" onRetry={() => refetch()} />
+      </div>
+    );
   }
 
   if (isLoading || !order) {
