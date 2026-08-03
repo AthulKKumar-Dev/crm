@@ -16,6 +16,7 @@ import {
   useAnalyticsDashboard,
   useRefreshAnalytics,
 } from "~/hooks/use-analytics-queries";
+import { QueryErrorState } from "~/components/app/query-error-state";
 import type {
   AnalyticsRange,
   AnalyticsChannelFilter,
@@ -36,7 +37,7 @@ export default function AnalyticsPage() {
   const [range, setRange] = useState<AnalyticsRange>("30d");
   const [channel, setChannel] = useState<AnalyticsChannelFilter>("all");
 
-  const { data, isLoading, isFetching } = useAnalyticsDashboard({ range, channel });
+  const { data, isLoading, isFetching, isError, refetch } = useAnalyticsDashboard({ range, channel });
   const refresh = useRefreshAnalytics();
 
   const stats = data?.stats ?? [];
@@ -107,7 +108,15 @@ export default function AnalyticsPage() {
             changeLabel={changeLabel}
           />
         ))}
-        {isLoading && stats.length === 0 ? (
+        {/* On failure the grid rendered completely blank: `stats` fell back to
+            [] so nothing mapped, and this placeholder is gated on isLoading,
+            so it disappeared too — a broken page and a quiet one looked the
+            same. */}
+        {isError && !data ? (
+          <div className="col-span-full">
+            <QueryErrorState resource="analytics" onRetry={() => refetch()} />
+          </div>
+        ) : isLoading && stats.length === 0 ? (
           <div className="col-span-full rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border text-xs text-muted-foreground">
             Loading analytics…
           </div>

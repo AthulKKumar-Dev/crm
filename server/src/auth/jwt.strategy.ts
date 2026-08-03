@@ -5,6 +5,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { JwtPayload, SessionPayload } from './interfaces/jwt-payload.interface';
+import { extractGrants } from './permissions';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -71,11 +72,13 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             orgId: membership?.organizationId,
             role: membership?.role,
             vendorScope: membership?.vendorScope ?? undefined,
+            permissions: extractGrants(membership?.permissions),
             emailVerified: user.emailVerified,
             memberships: user.memberships.map((m) => ({
                 orgId: m.organizationId,
                 role: m.role,
                 vendorScope: m.vendorScope ?? undefined,
+                permissions: extractGrants(m.permissions),
             })),
         };
 

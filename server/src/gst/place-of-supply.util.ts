@@ -17,7 +17,20 @@ import { extractStateCodeFromGstin } from './constants/gst-rates';
  * which is the correct default for over-the-counter supply.
  */
 
-/** Shopify province code → Indian GST state code. */
+/**
+ * Shopify province code → Indian GST state code.
+ *
+ * `TR` (Tripura) was missing, which mattered more than a missing row normally
+ * would: the lookup below used to return null on a miss instead of trying the
+ * other key shapes, so a Tripura delivery dropped out of address-based place of
+ * supply entirely and silently fell back to the billing/customer/seller state —
+ * potentially the wrong tax head on a statutory invoice.
+ *
+ * Deliberately absent: `28` (Andhra Pradesh Old — superseded by `37`, which
+ * `AP` maps to) and `97` (Other Territory). Neither is a Shopify province code.
+ * Those two plus Tripura were the only codes in `INDIAN_STATES` unreachable
+ * from this map.
+ */
 const PROVINCE_TO_STATE_CODE: Record<string, string> = {
   AN: '35', AP: '37', AR: '12', AS: '18', BR: '10',
   CG: '22', CH: '04', DD: '26', DL: '07', GA: '30',
@@ -25,7 +38,8 @@ const PROVINCE_TO_STATE_CODE: Record<string, string> = {
   KA: '29', KL: '32', LA: '38', LD: '31', MH: '27',
   ML: '17', MN: '14', MP: '23', MZ: '15', NL: '13',
   OR: '21', PB: '03', PY: '34', RJ: '08', SK: '11',
-  TN: '33', TS: '36', UK: '05', UP: '09', WB: '19',
+  TN: '33', TR: '16', TS: '36', UK: '05', UP: '09',
+  WB: '19',
 };
 
 /** State code from an address JSON blob, or null when it carries none. */
@@ -34,13 +48,21 @@ export function extractStateFromAddress(address: unknown): string | null {
 
   const a = address as Record<string, unknown>;
 
+  // Try each key shape in turn and FALL THROUGH on a miss. Each branch used to
+  // `return ... ?? null`, so an unrecognised `province_code` ended resolution
+  // then and there — even when the same address also carried a perfectly good
+  // `stateCode`. An address is one fact expressed in several notations; a
+  // notation we don't recognise is not evidence that the fact is absent.
+
   // Shopify format: province_code (e.g. "MH").
   if (typeof a.province_code === 'string' && a.province_code) {
-    return PROVINCE_TO_STATE_CODE[a.province_code] ?? null;
+    const mapped = PROVINCE_TO_STATE_CODE[a.province_code];
+    if (mapped) return mapped;
   }
   // Locally-entered format.
   if (typeof a.provinceCode === 'string' && a.provinceCode) {
-    return PROVINCE_TO_STATE_CODE[a.provinceCode] ?? null;
+    const mapped = PROVINCE_TO_STATE_CODE[a.provinceCode];
+    if (mapped) return mapped;
   }
   if (typeof a.stateCode === 'string' && isValidStateCode(a.stateCode)) {
     return a.stateCode;

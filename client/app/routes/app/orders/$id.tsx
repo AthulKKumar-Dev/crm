@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { cn, formatCurrency } from "~/lib/utils";
+import { QueryErrorState } from "~/components/app/query-error-state";
 import type {
   OrderDetail,
   OrganizationGstin,
@@ -59,7 +60,7 @@ const FULFILLMENT_CLASS: Record<string, string> = {
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { isVendor } = useCurrentRole();
-  const { data: order, isLoading } = useOrder(id);
+  const { data: order, isLoading, isError, refetch } = useOrder(id);
   const { data: org } = useCurrentOrg();
   const currency = order?.currency ?? org?.currency ?? "INR";
   const gstEnabled = org?.gstEnabled ?? false;
@@ -74,6 +75,18 @@ export default function OrderDetailPage() {
   // Vendors get a deliberately narrow, vendor-scoped view (their items only).
   if (isVendor) {
     return <VendorOrderDetail orderId={id!} />;
+  }
+
+  // Must precede the spinner below: on failure `isLoading` is false and
+  // `order` undefined, so `isLoading || !order` held the spinner on screen
+  // for ever with no retry and no way out. `!order` keeps a failed background
+  // refetch from replacing an order that is already rendered.
+  if (isError && !order) {
+    return (
+      <div className="p-8">
+        <QueryErrorState resource="this order" onRetry={() => refetch()} />
+      </div>
+    );
   }
 
   if (isLoading || !order) {

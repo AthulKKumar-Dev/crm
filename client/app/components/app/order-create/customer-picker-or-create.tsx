@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Search, X, UserPlus, Award } from "lucide-react";
 import { useCustomers } from "~/hooks/use-customer-queries";
 import { useGstins } from "~/hooks/use-gst-queries";
+import { useDebounced } from "~/hooks/use-debounced";
 import {
   Select,
   SelectContent,
@@ -23,15 +24,9 @@ type Selection = {
   newCustomer?: OfflineCustomerInput;
 };
 
-/** A simple debounced value hook — no external dep needed. */
-function useDebounced<T>(value: T, delay = 250): T {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
-  }, [value, delay]);
-  return debounced;
-}
+// (A byte-identical private copy of `useDebounced` used to live here. It now
+// imports the shared hook, so there is one debounce implementation to reason
+// about rather than two that can drift.)
 
 export function CustomerPickerOrCreate({
   value,

@@ -1174,6 +1174,17 @@ export class OrderService {
     const order = await this.loadOrderWithChannel(id, orgId);
     const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
 
+    // Shopify's `OrderInput` has no `billingAddress` field — it exists only on
+    // `OrderCreateInput`. So this edit could never reach Shopify, and writing
+    // it locally alone is worse than refusing: `upsertOrder` applies whatever
+    // address the next `orders/updated` webhook carries, silently reverting it.
+    // Refuse loudly instead. MANUAL orders are unaffected.
+    if (isShopify && dto.billingAddress !== undefined) {
+      throw new BadRequestException(
+        "A Shopify order's billing address can't be changed here — Shopify's API doesn't accept it, so the change would be overwritten on the next sync. Update it in Shopify admin instead.",
+      );
+    }
+
     if (isShopify) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
       const input: OrderUpdateInput = {
@@ -1181,10 +1192,6 @@ export class OrderService {
       };
       if (dto.tags !== undefined) input.tags = dto.tags;
       if (dto.note !== undefined) input.note = dto.note;
-      if (dto.email !== undefined) input.email = dto.email;
-      if (dto.phone !== undefined) input.phone = dto.phone;
-      if (dto.poNumber !== undefined) input.poNumber = dto.poNumber;
-      if (dto.customAttributes !== undefined) input.customAttributes = dto.customAttributes;
       if (dto.shippingAddress !== undefined) {
         input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
       }
@@ -1195,10 +1202,6 @@ export class OrderService {
       );
       ShopifyGraphqlClient.throwIfUserErrors(result.orderUpdate.userErrors, 'orderUpdate');
     }
-
-    const updatedFields = Object.keys(dto).filter(
-      (k) => (dto as Record<string, unknown>)[k] !== undefined,
-    );
 
     return this.prisma.$transaction(async (tx) => {
       const data: Prisma.OrderUpdateInput = {};
@@ -1213,6 +1216,13 @@ export class OrderService {
       const updated = Object.keys(data).length > 0
         ? await tx.order.update({ where: { id }, data })
         : order;
+
+      // Report what was actually WRITTEN, not what was sent. This was derived
+      // from the DTO, so fields the write block ignored still appeared in the
+      // event — a manual order recorded "Order details updated (email, phone)"
+      // having stored neither. Deriving it from `data` means a field added to
+      // the DTO without a matching write can't quietly lie again.
+      const updatedFields = Object.keys(data);
 
       await tx.orderTimelineEvent.create({
         data: {
@@ -1527,6 +1537,24 @@ export class OrderService {
     if (!authTx) {
       throw new BadRequestException(
         'No authorize transaction available to capture against this order.',
+      );
+    }
+
+    // Never capture more than was authorised.
+    //
+    // The only prior checks were "not already PAID/REFUNDED" and "is Shopify";
+    // `dto.amount` went straight into the mutation, and the DTO caps it at
+    // nothing (`@IsNumber() @Min(0)`). Shopify was the sole backstop on a path
+    // that moves real money. The authorised figure is already in hand — it is
+    // this method's own fallback below — so this costs no extra call.
+    //
+    // Rejected rather than silently clamped: quietly correcting a wrong amount
+    // hides whatever produced it.
+    const authorized = Number(authTx.amountSet.shopMoney.amount);
+    if (dto.amount !== undefined && Number.isFinite(authorized) && dto.amount > authorized) {
+      throw new BadRequestException(
+        `Cannot capture ${dto.amount.toFixed(2)} — only ${authorized.toFixed(2)} ` +
+        `${authTx.amountSet.shopMoney.currencyCode} was authorised on this order.`,
       );
     }
 
@@ -2031,7 +2059,7 @@ export class OrderService {
     const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : null);
     const name =
       str('name') ?? ([str('first_name'), str('last_name')].filter(Boolean).join(' ') || null);
-    return {
+    const shipTo = {
       name,
       company: str('company'),
       address1: str('address1'),
@@ -2042,6 +2070,12 @@ export class OrderService {
       country: str('country') ?? str('country_code'),
       phone: str('phone'),
     };
+    // An object of nothing but nulls is not an address. This used to return it
+    // anyway, which diverged from the client's own `resolveAddress` (it yields
+    // null when every field is falsy): an address carrying only a `stateCode`
+    // showed the owner a tidy "No shipping address" and the vendor a stack of
+    // blank lines. Same data, two answers.
+    return Object.values(shipTo).some(Boolean) ? shipTo : null;
   }
 
   /** Mark a fulfilment as delivered locally + in Shopify (best-effort). */

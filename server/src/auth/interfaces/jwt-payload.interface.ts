@@ -15,7 +15,19 @@ export interface JwtPayload {
 
 export interface SessionPayload extends JwtPayload {
     emailVerified: boolean;
-    memberships: Array<{ orgId: string; role: UserRole; vendorScope?: string }>;
+    /**
+     * Fine-grained grants from OrganizationMember.permissions for the CURRENT
+     * org (see auth/permissions.ts). Empty/absent for roles that hold
+     * everything implicitly (OWNER/ADMIN/MANAGER) — PermissionsGuard short-
+     * circuits those before looking here.
+     */
+    permissions?: string[];
+    memberships: Array<{
+        orgId: string;
+        role: UserRole;
+        vendorScope?: string;
+        permissions?: string[];
+    }>;
 }
 
 export interface TokenPair {

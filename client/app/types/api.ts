@@ -1078,15 +1078,20 @@ export type OrderCancelReason =
   | "OTHER";
 
 /** Payload for PATCH /orders/:id. Every field is optional; only sent fields update. */
+/**
+ * `email`, `phone`, `poNumber` and `customAttributes` were removed: the server
+ * accepted them but stored none of them (no columns exist), so sending them was
+ * a silent no-op. The API now rejects them outright.
+ *
+ * `billingAddress` is accepted for MANUAL orders only — Shopify's order-update
+ * API has no billing address field, so on a Shopify order the server refuses it
+ * rather than let the next sync silently revert the change.
+ */
 export interface UpdateOrderRequest {
   tags?: string[];
   note?: string;
-  email?: string;
-  phone?: string;
-  poNumber?: string;
   shippingAddress?: Record<string, unknown>;
   billingAddress?: Record<string, unknown>;
-  customAttributes?: { key: string; value: string }[];
 }
 
 /** Payload for POST /orders/:id/cancel. */
