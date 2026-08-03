@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -292,12 +293,24 @@ export class DraftOrderService {
         const unitPrice = li.unitPriceOverride ?? this.calculator.toNumber(v.price);
         const discount = li.discount ?? 0;
 
-        const productGstRate = this.calculator.toNumber(v.product.gstRate);
+        // Validated here rather than in the DTO — the unit price can come from
+        // the variant, so the ceiling isn't knowable at validation time.
+        const lineGross = this.calculator.round2(unitPrice * li.quantity);
+        if (discount > lineGross) {
+          throw new BadRequestException(
+            `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+          );
+        }
+
+        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
+        const productGstRate = this.calculator.toNullableNumber(
+          v.product.gstRate,
+        );
         const gstRate = sellerState
           ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
           : 0;
@@ -568,12 +581,24 @@ export class DraftOrderService {
           li.unitPriceOverride ?? this.calculator.toNumber(v.price);
         const discount = li.discount ?? 0;
 
-        const productGstRate = this.calculator.toNumber(v.product.gstRate);
+        // Validated here rather than in the DTO — the unit price can come from
+        // the variant, so the ceiling isn't knowable at validation time.
+        const lineGross = this.calculator.round2(unitPrice * li.quantity);
+        if (discount > lineGross) {
+          throw new BadRequestException(
+            `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+          );
+        }
+
+        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
+        const productGstRate = this.calculator.toNullableNumber(
+          v.product.gstRate,
+        );
         const gstRate = sellerState
           ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
           : 0;
@@ -731,6 +756,12 @@ export class DraftOrderService {
   }
 
   // ─── COMPLETE → real Order ───
+  //
+  // Atomic claim-then-act: flip OPEN/INVOICE_SENT → COMPLETED in one
+  // updateMany before any order/stock/invoice work. A concurrent second
+  // completer gets count === 0 → 409, so double-click / two tabs cannot
+  // create two sales. If the sale then fails, revertDraftClaim restores
+  // the prior status (only when no order was linked).
   async complete(
     id: string,
     orgId: string,
@@ -746,72 +777,148 @@ export class DraftOrderService {
       },
     });
     if (!draft) throw new NotFoundException('Draft order not found');
-    if (draft.status === DraftOrderStatus.COMPLETED) {
-      throw new BadRequestException(
+
+    // Prefer Shopify completion when a live mirror exists.
+    let shopifyChannelId: string | null = null;
+    if (draft.externalId) {
+      const shopify = await this.findShopifyChannel(orgId);
+      if (shopify && shopify.status === ChannelStatus.CONNECTED) {
+        shopifyChannelId = shopify.id;
+      }
+      // Mirrored but disconnected → fall through to the local path.
+    }
+
+    if (!shopifyChannelId) {
+      if (!dto.paymentMethod) {
+        throw new BadRequestException(
+          'paymentMethod is required when completing a draft (CASH, CARD, UPI, or OTHER).',
+        );
+      }
+
+      const customCount = draft.lineItems.filter((li) => !li.variantId).length;
+      if (customCount > 0) {
+        throw new BadRequestException(
+          `This draft has ${customCount} custom line item(s) without a linked product; complete it in Shopify or remove the custom lines first.`,
+        );
+      }
+    }
+
+    const previousStatus = draft.status;
+    const claimed = await this.prisma.draftOrder.updateMany({
+      where: {
+        id,
+        organizationId: orgId,
+        deletedAt: null,
+        status: {
+          in: [DraftOrderStatus.OPEN, DraftOrderStatus.INVOICE_SENT],
+        },
+      },
+      data: {
+        status: DraftOrderStatus.COMPLETED,
+        completedAt: new Date(),
+      },
+    });
+    if (claimed.count === 0) {
+      throw new ConflictException(
         'Draft is already completed. See the linked order.',
       );
     }
 
-    // ── Shopify completion path ──────────────────────────────────────────
-    // If the draft was mirrored to Shopify, call draftOrderComplete which
-    // converts the Shopify draft into a real Shopify Order. We then trigger
-    // a one-shot order sync so the new order lands in our DB.
-    if (draft.externalId) {
-      const shopify = await this.findShopifyChannel(orgId);
-      if (shopify && shopify.status === ChannelStatus.CONNECTED) {
-        return this.completeViaShopify(draft.id, orgId, shopify.id, dto);
+    if (shopifyChannelId) {
+      try {
+        return await this.completeViaShopify(
+          draft.id,
+          orgId,
+          shopifyChannelId,
+          dto,
+        );
+      } catch (err) {
+        await this.revertDraftClaim(id, orgId, previousStatus);
+        throw err;
       }
-      // Shopify draft exists but channel is disconnected — fall through to
-      // the manual completion path below as a graceful degrade.
     }
 
-    if (!dto.paymentMethod) {
-      throw new BadRequestException(
-        'paymentMethod is required when completing a draft (CASH, CARD, UPI, or OTHER).',
-      );
+    let createdOrderId: string | null = null;
+    try {
+      const shippingAddress =
+        (draft.shippingAddress as Record<string, unknown> | null) ?? undefined;
+      const billingAddress =
+        (draft.billingAddress as Record<string, unknown> | null) ?? undefined;
+
+      const result = await this.orderService.createOfflineOrder(orgId, userId, {
+        customer: {
+          customerId: draft.customerId ?? undefined,
+          email: draft.customer?.email ?? draft.customerEmail ?? undefined,
+          phone: draft.customer?.phone ?? undefined,
+          firstName: draft.customer?.firstName ?? undefined,
+          lastName: draft.customer?.lastName ?? undefined,
+          gstin: draft.customer?.gstin ?? undefined,
+          billingStateCode: draft.customer?.billingStateCode ?? undefined,
+        },
+        lineItems: draft.lineItems.map((li) => ({
+          productVariantId: li.variantId as string,
+          quantity: li.quantity,
+          unitPriceOverride: this.calculator.toNumber(li.price),
+          discount: this.calculator.toNumber(li.totalDiscount),
+        })),
+        paymentMethod: dto.paymentMethod!,
+        note: draft.note ?? undefined,
+        generateInvoice: dto.generateInvoice ?? true,
+        sellerGstinId: dto.sellerGstinId,
+        shippingAddress,
+        billingAddress,
+      });
+
+      createdOrderId = result.order.id;
+      await this.prisma.draftOrder.update({
+        where: { id: draft.id },
+        data: { completedOrderId: result.order.id },
+      });
+
+      return {
+        draftId: draft.id,
+        order: result.order,
+        invoice: result.invoice,
+        invoiceError: result.invoiceError,
+      };
+    } catch (err) {
+      if (createdOrderId) {
+        // Sale already committed — keep COMPLETED and best-effort link so a
+        // failed completedOrderId write cannot reopen the draft for a second sale.
+        await this.prisma.draftOrder
+          .updateMany({
+            where: { id, organizationId: orgId, completedOrderId: null },
+            data: { completedOrderId: createdOrderId },
+          })
+          .catch(() => undefined);
+      } else {
+        await this.revertDraftClaim(id, orgId, previousStatus);
+      }
+      throw err;
     }
+  }
 
-    // Build the offline-order DTO from the draft and delegate to
-    // OrderService.createOfflineOrder — same machinery as walk-in sales,
-    // so GST / invoice / customer-counter updates are consistent.
-    const result = await this.orderService.createOfflineOrder(orgId, userId, {
-      customer: {
-        customerId: draft.customerId ?? undefined,
-        email: draft.customer?.email ?? draft.customerEmail ?? undefined,
-        phone: draft.customer?.phone ?? undefined,
-        firstName: draft.customer?.firstName ?? undefined,
-        lastName: draft.customer?.lastName ?? undefined,
-        gstin: draft.customer?.gstin ?? undefined,
-        billingStateCode: draft.customer?.billingStateCode ?? undefined,
-      },
-      lineItems: draft.lineItems.map((li) => ({
-        productVariantId: li.variantId!,
-        quantity: li.quantity,
-        unitPriceOverride: this.calculator.toNumber(li.price),
-        discount: this.calculator.toNumber(li.totalDiscount),
-      })),
-      paymentMethod: dto.paymentMethod,
-      note: draft.note ?? undefined,
-      generateInvoice: dto.generateInvoice ?? true,
-      sellerGstinId: dto.sellerGstinId,
-    });
-
-    // Link the draft to the newly-created order and mark COMPLETED.
-    await this.prisma.draftOrder.update({
-      where: { id: draft.id },
-      data: {
+  /**
+   * Undo a failed completion claim. Only reverts when no order was linked,
+   * so a partial success that already wrote completedOrderId is left alone.
+   */
+  private async revertDraftClaim(
+    id: string,
+    orgId: string,
+    previousStatus: DraftOrderStatus,
+  ) {
+    await this.prisma.draftOrder.updateMany({
+      where: {
+        id,
+        organizationId: orgId,
         status: DraftOrderStatus.COMPLETED,
-        completedAt: new Date(),
-        completedOrderId: result.order.id,
+        completedOrderId: null,
+      },
+      data: {
+        status: previousStatus,
+        completedAt: null,
       },
     });
-
-    return {
-      draftId: draft.id,
-      order: result.order,
-      invoice: result.invoice,
-      invoiceError: result.invoiceError,
-    };
   }
 
   // ─── SEND INVOICE ───
@@ -881,17 +988,41 @@ export class DraftOrderService {
     );
 
     const remote = result.draftOrderInvoiceSend.draftOrder;
-    const updated = await this.prisma.draftOrder.update({
-      where: { id: draft.id },
+
+    // The COMPLETED check at the top of this method read a snapshot from before
+    // the Shopify round-trip above. A concurrent complete() can have claimed the
+    // draft in the meantime; an unconditional update here would overwrite that
+    // claim with INVOICE_SENT and make the draft completable a second time.
+    // Advance the status only while it is still un-completed.
+    const advanced = await this.prisma.draftOrder.updateMany({
+      where: {
+        id: draft.id,
+        organizationId: orgId,
+        status: {
+          in: [DraftOrderStatus.OPEN, DraftOrderStatus.INVOICE_SENT],
+        },
+      },
       data: {
-        status: DraftOrderStatus.INVOICE_SENT,
         invoiceUrl: remote?.invoiceUrl ?? draft.invoiceUrl,
         invoiceSentAt: remote?.invoiceSentAt
           ? new Date(remote.invoiceSentAt)
           : new Date(),
+        status: DraftOrderStatus.INVOICE_SENT,
       },
     });
-    return updated;
+
+    if (advanced.count === 0) {
+      // Shopify already delivered the email — that side effect cannot be undone
+      // — but the draft is now a finalized order, so say so plainly rather than
+      // reporting success against stale state.
+      throw new ConflictException(
+        'This draft was completed while the invoice was being sent. Shopify delivered the email, but the draft is now a finalized order.',
+      );
+    }
+
+    return this.prisma.draftOrder.findUniqueOrThrow({
+      where: { id: draft.id },
+    });
   }
 
   // ─── HELPERS ───
@@ -1314,14 +1445,14 @@ export class DraftOrderService {
       });
     }
 
-    await this.prisma.draftOrder.update({
-      where: { id: draft.id },
-      data: {
-        status: DraftOrderStatus.COMPLETED,
-        completedAt: new Date(),
-        ...(localOrder && { completedOrderId: localOrder.id }),
-      },
-    });
+    // Status was already flipped to COMPLETED by the atomic claim in
+    // complete(); only link the local order when the sync/webhook has it.
+    if (localOrder) {
+      await this.prisma.draftOrder.update({
+        where: { id: draft.id },
+        data: { completedOrderId: localOrder.id },
+      });
+    }
 
     return {
       draftId: draft.id,

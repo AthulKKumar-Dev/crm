@@ -6,7 +6,13 @@ import { ChartLineDefault } from "./chart-line-default";
 interface StatCardProps {
   label: string;
   value: string;
-  change: number;
+  /**
+   * Omit when there is no trend to show — a failed request, or a metric with
+   * no comparison period. Callers used to pass 0 in that case, which rendered
+   * a GREEN up-trend "0%" badge (`change >= 0` is true for zero), so a failed
+   * stats request looked like four healthy metrics.
+   */
+  change?: number;
   changeLabel?: string;
   className?: string;
   icon?: ReactNode;
@@ -27,7 +33,8 @@ export function StatCard({
   icon,
   variant = "card",
 }: StatCardProps) {
-  const isPositive = change >= 0;
+  const hasTrend = change !== undefined;
+  const isPositive = (change ?? 0) >= 0;
 
   if (variant === "inline") {
     return (
@@ -46,21 +53,23 @@ export function StatCard({
               <p className="text-[20px] font-bold text-gray-900 dark:text-gray-100 leading-none">
                 {value}
               </p>
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
-                  isPositive
-                    ? "bg-[#CEF17B]/30 text-[#084734]"
-                    : "bg-red-100 text-red-600"
-                )}
-              >
-                {isPositive ? (
-                  <TrendingUp className="size-3" />
-                ) : (
-                  <TrendingDown className="size-3" />
-                )}
-                {Math.abs(change)}%
-              </span>
+              {hasTrend && (
+                <span
+                  className={cn(
+                    "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
+                    isPositive
+                      ? "bg-[#CEF17B]/30 text-[#084734]"
+                      : "bg-red-100 text-red-600"
+                  )}
+                >
+                  {isPositive ? (
+                    <TrendingUp className="size-3" />
+                  ) : (
+                    <TrendingDown className="size-3" />
+                  )}
+                  {Math.abs(change!)}%
+                </span>
+              )}
             </div>
           </div>
           <div className="w-full flex-1">
@@ -93,21 +102,23 @@ export function StatCard({
         <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">
           {value}
         </p>
-        <span
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
-            isPositive
-              ? "bg-[#CEF17B]/30 text-[#084734]"
-              : "bg-red-100 text-red-600"
-          )}
-        >
-          {isPositive ? (
-            <TrendingUp className="size-3" />
-          ) : (
-            <TrendingDown className="size-3" />
-          )}
-          {Math.abs(change)}%
-        </span>
+        {hasTrend && (
+          <span
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold",
+              isPositive
+                ? "bg-[#CEF17B]/30 text-[#084734]"
+                : "bg-red-100 text-red-600"
+            )}
+          >
+            {isPositive ? (
+              <TrendingUp className="size-3" />
+            ) : (
+              <TrendingDown className="size-3" />
+            )}
+            {Math.abs(change!)}%
+          </span>
+        )}
       </div>
       {changeLabel && (
         <p className="mt-1.5 text-xs text-muted-foreground">{changeLabel}</p>

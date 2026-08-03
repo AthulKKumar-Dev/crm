@@ -172,6 +172,50 @@ type SelectedItem = {
   maxQuantity: number;
 };
 
+/** What the user has changed. Deliberately carries no `maxQuantity`. */
+export type SelectionEdit = { selected?: boolean; quantity?: number };
+
+/**
+ * Combine what the server currently says is fulfillable with the edits the user
+ * has made, letting the server win on everything except intent.
+ *
+ * This replaces a one-way latch: the previous `merged` returned the live map
+ * only while no edit existed, and from the first keystroke onwards every later
+ * server response was computed and then discarded. Because the dialog reopens
+ * onto a cached payload (`useFulfillableLineItems` sets `staleTime: 0` but no
+ * `gcTime`, and invalidating a query nobody is observing only marks it stale),
+ * the values it latched onto were routinely out of date. Fulfil 2 of 5, reopen,
+ * touch the quantity box before the refetch lands, and the dialog kept offering
+ * `/5` and would POST 5 against 3 remaining.
+ *
+ * So: `maxQuantity` always comes from `live`, a stale quantity is clamped down
+ * to it, and an edit whose line item is no longer fulfillable is dropped rather
+ * than lingering invisibly in the payload.
+ *
+ * Exported as a pure function because the client has no test runner — this is
+ * the only way to exercise the behaviour rather than the shape.
+ */
+export function mergeSelections(
+  live: Map<string, SelectedItem>,
+  edits: Map<string, SelectionEdit>,
+): Map<string, SelectedItem> {
+  const merged = new Map<string, SelectedItem>();
+  for (const [id, base] of live) {
+    const edit = edits.get(id);
+    merged.set(
+      id,
+      edit
+        ? {
+          ...base,
+          selected: edit.selected ?? base.selected,
+          quantity: Math.min(edit.quantity ?? base.quantity, base.maxQuantity),
+        }
+        : base,
+    );
+  }
+  return merged;
+}
+
 export function FulfillDialog({
   order,
   onClose,
@@ -190,9 +234,8 @@ export function FulfillDialog({
   });
   const [notifyCustomer, setNotifyCustomer] = useState(true);
 
-  // Per-line-item selection state. Built lazily from the query result via useMemo
-  // and merged with the local edits the user has made so far.
-  const initialSelections = useMemo<Map<string, SelectedItem>>(() => {
+  // What the server currently says is fulfillable. Recomputed on every response.
+  const liveSelections = useMemo<Map<string, SelectedItem>>(() => {
     const map = new Map<string, SelectedItem>();
     if (!data) return map;
     for (const fo of data.fulfillmentOrders) {
@@ -208,18 +251,22 @@ export function FulfillDialog({
     return map;
   }, [data]);
 
-  const [selections, setSelections] = useState<Map<string, SelectedItem>>(new Map());
-  const merged = useMemo(() => {
-    if (selections.size === 0) return initialSelections;
-    return selections;
-  }, [initialSelections, selections]);
+  // Edits only — never a copy of the server's numbers, so they cannot go stale.
+  const [edits, setEdits] = useState<Map<string, SelectionEdit>>(new Map());
+  const merged = useMemo(
+    () => mergeSelections(liveSelections, edits),
+    [liveSelections, edits],
+  );
 
   function setSelection(lineItemId: string, patch: Partial<SelectedItem>) {
-    const next = new Map(merged);
-    const current = next.get(lineItemId);
-    if (!current) return;
-    next.set(lineItemId, { ...current, ...patch });
-    setSelections(next);
+    if (!liveSelections.has(lineItemId)) return;
+    const next = new Map(edits);
+    const current = next.get(lineItemId) ?? {};
+    next.set(lineItemId, {
+      selected: patch.selected ?? current.selected,
+      quantity: patch.quantity ?? current.quantity,
+    });
+    setEdits(next);
   }
 
   const selectedCount = Array.from(merged.values()).filter((s) => s.selected).length;
@@ -227,9 +274,18 @@ export function FulfillDialog({
     !isLoading && data && data.fulfillmentOrders.every((fo) => fo.lineItems.length === 0);
 
   function handleSubmit() {
+    // Belt and braces: `merged` already clamps, but re-derive straight from the
+    // live map so nothing can be submitted above what is currently fulfillable.
     const lineItems = Array.from(merged.values())
       .filter((s) => s.selected && s.quantity > 0)
-      .map((s) => ({ lineItemId: s.lineItemId, quantity: s.quantity }));
+      .map((s) => ({
+        lineItemId: s.lineItemId,
+        quantity: Math.min(
+          s.quantity,
+          liveSelections.get(s.lineItemId)?.maxQuantity ?? s.quantity,
+        ),
+      }))
+      .filter((s) => s.quantity > 0);
     if (lineItems.length === 0) return;
     const trackingPayload: TrackingInfoInput | undefined =
       tracking.number || tracking.url || tracking.company

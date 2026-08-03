@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   ForbiddenException,
+  HttpException,
   Injectable,
   Logger,
   NotFoundException,
@@ -8,10 +9,13 @@ import {
 import {
   ChannelPlatform,
   ChannelStatus,
+  GstType,
+  InvoiceStatus,
   OrderFinancialStatus,
   OrderFulfillmentStatus,
   Prisma,
 } from '@prisma/client';
+import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryOrdersDto } from './dto/query-orders.dto';
@@ -31,7 +35,13 @@ import { ShopifyPushService } from '../channel/shopify-push.service';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { LoyaltyService } from '../loyalty/loyalty.service';
 import { displayVariantTitle } from '../product/variant-title.util';
+import {
+  retryOnNumberingConflict,
+  uniqueViolationTargets,
+} from '../common/utils/serialization-retry.util';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -99,6 +109,7 @@ export class OrderService {
     private readonly graphql: ShopifyGraphqlClient,
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly settings: OrganizationSettingsService,
+    private readonly loyalty: LoyaltyService,
   ) { }
 
   async findAll(orgId: string, query: QueryOrdersDto, vendorScope?: string) {
@@ -291,6 +302,22 @@ export class OrderService {
         fulfillments: true,
         refunds: true,
         timeline: { orderBy: { createdAt: 'desc' } },
+        // The order's live GST invoice (at most one — enforced by the partial
+        // unique index invoices_order_id_active_key). Lets the client show the
+        // invoice card / gate the Generate button without scanning the
+        // paginated invoice list.
+        invoices: {
+          where: { status: { not: InvoiceStatus.CANCELLED } },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            invoiceDate: true,
+            status: true,
+            grandTotal: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
       },
     });
 
@@ -466,6 +493,9 @@ export class OrderService {
         channel: { select: { name: true } },
       },
       orderBy: { externalCreatedAt: 'desc' },
+      // Bounded: the export builds the whole CSV/JSON in memory, so an
+      // unlimited query on a large tenant could OOM the process for everyone.
+      take: 10_000,
     });
 
     return orders.map((o) => ({
@@ -526,7 +556,7 @@ export class OrderService {
       );
     }
 
-    const result = await this.prisma.$transaction(
+    const runSale = () => this.prisma.$transaction(
       async (tx) => {
         // 1. Resolve or lazy-create the org's MANUAL channel.
         const channel = await tx.channel.upsert({
@@ -620,12 +650,21 @@ export class OrderService {
         }
 
         // 5. Compute pricing per line item.
-        const placeOfSupplyCode =
-          dto.placeOfSupplyCode ||
-          dto.customer.billingStateCode ||
-          customer.billingStateCode ||
-          sellerGstin?.stateCode ||
-          '00';
+        //    Uses the SHARED resolver so the invoice cannot disagree with what
+        //    the order was taxed with, and so the delivery address actually
+        //    participates (Section 10(1)(a): place of supply for goods is where
+        //    they are delivered). The resolved code is persisted on the order
+        //    below and read back by the invoice.
+        const placeOfSupplyCode = resolvePlaceOfSupply({
+          explicitCode: dto.placeOfSupplyCode,
+          shippingAddress: dto.shippingAddress ?? dto.customer.address,
+          billingAddress:
+            dto.billingAddress ?? dto.shippingAddress ?? dto.customer.address,
+          customerBillingStateCode:
+            dto.customer.billingStateCode ?? customer.billingStateCode,
+          buyerGstin: dto.customer.gstin ?? customer.gstin,
+          sellerStateCode: sellerGstin?.stateCode,
+        });
 
         const isIntraState = sellerGstin
           ? this.calculator.isIntraState(
@@ -633,6 +672,9 @@ export class OrderService {
             placeOfSupplyCode,
           )
           : true;
+        const resolvedGstType = isIntraState
+          ? GstType.CGST_SGST
+          : GstType.IGST;
 
         const lineItemsToCreate: Array<{
           variantId: string;
@@ -656,12 +698,28 @@ export class OrderService {
             li.unitPriceOverride ?? this.calculator.toNumber(v.price);
           const discount = li.discount ?? 0;
 
-          const productGstRate = this.calculator.toNumber(v.product.gstRate);
+          // Validated here, not in the DTO: the unit price may come from the
+          // variant rather than the payload, so the ceiling isn't knowable at
+          // validation time. An over-large discount would otherwise produce a
+          // negative taxable value, a negative invoice, and a decremented
+          // customer lifetime value.
+          const lineGross = this.calculator.round2(unitPrice * li.quantity);
+          if (discount > lineGross) {
+            throw new BadRequestException(
+              `Discount (${discount}) cannot exceed the line total (${lineGross}) for "${v.product.title}".`,
+            );
+          }
+
+          // toNullableNumber, not toNumber: null (no rate configured) and 0
+          // (explicitly exempt) must stay distinguishable for the resolver.
+          const productGstRate = this.calculator.toNullableNumber(
+            v.product.gstRate,
+          );
           const gstRate = sellerGstin
             ? await this.taxResolver.resolveGstRate(
               orgId,
               v.product.id,
-              productGstRate || null,
+              productGstRate,
               placeOfSupplyCode,
             )
             : 0;
@@ -693,11 +751,17 @@ export class OrderService {
         totalTax = round(totalTax);
         const grandTotal = round(subtotal + totalTax);
 
-        // 6. Generate next sequential orderNumber. Serializable isolation +
-        //    @@unique([channelId, externalId]) keep this collision-free under
-        //    concurrency; the runtime will retry on serialization conflict.
+        // 6. Generate the next sequential orderNumber for the MANUAL channel.
+        //    Scoped to this channel so offline sales run their own sequence
+        //    instead of consuming the number Shopify is about to assign to its
+        //    next online order. Collision safety comes from the PARTIAL unique
+        //    index orders_channel_id_order_number_manual_key (manual rows only;
+        //    Shopify legitimately re-issues numbers after store resets) plus
+        //    the caller's bounded retry on P2002/P2034 — Serializable alone
+        //    does not prevent this, and Prisma does not auto-retry
+        //    serialization failures.
         const last = await tx.order.findFirst({
-          where: { organizationId: orgId },
+          where: { channelId: channel.id },
           orderBy: { orderNumber: 'desc' },
           select: { orderNumber: true },
         });
@@ -712,7 +776,9 @@ export class OrderService {
             customerId: customer.id,
             externalId: `manual_${randomUUID()}`,
             orderNumber: nextNumber,
-            name: `#${nextNumber}`,
+            // "M" marks the order as manual/offline so it can never be confused
+            // with a Shopify order carrying the same number on its own channel.
+            name: `#M${nextNumber}`,
             financialStatus:
               dto.financialStatus ?? OrderFinancialStatus.PAID,
             fulfillmentStatus:
@@ -723,6 +789,19 @@ export class OrderService {
             totalTax,
             totalDiscounts: 0,
             totalShippingPrice: 0,
+            // Prefer explicit order addresses (e.g. draft completion); else
+            // customer.address so GST place-of-supply / packing slips aren't blank.
+            shippingAddress: (dto.shippingAddress ??
+              dto.customer.address ??
+              null) as Prisma.InputJsonValue | undefined,
+            billingAddress: (dto.billingAddress ??
+              dto.shippingAddress ??
+              dto.customer.address ??
+              null) as Prisma.InputJsonValue | undefined,
+            // What this order was ACTUALLY taxed with — the invoice reads these
+            // back instead of re-deriving and possibly disagreeing.
+            placeOfSupplyCode: sellerGstin ? placeOfSupplyCode : null,
+            gstType: sellerGstin ? resolvedGstType : null,
             note: dto.note,
             metadata: {
               source: 'offline',
@@ -776,14 +855,12 @@ export class OrderService {
           });
         }
 
-        // 9. Update customer denormalized counters.
-        await tx.customer.update({
-          where: { id: customer.id },
-          data: {
-            ordersCount: { increment: 1 },
-            totalSpent: { increment: grandTotal },
-          },
-        });
+        // 9. Customer counters are NOT incremented here. `ordersCount` and
+        //    `totalSpent` are derived from the order table by
+        //    LoyaltyService.recomputeForCustomer, which runs after this
+        //    transaction commits. Incrementing in place is what allowed a later
+        //    Shopify customer sync — which overwrites both fields wholesale —
+        //    to wipe in-store purchase history.
 
         // 10. Timeline event.
         await tx.orderTimelineEvent.create({
@@ -809,14 +886,32 @@ export class OrderService {
               order.id,
               {
                 sellerGstinId: dto.sellerGstinId,
-                placeOfSupplyCode: dto.placeOfSupplyCode,
+                // The RESOLVED code, not the raw (usually undefined) DTO field.
+                // Passing the raw one made the invoice re-derive independently
+                // and disagree with the tax the order just charged.
+                placeOfSupplyCode,
                 notes: dto.note,
               },
             );
           } catch (err) {
-            // Soft-fail: a missing GST detail (no seller GSTIN, etc.) must not
-            // block a walk-in sale. Log it and proceed; the merchant can issue
-            // the invoice later from the order detail page.
+            // Soft-fail ONLY deliberate application-level rejections (missing
+            // seller GSTIN, GST disabled, an invoice already issued). Those are
+            // thrown after a successful query, so the transaction is still
+            // healthy and the walk-in sale can proceed without its invoice.
+            //
+            // Every other error is a database failure, and swallowing one here
+            // is never safe for two reasons:
+            //   1. Postgres puts the transaction into aborted state (25P02) as
+            //      soon as a statement errors, so every later statement in this
+            //      transaction fails and COMMIT silently degrades to ROLLBACK —
+            //      we would return a "successful" sale referencing an order row
+            //      that was never persisted.
+            //   2. Transient conflicts (P2002 on invoice number, P2034
+            //      serialization abort, P2010 carrying SQLSTATE 40001) must
+            //      reach retryOnNumberingConflict below to be retried at all.
+            if (!(err instanceof HttpException)) {
+              throw err;
+            }
             invoiceError =
               err instanceof Error ? err.message : 'Invoice generation failed.';
             this.logger.warn(
@@ -839,6 +934,21 @@ export class OrderService {
       },
     );
 
+    // Retry the whole sale on a numbering collision — order number OR invoice
+    // number (the two sequences are both read-max-then-increment inside this
+    // transaction). Safe to re-run because every side effect — numbers, stock
+    // decrement — is allocated inside the transaction and only persists on
+    // commit, so a rolled-back attempt consumes nothing.
+    const result = await retryOnNumberingConflict(runSale, {
+      isRetriableUniqueViolation: (e) =>
+        uniqueViolationTargets(e, 'orderNumber') ||
+        uniqueViolationTargets(e, 'invoiceNumber'),
+      onRetry: (attempt) =>
+        this.logger.warn(
+          `Numbering collision on attempt ${attempt} — retrying sale`,
+        ),
+    });
+
     // Auto-push to Shopify — only if the org has opted in via
     // orderSettings.autoSyncToShopify. Default is OFF: offline orders stay
     // local and must be pushed manually (POST /orders/:id/sync) or in bulk
@@ -854,7 +964,7 @@ export class OrderService {
         if (shopifyChannel?.status === 'CONNECTED') {
           // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
           // even before the worker picks the job up.
-          await this.markPendingSync(result.order.id);
+          await this.markPendingSync(result.order.id, orgId);
           await this.shopifyPushEnqueuer.enqueueOrderPush({
             type: 'order',
             orderId: result.order.id,
@@ -867,6 +977,17 @@ export class OrderService {
         `Skipping Shopify push enqueue for order ${result.order.id}: ${err}`,
       );
     }
+
+    // The sale just moved ordersCount/totalSpent, and the loyalty tier is
+    // derived from them. Non-fatal and outside the transaction — a tier refresh
+    // must never roll back a completed sale.
+    await this.loyalty
+      .recomputeForCustomer(result.order.customerId!, orgId)
+      .catch((err) =>
+        this.logger.warn(
+          `Loyalty recompute failed for order ${result.order.id}: ${err}`,
+        ),
+      );
 
     return result;
   }
@@ -903,7 +1024,15 @@ export class OrderService {
       return { status: 'ALREADY_QUEUED' as const, orderId: order.id };
     }
 
-    await this.markPendingSync(order.id);
+    // The status read above is a snapshot; a worker can finish a push between
+    // it and this claim. markPendingSync refuses to demote a SYNCED order, so a
+    // lost claim means exactly that happened — report it rather than enqueueing
+    // a duplicate push.
+    const claimed = await this.markPendingSync(order.id, orgId);
+    if (!claimed) {
+      return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
+    }
+
     await this.shopifyPushEnqueuer.enqueueOrderPush({
       type: 'order',
       orderId: order.id,
@@ -912,25 +1041,31 @@ export class OrderService {
     return { status: 'QUEUED' as const, orderId: order.id };
   }
 
-  /** Stamp metadata.shopifySync = { status: 'PENDING', attempts: 0 }. */
-  private async markPendingSync(orderId: string): Promise<void> {
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      select: { metadata: true },
-    });
-    const meta =
-      order?.metadata && typeof order.metadata === 'object' && !Array.isArray(order.metadata)
-        ? (order.metadata as Prisma.JsonObject)
-        : {};
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: {
-        metadata: {
-          ...meta,
-          shopifySync: { status: 'PENDING', attempts: 0 },
-        } as Prisma.InputJsonObject,
-      },
-    });
+  /**
+   * Claim an order for a Shopify push by stamping
+   * metadata.shopifySync = { status: 'PENDING', attempts: 0 }.
+   *
+   * Atomic JSONB merge (H7) — does not read-modify-write the whole blob — and
+   * guarded so it can never demote an order a worker has already marked
+   * SYNCED. Without that guard a push completing between the caller's status
+   * read and this write would be overwritten with PENDING, and the order would
+   * be pushed to Shopify a second time.
+   *
+   * Returns true when this call won the claim.
+   */
+  private async markPendingSync(
+    orderId: string,
+    organizationId: string,
+  ): Promise<boolean> {
+    const updated = await mergeJsonMetadata(
+      this.prisma,
+      'orders',
+      orderId,
+      organizationId,
+      { shopifySync: { status: 'PENDING', attempts: 0 } },
+      Prisma.sql`AND COALESCE("metadata" -> 'shopifySync' ->> 'status', '') <> 'SYNCED'`,
+    );
+    return updated > 0;
   }
 
   private async resolveCustomer(
@@ -1039,6 +1174,17 @@ export class OrderService {
     const order = await this.loadOrderWithChannel(id, orgId);
     const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
 
+    // Shopify's `OrderInput` has no `billingAddress` field — it exists only on
+    // `OrderCreateInput`. So this edit could never reach Shopify, and writing
+    // it locally alone is worse than refusing: `upsertOrder` applies whatever
+    // address the next `orders/updated` webhook carries, silently reverting it.
+    // Refuse loudly instead. MANUAL orders are unaffected.
+    if (isShopify && dto.billingAddress !== undefined) {
+      throw new BadRequestException(
+        "A Shopify order's billing address can't be changed here — Shopify's API doesn't accept it, so the change would be overwritten on the next sync. Update it in Shopify admin instead.",
+      );
+    }
+
     if (isShopify) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
       const input: OrderUpdateInput = {
@@ -1046,10 +1192,6 @@ export class OrderService {
       };
       if (dto.tags !== undefined) input.tags = dto.tags;
       if (dto.note !== undefined) input.note = dto.note;
-      if (dto.email !== undefined) input.email = dto.email;
-      if (dto.phone !== undefined) input.phone = dto.phone;
-      if (dto.poNumber !== undefined) input.poNumber = dto.poNumber;
-      if (dto.customAttributes !== undefined) input.customAttributes = dto.customAttributes;
       if (dto.shippingAddress !== undefined) {
         input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
       }
@@ -1060,10 +1202,6 @@ export class OrderService {
       );
       ShopifyGraphqlClient.throwIfUserErrors(result.orderUpdate.userErrors, 'orderUpdate');
     }
-
-    const updatedFields = Object.keys(dto).filter(
-      (k) => (dto as Record<string, unknown>)[k] !== undefined,
-    );
 
     return this.prisma.$transaction(async (tx) => {
       const data: Prisma.OrderUpdateInput = {};
@@ -1078,6 +1216,13 @@ export class OrderService {
       const updated = Object.keys(data).length > 0
         ? await tx.order.update({ where: { id }, data })
         : order;
+
+      // Report what was actually WRITTEN, not what was sent. This was derived
+      // from the DTO, so fields the write block ignored still appeared in the
+      // event — a manual order recorded "Order details updated (email, phone)"
+      // having stored neither. Deriving it from `data` means a field added to
+      // the DTO without a matching write can't quietly lie again.
+      const updatedFields = Object.keys(data);
 
       await tx.orderTimelineEvent.create({
         data: {
@@ -1100,6 +1245,10 @@ export class OrderService {
    */
   async cancel(id: string, orgId: string, userId: string, dto: CancelOrderDto) {
     const order = await this.loadOrderWithChannel(id, orgId);
+    // Fast, friendly path for the common case. This read is NOT the real guard
+    // — `cancelledAt` is written much later, inside the transaction below — so
+    // the atomic claim there is what actually prevents two concurrent cancels
+    // from both restocking inventory and both decrementing customer counters.
     if (order.cancelledAt) {
       throw new BadRequestException('Order is already cancelled');
     }
@@ -1156,14 +1305,29 @@ export class OrderService {
       });
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const data: Prisma.OrderUpdateInput = {
+    const cancelled = await this.prisma.$transaction(async (tx) => {
+      const data: Prisma.OrderUpdateManyMutationInput = {
         cancelReason: dto.reason,
         cancelledAt: new Date(),
       };
       if (dto.refund) data.financialStatus = OrderFinancialStatus.REFUNDED;
       if (dto.restock) data.fulfillmentStatus = OrderFulfillmentStatus.RESTOCKED;
-      const updated = await tx.order.update({ where: { id }, data });
+
+      // Atomic claim. `cancelledAt: null` is the precondition, so exactly one
+      // concurrent caller can transition the order — the loser matches zero
+      // rows and bails out before the restock and counter reversal below.
+      // No compensating revert is needed: the claim shares this transaction
+      // with every side effect, so a rollback releases it automatically.
+      // Same exception as the early check above, so a race-loser and a late
+      // arrival are indistinguishable to the client.
+      const claimed = await tx.order.updateMany({
+        where: { id, organizationId: orgId, cancelledAt: null },
+        data,
+      });
+      if (claimed.count === 0) {
+        throw new BadRequestException('Order is already cancelled');
+      }
+      const updated = await tx.order.findUniqueOrThrow({ where: { id } });
 
       // Local restock for MANUAL channel orders. Shopify orders are restocked
       // server-side by the orderCancel mutation we already sent — adjusting
@@ -1198,6 +1362,10 @@ export class OrderService {
         }
       }
 
+      // Customer counters are not adjusted here — they are derived from the
+      // order table, and the `cancelledAt` we just set removes this order from
+      // that derivation. The recompute below applies it.
+
       await tx.orderTimelineEvent.create({
         data: {
           orderId: id,
@@ -1214,6 +1382,24 @@ export class OrderService {
       });
       return updated;
     });
+
+    // Re-derive the customer's counters (and therefore their tier) now that
+    // this order is cancelled. Every channel, not just MANUAL — the counters
+    // are derived from all orders. Non-fatal and outside the transaction: a
+    // tier refresh must never roll back a cancellation, and because the values
+    // are derived rather than incremental, a failure here is repaired by the
+    // next recompute rather than lost.
+    if (order.customerId) {
+      await this.loyalty
+        .recomputeForCustomer(order.customerId, orgId)
+        .catch((err) =>
+          this.logger.warn(
+            `Loyalty recompute failed after cancelling order ${id}: ${err}`,
+          ),
+        );
+    }
+
+    return cancelled;
   }
 
   /** Archive (close) an order. Reversible via `open()`. */
@@ -1351,6 +1537,24 @@ export class OrderService {
     if (!authTx) {
       throw new BadRequestException(
         'No authorize transaction available to capture against this order.',
+      );
+    }
+
+    // Never capture more than was authorised.
+    //
+    // The only prior checks were "not already PAID/REFUNDED" and "is Shopify";
+    // `dto.amount` went straight into the mutation, and the DTO caps it at
+    // nothing (`@IsNumber() @Min(0)`). Shopify was the sole backstop on a path
+    // that moves real money. The authorised figure is already in hand — it is
+    // this method's own fallback below — so this costs no extra call.
+    //
+    // Rejected rather than silently clamped: quietly correcting a wrong amount
+    // hides whatever produced it.
+    const authorized = Number(authTx.amountSet.shopMoney.amount);
+    if (dto.amount !== undefined && Number.isFinite(authorized) && dto.amount > authorized) {
+      throw new BadRequestException(
+        `Cannot capture ${dto.amount.toFixed(2)} — only ${authorized.toFixed(2)} ` +
+        `${authTx.amountSet.shopMoney.currencyCode} was authorised on this order.`,
       );
     }
 
@@ -1765,18 +1969,47 @@ export class OrderService {
   ) {
     const f = await this.prisma.orderFulfillment.findFirst({
       where: { id: fulfillmentId, orderId },
-      select: { metadata: true },
+      select: { metadata: true, externalId: true },
     });
     if (!f) throw new NotFoundException('Fulfillment not found');
-    const ids = this.fulfillmentLineItemIds(f.metadata);
-    if (ids.length === 0) {
-      throw new ForbiddenException('This fulfilment is not attributable to your items.');
-    }
-    const lines = await this.prisma.orderLineItem.findMany({
-      where: { id: { in: ids } },
-      select: { vendor: true },
+
+    // Who else has items on this order? Scoped to the order — the previous
+    // query looked line items up by id ALONE, so it trusted the metadata to
+    // name lines that actually belong here.
+    const orderLines = await this.prisma.orderLineItem.findMany({
+      where: { orderId },
+      select: { id: true, vendor: true },
     });
-    if (lines.some((l) => l.vendor !== vendorScope)) {
+    const foreignLines = orderLines.filter((l) => l.vendor !== vendorScope);
+
+    // Whole order belongs to this vendor ⇒ no fulfilment on it can touch
+    // anyone else's goods, whatever the metadata says. This is what keeps
+    // vendors working on Shopify-synced fulfilments, which carry no
+    // lineItemIds until `resolveFulfillmentForLine` lazily backfills them.
+    if (foreignLines.length === 0) return;
+
+    // Mixed-vendor order: attribution has to be proven.
+    const ids = this.fulfillmentLineItemIds(f.metadata);
+
+    // A Shopify-created fulfilment's lineItemIds are backfilled one line at a
+    // time, so they are a SUBSET of its real contents — never evidence that it
+    // excludes another vendor. Refuse rather than guess.
+    const isShopifyFulfillment =
+      !!f.externalId && !f.externalId.startsWith('manual_');
+    if (isShopifyFulfillment) {
+      throw new ForbiddenException(
+        'This shipment also contains another supplier\'s items, so it cannot be edited here. Update tracking on your own item instead.',
+      );
+    }
+
+    // Manual fulfilment: we wrote the metadata, so it is complete. Fail CLOSED
+    // — `[].some()` is false, so unresolvable ids used to PASS this check.
+    const claimed = orderLines.filter((l) => ids.includes(l.id));
+    if (
+      ids.length === 0 ||
+      claimed.length !== ids.length ||
+      claimed.some((l) => l.vendor !== vendorScope)
+    ) {
       throw new ForbiddenException('You can only update your own fulfilments.');
     }
   }
@@ -1826,7 +2059,7 @@ export class OrderService {
     const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : null);
     const name =
       str('name') ?? ([str('first_name'), str('last_name')].filter(Boolean).join(' ') || null);
-    return {
+    const shipTo = {
       name,
       company: str('company'),
       address1: str('address1'),
@@ -1837,6 +2070,12 @@ export class OrderService {
       country: str('country') ?? str('country_code'),
       phone: str('phone'),
     };
+    // An object of nothing but nulls is not an address. This used to return it
+    // anyway, which diverged from the client's own `resolveAddress` (it yields
+    // null when every field is falsy): an address carrying only a `stateCode`
+    // showed the owner a tidy "No shipping address" and the vendor a stack of
+    // blank lines. Same data, two answers.
+    return Object.values(shipTo).some(Boolean) ? shipTo : null;
   }
 
   /** Mark a fulfilment as delivered locally + in Shopify (best-effort). */
@@ -2368,7 +2607,18 @@ export class OrderService {
     if (!fulfillment) {
       throw new BadRequestException('Fulfil this item before adding tracking.');
     }
-    return this.updateTracking(orderId, fulfillment.id, orgId, userId, dto);
+    // Forward the scope. Owning the LINE is not the same as owning the
+    // FULFILMENT — a shipment can span several vendors, and writing tracking
+    // on it rewrites the number every one of their customers sees. Dropping
+    // `vendorScope` here silently skipped that check.
+    return this.updateTracking(
+      orderId,
+      fulfillment.id,
+      orgId,
+      userId,
+      dto,
+      vendorScope,
+    );
   }
 
   async updateTracking(

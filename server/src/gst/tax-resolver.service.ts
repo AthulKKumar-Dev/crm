@@ -23,8 +23,13 @@ export class TaxResolverService {
     productGstRate: number | null,
     placeOfSupplyCode: string,
   ): Promise<number> {
-    // 1. Product-level override (highest priority)
-    if (productGstRate !== null && productGstRate > 0) {
+    // 1. Product-level override (highest priority).
+    //    `>= 0`, not `> 0`: a product explicitly configured at 0% is EXEMPT and
+    //    must stop here. Treating 0 as "unset" made exempt goods fall through
+    //    to the collection/product-type/state rates and get taxed. Callers must
+    //    pass `toNullableNumber(product.gstRate)` so null (unset) and 0
+    //    (exempt) stay distinguishable.
+    if (productGstRate !== null && productGstRate >= 0) {
       return productGstRate;
     }
 

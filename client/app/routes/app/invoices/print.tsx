@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useParams } from "react-router";
 import { useInvoice } from "~/hooks/use-invoice-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
@@ -14,14 +14,23 @@ export default function InvoicePrintPage() {
   const { data: org } = useCurrentOrg();
   const currency = invoice?.currency ?? org?.currency ?? "INR";
 
+  // Print once per invoice, not once per response.
+  //
+  // This depended on the whole `invoice` object. Structural sharing means an
+  // unchanged refetch reuses the reference, so it looked fine — but any refetch
+  // that returned different data threw a second OS print dialog at someone
+  // mid-review. That is reachable: `refetchOnReconnect` is left at its default
+  // of true, and four separate call sites invalidate `invoiceKeys.all`, which
+  // prefix-matches this query. Depending on the id fixes the common case; the
+  // ref makes a same-id remount safe too.
+  const printedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (invoice) {
-      // Auto-trigger the browser print dialog so the merchant can hand over
-      // a printed bill (or save as PDF). Small delay so layout settles.
-      const t = setTimeout(() => window.print(), 250);
-      return () => clearTimeout(t);
-    }
-  }, [invoice]);
+    if (!invoice?.id || printedRef.current === invoice.id) return;
+    printedRef.current = invoice.id;
+    // Small delay so layout settles before the dialog opens.
+    const t = setTimeout(() => window.print(), 250);
+    return () => clearTimeout(t);
+  }, [invoice?.id]);
 
   if (isLoading || !invoice) {
     return (

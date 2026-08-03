@@ -117,4 +117,13 @@ export const orderService = {
     apiClient
       .post<ManualSyncResponse>(`/orders/${id}/sync`)
       .then((response) => response.data),
+
+  /**
+   * Export the order list as CSV. Takes the SAME params as `list`, so whatever
+   * the page is currently filtered to is what gets exported.
+   */
+  exportCsv: (params?: OrderListParams) =>
+    apiClient
+      .get<Blob>("/orders/export/csv", { params, responseType: "blob" })
+      .then((response) => response.data),
 };
