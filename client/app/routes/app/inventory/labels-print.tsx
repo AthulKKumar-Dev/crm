@@ -8,26 +8,67 @@ import { inventoryKeys } from "~/hooks/use-inventory-queries";
 import type { LabelData } from "~/types/api";
 
 /**
- * Barcode label print sheet — 50×25 mm per label, Code 128 SVG (crisp on
- * 203 dpi thermal printers; pure black, no grayscale antialiasing).
+ * Barcode label printing — 50×25 mm per label, Code 128 SVG (crisp on 203 dpi
+ * thermal printers; pure black, no grayscale antialiasing).
+ *
+ * Two output modes, because the paper decides the layout:
+ *
+ *   sheet   — A4, labels tiled 3 per row, dashed cut guides. Works on any
+ *             printer or Save-as-PDF. The default.
+ *   thermal — 50×25 mm page, one label per page, no borders. Needs the OS
+ *             printer's paper size set to match; thermal drivers ignore CSS
+ *             sizes that don't correspond to the loaded stock.
+ *
+ * Sheet mode targets PLAIN paper you cut, not pre-cut sticker sheets — their
+ * pitch is vendor-specific and would not line up with this grid.
  *
  * Rendered chrome-free: the route ends in `/print`, which the app layout's
  * existing regex treats like packing-slip/pick-slip. Options persist in
- * localStorage (same pattern as order-slip.tsx). Print via the button — the
- * OS printer's paper size must be set to 50×25 mm for @page to take effect
- * (thermal drivers ignore CSS sizes that don't match the driver paper).
+ * localStorage (same pattern as order-slip.tsx).
  */
 
 const OPTS_KEY = "label-print-opts";
 const MAX_LABELS = 1000;
 
+type PrintMode = "sheet" | "thermal";
+
 interface LabelOptions {
   showSku: boolean;
   showTitle: boolean;
   showPrice: boolean;
+  mode: PrintMode;
 }
 
-const DEFAULT_OPTIONS: LabelOptions = { showSku: true, showTitle: true, showPrice: false };
+// `mode` defaults to sheet: it is the mode that works on whatever printer is
+// attached, and the one someone gets by pressing Print without label stock
+// loaded. loadOptions spreads over these defaults, so an options object stored
+// before `mode` existed picks it up with no migration.
+const DEFAULT_OPTIONS: LabelOptions = {
+  showSku: true,
+  showTitle: true,
+  showPrice: false,
+  mode: "sheet",
+};
+
+/**
+ * `@page` cannot be switched with a class, so the whole block is interpolated
+ * per mode.
+ *
+ * A4 minus 8 mm margins leaves 194 mm of usable width — 3 labels of 50 mm per
+ * row, ~11 rows, so roughly 33 labels a page. `break-inside: avoid` is what
+ * stops a label being sliced in half at the page boundary.
+ */
+const PAGE_RULES: Record<PrintMode, string> = {
+  sheet: `
+    @page { size: A4; margin: 8mm; }
+    .label-cell { break-inside: avoid; page-break-inside: avoid; }
+  `,
+  thermal: `
+    @page { size: 50mm 25mm; margin: 0; }
+    .label-cell { page-break-after: always; break-after: page; }
+    .label-cell:last-child { page-break-after: auto; break-after: auto; }
+  `,
+};
 
 function loadOptions(): LabelOptions {
   if (typeof window === "undefined") return DEFAULT_OPTIONS;
@@ -110,8 +151,10 @@ export default function LabelsPrintPage() {
 
   const missingBarcode = (labels.data ?? []).filter((l) => !l.barcode);
 
-  const toggle = (key: keyof LabelOptions) =>
+  const toggle = (key: "showSku" | "showTitle" | "showPrice") =>
     setOptions((o) => ({ ...o, [key]: !o[key] }));
+
+  const isSheet = options.mode === "sheet";
 
   if (variantIds.length === 0) {
     return (
@@ -125,11 +168,29 @@ export default function LabelsPrintPage() {
     <div className="min-h-screen bg-white">
       <style>{`
         @media print {
-          @page { size: 50mm 25mm; margin: 0; }
+          ${PAGE_RULES[options.mode]}
           body { background: white !important; }
+
+          /* Whitelist, not blacklist.
+             Hiding only .no-print assumes every stray node carries the tag, so
+             anything this app does not create still prints — portals, and
+             nodes injected by browser extensions, which is where the graphics
+             landing on top of the barcodes come from. This route's markup has
+             never contained an <img> in any commit, and the label API returns
+             no image field, so there is no element here to remove.
+
+             visibility (not display) for the hide step: it is overridable on
+             descendants, so the sheet re-shows even though its ancestors stay
+             hidden — display:none would take the sheet with everything else
+             and no descendant rule could bring it back. It also leaves the
+             labels' boxes and page breaks untouched, which thermal mode
+             depends on for exactly one label per page. */
+          body * { visibility: hidden !important; }
+          .label-sheet, .label-sheet * { visibility: visible !important; }
+
+          /* The toolbars must occupy NO space; visibility alone would leave a
+             gap above the first label. */
           .no-print { display: none !important; }
-          .label-cell { page-break-after: always; break-after: page; }
-          .label-cell:last-child { page-break-after: auto; break-after: auto; }
         }
         .label-cell { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
       `}</style>
@@ -145,8 +206,23 @@ export default function LabelsPrintPage() {
             {key === "showSku" ? "SKU text" : key === "showTitle" ? "Product title" : "Price"}
           </label>
         ))}
+        <label className="flex items-center gap-1.5">
+          <span className="font-medium text-gray-700">Paper</span>
+          <select
+            value={options.mode}
+            onChange={(e) =>
+              setOptions((o) => ({ ...o, mode: e.target.value as PrintMode }))
+            }
+            className="rounded-md border px-2 py-1 text-xs"
+          >
+            <option value="sheet">A4 sheet</option>
+            <option value="thermal">Label roll (50×25mm)</option>
+          </select>
+        </label>
         <span className="text-muted-foreground">
-          Set printer paper to 50×25&nbsp;mm. Use Chrome/Edge for custom label sizes.
+          {isSheet
+            ? "Prints on A4, 3 per row — cut along the guides."
+            : "Set printer paper to 50×25 mm. Use Chrome/Edge for custom label sizes."}
         </span>
         <button
           onClick={() => window.print()}
@@ -200,12 +276,27 @@ export default function LabelsPrintPage() {
         )}
       </div>
 
-      {/* Labels — one 50×25mm cell per physical unit */}
-      <div className="flex flex-wrap gap-2 p-4 print:block print:gap-0 print:p-0">
+      {/* Labels — one 50×25mm cell per physical unit.
+          Sheet mode keeps the flex grid when printing so cells tile across the
+          page, and caps the on-screen width at A4's 194mm content box so the
+          preview wraps exactly where the print will. Thermal collapses to
+          `print:block`, which is what puts one label on each page. */}
+      <div
+        className={`label-sheet ${
+          isSheet
+            ? "flex max-w-[194mm] flex-wrap gap-2 p-4 print:max-w-none print:gap-0 print:p-0"
+            : "flex flex-wrap gap-2 p-4 print:block print:gap-0 print:p-0"
+        }`}
+      >
         {printable.map((l, i) => (
           <div
             key={`${l.variantId}-${i}`}
-            className="label-cell flex h-[25mm] w-[50mm] flex-col justify-between overflow-hidden border border-dashed border-gray-300 px-[2mm] py-[1.5mm] print:border-0"
+            className={`label-cell flex h-[25mm] w-[50mm] flex-col justify-between overflow-hidden border border-dashed border-gray-300 px-[2mm] py-[1.5mm] ${
+              // Thermal: the label stock is the boundary, so no border. Sheet:
+              // keep the dashes in print — tiled labels on plain paper are
+              // uncuttable without a guide.
+              isSheet ? "" : "print:border-0"
+            }`}
           >
             {options.showTitle && (
               <p className="truncate text-[7pt] font-semibold leading-tight text-black">

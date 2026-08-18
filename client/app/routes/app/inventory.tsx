@@ -137,6 +137,13 @@ function StockScreen() {
     setPage(1);
   }, [debouncedSearch, warehouseId, stockFilter]);
 
+  // Selection is by variant id and survives re-filtering, so without this the
+  // "Print labels (n)" count keeps counting rows the user can no longer see —
+  // and printing a sheet of labels for them is not a recoverable mistake.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [debouncedSearch, warehouseId, stockFilter, page]);
+
   const params: StockListParams = useMemo(
     () => ({
       page,
@@ -187,6 +194,17 @@ function StockScreen() {
       ? `/inventory/labels/print?variantIds=${[...selectedIds].join(",")}`
       : null;
 
+  // Code generation acts on the selection when there is one, and on the whole
+  // org otherwise. Counting the rows that actually LACK a code (rather than
+  // the rows selected) lets each button say up front what it will change —
+  // and lets it disable itself when the answer is "nothing", instead of
+  // firing a request that reports zero.
+  const selectedRows = rows.filter((r) => selectedIds.has(r.variantId));
+  const hasSelection = selectedIds.size > 0;
+  const missingSkuCount = selectedRows.filter((r) => !r.sku).length;
+  const missingBarcodeCount = selectedRows.filter((r) => !r.barcode).length;
+  const selectedVariantIds = [...selectedIds];
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -196,20 +214,52 @@ function StockScreen() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => generateSkus.mutate({ filter: "missing-sku" })}
-            disabled={generateSkus.isPending}
+            onClick={() =>
+              generateSkus.mutate(
+                hasSelection
+                  ? { variantIds: selectedVariantIds }
+                  : { filter: "missing-sku" },
+              )
+            }
+            disabled={generateSkus.isPending || (hasSelection && missingSkuCount === 0)}
+            title={
+              hasSelection && missingSkuCount === 0
+                ? "Every selected row already has a SKU"
+                : undefined
+            }
           >
             <SlidersHorizontal className="size-3.5" />
-            {generateSkus.isPending ? "Generating…" : "Generate missing SKUs"}
+            {generateSkus.isPending
+              ? "Generating…"
+              : hasSelection
+                ? `Generate SKUs (${missingSkuCount})`
+                : "Generate all missing SKUs"}
           </Button>
           <Button
             variant="outline"
             size="sm"
-            onClick={() => generateBarcodes.mutate({ filter: "missing-barcode" })}
-            disabled={generateBarcodes.isPending}
+            onClick={() =>
+              generateBarcodes.mutate(
+                hasSelection
+                  ? { variantIds: selectedVariantIds }
+                  : { filter: "missing-barcode" },
+              )
+            }
+            disabled={
+              generateBarcodes.isPending || (hasSelection && missingBarcodeCount === 0)
+            }
+            title={
+              hasSelection && missingBarcodeCount === 0
+                ? "Every selected row already has a barcode"
+                : undefined
+            }
           >
             <Barcode className="size-3.5" />
-            {generateBarcodes.isPending ? "Generating…" : "Generate missing barcodes"}
+            {generateBarcodes.isPending
+              ? "Generating…"
+              : hasSelection
+                ? `Generate barcodes (${missingBarcodeCount})`
+                : "Generate all missing barcodes"}
           </Button>
           {labelHref ? (
             <Button asChild size="sm" className="bg-[#CEF17B] text-gray-900 hover:bg-[#b8e67d]">
@@ -294,11 +344,18 @@ function StockScreen() {
             <SelectItem value="oversold">Oversold</SelectItem>
           </SelectContent>
         </Select>
-        <Button asChild variant="ghost" size="sm" className="ml-auto text-xs text-muted-foreground">
-          <Link to="/inventory/ledger">
-            <History className="size-3.5" /> Movement ledger
-          </Link>
-        </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
+            <Link to="/inventory/warehouses">
+              <WarehouseIcon className="size-3.5" /> Warehouses
+            </Link>
+          </Button>
+          <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
+            <Link to="/inventory/ledger">
+              <History className="size-3.5" /> Movement ledger
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {/* Table */}

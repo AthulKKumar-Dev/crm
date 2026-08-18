@@ -4,7 +4,7 @@ import { channelService } from "~/services/channel.service";
 import { channelKeys } from "~/hooks/use-channel-queries";
 import { orgKeys } from "~/hooks/use-org-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import type { UpdateChannelRequest, TriggerSyncRequest, ShopifyInstallRequest, ManualConnectShopifyRequest } from "~/types/api";
+import type { UpdateChannelRequest, TriggerSyncRequest, ShopifyInstallRequest, ManualConnectShopifyRequest, UpdateSyncSettingsRequest } from "~/types/api";
 
 /** Mutation hook for updating a channel's settings. */
 export function useUpdateChannelMutation() {
@@ -43,10 +43,29 @@ export function useTriggerSyncMutation() {
     mutationFn: ({ id, data }: { id: string; data: TriggerSyncRequest }) =>
       channelService.triggerSync(id, data),
     onSuccess: (_, variables) => {
+      // The channels page renders channelKeys.list(); invalidating only the
+      // detail key meant the row never refreshed after a sync was triggered.
+      queryClient.invalidateQueries({ queryKey: channelKeys.list() });
       queryClient.invalidateQueries({ queryKey: channelKeys.detail(variables.id) });
       toast.success("Sync started.");
     },
     onError: (error) => handleMutationError(error, "Failed to start sync."),
+  });
+}
+
+/** Mutation hook for saving a channel's per-entity sync toggles. */
+export function useUpdateSyncSettingsMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateSyncSettingsRequest }) =>
+      channelService.updateSyncSettings(id, data),
+    // The PATCH returns the freshly-resolved settings, so seed the cache with
+    // them rather than invalidating and making the menu flicker mid-interaction.
+    onSuccess: (settings, variables) => {
+      queryClient.setQueryData(channelKeys.syncSettings(variables.id), settings);
+    },
+    onError: (error) => handleMutationError(error, "Failed to save sync settings."),
   });
 }
 

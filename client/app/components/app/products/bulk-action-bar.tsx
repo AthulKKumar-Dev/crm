@@ -1,8 +1,10 @@
 import { useState } from "react";
 import {
   Archive,
+  Barcode,
   CheckCheck,
   Loader2,
+  SlidersHorizontal,
   Tag,
   Trash2,
   UploadCloud,
@@ -16,6 +18,10 @@ import {
   useBulkSetStatusMutation,
   useBulkSyncMutation,
 } from "~/hooks/use-product-mutations";
+import {
+  useGenerateBarcodesMutation,
+  useGenerateSkusMutation,
+} from "~/hooks/use-inventory-mutations";
 import type { Product, ProductStatus } from "~/types/api";
 
 /**
@@ -46,6 +52,21 @@ export function BulkActionBar({
   const sync = useBulkSyncMutation();
   const del = useBulkDeleteMutation();
 
+  // SKU/barcode generation is variant-level, so the selection is flattened to
+  // its variants. Counting the ones that actually LACK a code lets each button
+  // state its scope up front and disable itself when there is nothing to do.
+  //
+  // Deliberately NOT gated on warehousing: the generate endpoints never were,
+  // and the equivalent buttons on /inventory live inside the stock table, so
+  // this bar is the only route to them for an org that has not enabled it.
+  const selectedVariants = selectedProducts.flatMap((p) => p.variants);
+  const variantIds = selectedVariants.map((v) => v.id);
+  const missingSkuCount = selectedVariants.filter((v) => !v.sku).length;
+  const missingBarcodeCount = selectedVariants.filter((v) => !v.barcode).length;
+
+  const generateSkus = useGenerateSkusMutation();
+  const generateBarcodes = useGenerateBarcodesMutation();
+
   const [tagDialogOpen, setTagDialogOpen] = useState<"add" | "remove" | null>(null);
   const [tagsInput, setTagsInput] = useState("");
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
@@ -56,7 +77,9 @@ export function BulkActionBar({
     addTags.isPending ||
     removeTags.isPending ||
     sync.isPending ||
-    del.isPending;
+    del.isPending ||
+    generateSkus.isPending ||
+    generateBarcodes.isPending;
 
   function handleAfter(action: () => void) {
     return () => {
@@ -153,6 +176,32 @@ export function BulkActionBar({
             disabled={isPending || editableCount === 0}
           >
             <Tag className="size-3.5" /> Remove tags
+          </ActionButton>
+          <ActionButton
+            onClick={() =>
+              generateSkus.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
+            }
+            disabled={isPending || missingSkuCount === 0}
+            title={
+              missingSkuCount === 0
+                ? "Every selected variant already has a SKU"
+                : `${missingSkuCount} of ${selectedVariants.length} variants need a SKU`
+            }
+          >
+            <SlidersHorizontal className="size-3.5" /> SKUs ({missingSkuCount})
+          </ActionButton>
+          <ActionButton
+            onClick={() =>
+              generateBarcodes.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
+            }
+            disabled={isPending || missingBarcodeCount === 0}
+            title={
+              missingBarcodeCount === 0
+                ? "Every selected variant already has a barcode"
+                : `${missingBarcodeCount} of ${selectedVariants.length} variants need a barcode`
+            }
+          >
+            <Barcode className="size-3.5" /> Barcodes ({missingBarcodeCount})
           </ActionButton>
           <ActionButton onClick={handleSync} disabled={isPending || editableCount === 0}>
             <UploadCloud className="size-3.5" /> Sync to Shopify

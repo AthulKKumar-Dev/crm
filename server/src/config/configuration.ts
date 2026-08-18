@@ -27,6 +27,16 @@ export default () => ({
         clientId: process.env.SHOPIFY_CLIENT_ID,
         clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
         apiVersion: process.env.SHOPIFY_API_VERSION || '2026-01',
+        // How far back the FIRST orders backfill reaches on a newly connected
+        // store. Only the initial pull is windowed — every later sync is
+        // incremental off the per-entity watermark, and an older order still
+        // arrives whenever it is edited in Shopify (the incremental filter is
+        // `updated_at`, not `created_at`). 60 days also happens to be what
+        // Shopify returns without the protected `read_all_orders` scope.
+        initialOrderWindowDays: Number.parseInt(
+            process.env.SHOPIFY_INITIAL_ORDER_WINDOW_DAYS || '60',
+            10,
+        ),
         // MUST mirror [access_scopes] in the public app's shopify.app.toml —
         // with include_config_on_deploy, Shopify grants what the TOML declares,
         // regardless of the scope param in the authorize URL.

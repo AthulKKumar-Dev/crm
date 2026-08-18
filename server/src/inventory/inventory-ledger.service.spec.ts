@@ -227,6 +227,64 @@ describe('InventoryLedgerService', () => {
     expect(rows[0]).toMatchObject({ variantId: 'b', changeAmount: 4, quantityBefore: 0 });
   });
 
+  // Multi-location: one variant now holds stock in several warehouses, one per
+  // mapped Shopify location. The sellable cache must track the SUM across all
+  // of them, not the warehouse the movement happened to touch — the aggregate
+  // is deliberately unscoped by warehouseId for exactly this reason.
+  it('multi-warehouse: cache is the SUM across warehouses, not the touched one', async () => {
+    // Warehouse w1 holds 4 available, w2 holds 6. A movement on either must
+    // leave the variant cache at 10.
+    tx.stockLevel.aggregate.mockResolvedValue({ _sum: { available: 10 } });
+
+    const onW1 = await service.applyMovement(
+      { ...baseArgs, warehouseId: 'w1', fromBucket: null, toBucket: StockBucket.AVAILABLE },
+      tx as never,
+    );
+    expect(onW1.inventoryQuantity).toBe(10);
+
+    // The aggregate is variant-scoped only. Scoping it to the warehouse would
+    // make the cache collapse to whichever location was written last —
+    // precisely the bug the per-location sync exists to avoid.
+    expect(tx.stockLevel.aggregate).toHaveBeenLastCalledWith({
+      where: { variantId: 'v1' },
+      _sum: { available: true },
+    });
+
+    const onW2 = await service.applyMovement(
+      { ...baseArgs, warehouseId: 'w2', fromBucket: null, toBucket: StockBucket.AVAILABLE },
+      tx as never,
+    );
+    expect(onW2.inventoryQuantity).toBe(10);
+    expect(tx.productVariant.update).toHaveBeenLastCalledWith({
+      where: { id: 'v1' },
+      data: { inventoryQuantity: 10 },
+    });
+  });
+
+  // The Shopify pull and the inventory_levels/update webhook both set an
+  // absolute per-location quantity, so a decrease that crosses zero is real
+  // (oversold) rather than an error to refuse — refusing would leave the two
+  // systems permanently out of step.
+  it('allowNegativeAvailable drops the source guard for the Shopify mirror only', async () => {
+    await service.applyMovement(
+      {
+        ...baseArgs,
+        fromBucket: StockBucket.AVAILABLE,
+        toBucket: null,
+        allowNegativeAvailable: true,
+      },
+      tx as never,
+    );
+    expect(tx.$executeRawUnsafe.mock.calls[0][0] as string).not.toContain('"available" >= $2');
+
+    tx.$executeRawUnsafe.mockClear();
+    await service.applyMovement(
+      { ...baseArgs, fromBucket: StockBucket.AVAILABLE, toBucket: null },
+      tx as never,
+    );
+    expect(tx.$executeRawUnsafe.mock.calls[0][0] as string).toContain('"available" >= $2');
+  });
+
   it('releaseStockRowsForDelete refuses when any bucket is non-zero', async () => {
     tx.stockLevel.findFirst.mockResolvedValue({ id: 'level1' });
     await expect(service.releaseStockRowsForDelete(tx as never, 'v1')).rejects.toThrow(

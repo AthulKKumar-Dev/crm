@@ -397,11 +397,26 @@ export class ShopifyOAuthService {
     // here carry a per-merchant apiSecret in credentials, which the webhook
     // controller still accepts as a legacy HMAC fallback.
     async manualConnect(orgId: string, shopDomain: string, apiKey: string, apiSecret: string, accessToken: string) {
-        // Check if org already has a Shopify channel
+        // An existing row is only a conflict when it is a DIFFERENT, live
+        // store.
+        //
+        // Rejecting unconditionally created a dead end: webhook registration
+        // used to run inside this request and could outlive the client's 30s
+        // timeout, so the merchant saw a failure for a store that had
+        // connected - and every retry then hit this exception, with
+        // "Disconnect it first" as the only way out. Reconnecting the same
+        // domain, or replacing a DISCONNECTED channel, updates the row in
+        // place (which is also what the public-app Reconnect button does).
         const existing = await this.prisma.channel.findUnique({
             where: { organizationId_platform: { organizationId: orgId, platform: ChannelPlatform.SHOPIFY } },
         });
-        if (existing) {
+        const sameStore =
+            existing?.externalStoreUrl === `https://${shopDomain}`;
+        if (
+            existing &&
+            !sameStore &&
+            existing.status !== ChannelStatus.DISCONNECTED
+        ) {
             throw new ConflictException('A Shopify store is already connected. Disconnect it first.');
         }
 
@@ -472,35 +487,53 @@ export class ShopifyOAuthService {
         // Create Channel + update Organization currency atomically.
         // Same rationale as the OAuth flow: the Shopify shop's currency is the
         // source of truth for the org's currency.
-        const [channel] = await this.prisma.$transaction([
-            this.prisma.channel.create({
-                data: {
-                    organizationId: orgId,
-                    name: shopData.shop.name || shopDomain,
-                    platform: ChannelPlatform.SHOPIFY,
-                    status: ChannelStatus.CONNECTED,
-                    isEnabled: true,
-                    credentials: {
-                        accessToken: encryptedToken,
-                        apiKey: encryptedApiKey,
-                        apiSecret: encryptedApiSecret,
-                        shopDomain,
-                        scopes: 'custom_app',
+        const channelData = {
+            name: shopData.shop.name || shopDomain,
+            status: ChannelStatus.CONNECTED,
+            isEnabled: true,
+            credentials: {
+                accessToken: encryptedToken,
+                apiKey: encryptedApiKey,
+                apiSecret: encryptedApiSecret,
+                shopDomain,
+                scopes: 'custom_app',
+            },
+            externalStoreId: String(shopData.shop.id),
+            externalStoreUrl: `https://${shopDomain}`,
+        };
+
+        // Update-or-create by primary key rather than `upsert`. Prisma would
+        // compile an upsert on the compound unique into
+        // INSERT ... ON CONFLICT (organization_id, platform) - and that index,
+        // though declared in schema.prisma, is NOT present in this database
+        // (it was lost in the migration divergence), so Postgres would reject
+        // the statement. The public-app path branches explicitly for the same
+        // reason.
+        const channel = await this.prisma.$transaction(async (tx) => {
+            const ch = existing
+                ? await tx.channel.update({
+                    where: { id: existing.id },
+                    // syncStatus / lastSyncedAt are deliberately left alone: a
+                    // reconnect should resume where the sync got to rather
+                    // than re-backfill from scratch.
+                    data: channelData,
+                })
+                : await tx.channel.create({
+                    data: {
+                        organizationId: orgId,
+                        platform: ChannelPlatform.SHOPIFY,
+                        syncStatus: SyncStatus.IDLE,
+                        ...channelData,
                     },
-                    externalStoreId: String(shopData.shop.id),
-                    externalStoreUrl: `https://${shopDomain}`,
-                    syncStatus: SyncStatus.IDLE,
-                },
-            }),
-            ...(shopData.shop.currency
-                ? [
-                    this.prisma.organization.update({
-                        where: { id: orgId },
-                        data: { currency: shopData.shop.currency },
-                    }),
-                ]
-                : []),
-        ]);
+                });
+            if (shopData.shop.currency) {
+                await tx.organization.update({
+                    where: { id: orgId },
+                    data: { currency: shopData.shop.currency },
+                });
+            }
+            return ch;
+        });
 
         this.logger.log(
             `Shopify store connected (custom app): ${shopDomain} → org ${orgId} ` +

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { RedisService } from '../redis/redis.service';
 
 export interface ShopifyAuthContext {
   shopDomain: string;
@@ -80,6 +81,30 @@ const MAX_RETRY_AFTER_MS = 60_000;
 /// one (Razorpay 5s, order service 15s, email service).
 const SHOPIFY_FETCH_TIMEOUT_MS = 30_000;
 
+/// Shopify's leaky bucket is per SHOP, but nothing here was: the sync worker
+/// runs three jobs at once and the push and draft-mirror workers run alongside
+/// it, each seeing only its own responses. Every one of them could believe the
+/// bucket was healthy while collectively draining it. The last observed
+/// throttle status is therefore shared through Redis.
+///
+/// Short TTL: a stale reading is worse than none, because the bucket refills
+/// continuously and an old low reading would throttle us for no reason.
+const BUCKET_STATE_TTL_S = 60;
+/// Below this fraction of the bucket we wait for it to refill rather than
+/// spend the remainder and take a THROTTLED round-trip.
+const BUCKET_LOW_WATERMARK = 0.2;
+/// Never park a worker longer than this on the shared reading alone. The
+/// per-request 429 / THROTTLED handling below remains the real backstop.
+const MAX_BUCKET_WAIT_MS = 5_000;
+
+interface ShopBucketState {
+  currentlyAvailable: number;
+  maximumAvailable: number;
+  restoreRate: number;
+  /// epoch ms of the observation, so readers can project it forward
+  at: number;
+}
+
 /**
  * Thin Shopify Admin GraphQL client.
  *
@@ -96,7 +121,69 @@ const SHOPIFY_FETCH_TIMEOUT_MS = 30_000;
 export class ShopifyGraphqlClient {
   private readonly logger = new Logger(ShopifyGraphqlClient.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly redis: RedisService,
+  ) {}
+
+  private bucketKey(shopDomain: string): string {
+    return `shopify:bucket:${shopDomain}`;
+  }
+
+  /**
+   * Wait if another worker recently found this shop's bucket nearly empty.
+   *
+   * Projects the last reading forward at the shop's restore rate, so a reading
+   * taken while we were waiting on our own response is still useful. Entirely
+   * best-effort: any Redis problem just means we proceed and fall back to the
+   * per-request retry budgets.
+   */
+  private async awaitBucketHeadroom(shopDomain: string): Promise<void> {
+    let state: ShopBucketState | null;
+    try {
+      state = await this.redis.get<ShopBucketState>(this.bucketKey(shopDomain));
+    } catch {
+      return;
+    }
+    if (!state || !state.maximumAvailable || !state.restoreRate) return;
+
+    const elapsedS = Math.max(0, (Date.now() - state.at) / 1000);
+    const projected = Math.min(
+      state.maximumAvailable,
+      state.currentlyAvailable + elapsedS * state.restoreRate,
+    );
+    const floor = state.maximumAvailable * BUCKET_LOW_WATERMARK;
+    if (projected >= floor) return;
+
+    const waitMs = Math.min(
+      MAX_BUCKET_WAIT_MS,
+      Math.ceil(((floor - projected) / state.restoreRate) * 1000),
+    );
+    if (waitMs <= 0) return;
+    this.logger.debug(
+      `Shopify bucket for ${shopDomain} projected at ${Math.round(projected)}/${state.maximumAvailable} - waiting ${waitMs}ms for headroom.`,
+    );
+    await this.sleep(waitMs);
+  }
+
+  private async recordBucket(
+    shopDomain: string,
+    throttleStatus: {
+      maximumAvailable: number;
+      currentlyAvailable: number;
+      restoreRate: number;
+    },
+  ): Promise<void> {
+    try {
+      await this.redis.set(
+        this.bucketKey(shopDomain),
+        { ...throttleStatus, at: Date.now() } satisfies ShopBucketState,
+        BUCKET_STATE_TTL_S,
+      );
+    } catch {
+      // Best-effort telemetry; never fail a request over it.
+    }
+  }
 
   getApiVersion(): string {
     return this.config.get<string>('shopify.apiVersion') ?? '2026-01';
@@ -122,6 +209,9 @@ export class ShopifyGraphqlClient {
     let lastError: string = 'unknown';
 
     while (attempt < TOTAL_ATTEMPT_CEILING) {
+      // What every OTHER worker on this shop has seen, not just us.
+      await this.awaitBucketHeadroom(auth.shopDomain);
+
       let res: Response;
       try {
         res = await fetch(url, {
@@ -264,6 +354,10 @@ export class ShopifyGraphqlClient {
           `bucket=${throttleStatus.currentlyAvailable}/${throttleStatus.maximumAvailable} ` +
           `restore=${throttleStatus.restoreRate}/s`,
         );
+        // Share the reading so concurrent workers on this shop see it too --
+        // see awaitBucketHeadroom.
+        await this.recordBucket(auth.shopDomain, throttleStatus);
+
         const usage =
           1 - throttleStatus.currentlyAvailable / throttleStatus.maximumAvailable;
         if (usage > 0.8) {

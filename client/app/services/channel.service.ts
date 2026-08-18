@@ -4,6 +4,9 @@ import type {
   ChannelDetail,
   UpdateChannelRequest,
   TriggerSyncRequest,
+  ChannelSyncSettings,
+  UpdateSyncSettingsRequest,
+  SyncLog,
   ShopifyInstallRequest,
   OAuthInstallResponse,
   ManualConnectShopifyRequest,
@@ -34,6 +37,16 @@ export const channelService = {
 
   triggerSync: (id: string, data: TriggerSyncRequest) =>
     apiClient.post<{ message: string; jobId: string }>(`/channels/${id}/sync`, data).then((response) => response.data),
+
+  /** Sync history — the only place a failed sync explains itself. */
+  getSyncLogs: (id: string) =>
+    apiClient.get<SyncLog[]>(`/channels/${id}/sync-logs`).then((response) => response.data),
+
+  getSyncSettings: (id: string) =>
+    apiClient.get<ChannelSyncSettings>(`/channels/${id}/sync-settings`).then((response) => response.data),
+
+  updateSyncSettings: (id: string, data: UpdateSyncSettingsRequest) =>
+    apiClient.patch<ChannelSyncSettings>(`/channels/${id}/sync-settings`, data).then((response) => response.data),
 
   installShopify: (data: ShopifyInstallRequest) =>
     apiClient.post<OAuthInstallResponse>("/channels/shopify/install", data).then((response) => response.data),

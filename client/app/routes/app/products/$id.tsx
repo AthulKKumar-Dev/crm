@@ -34,6 +34,7 @@ import {
   useUpdateVariantMutation,
 } from "~/hooks/use-product-mutations";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { useInventoryStatus, useVariantStock } from "~/hooks/use-inventory-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { calcMargin, cn, formatCurrency } from "~/lib/utils";
 import { formatDate, formatDateTime } from "~/lib/format-date";
@@ -2169,6 +2170,85 @@ function VariantTableRow({
   );
 }
 
+/**
+ * Per-warehouse bucket breakdown for one variant, shown in place of the single
+ * editable quantity once warehousing is on. Read-only by design: every write
+ * has to go through the movement ledger so it leaves an audit row, which is
+ * what the Inventory screen's Adjust action does.
+ */
+function VariantWarehouseStock({ variantId }: { variantId: string }) {
+  const stock = useVariantStock(variantId);
+  const levels = stock.data?.levels ?? [];
+
+  if (stock.isLoading) {
+    return (
+      <p className="rounded-lg bg-gray-50 dark:bg-gray-800/50 px-3 py-2 text-[11px] text-muted-foreground">
+        Loading stock by warehouse…
+      </p>
+    );
+  }
+  if (stock.isError) {
+    return (
+      <p className="rounded-lg bg-gray-50 dark:bg-gray-800/50 px-3 py-2 text-[11px] text-muted-foreground">
+        Couldn't load stock by warehouse.
+      </p>
+    );
+  }
+  if (levels.length === 0) {
+    return (
+      <p className="rounded-lg bg-gray-50 dark:bg-gray-800/50 px-3 py-2 text-[11px] text-muted-foreground">
+        No stock recorded for this variant in any warehouse yet.
+      </p>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg ring-1 ring-border">
+      <table className="w-full text-left text-[11px]">
+        <thead>
+          <tr className="border-b text-muted-foreground">
+            <th className="px-2.5 py-1.5 font-medium">Warehouse</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">Available</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">Reserved</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">QC</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">Damaged</th>
+            <th className="px-2.5 py-1.5 text-right font-medium">On hand</th>
+          </tr>
+        </thead>
+        <tbody>
+          {levels.map((l) => (
+            <tr key={l.id} className="border-b last:border-b-0">
+              <td className="px-2.5 py-1.5">
+                {l.warehouse.name}
+                {l.defaultLocation?.fullCode && (
+                  <span className="ml-1.5 font-mono text-[10px] text-muted-foreground">
+                    {l.defaultLocation.fullCode}
+                  </span>
+                )}
+              </td>
+              <td
+                className={cn(
+                  "px-2.5 py-1.5 text-right font-semibold tabular-nums",
+                  l.available < 0 && "text-red-600",
+                  l.available === 0 && "text-orange-500",
+                )}
+              >
+                {l.available}
+              </td>
+              <td className="px-2.5 py-1.5 text-right tabular-nums">{l.reserved}</td>
+              <td className="px-2.5 py-1.5 text-right tabular-nums">{l.qc}</td>
+              <td className="px-2.5 py-1.5 text-right tabular-nums">{l.damaged}</td>
+              <td className="px-2.5 py-1.5 text-right font-semibold tabular-nums">
+                {l.available + l.reserved + l.qc + l.damaged}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function VariantEditDialog({
   variant,
   draft,
@@ -2197,6 +2277,13 @@ function VariantEditDialog({
   const [trackQuantity, setTrackQuantity] = useState(true);
   const [continueSelling, setContinueSelling] = useState(false);
   const [taxable, setTaxable] = useState(true);
+
+  // With warehousing on, this variant's stock is the sum of per-warehouse
+  // buckets and `inventoryQuantity` is only a cache of it. Writing the field
+  // directly would bypass the movement ledger and be silently recomputed away
+  // by the next stock movement, so it becomes read-only and the real numbers
+  // are shown below instead.
+  const warehousingEnabled = useInventoryStatus().data?.warehousingEnabled === true;
 
   useEffect(() => {
     if (!variant || !open) return;
@@ -2298,8 +2385,14 @@ function VariantEditDialog({
                 step="1"
                 value={inventoryQuantity}
                 onChange={(e) => setInventoryQuantity(e.target.value)}
-                disabled={!trackQuantity}
+                disabled={!trackQuantity || warehousingEnabled}
               />
+              {warehousingEnabled && (
+                <p className="text-[11px] text-muted-foreground">
+                  Set per warehouse in{" "}
+                  <Link to="/inventory" className="underline">Inventory</Link>
+                </p>
+              )}
             </div>
             <div className="space-y-1">
               <Label htmlFor="ve-sku" className="text-[12px]">SKU</Label>
@@ -2314,6 +2407,7 @@ function VariantEditDialog({
               />
             </div>
           </div>
+          {warehousingEnabled && <VariantWarehouseStock variantId={variant.id} />}
           <Field orientation="horizontal">
             <FieldContent>
               <FieldLabel className="text-[13px]" htmlFor="ve-track">
