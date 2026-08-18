@@ -14,6 +14,7 @@ import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { QueryErrorState } from "~/components/app/query-error-state";
 import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
+import { ChannelSyncOptions } from "~/components/app/channel-sync-options";
 import { WhatsAppConnectDialog } from "~/components/app/whatsapp-connect-dialog";
 import { useChannels, channelKeys } from "~/hooks/use-channel-queries";
 import { orgKeys } from "~/hooks/use-org-queries";
@@ -225,7 +226,13 @@ export default function ChannelPage() {
           </div>
           <div className="divide-y divide-border">
             {channels.map((channel) => {
-              const statusConfig = STATUS_CONFIG[channel.status];
+              // Non-partial Record lookups: an unrecognised status (a new
+              // enum value, a stale cached payload) used to crash the row on
+              // `statusConfig.className` rather than degrade.
+              const statusConfig =
+                STATUS_CONFIG[channel.status] ?? STATUS_CONFIG.DISCONNECTED;
+              const syncLabel =
+                SYNC_STATUS_LABEL[channel.syncStatus] ?? "Unknown";
               return (
                 <div key={channel.id} className="flex items-center gap-4 px-5 py-4 hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
                   <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-[#f1f7fa] dark:bg-gray-800/60 text-xl">
@@ -240,7 +247,7 @@ export default function ChannelPage() {
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-3 text-[10px] text-muted-foreground">
                       <span className="flex items-center gap-1"><Package className="size-3" />{PLATFORM_LABEL[channel.platform]}</span>
-                      <span className="flex items-center gap-1"><ShoppingBag className="size-3" />{SYNC_STATUS_LABEL[channel.syncStatus]}</span>
+                      <span className="flex items-center gap-1"><ShoppingBag className="size-3" />{syncLabel}</span>
                       <span className="flex items-center gap-1"><Clock className="size-3" />{timeAgo(channel.lastSyncedAt)}</span>
                       {channel.externalStoreUrl && (
                         <a href={channel.externalStoreUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-[#084734] hover:underline">
@@ -273,18 +280,26 @@ export default function ChannelPage() {
                         • MANUAL   → "Push to Shopify" (no pull; bulk-push products/orders/drafts created in the CRM)
                         • Others   → hidden            (no push/pull semantics for IG/WA in this queue) */}
                     {(channel.platform === 'SHOPIFY' || channel.platform === 'MANUAL') && (
+                      <ChannelSyncOptions channel={channel} />
+                    )}
+                    {(channel.platform === 'SHOPIFY' || channel.platform === 'MANUAL') && (
                       <button
                         onClick={() => triggerSync.mutate({
                           id: channel.id,
-                          // 'locations' first: it mirrors Shopify locations as warehouses, and
-                            // the inventory pass reconciles per-location stock into them.
-                            data: { entityTypes: ['locations', 'products', 'orders', 'customers', 'inventory'] },
+                          // Everything the server knows how to pull; it then
+                          // intersects this with the channel's enabled set, so
+                          // the gear menu is what actually decides what runs.
+                          // 'locations' first: it mirrors Shopify locations as
+                          // warehouses, and the inventory pass reconciles
+                          // per-location stock into them.
+                          data: { entityTypes: ['locations', 'products', 'orders', 'customers', 'inventory', 'collections'] },
                         })}
-                        // Only block on the local mutation being mid-flight.
-                        // We deliberately do NOT block on `syncStatus === IN_PROGRESS`:
-                        // the server self-heals stuck rows when the trigger fires
-                        // again, so allowing re-clicks is the recovery path.
-                        disabled={triggerSync.isPending}
+                        // Blocked while a sync is genuinely live: the server
+                        // returns 409 in that window, so the old "click to
+                        // retry" label invited a click designed to fail. The
+                        // list polls while IN_PROGRESS now, so this clears by
+                        // itself instead of needing a manual nudge.
+                        disabled={triggerSync.isPending || channel.syncStatus === 'IN_PROGRESS'}
                         title={
                           channel.platform === 'MANUAL'
                             ? 'Push every CRM-created product, offline order and draft to your connected Shopify store.'
@@ -300,7 +315,7 @@ export default function ChannelPage() {
                         {triggerSync.isPending
                           ? 'Starting…'
                           : channel.syncStatus === 'IN_PROGRESS'
-                            ? 'Syncing… click to retry'
+                            ? 'Syncing…'
                             : channel.platform === 'MANUAL'
                               ? 'Push to Shopify'
                               : 'Sync Now'}

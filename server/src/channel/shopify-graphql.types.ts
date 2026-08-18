@@ -124,6 +124,12 @@ export interface OrderNode {
   customer: OrderCustomerNode | null;
   lineItems: { pageInfo?: PageInfo; nodes: OrderLineItemNode[] };
   fulfillments: OrderFulfillmentNode[];
+  /** Order-level refund total. A cheap scalar standing in for the refunds
+   *  connection, which ORDERS_LIST_QUERY no longer selects -- it tells
+   *  `drainRefunds` whether this order is worth a follow-up call at all. */
+  totalRefundedSet: MoneyBag;
+  /** Empty as returned by ORDERS_LIST_QUERY; populated by `drainRefunds` for
+   *  the orders that actually have refunds. */
   refunds: OrderRefundNode[];
 }
 
@@ -234,7 +240,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
         customer {
           id email firstName lastName
         }
-        lineItems(first: 100) {
+        lineItems(first: 25) {
           pageInfo { hasNextPage endCursor }
           nodes {
             id
@@ -260,24 +266,55 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
           updatedAt
           trackingInfo { number url company }
         }
-        refunds(first: 50) {
-          id
-          note
-          createdAt
-          totalRefundedSet { shopMoney { amount currencyCode } }
-          refundLineItems(first: 50) {
-            nodes {
-              id
-              quantity
-              restockType
-              lineItem { id }
-            }
+        totalRefundedSet { shopMoney { amount currencyCode } }
+      }
+    }
+  }
+`;
+
+/**
+ * Fetch one order's refunds.
+ *
+ * WHY this is not in ORDERS_LIST_QUERY: `refunds(first: 50)` nesting
+ * `refundLineItems(first: 50)` requests ~2,500 nodes PER ORDER, and Shopify
+ * prices a query before running it against a 1,000-point ceiling. Multiplied by
+ * the orders page size, that put the list query structurally over the limit --
+ * which is why orders failed to sync while products (no nested connections)
+ * were fine.
+ *
+ * Refunds are rare, so pulling them per-order costs almost nothing in practice:
+ * `drainRefunds` only calls this when the order's financial status or
+ * `totalRefundedSet` says there is something to fetch.
+ */
+export const ORDER_REFUNDS_QUERY = /* GraphQL */ `
+  query OrderRefunds($id: ID!) {
+    order(id: $id) {
+      id
+      refunds(first: 50) {
+        id
+        note
+        createdAt
+        totalRefundedSet { shopMoney { amount currencyCode } }
+        refundLineItems(first: 50) {
+          nodes {
+            id
+            quantity
+            restockType
+            lineItem { id }
           }
         }
       }
     }
   }
 `;
+
+export interface OrderRefundsResponse {
+  order: { id: string; refunds: OrderRefundNode[] } | null;
+}
+
+export interface OrderRefundsVariables {
+  id: string;
+}
 
 // ─── Common shapes for Phase 1 mutations ────────────────────────────────────
 
@@ -1275,6 +1312,9 @@ export interface ProductSyncNode {
 export interface ProductsListVariables {
   first: number;
   after?: string | null;
+  /** Shopify search filter, e.g. `updated_at:>='2026-08-01T00:00:00.000Z'`.
+   *  Null on a first backfill (pull everything). */
+  query?: string | null;
   withMetafield: boolean;
   mfNamespace: string;
   mfKey: string;
@@ -1291,11 +1331,12 @@ export const PRODUCTS_LIST_QUERY = /* GraphQL */ `
   query ProductsList(
     $first: Int!
     $after: String
+    $query: String
     $withMetafield: Boolean!
     $mfNamespace: String
     $mfKey: String!
   ) {
-    products(first: $first, after: $after) {
+    products(first: $first, after: $after, query: $query) {
       pageInfo {
         hasNextPage
         endCursor
@@ -1360,8 +1401,8 @@ export interface ProductsInventoryResponse {
 }
 
 export const PRODUCTS_INVENTORY_QUERY = /* GraphQL */ `
-  query ProductsInventory($first: Int!, $after: String) {
-    products(first: $first, after: $after) {
+  query ProductsInventory($first: Int!, $after: String, $query: String) {
+    products(first: $first, after: $after, query: $query) {
       pageInfo {
         hasNextPage
         endCursor
@@ -1405,6 +1446,9 @@ export interface CustomerSyncNode {
 export interface CustomersListVariables {
   first: number;
   after?: string | null;
+  /** Shopify search filter, e.g. `updated_at:>='2026-08-01T00:00:00.000Z'`.
+   *  Null on a first backfill (pull everything). */
+  query?: string | null;
 }
 
 export interface CustomersListResponse {
@@ -1415,8 +1459,8 @@ export interface CustomersListResponse {
 }
 
 export const CUSTOMERS_LIST_QUERY = /* GraphQL */ `
-  query CustomersList($first: Int!, $after: String) {
-    customers(first: $first, after: $after) {
+  query CustomersList($first: Int!, $after: String, $query: String) {
+    customers(first: $first, after: $after, query: $query) {
       pageInfo {
         hasNextPage
         endCursor
@@ -1471,6 +1515,9 @@ export interface CollectionSyncNode {
 export interface CollectionsListVariables {
   first: number;
   after?: string | null;
+  /** Shopify search filter, e.g. `updated_at:>='2026-08-01T00:00:00.000Z'`.
+   *  Null on a first backfill (pull everything). */
+  query?: string | null;
 }
 
 export interface CollectionsListResponse {
@@ -1481,8 +1528,8 @@ export interface CollectionsListResponse {
 }
 
 export const COLLECTIONS_LIST_QUERY = /* GraphQL */ `
-  query CollectionsList($first: Int!, $after: String) {
-    collections(first: $first, after: $after) {
+  query CollectionsList($first: Int!, $after: String, $query: String) {
+    collections(first: $first, after: $after, query: $query) {
       pageInfo {
         hasNextPage
         endCursor

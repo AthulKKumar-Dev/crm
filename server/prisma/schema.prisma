@@ -417,6 +417,7 @@ model Channel {
 
   organization       Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   syncLogs           SyncLog[]
+  syncStates         ChannelSyncState[]
   products           Product[]
   customers          Customer[]
   orders             Order[]
@@ -443,6 +444,45 @@ model Channel {
   /// two stores of one platform) and is tracked separately.
   @@index([organizationId])
   @@map("channels")
+}
+
+/// Per-entity sync bookkeeping for a channel: where the last successful run of
+/// THAT entity got to, and whether the merchant wants it synced at all.
+///
+/// Replaces the single channel-level `Channel.lastSyncedAt` as the sync filter.
+/// That watermark only advanced when EVERY entity succeeded, so one failing
+/// entity forced a full rescan of all the others on every BullMQ retry - the
+/// amplifier that turned an orders failure into a store-wide rate-limit event.
+///
+/// One row per (channel, direction, entity):
+///   direction 'pull' -> products | orders | customers | inventory | collections
+///   direction 'push' -> orders | products | drafts
+/// `push` rows use only `enabled`; the watermark columns stay null for them.
+model ChannelSyncState {
+  id           String    @id @default(cuid())
+  channelId    String    @map("channel_id")
+  direction    String    @default("pull")
+  entityType   String    @map("entity_type")
+  /// Merchant's per-entity toggle. Controls the BULK pass only - real-time
+  /// webhooks keep flowing regardless, and disabling never deletes data.
+  enabled      Boolean   @default(true)
+  /// Start time of the last run of this entity that completed cleanly.
+  /// Compared against Shopify's `updated_at`, so it is deliberately rewound by
+  /// SYNC_WATERMARK_SKEW_MS to absorb clock drift between the two servers.
+  watermark    DateTime?
+  /// False until this entity has completed a first full/windowed backfill.
+  /// Drives the choice between the initial window and the incremental filter.
+  backfillDone Boolean   @default(false) @map("backfill_done")
+  /// The floor the initial backfill used, recorded so it stays auditable
+  /// (orders are windowed to SHOPIFY_INITIAL_ORDER_WINDOW_DAYS on first pull).
+  windowStart  DateTime? @map("window_start")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, direction, entityType])
+  @@index([channelId])
+  @@map("channel_sync_states")
 }
 
 model SyncLog {

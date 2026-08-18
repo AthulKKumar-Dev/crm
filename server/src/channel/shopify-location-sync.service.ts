@@ -107,6 +107,22 @@ export class ShopifyLocationSyncService {
     shopDomain: string,
     token: string,
   ): Promise<void> {
+    // Authoritative guard, deliberately here and not only in
+    // runForOrganization: `runSync` reaches this directly through the
+    // 'locations' entity type (it is first in PULL_ENTITY_TYPES), for EVERY
+    // org. Without it a legacy org's sync invents a warehouse per Shopify
+    // location — warehouses the merchant never asked for, and whose mere
+    // existence used to flip the availability push into per-warehouse mode.
+    // A legacy org has no stock_levels at all, so that push then found zero
+    // rows and sent nothing: stock sync would stop, silently, with no
+    // mutation and therefore no error to notice.
+    //
+    // Above openSyncLog so a legacy org does not accrue empty log rows either.
+    if (!(await this.ledger.isWarehousingEnabled(orgId))) {
+      this.logger.debug(`Locations sync skipped: warehousing off for org ${orgId}`);
+      return;
+    }
+
     const syncLog = await this.openSyncLog(channelId, orgId, 'locations');
     let processed = 0;
 
@@ -138,6 +154,23 @@ export class ShopifyLocationSyncService {
         nodes[0];
       const primaryLocationId = this.numericId(primary.id);
 
+      // `enable()` reads shopifyLocationId from Channel.metadata, which is only
+      // populated once resolveLocationId has run during some push. An org that
+      // enabled warehousing BEFORE ever pushing to Shopify (or before
+      // connecting it) therefore has a default warehouse with a NULL mapping.
+      //
+      // byLocation only contains warehouses that already carry a location id,
+      // so that one never matches — the primary location would create a SECOND
+      // warehouse beside it. The new one becomes default and receives
+      // Shopify's quantities while the original keeps all the real stock,
+      // unmapped and unsynced; and because the variant cache is SUM(available)
+      // across ALL warehouses, the reported total roughly doubles.
+      //
+      // Claim it instead. Only the DEFAULT unmapped warehouse is adoptable and
+      // only by the PRIMARY location — claiming a hand-created "Overflow
+      // Store" for a Shopify location would be silently wrong.
+      const adoptable = existing.find((w) => !w.shopifyLocationId && w.isDefault);
+
       const seenLocationIds = new Set<string>();
 
       for (const node of nodes) {
@@ -150,6 +183,19 @@ export class ShopifyLocationSyncService {
             where: { id: match.id },
             data: { isActive: node.isActive },
           });
+        } else if (locationId === primaryLocationId && adoptable) {
+          // Link the org's pre-existing warehouse to the primary location
+          // rather than stranding it. Name and stock are untouched; it simply
+          // gains the mapping it should have had at enable time.
+          await this.prisma.warehouse.update({
+            where: { id: adoptable.id },
+            data: { shopifyLocationId: locationId, isActive: node.isActive },
+          });
+          // Seed the lookup so the default-settle pass below resolves it.
+          byLocation.set(locationId, { ...adoptable, shopifyLocationId: locationId });
+          this.logger.log(
+            `Adopted existing warehouse ${adoptable.code} for Shopify location ${locationId} (org ${orgId})`,
+          );
         } else {
           const code = this.deriveCode(node.name, usedCodes);
           usedCodes.add(code);

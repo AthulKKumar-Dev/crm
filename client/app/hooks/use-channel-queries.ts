@@ -6,6 +6,7 @@ export const channelKeys = {
   all: ["channels"] as const,
   list: () => [...channelKeys.all, "list"] as const,
   detail: (id: string) => [...channelKeys.all, "detail", id] as const,
+  syncSettings: (id: string) => [...channelKeys.all, "sync-settings", id] as const,
 };
 
 /** Fetch all connected channels for the current organization. */
@@ -13,6 +14,21 @@ export function useChannels() {
   return useQuery({
     queryKey: channelKeys.list(),
     queryFn: () => channelService.list(),
+    // Poll only while something is actually syncing, and stop by itself once
+    // it settles. Without this IN_PROGRESS was a dead end in the UI: the row
+    // never advanced until the user navigated away and back (staleTime is 30s
+    // and refetchOnWindowFocus is off). Same pattern as use-product-queries.
+    refetchInterval: (query) =>
+      query.state.data?.some((c) => c.syncStatus === "IN_PROGRESS") ? 3000 : false,
+  });
+}
+
+/** Per-entity sync toggles + state for one channel. */
+export function useSyncSettings(id?: string | null) {
+  return useQuery({
+    queryKey: channelKeys.syncSettings(id!),
+    queryFn: () => channelService.getSyncSettings(id!),
+    enabled: !!id,
   });
 }
 

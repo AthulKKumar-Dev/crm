@@ -5,6 +5,7 @@ import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import {
   LOCATIONS_QUERY,
   LocationsResponse,
@@ -61,6 +62,9 @@ export class ShopifyPushService {
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly graphql: ShopifyGraphqlClient,
     private readonly orgSettings: OrganizationSettingsService,
+    // Warehousing decides where stock quantities are written. ChannelModule
+    // already imports InventoryModule for the ledger, so no cycle.
+    private readonly inventoryLedger: InventoryLedgerService,
   ) { }
 
   /** Resolve the org's connected SHOPIFY channel (if any). Null = nothing to push. */
@@ -648,27 +652,15 @@ export class ShopifyPushService {
     // running multi-location warehouses that is the wrong distribution — the
     // stock may live in a different warehouse entirely — so redistribute now
     // that the rebadge transaction above has persisted each inventoryItemId.
-    // Skipped for single-location orgs, where the seed is already correct and
+    // Skipped for non-warehousing orgs, where the seed is already correct and
     // this would be a redundant mutation.
-    if (await this.hasMappedWarehouses(orgId)) {
+    if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
       await this.pushAvailability(orgId, product.variants.map((v) => v.id));
     }
 
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
     );
-  }
-
-  /** True once the locations sync has mirrored at least one Shopify location. */
-  private async hasMappedWarehouses(orgId: string): Promise<boolean> {
-    const count = await this.prisma.warehouse.count({
-      where: {
-        organizationId: orgId,
-        shopifyLocationId: { not: null },
-        isActive: true,
-      },
-    });
-    return count > 0;
   }
 
   /**
@@ -1119,20 +1111,26 @@ export class ShopifyPushService {
   /**
    * One `{ inventoryItem, location, quantity }` triple per mapped warehouse.
    *
-   * The presence of Shopify-mapped warehouses is the switch, not the
-   * warehousing flag: it is the operative condition either way, and reading it
-   * from the warehouse table avoids a second dependency on the ledger here.
+   * **Warehousing is the switch**, not "does this org have mapped warehouses".
+   * The latter is a proxy that reads the wrong thing: a stray warehouse row —
+   * which the locations sync could once create for a legacy org — flipped this
+   * into per-warehouse mode, where a legacy org has no stock_levels at all, so
+   * it emitted nothing and stock sync stopped silently (no mutation, hence no
+   * error). Testing the flag directly makes that unrepresentable.
    *
-   *  - **Mapped warehouses exist** → push each warehouse's own `available` to
-   *    the location it mirrors. Pushing the org-wide total to the primary (as
-   *    this did before) left the other locations untouched, so Shopify's
-   *    displayed total became our number PLUS whatever they held.
-   *  - **None** → legacy orgs, and warehousing orgs whose locations sync has
-   *    not run yet. Falls back to the previous behaviour exactly.
+   *  - **Warehousing on, with mapped warehouses** → push each warehouse's own
+   *    `available` to the location it mirrors. Pushing the org-wide total to
+   *    the primary (as this did originally) left other locations untouched, so
+   *    Shopify's displayed total became our number PLUS whatever they held.
+   *  - **Otherwise** → legacy orgs, and warehousing orgs whose locations sync
+   *    has not run yet. Falls back to the previous behaviour exactly.
    *
-   * A variant with no stock row at a mapped warehouse emits nothing for that
-   * location — deliberately symmetric with the pull, which treats an absent
-   * inventory level as "not stocked here" rather than as zero.
+   * A variant with no stock row *at a mapped warehouse* emits nothing for that
+   * location — symmetric with the pull, which treats an absent inventory level
+   * as "not stocked here" rather than as zero. But a variant with no stock row
+   * at ALL is not covered by the bucket model (created after the enable seed,
+   * or trackQuantity:false so never seeded), and falls back to the primary
+   * location so it keeps syncing rather than silently dropping out.
    */
   private async buildAvailabilityQuantities(
     orgId: string,
@@ -1142,16 +1140,10 @@ export class ShopifyPushService {
     variants: Array<{ id: string; inventoryQuantity: number }>,
     invIdByVariant: Map<string, string>,
   ): Promise<Array<{ inventoryItemId: string; locationId: string; quantity: number }>> {
-    const mapped = await this.prisma.warehouse.findMany({
-      where: {
-        organizationId: orgId,
-        shopifyLocationId: { not: null },
-        isActive: true,
-      },
-      select: { id: true, shopifyLocationId: true },
-    });
-
-    if (mapped.length === 0) {
+    // The pre-multi-location behaviour, kept as a named helper because two
+    // callers need it: whole-org fallback, and per-variant fallback below.
+    const pushAtPrimary = async (subset: typeof variants) => {
+      if (subset.length === 0) return [];
       const locationId = await this.resolveLocationId(channelId, shopDomain, token);
       if (!locationId) {
         this.logger.warn(
@@ -1159,7 +1151,7 @@ export class ShopifyPushService {
         );
         return [];
       }
-      return variants.flatMap((v) => {
+      return subset.flatMap((v) => {
         const invId = invIdByVariant.get(v.id);
         if (!invId) return [];
         return [
@@ -1170,7 +1162,21 @@ export class ShopifyPushService {
           },
         ];
       });
-    }
+    };
+
+    const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
+    const mapped = warehousing
+      ? await this.prisma.warehouse.findMany({
+          where: {
+            organizationId: orgId,
+            shopifyLocationId: { not: null },
+            isActive: true,
+          },
+          select: { id: true, shopifyLocationId: true },
+        })
+      : [];
+
+    if (mapped.length === 0) return pushAtPrimary(variants);
 
     const locationByWarehouse = new Map(
       mapped.map((w) => [w.id, w.shopifyLocationId as string]),
@@ -1184,7 +1190,7 @@ export class ShopifyPushService {
       select: { variantId: true, warehouseId: true, available: true },
     });
 
-    return levels.flatMap((level) => {
+    const perLocation = levels.flatMap((level) => {
       const invId = invIdByVariant.get(level.variantId);
       const shopifyLocationId = locationByWarehouse.get(level.warehouseId);
       if (!invId || !shopifyLocationId) return [];
@@ -1196,6 +1202,18 @@ export class ShopifyPushService {
         },
       ];
     });
+
+    // A variant with NO stock row anywhere is outside the bucket model — it
+    // was created after the enable seed, or has trackQuantity:false so the
+    // seed skipped it. It used to push its cached quantity; without this it
+    // would silently stop syncing the moment warehousing was switched on.
+    const covered = new Set(levels.map((l) => l.variantId));
+    const uncovered = variants.filter((v) => !covered.has(v.id));
+    if (uncovered.length > 0) {
+      perLocation.push(...(await pushAtPrimary(uncovered)));
+    }
+
+    return perLocation;
   }
 
   /** Set absolute available quantities in one mutation. Best-effort — a

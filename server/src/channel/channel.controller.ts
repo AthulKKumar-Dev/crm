@@ -1,7 +1,7 @@
-import { BadRequestException, ConflictException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Req, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response, Request } from 'express';
-import { ChannelPlatform, ChannelStatus, SyncStatus, UserRole } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, SyncStatus } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { SYNC_QUEUE, SyncJobData } from './sync.queue';
@@ -10,6 +10,7 @@ import { SYNC_RESUME_MAX_AGE_MS } from './shopify-sync.service';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { Public } from '../auth/decorators/public.decorator';
+import { Roles, ORG_MANAGERS } from '../auth/decorators/roles.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChannelService } from './channel.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
@@ -17,6 +18,7 @@ import { ConnectShopifyDto } from './dto/connect-shopify.dto';
 import { ManualConnectShopifyDto } from './dto/manual-connect-shopify.dto';
 import { UpdateChannelDto } from './dto/update-channel.dto';
 import { TriggerSyncDto } from './dto/trigger-sync.dto';
+import { UpdateSyncSettingsDto } from './dto/update-sync-settings.dto';
 import { InstagramOAuthService } from './instagram-oauth.service';
 import { WhatsAppOAuthService } from './whatsapp-oauth.service';
 import { WhatsAppCallbackDto } from './dto/whatsapp-callback.dto';
@@ -89,23 +91,14 @@ export class ChannelController {
     try {
       const result = await this.shopifyOAuth.handleCallback(query);
 
-      // Register webhooks before redirecting — without them the store only
-      // updates on manual/scheduled syncs. Non-fatal: the
-      // POST /channels/:id/register-webhooks endpoint can re-run this.
-      try {
-        await this.shopifyOAuth.registerWebhooks(result.channelId);
-        try {
-          await this.shopifyPixel.activatePixel(result.channelId);
-        } catch (error) {
-          this.logger.warn(
-            `Pixel activation failed after OAuth connect (non-fatal): ${error instanceof Error ? error.message : error}`,
-          );
-        }
-      } catch (error) {
-        this.logger.warn(
-          `Webhook registration failed after OAuth connect (non-fatal): ${error instanceof Error ? error.message : error}`,
-        );
-      }
+      // Webhook registration + pixel activation run on the queue, NOT here.
+      //
+      // Between them they are ~20 sequential Shopify mutations, each able to
+      // back off on a 429. Awaiting them left the merchant's browser parked
+      // on this URL long enough to hit the edge proxy's timeout, so a store
+      // that had connected fine rendered an error page instead of the
+      // redirect. The channel row is already committed by handleCallback.
+      await this.enqueueChannelSetup(result.channelId, result.organizationId);
 
       // Auto-trigger initial sync after successful connection
       try {
@@ -163,11 +156,12 @@ export class ChannelController {
       // Non-fatal: sync can be triggered manually later
     }
 
-    try {
-      await this.shopifyOAuth.registerWebhooks(result.channelId);
-    } catch {
-      // Non-fatal: data still syncs via manual/scheduled sync
-    }
+    // Queued, not awaited: the client aborts this request at 30s, and ~20
+    // sequential webhook mutations routinely take longer. That timeout was
+    // surfacing as "Failed to connect Shopify store." for a store that had
+    // in fact connected - after which the retry hit "A Shopify store is
+    // already connected. Disconnect it first."
+    await this.enqueueChannelSetup(result.channelId, user.orgId!);
 
     return result;
   }
@@ -321,6 +315,59 @@ export class ChannelController {
       channelId: id,
       entityTypes: dto.entityTypes,
     };
+  }
+
+  /**
+   * Queue post-connect store setup (webhooks + web pixel).
+   *
+   * Never throws: a channel with no webhooks still syncs on demand, so a
+   * Redis hiccup must not turn a successful connect into a failed one.
+   */
+  private async enqueueChannelSetup(
+    channelId: string,
+    organizationId: string,
+  ): Promise<void> {
+    try {
+      await this.syncQueue.add(
+        'setup',
+        { type: 'setup', channelId, organizationId } satisfies SyncJobData,
+        {
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: { count: 100 },
+          removeOnFail: { count: 50 },
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `Could not queue setup for channel ${channelId} - webhooks are NOT registered. ` +
+        `Re-run POST /channels/${channelId}/register-webhooks once Redis is healthy.`,
+        error instanceof Error ? error.stack : error,
+      );
+    }
+  }
+
+  // GET /channels/:id/sync-settings — per-entity toggles, per-entity sync
+  // state, and how many local records a push would send right now.
+  @Get(':id/sync-settings')
+  getSyncSettings(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.channelService.getSyncSettings(id, user.orgId!);
+  }
+
+  // PATCH /channels/:id/sync-settings — set which entities sync, per direction.
+  //
+  // ORG_MANAGERS: this decides what crosses the line into a merchant's live
+  // Shopify store. NOTE the guard-order trap documented in roles.decorator.ts —
+  // RolesGuard runs BEFORE VendorAccessGuard, so omitting VENDOR closes this
+  // route to vendors, which is intended here.
+  @Patch(':id/sync-settings')
+  @Roles(...ORG_MANAGERS)
+  updateSyncSettings(
+    @Param('id') id: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateSyncSettingsDto,
+  ) {
+    return this.channelService.updateSyncSettings(id, user.orgId!, dto);
   }
 
   // GET /channels/:id/sync-logs — list sync history
