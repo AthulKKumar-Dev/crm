@@ -18,6 +18,7 @@ import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import { ShopifyLocationSyncService } from './shopify-location-sync.service';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -97,6 +98,7 @@ export class ShopifySyncService {
         private readonly graphql: ShopifyGraphqlClient,
         private readonly pushEnqueuer: ShopifyPushEnqueuer,
         private readonly inventoryLedger: InventoryLedgerService,
+        private readonly locationSync: ShopifyLocationSyncService,
         @InjectQueue(DRAFT_MIRROR_QUEUE)
         private readonly draftMirrorQueue: Queue<DraftMirrorJobData>,
     ) { }
@@ -213,6 +215,12 @@ export class ShopifySyncService {
                 for (const entityType of entityTypes) {
                     try {
                         switch (entityType) {
+                            // Ordered first by the callers' entity lists: the
+                            // per-location inventory reconcile needs the
+                            // warehouse mapping to exist before it runs.
+                            case 'locations':
+                                await this.locationSync.syncLocations(channelId, orgId, shopDomain, token);
+                                break;
                             case 'products':
                                 await this.syncProducts(channelId, orgId, shopDomain, token);
                                 break;
@@ -778,15 +786,17 @@ export class ShopifySyncService {
         let processed = 0;
         let failed = 0;
 
-        // Warehousing orgs own their physical stock — the Shopify aggregate
-        // must not overwrite the bucket-derived cache. Reconciliation for
-        // those orgs is the Phase D drift flow; until then this pass is a
-        // no-op for them.
+        // Warehousing orgs hold stock per warehouse, so the aggregate this
+        // pass reads (variant.inventoryQuantity — Shopify's SUM across every
+        // location) is the wrong number for them: it would flatten the split
+        // into whichever warehouse happened to be written last. They get the
+        // per-location reconcile instead, which owns its own sync log.
+        //
+        // This used to be an outright no-op ("Phase D"), which meant a
+        // warehousing org's stock never updated from Shopify at all.
         if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
-            this.logger.log(
-                `Skipping inventory pull for warehousing-enabled org ${orgId}`,
-            );
             await this.completeSyncLog(syncLog.id, 0, 0);
+            await this.locationSync.pullLocationInventory(channelId, orgId, shopDomain, token);
             return;
         }
 

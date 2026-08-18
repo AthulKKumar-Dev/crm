@@ -1530,23 +1530,106 @@ export const COLLECTION_PRODUCTS_QUERY = /* GraphQL */ `
 `;
 
 // ─── Locations ──────────────────────────────────────────────────────────────
-// Replaces REST `locations.json` (used to resolve the primary location for
-// inventory seeding / order fulfillment).
+// Replaces REST `locations.json`. Two consumers with different needs:
+//   - resolveLocationId  — wants only the primary, for order fulfillment.
+//   - ShopifyLocationSyncService — wants EVERY location; each one is mirrored
+//     as a CRM warehouse and holds its own stock.
+// The second is why this paginates. It used to be a bare `locations(first: 50)`
+// with no pageInfo, which silently truncated stores above 50 — invisible when
+// only the primary was ever read, a whole warehouse of missing stock now.
+// `includeInactive` is required to see deactivated locations at all; without it
+// a location deactivated in Shopify simply vanishes from the response, which
+// the sync would be unable to tell apart from one that was deleted.
+
+export interface ShopifyLocationNode {
+  id: string;
+  name: string;
+  isActive: boolean;
+  isPrimary: boolean;
+}
 
 export interface LocationsResponse {
   locations: {
-    nodes: Array<{ id: string; name: string; isActive: boolean; isPrimary: boolean }>;
+    pageInfo: PageInfo;
+    nodes: ShopifyLocationNode[];
   };
 }
 
 export const LOCATIONS_QUERY = /* GraphQL */ `
-  query Locations {
-    locations(first: 50) {
+  query Locations($first: Int!, $after: String) {
+    locations(first: $first, after: $after, includeInactive: true) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
       nodes {
         id
         name
         isActive
         isPrimary
+      }
+    }
+  }
+`;
+
+// ─── Per-location inventory (multi-location pull) ───────────────────────────
+// The per-location counterpart to PRODUCTS_INVENTORY_QUERY. That one reads
+// `variant.inventoryQuantity`, which is Shopify's SUM across every location —
+// fine when the CRM tracked one number, useless once each location maps to its
+// own warehouse holding its own stock.
+//
+// Rooted at `productVariants` rather than nesting products → variants: the
+// inner connection would cap at 100 variants per product with no way to page
+// the remainder, and we need every variant regardless of how they group.
+//
+// `quantities(names: ["available"])` returns a list, so the caller must find
+// the entry by name rather than indexing [0].
+
+export interface VariantInventoryLevelsResponse {
+  productVariants: {
+    pageInfo: PageInfo;
+    nodes: Array<{
+      id: string;
+      inventoryItem: {
+        id: string;
+        inventoryLevels: {
+          pageInfo: PageInfo;
+          nodes: Array<{
+            location: { id: string };
+            quantities: Array<{ name: string; quantity: number }>;
+          }>;
+        };
+      } | null;
+    }>;
+  };
+}
+
+export const VARIANT_INVENTORY_LEVELS_QUERY = /* GraphQL */ `
+  query VariantInventoryLevels($first: Int!, $after: String, $levelsFirst: Int!) {
+    productVariants(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        inventoryItem {
+          id
+          inventoryLevels(first: $levelsFirst) {
+            pageInfo {
+              hasNextPage
+            }
+            nodes {
+              location {
+                id
+              }
+              quantities(names: ["available"]) {
+                name
+                quantity
+              }
+            }
+          }
+        }
       }
     }
   }

@@ -276,7 +276,9 @@ export default function ChannelPage() {
                       <button
                         onClick={() => triggerSync.mutate({
                           id: channel.id,
-                          data: { entityTypes: ['products', 'orders', 'customers', 'inventory'] },
+                          // 'locations' first: it mirrors Shopify locations as warehouses, and
+                            // the inventory pass reconciles per-location stock into them.
+                            data: { entityTypes: ['locations', 'products', 'orders', 'customers', 'inventory'] },
                         })}
                         // Only block on the local mutation being mid-flight.
                         // We deliberately do NOT block on `syncStatus === IN_PROGRESS`:

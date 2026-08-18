@@ -364,9 +364,15 @@ export class ShopifyPushService {
 
     let nodes: LocationsResponse['locations']['nodes'];
     try {
+      // Only the primary is wanted here, so a single page is enough — the
+      // sort puts no guarantee on position, but `isPrimary` is unique and a
+      // shop with >50 locations having its primary beyond the first page is
+      // not a case worth a second round trip on the fulfillment hot path.
+      // ShopifyLocationSyncService pages properly because it needs them all.
       const res = await this.graphql.request<LocationsResponse>(
         { shopDomain, accessToken: token },
         LOCATIONS_QUERY,
+        { first: 50 },
       );
       nodes = res.locations?.nodes ?? [];
     } catch (err) {
@@ -563,6 +569,7 @@ export class ShopifyPushService {
     if (product.channel.platform === ChannelPlatform.SHOPIFY) {
       await this.pushProductUpdate(
         product,
+        orgId,
         shopify.id,
         shopDomain,
         token,
@@ -636,9 +643,32 @@ export class ShopifyPushService {
 
     await this.recordProductSuccess(productId, orgId, remoteProductId);
 
+    // productSet seeded the whole quantity at the primary location, because
+    // that is the only location its per-variant input can name. For an org
+    // running multi-location warehouses that is the wrong distribution — the
+    // stock may live in a different warehouse entirely — so redistribute now
+    // that the rebadge transaction above has persisted each inventoryItemId.
+    // Skipped for single-location orgs, where the seed is already correct and
+    // this would be a redundant mutation.
+    if (await this.hasMappedWarehouses(orgId)) {
+      await this.pushAvailability(orgId, product.variants.map((v) => v.id));
+    }
+
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
     );
+  }
+
+  /** True once the locations sync has mirrored at least one Shopify location. */
+  private async hasMappedWarehouses(orgId: string): Promise<boolean> {
+    const count = await this.prisma.warehouse.count({
+      where: {
+        organizationId: orgId,
+        shopifyLocationId: { not: null },
+        isActive: true,
+      },
+    });
+    return count > 0;
   }
 
   /**
@@ -817,6 +847,7 @@ export class ShopifyPushService {
         taxable: boolean;
       }>;
     },
+    orgId: string,
     channelId: string,
     shopDomain: string,
     token: string,
@@ -824,9 +855,8 @@ export class ShopifyPushService {
     trackGlobally: boolean,
   ): Promise<void> {
     const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
-    // Resolve the primary location once — needed for the stock push below.
-    // Null when read_locations is missing; inventory is then skipped.
-    const locationId = await this.resolveLocationId(channelId, shopDomain, token);
+    // The stock push below resolves its own target location(s) — per mapped
+    // warehouse when the org runs multi-location, primary otherwise.
     const productGid = ShopifyGraphqlClient.toGid('Product', product.externalId);
 
     // Top-level product fields.
@@ -989,23 +1019,27 @@ export class ShopifyPushService {
       }
     }
 
-    // Push current stock (available) at the primary location — one mutation
-    // for every tracked variant.
-    if (locationId) {
-      const quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
-      for (const v of product.variants) {
-        if (!(trackGlobally || v.trackQuantity)) continue;
-        let invId = inventoryItemIds.get(v.id) ?? null;
-        if (!invId && v.externalId && !v.externalId.startsWith('manual_')) {
-          invId = await this.backfillInventoryItemId(auth, v.id, v.externalId);
-        }
-        if (!invId) continue;
-        quantities.push({
-          inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
-          locationId: ShopifyGraphqlClient.toGid('Location', locationId),
-          quantity: v.inventoryQuantity,
-        });
-      }
+    // Push current stock (available) — one mutation for every tracked variant,
+    // at every mapped location when the org runs multi-location warehouses,
+    // otherwise at the primary location as before.
+    const tracked = product.variants.filter((v) => trackGlobally || v.trackQuantity);
+    if (tracked.length > 0) {
+      const invIdByVariant = await this.resolveInventoryItemIds(
+        auth,
+        tracked.map((v) => ({
+          id: v.id,
+          externalId: v.externalId,
+          inventoryItemId: inventoryItemIds.get(v.id) ?? null,
+        })),
+      );
+      const quantities = await this.buildAvailabilityQuantities(
+        orgId,
+        channelId,
+        shopDomain,
+        token,
+        tracked,
+        invIdByVariant,
+      );
       if (quantities.length > 0) {
         await this.setInventoryQuantities(auth, quantities);
       }
@@ -1031,13 +1065,6 @@ export class ShopifyPushService {
     }
     const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(shopify.id);
     const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
-    const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
-    if (!locationId) {
-      this.logger.warn(
-        `Skipping availability push for org ${orgId}: no resolvable Shopify location`,
-      );
-      return;
-    }
 
     const variants = await this.prisma.productVariant.findMany({
       where: {
@@ -1052,23 +1079,123 @@ export class ShopifyPushService {
         inventoryQuantity: true,
       },
     });
+    if (variants.length === 0) return;
 
-    const quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
+    const invIdByVariant = await this.resolveInventoryItemIds(auth, variants);
+    const quantities = await this.buildAvailabilityQuantities(
+      orgId,
+      shopify.id,
+      shopDomain,
+      token,
+      variants,
+      invIdByVariant,
+    );
+
+    if (quantities.length > 0) {
+      await this.setInventoryQuantities(auth, quantities);
+    }
+  }
+
+  /**
+   * Inventory item ids for a set of variants, backfilling from Shopify for the
+   * ones older pulls never persisted. Variants with no id (never pushed, or
+   * `manual_` locals) are simply absent from the map.
+   */
+  private async resolveInventoryItemIds(
+    auth: ShopifyAuthContext,
+    variants: Array<{ id: string; externalId: string | null; inventoryItemId: string | null }>,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
     for (const v of variants) {
       let invId = v.inventoryItemId;
       if (!invId && v.externalId && !v.externalId.startsWith('manual_')) {
         invId = await this.backfillInventoryItemId(auth, v.id, v.externalId);
       }
-      if (!invId) continue;
-      quantities.push({
-        inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
-        locationId: ShopifyGraphqlClient.toGid('Location', locationId),
-        quantity: v.inventoryQuantity,
+      if (invId) out.set(v.id, invId);
+    }
+    return out;
+  }
+
+  /**
+   * One `{ inventoryItem, location, quantity }` triple per mapped warehouse.
+   *
+   * The presence of Shopify-mapped warehouses is the switch, not the
+   * warehousing flag: it is the operative condition either way, and reading it
+   * from the warehouse table avoids a second dependency on the ledger here.
+   *
+   *  - **Mapped warehouses exist** → push each warehouse's own `available` to
+   *    the location it mirrors. Pushing the org-wide total to the primary (as
+   *    this did before) left the other locations untouched, so Shopify's
+   *    displayed total became our number PLUS whatever they held.
+   *  - **None** → legacy orgs, and warehousing orgs whose locations sync has
+   *    not run yet. Falls back to the previous behaviour exactly.
+   *
+   * A variant with no stock row at a mapped warehouse emits nothing for that
+   * location — deliberately symmetric with the pull, which treats an absent
+   * inventory level as "not stocked here" rather than as zero.
+   */
+  private async buildAvailabilityQuantities(
+    orgId: string,
+    channelId: string,
+    shopDomain: string,
+    token: string,
+    variants: Array<{ id: string; inventoryQuantity: number }>,
+    invIdByVariant: Map<string, string>,
+  ): Promise<Array<{ inventoryItemId: string; locationId: string; quantity: number }>> {
+    const mapped = await this.prisma.warehouse.findMany({
+      where: {
+        organizationId: orgId,
+        shopifyLocationId: { not: null },
+        isActive: true,
+      },
+      select: { id: true, shopifyLocationId: true },
+    });
+
+    if (mapped.length === 0) {
+      const locationId = await this.resolveLocationId(channelId, shopDomain, token);
+      if (!locationId) {
+        this.logger.warn(
+          `Skipping availability push for org ${orgId}: no resolvable Shopify location`,
+        );
+        return [];
+      }
+      return variants.flatMap((v) => {
+        const invId = invIdByVariant.get(v.id);
+        if (!invId) return [];
+        return [
+          {
+            inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
+            locationId: ShopifyGraphqlClient.toGid('Location', locationId),
+            quantity: v.inventoryQuantity,
+          },
+        ];
       });
     }
-    if (quantities.length > 0) {
-      await this.setInventoryQuantities(auth, quantities);
-    }
+
+    const locationByWarehouse = new Map(
+      mapped.map((w) => [w.id, w.shopifyLocationId as string]),
+    );
+    const levels = await this.prisma.stockLevel.findMany({
+      where: {
+        variantId: { in: variants.map((v) => v.id) },
+        warehouseId: { in: mapped.map((w) => w.id) },
+        locationId: null,
+      },
+      select: { variantId: true, warehouseId: true, available: true },
+    });
+
+    return levels.flatMap((level) => {
+      const invId = invIdByVariant.get(level.variantId);
+      const shopifyLocationId = locationByWarehouse.get(level.warehouseId);
+      if (!invId || !shopifyLocationId) return [];
+      return [
+        {
+          inventoryItemId: ShopifyGraphqlClient.toGid('InventoryItem', invId),
+          locationId: ShopifyGraphqlClient.toGid('Location', shopifyLocationId),
+          quantity: level.available,
+        },
+      ];
+    });
   }
 
   /** Set absolute available quantities in one mutation. Best-effort — a
@@ -1092,14 +1219,24 @@ export class ShopifyPushService {
       );
       const errors = res.inventorySetQuantities?.userErrors ?? [];
       if (errors.length > 0) {
-        this.logger.warn(
-          `inventorySetQuantities: ${errors.map((e) => e.message).join('; ')}`,
+        // Logged at ERROR, not WARN: a rejected push leaves Shopify holding a
+        // number the CRM believes it changed, and the two only reconverge on
+        // the next pull. The most common cause is an inventory item that is
+        // not stocked at the target location, so the location list is named
+        // here — that is the detail that makes it diagnosable, and it used to
+        // be absent entirely.
+        const locations = [...new Set(quantities.map((q) => q.locationId))].join(', ');
+        this.logger.error(
+          `inventorySetQuantities rejected ${errors.length} of ${quantities.length} quantity write(s) ` +
+          `across location(s) ${locations}: ${errors.map((e) => e.message).join('; ')}`,
         );
       } else {
-        this.logger.log(`Inventory set for ${quantities.length} variant(s)`);
+        this.logger.log(`Inventory set for ${quantities.length} variant/location pair(s)`);
       }
     } catch (err) {
-      this.logger.warn(`Inventory update failed: ${err instanceof Error ? err.message : err}`);
+      this.logger.error(
+        `Inventory update failed for ${quantities.length} quantity write(s): ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 

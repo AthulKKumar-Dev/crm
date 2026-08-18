@@ -965,7 +965,12 @@ model Warehouse {
   pickTasks       PickTask[]
   inventoryEvents InventoryEvent[]
 
-  // SQL-only partial unique: one is_default=true per organization
+  // SQL-only partial uniques:
+  //   (organization_id) WHERE is_default          — one default per org
+  //   (organization_id, shopify_location_id) WHERE shopify_location_id IS NOT NULL
+  //     — the Shopify-location mapping is an identity the location sync
+  //       re-resolves on every run; a duplicate would split one location's
+  //       stock across two warehouses. See 20260818090000.
   @@unique([organizationId, code])
   @@index([organizationId])
   @@map("warehouses")

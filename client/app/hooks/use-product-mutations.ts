@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { productService } from "~/services/product.service";
 import { productKeys } from "~/hooks/use-product-queries";
+import { inventoryKeys } from "~/hooks/use-inventory-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   BulkResult,
@@ -95,7 +96,15 @@ export function useSyncProductMutation() {
   });
 }
 
-// ─── VARIANT MUTATIONS ──────────────────────────────────────────────────────
+// ─── VARIANT MUTATIONS ──────────────────────────────────────────────
+//
+// Every variant mutation below invalidates the INVENTORY prefix as well as the
+// product one. Variants carry inventoryQuantity, and the inventory screens
+// render the same number (per warehouse once warehousing is on) — the
+// inventory→products direction was already handled in use-inventory-mutations,
+// but not this one, so editing stock here left /inventory showing the old
+// figure until its 30s staleTime expired, or indefinitely on an already-mounted
+// tab since refetchOnWindowFocus is off.────────
 
 /** Add a new variant to an existing product. */
 export function useCreateVariantMutation(productId: string) {
@@ -106,6 +115,7 @@ export function useCreateVariantMutation(productId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       toast.success("Variant added.");
     },
     onError: (error) => handleMutationError(error, "Failed to add variant."),
@@ -124,6 +134,7 @@ export function useUpdateVariantMutation(
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       if (!options?.silent) toast.success("Variant updated.");
     },
     onError: (error) => {
@@ -144,6 +155,7 @@ export function useBulkUpdateVariantsMutation(
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       if (!options?.silent) toast.success("Variants updated.");
     },
     onError: (error) => {
@@ -160,6 +172,7 @@ export function useDeleteVariantMutation(productId: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       toast.success("Variant deleted.");
     },
     onError: (error) => handleMutationError(error, "Failed to delete variant."),
@@ -401,6 +414,7 @@ export function useDuplicateProductMutation() {
     mutationFn: (productId: string) => productService.duplicate(productId),
     onSuccess: (newProduct) => {
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       toast.success(`Duplicated as "${newProduct.title}".`);
     },
     onError: (error) => handleMutationError(error, "Failed to duplicate product."),
@@ -425,6 +439,7 @@ export function useConfirmImportMutation() {
       productService.confirmImport(jobId, file),
     onSuccess: (job) => {
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       if (job.status === "COMPLETED") {
         toast.success(
           `Import complete: ${job.createdCount} created${job.errorCount > 0 ? `, ${job.errorCount} errors` : ""}.`,

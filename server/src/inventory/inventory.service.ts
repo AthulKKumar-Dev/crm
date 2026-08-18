@@ -207,6 +207,32 @@ export class InventoryService {
     await this.settings.setWarehousingEnabled(orgId, true);
     this.ledger.invalidateFlagCache(orgId);
     this.logger.log(`enable-seed: org ${orgId} seeded ${seeded} stock lines`);
+
+    // Everything above put the org-wide quantity into the single default
+    // warehouse, which is right for an org with no Shopify store and only an
+    // approximation for one with several locations. This job mirrors the rest
+    // of the locations as warehouses and reconciles each against Shopify's
+    // per-location quantities — correcting the default warehouse down to its
+    // real number and distributing the remainder.
+    //
+    // Deliberately AFTER the flag flip: the reconcile writes through
+    // applyMovement, which only owns the org once warehousing is on. It is
+    // also why this is a queued job rather than a call — InventoryModule must
+    // not import ChannelModule (see the queue-name seam in the constructor).
+    await this.enqueueLocationSync(orgId);
+  }
+
+  /** Fire-and-forget: a missed location sync is recovered by the next channel sync. */
+  private async enqueueLocationSync(orgId: string) {
+    try {
+      await this.shopifyPushQueue.add(
+        'sync-locations',
+        { type: 'sync-locations', organizationId: orgId },
+        { attempts: 3, backoff: { type: 'exponential', delay: 10_000 } },
+      );
+    } catch (err) {
+      this.logger.warn(`Failed to enqueue location sync for org ${orgId}: ${err}`);
+    }
   }
 
   // ─────────────────────────── stock reads ───────────────────────────

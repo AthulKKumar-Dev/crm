@@ -112,7 +112,7 @@ export class ChannelController {
         await this.syncQueue.add('sync', {
           channelId: result.channelId,
           organizationId: result.organizationId,
-          entityTypes: ['products', 'orders', 'customers', 'inventory'],
+          entityTypes: ['locations', 'products', 'orders', 'customers', 'inventory'],
         } satisfies SyncJobData, {
           attempts: 3,
           backoff: { type: 'exponential', delay: 5000 },
@@ -152,7 +152,7 @@ export class ChannelController {
       await this.syncQueue.add('sync', {
         channelId: result.channelId,
         organizationId: user.orgId!,
-        entityTypes: ['products', 'orders', 'customers', 'inventory'],
+        entityTypes: ['locations', 'products', 'orders', 'customers', 'inventory'],
       } satisfies SyncJobData, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 5000 },
