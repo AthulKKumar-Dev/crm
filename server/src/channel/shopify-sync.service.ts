@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
     ChannelPlatform,
     ChannelStatus,
@@ -18,6 +19,7 @@ import { LoyaltyService } from '../loyalty/loyalty.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import { ShopifyLocationSyncService } from './shopify-location-sync.service';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -29,6 +31,9 @@ import {
     OrderLineItemsPageResponse,
     OrderLineItemsPageVariables,
     ORDER_LINE_ITEMS_PAGE_QUERY,
+    ORDER_REFUNDS_QUERY,
+    OrderRefundsResponse,
+    OrderRefundsVariables,
     OrderNode,
     ORDERS_LIST_QUERY,
     ORDERS_COUNT_QUERY,
@@ -55,6 +60,35 @@ import {
 import { parseProductSettings } from '../organization-settings/schemas/product-settings.schema';
 
 const GRAPHQL_PAGE_SIZE = 50;
+
+/// Orders are fetched in smaller pages than everything else. Even with the
+/// refunds fan-out moved to `drainRefunds`, an order node is by far the most
+/// expensive thing we ask Shopify for -- it still carries line items,
+/// fulfillments, two addresses and five money bags -- and Shopify prices a
+/// query before running it against a fixed per-query ceiling. Halving the page
+/// size is the cheapest way to stay under it; `paginateOrdersGraphql` degrades
+/// further on its own if a particular shop still trips the limit.
+const ORDERS_PAGE_SIZE = 25;
+
+/// Entity types this service knows how to pull, in the order `runSync` runs
+/// them. The order is load-bearing:
+///   locations before inventory - the per-location reconcile needs the
+///             warehouse mapping to exist first;
+///   products  before inventory - once products has applied the quantities,
+///             the inventory pass skips its duplicate catalogue scan;
+///   orders    before customers - `upsertOrder` creates stub customer rows
+///             that the customers pass then enriches.
+export const PULL_ENTITY_TYPES = [
+    'locations',
+    'products',
+    'orders',
+    'customers',
+    'inventory',
+    'collections',
+] as const;
+
+/// Bulk push directions the channels-page Sync action fans out to.
+export const PUSH_ENTITY_TYPES = ['products', 'orders', 'drafts'] as const;
 
 /// Above this many line items in a single order payload we stop trusting the
 /// array to be complete and skip the H2 reconcile rather than risk deleting
@@ -97,6 +131,8 @@ export class ShopifySyncService {
         private readonly graphql: ShopifyGraphqlClient,
         private readonly pushEnqueuer: ShopifyPushEnqueuer,
         private readonly inventoryLedger: InventoryLedgerService,
+        private readonly locationSync: ShopifyLocationSyncService,
+        private readonly config: ConfigService,
         @InjectQueue(DRAFT_MIRROR_QUEUE)
         private readonly draftMirrorQueue: Queue<DraftMirrorJobData>,
     ) { }
@@ -150,16 +186,25 @@ export class ShopifySyncService {
                     lastSyncedAt: new Date(),
                 },
             });
+            // No pull to fail here, so the push always runs - but it still
+            // honours the per-entity push toggles.
+            const enabledPush = await this.enabledEntities(channelId, 'push');
             try {
-                await this.pushEnqueuer.enqueueBulkProductPush({
-                    type: 'bulk-products',
-                    organizationId: orgId,
-                });
-                await this.pushEnqueuer.enqueueBulkOrderPush({
-                    type: 'bulk-orders',
-                    organizationId: orgId,
-                });
-                await this.enqueueDraftBulkMirror(orgId);
+                if (enabledPush.has('products')) {
+                    await this.pushEnqueuer.enqueueBulkProductPush({
+                        type: 'bulk-products',
+                        organizationId: orgId,
+                    });
+                }
+                if (enabledPush.has('orders')) {
+                    await this.pushEnqueuer.enqueueBulkOrderPush({
+                        type: 'bulk-orders',
+                        organizationId: orgId,
+                    });
+                }
+                if (enabledPush.has('drafts')) {
+                    await this.enqueueDraftBulkMirror(orgId);
+                }
             } catch (err) {
                 this.logger.warn(
                     `Failed to enqueue bulk push for org ${orgId}: ${err}`,
@@ -168,14 +213,24 @@ export class ShopifySyncService {
             return;
         }
 
-        // Mark as syncing
+        // Mark as syncing - `syncStatus` ONLY.
+        //
+        // `status` is CONNECTION health: whether we can still talk to this
+        // store. It used to double as sync health, so a backfill that was
+        // merely slow (or that failed on one entity) rendered the store as
+        // "Error" on the channels page - indistinguishable from a revoked
+        // token, and the reason a large store looked like it had failed to
+        // connect when it was in fact connected and syncing.
         await this.prisma.channel.update({
             where: { id: channelId },
-            data: { syncStatus: SyncStatus.IN_PROGRESS, status: ChannelStatus.SYNCING },
+            data: { syncStatus: SyncStatus.IN_PROGRESS },
         });
 
         let allSucceeded = true;
         let authFailed = false;
+        /// Entities that finished cleanly in THIS run. Drives the inventory
+        /// pass's skip so the catalogue is only walked once.
+        const completedEntities = new Set<string>();
         let initError: Error | null = null;
         let token: string | null = null;
         let shopDomain: string | null = null;
@@ -210,9 +265,25 @@ export class ShopifySyncService {
             }
 
             if (token && shopDomain) {
-                for (const entityType of entityTypes) {
+                const enabledPull = await this.enabledEntities(channelId, 'pull');
+
+                // Run in PULL_ENTITY_TYPES order rather than the order the job
+                // happened to list them in - see that constant for why the
+                // order is load-bearing.
+                const requested = PULL_ENTITY_TYPES.filter((e) => entityTypes.includes(e));
+                const skipped = requested.filter((e) => !enabledPull.has(e));
+                if (skipped.length) {
+                    this.logger.log(
+                        `Skipping ${skipped.join(', ')} for channel ${channelId} - switched off in this channel's sync settings.`,
+                    );
+                }
+
+                for (const entityType of requested.filter((e) => enabledPull.has(e))) {
                     try {
                         switch (entityType) {
+                            case 'locations':
+                                await this.locationSync.syncLocations(channelId, orgId, shopDomain, token);
+                                break;
                             case 'products':
                                 await this.syncProducts(channelId, orgId, shopDomain, token);
                                 break;
@@ -223,17 +294,29 @@ export class ShopifySyncService {
                                 await this.syncCustomers(channelId, orgId, shopDomain, token);
                                 break;
                             case 'inventory':
-                                await this.syncInventory(channelId, orgId, shopDomain, token);
+                                await this.syncInventory(
+                                    channelId, orgId, shopDomain, token,
+                                    completedEntities.has('products'),
+                                );
                                 break;
                             case 'collections':
                                 await this.syncCollections(channelId, orgId, shopDomain, token);
                                 break;
                         }
+                        completedEntities.add(entityType);
+
+                        // Stamp THIS entity the moment it succeeds, so a retry
+                        // of the whole job re-reads almost nothing for the
+                        // parts that already finished. Previously one shared
+                        // watermark advanced only when EVERY entity succeeded,
+                        // which is what turned a single failing entity into
+                        // three full catalogue rescans per trigger.
+                        await this.markEntitySynced(channelId, entityType, syncStartedAt);
                     } catch (error) {
                         allSucceeded = false;
                         // Token revoked (app uninstalled / secret rotated) —
-                        // mark the channel DISCONNECTED instead of ERROR so
-                        // the UI surfaces "Reconnect" and retries stop.
+                        // mark the channel DISCONNECTED so the UI surfaces
+                        // "Reconnect" and retries stop.
                         if (error instanceof ShopifyGraphqlError && error.code === 'AUTH_FAILED') {
                             authFailed = true;
                         }
@@ -248,11 +331,19 @@ export class ShopifySyncService {
                 where: { id: channelId },
                 data: {
                     syncStatus: allSucceeded ? SyncStatus.COMPLETED : SyncStatus.FAILED,
-                    status: allSucceeded
-                        ? ChannelStatus.CONNECTED
-                        : authFailed
-                            ? ChannelStatus.DISCONNECTED
-                            : ChannelStatus.ERROR,
+                    // ONLY a revoked token is a connection failure. A sync
+                    // that merely failed leaves `status` alone: it used to be
+                    // set to ERROR here, which is what made a rate-limited
+                    // backfill look identical to a store that could not be
+                    // connected at all. On success we still repair a stale
+                    // ERROR/SYNCING left behind by the old behaviour.
+                    ...(authFailed
+                        ? { status: ChannelStatus.DISCONNECTED }
+                        : allSucceeded
+                            ? { status: ChannelStatus.CONNECTED }
+                            : {}),
+                    // Display only (the channels page's "5m ago"). The sync
+                    // FILTER now comes from ChannelSyncState per entity.
                     lastSyncedAt: allSucceeded ? syncStartedAt : undefined,
                 },
             }).catch((err) => {
@@ -263,24 +354,42 @@ export class ShopifySyncService {
             });
         }
 
-        // After the pull completes (regardless of partial failures), kick off
-        // bulk-push jobs for any locally-unsynced products and offline orders.
-        // This is what makes the channels-page Sync button "sync everything in
-        // both directions" with one click. Jobs are queued asynchronously —
-        // failures here don't fail the user's sync request.
-        try {
-            await this.pushEnqueuer.enqueueBulkProductPush({
-                type: 'bulk-products',
-                organizationId: orgId,
-            });
-            await this.pushEnqueuer.enqueueBulkOrderPush({
-                type: 'bulk-orders',
-                organizationId: orgId,
-            });
-            await this.enqueueDraftBulkMirror(orgId);
-        } catch (err) {
+        // Push local items up to Shopify - but ONLY after a clean pull.
+        //
+        // This used to run unconditionally, before the throw below. With
+        // `attempts: 3` on the queue that meant three bulk pushes fired during
+        // exactly the retry storm a failing pull produces, and
+        // `bulkPushUnsyncedOrders` re-scans every manual order each time.
+        // Gating on success also means a store whose pull is broken cannot
+        // start creating real Shopify orders from a backlog nobody has
+        // reviewed - `pushOrder` calls `orderCreate`, and a Shopify order
+        // cannot be un-created.
+        if (allSucceeded) {
+            const enabledPush = await this.enabledEntities(channelId, 'push');
+            try {
+                if (enabledPush.has('products')) {
+                    await this.pushEnqueuer.enqueueBulkProductPush({
+                        type: 'bulk-products',
+                        organizationId: orgId,
+                    });
+                }
+                if (enabledPush.has('orders')) {
+                    await this.pushEnqueuer.enqueueBulkOrderPush({
+                        type: 'bulk-orders',
+                        organizationId: orgId,
+                    });
+                }
+                if (enabledPush.has('drafts')) {
+                    await this.enqueueDraftBulkMirror(orgId);
+                }
+            } catch (err) {
+                this.logger.warn(
+                    `Failed to enqueue post-sync bulk push for org ${orgId}: ${err}`,
+                );
+            }
+        } else {
             this.logger.warn(
-                `Failed to enqueue post-sync bulk push for org ${orgId}: ${err}`,
+                `Skipping the bulk push for org ${orgId}: the pull from Shopify did not complete cleanly.`,
             );
         }
 
@@ -301,7 +410,9 @@ export class ShopifySyncService {
             await this.updateTotalEstimated(syncLog.id, auth, PRODUCTS_COUNT_QUERY, 'productsCount');
 
             const vendorMetafield = await this.getVendorMetafieldConfig(orgId);
-            for await (const page of this.paginateProductsGraphql(auth, syncLog.cursor, vendorMetafield)) {
+            const queryString = await this.resolveEntityQuery(channelId, 'products');
+            let pages = 0;
+            for await (const page of this.paginateProductsGraphql(auth, syncLog.cursor, vendorMetafield, queryString)) {
                 for (const node of page.products) {
                     try {
                         const sp = this.transformGraphqlProduct(node);
@@ -317,10 +428,23 @@ export class ShopifySyncService {
                         this.logger.error(`Failed product ${node.id}`, error);
                     }
                 }
+                pages++;
                 await this.prisma.syncLog.update({
                     where: { id: syncLog.id },
                     data: { recordsProcessed: processed, recordsFailed: failed, cursor: page.nextCursor },
                 });
+            }
+
+            if (pages === 0) {
+                // A successful request always yields a page — an empty result
+                // yields one page with zero nodes. Yielding nothing means the
+                // generator bailed without talking to Shopify, so this is a
+                // swallowed failure. Recording COMPLETED here would null the
+                // cursor and stamp a watermark, skipping the data for good.
+                throw new Error(
+                    'Products sync produced no pages — treating as a failure rather than ' +
+                    'recording a false COMPLETED (which would stamp a watermark and skip the data).',
+                );
             }
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
@@ -333,12 +457,14 @@ export class ShopifySyncService {
         auth: { shopDomain: string; accessToken: string },
         startCursor: string | null,
         vendorMetafield: { namespace: string; key: string } | null,
+        queryString: string | null,
     ): AsyncGenerator<{ products: ProductSyncNode[]; nextCursor: string | null }> {
         let cursor: string | null = startCursor ?? null;
         do {
             const variables: ProductsListVariables = {
                 first: GRAPHQL_PAGE_SIZE,
                 after: cursor,
+                query: queryString,
                 withMetafield: !!vendorMetafield,
                 // $mfKey is non-null in the query — pass a harmless placeholder
                 // when the feature is off (the field is skipped via @include).
@@ -433,18 +559,22 @@ export class ShopifySyncService {
             // Informational only (drives the totalEstimated progress UI).
             await this.updateTotalEstimated(syncLog.id, { shopDomain, accessToken: token }, ORDERS_COUNT_QUERY, 'ordersCount');
 
-            const channel = await this.prisma.channel.findUnique({ where: { id: channelId } });
-            const filters: string[] = [];
-            if (channel?.lastSyncedAt) {
-                filters.push(`updated_at:>='${channel.lastSyncedAt.toISOString()}'`);
-            }
-            const queryString = filters.length > 0 ? filters.join(' ') : null;
+            // First backfill → the initial window; afterwards → only what has
+            // changed since THIS entity last completed. Previously this read
+            // `channel.lastSyncedAt`, which never advanced while any entity was
+            // failing, so orders stayed a full-history scan indefinitely.
+            const queryString = await this.resolveEntityQuery(channelId, 'orders');
+            this.logger.log(
+                `Orders sync for channel ${channelId}: ${queryString ?? 'no filter (full pull)'}`,
+            );
 
             const auth = { shopDomain, accessToken: token };
+            let pages = 0;
             for await (const page of this.paginateOrdersGraphql(auth, syncLog.cursor, queryString)) {
                 for (const node of page.orders) {
                     try {
                         await this.drainLineItems(auth, node);
+                        await this.drainRefunds(auth, node);
                         const so = this.transformGraphqlOrder(node);
                         await this.upsertOrder(channelId, orgId, so);
                         processed++;
@@ -453,10 +583,21 @@ export class ShopifySyncService {
                         this.logger.error(`Failed order ${node.id}`, error);
                     }
                 }
+                pages++;
                 await this.prisma.syncLog.update({
                     where: { id: syncLog.id },
                     data: { recordsProcessed: processed, recordsFailed: failed, cursor: page.nextCursor },
                 });
+            }
+
+            if (pages === 0) {
+                // See PULL_ENTITY_TYPES / paginate* — a generator that yields
+                // no pages at all has not talked to Shopify, so this is a
+                // swallowed failure, not an empty store.
+                throw new Error(
+                    'Orders sync produced no pages — treating as a failure rather than ' +
+                    'recording a false COMPLETED (which would stamp a watermark and skip the data).',
+                );
             }
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
@@ -475,8 +616,8 @@ export class ShopifySyncService {
         queryString: string | null,
     ): AsyncGenerator<{ orders: OrderNode[]; nextCursor: string | null }> {
         let cursor: string | null = startCursor ?? null;
-        let pageSize = GRAPHQL_PAGE_SIZE;
-        do {
+        let pageSize = ORDERS_PAGE_SIZE;
+        for (;;) {
             const variables: OrdersListVariables = {
                 first: pageSize,
                 after: cursor,
@@ -496,6 +637,14 @@ export class ShopifySyncService {
                 // over its cap. Retrying identically can never succeed, but
                 // asking for fewer orders can — and a cursor stays valid across
                 // a changed `first`. Degrade instead of failing the whole sync.
+                //
+                // This block used to sit in a `do…while (cursor)`, where
+                // `continue` jumps to the CONDITION rather than the top of the
+                // body. On a fresh sync `cursor` is null, so the loop exited
+                // having retried nothing and `syncOrders` reported COMPLETED
+                // with 0 orders — a silent, permanent data loss. The `for(;;)`
+                // with an explicit exit at the bottom is what makes the retry
+                // actually happen.
                 if (
                     error instanceof ShopifyGraphqlError &&
                     error.code === 'MAX_COST_EXCEEDED' &&
@@ -513,8 +662,9 @@ export class ShopifySyncService {
                 ? res.orders.pageInfo.endCursor
                 : null;
             yield { orders: res.orders.nodes, nextCursor };
+            if (!nextCursor) return;
             cursor = nextCursor;
-        } while (cursor);
+        }
     }
 
     /**
@@ -559,6 +709,47 @@ export class ShopifySyncService {
                 `Order ${node.id}: drained ${node.lineItems.nodes.length} line items across ${guard + 1} pages.`,
             );
         }
+    }
+
+    /**
+     * Populate an order's refunds, but only when it has any.
+     *
+     * ORDERS_LIST_QUERY used to select `refunds(first: 50)` nesting
+     * `refundLineItems(first: 50)` — ~2,500 requested nodes per order, which
+     * Shopify prices against a fixed per-query ceiling BEFORE running the
+     * query. Multiplied by the page size that put the list query structurally
+     * over the limit, and is why orders failed to sync while products (no
+     * nested connections) imported cleanly.
+     *
+     * The list query now carries only the scalar `totalRefundedSet`. Refunds
+     * are rare, so the overwhelming majority of orders take zero extra calls
+     * and the ones that do need a call pay for exactly what they use.
+     */
+    private async drainRefunds(
+        auth: { shopDomain: string; accessToken: string },
+        node: OrderNode,
+    ): Promise<void> {
+        const status = node.displayFinancialStatus ?? '';
+        const refunded = Number(node.totalRefundedSet?.shopMoney?.amount ?? 0);
+        const hasRefund =
+            status === 'REFUNDED' ||
+            status === 'PARTIALLY_REFUNDED' ||
+            (Number.isFinite(refunded) && refunded > 0);
+
+        if (!hasRefund) {
+            // ORDERS_LIST_QUERY no longer returns the field at all, so give
+            // `transformGraphqlOrder` the empty array it expects rather than
+            // leaving it undefined.
+            node.refunds = [];
+            return;
+        }
+
+        const res = await this.graphql.request<OrderRefundsResponse, OrderRefundsVariables>(
+            auth,
+            ORDER_REFUNDS_QUERY,
+            { id: node.id },
+        );
+        node.refunds = res.order?.refunds ?? [];
     }
 
     // ─── GRAPHQL → REST SHAPE TRANSFORMER ───
@@ -612,7 +803,10 @@ export class ShopifySyncService {
             };
         });
 
-        const refunds = node.refunds.map((rf) => ({
+        // `?? []` because ORDERS_LIST_QUERY no longer selects refunds -- the
+        // field is populated by `drainRefunds`, and an order with none never
+        // gets a follow-up call.
+        const refunds = (node.refunds ?? []).map((rf) => ({
             id: ShopifyGraphqlClient.extractId(rf.id),
             note: rf.note,
             processed_at: rf.createdAt,
@@ -704,7 +898,9 @@ export class ShopifySyncService {
             const auth = { shopDomain, accessToken: token };
             await this.updateTotalEstimated(syncLog.id, auth, CUSTOMERS_COUNT_QUERY, 'customersCount');
 
-            for await (const page of this.paginateCustomersGraphql(auth, syncLog.cursor)) {
+            const queryString = await this.resolveEntityQuery(channelId, 'customers');
+            let pages = 0;
+            for await (const page of this.paginateCustomersGraphql(auth, syncLog.cursor, queryString)) {
                 for (const node of page.customers) {
                     try {
                         await this.upsertCustomer(channelId, orgId, this.transformGraphqlCustomer(node));
@@ -714,10 +910,23 @@ export class ShopifySyncService {
                         this.logger.error(`Failed customer ${node.id}`, error);
                     }
                 }
+                pages++;
                 await this.prisma.syncLog.update({
                     where: { id: syncLog.id },
                     data: { recordsProcessed: processed, recordsFailed: failed, cursor: page.nextCursor },
                 });
+            }
+
+            if (pages === 0) {
+                // A successful request always yields a page — an empty result
+                // yields one page with zero nodes. Yielding nothing means the
+                // generator bailed without talking to Shopify, so this is a
+                // swallowed failure. Recording COMPLETED here would null the
+                // cursor and stamp a watermark, skipping the data for good.
+                throw new Error(
+                    'Customers sync produced no pages — treating as a failure rather than ' +
+                    'recording a false COMPLETED (which would stamp a watermark and skip the data).',
+                );
             }
             await this.completeSyncLog(syncLog.id, processed, failed);
         } catch (error) {
@@ -729,10 +938,15 @@ export class ShopifySyncService {
     private async *paginateCustomersGraphql(
         auth: { shopDomain: string; accessToken: string },
         startCursor: string | null,
+        queryString: string | null,
     ): AsyncGenerator<{ customers: CustomerSyncNode[]; nextCursor: string | null }> {
         let cursor: string | null = startCursor ?? null;
         do {
-            const variables: CustomersListVariables = { first: GRAPHQL_PAGE_SIZE, after: cursor };
+            const variables: CustomersListVariables = {
+                first: GRAPHQL_PAGE_SIZE,
+                after: cursor,
+                query: queryString,
+            };
             const res = await this.graphql.request<CustomersListResponse, CustomersListVariables>(
                 auth,
                 CUSTOMERS_LIST_QUERY,
@@ -773,18 +987,53 @@ export class ShopifySyncService {
     }
 
     // ─── SYNC INVENTORY ───
-    private async syncInventory(channelId: string, orgId: string, shopDomain: string, token: string) {
+    private async syncInventory(
+        channelId: string,
+        orgId: string,
+        shopDomain: string,
+        token: string,
+        productsAlreadySynced: boolean,
+    ) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'inventory');
         let processed = 0;
         let failed = 0;
 
-        // Warehousing orgs own their physical stock — the Shopify aggregate
-        // must not overwrite the bucket-derived cache. Reconciliation for
-        // those orgs is the Phase D drift flow; until then this pass is a
-        // no-op for them.
-        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+        // `upsertProduct` ALREADY writes variant.inventoryQuantity and records
+        // the ledger event, because PRODUCTS_LIST_QUERY carries
+        // `inventoryQuantity` on every variant. When products ran in this same
+        // job, this pass would re-paginate the entire catalogue via
+        // PRODUCTS_INVENTORY_QUERY purely to read a field we already have —
+        // and the default sync sends both entity types, so every sync walked
+        // the catalogue twice. Skip it and keep the pass for the case where a
+        // merchant syncs inventory WITHOUT products.
+        const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
+
+        // Warehousing orgs hold stock per warehouse, so the aggregate this
+        // pass reads (variant.inventoryQuantity — Shopify's SUM across every
+        // location) is the wrong number for them: it would flatten the split
+        // into whichever warehouse happened to be written last. They get the
+        // per-location reconcile instead, which owns its own sync log — so
+        // this branch is checked BEFORE the products-pass skip below.
+        //
+        // This used to be an outright no-op ("Phase D"), which meant a
+        // warehousing org's stock never updated from Shopify at all.
+        if (warehousing) {
+            await this.completeSyncLog(syncLog.id, 0, 0);
+            await this.locationSync.pullLocationInventory(channelId, orgId, shopDomain, token);
+            return;
+        }
+
+        // `upsertProduct` ALREADY writes variant.inventoryQuantity and records
+        // the ledger event, because PRODUCTS_LIST_QUERY carries
+        // `inventoryQuantity` on every variant. When products ran in this same
+        // job, this pass would re-paginate the entire catalogue via
+        // PRODUCTS_INVENTORY_QUERY purely to read a field we already have —
+        // and the default sync sends both entity types, so every sync walked
+        // the catalogue twice. Keep the pass for merchants who sync inventory
+        // WITHOUT products.
+        if (productsAlreadySynced) {
             this.logger.log(
-                `Skipping inventory pull for warehousing-enabled org ${orgId}`,
+                `Inventory for channel ${channelId} was applied by the products pass — skipping the duplicate catalogue scan.`,
             );
             await this.completeSyncLog(syncLog.id, 0, 0);
             return;
@@ -792,12 +1041,13 @@ export class ShopifySyncService {
 
         try {
             const auth = { shopDomain, accessToken: token };
+            const queryString = await this.resolveEntityQuery(channelId, 'inventory');
             let cursor: string | null = syncLog.cursor ?? null;
             do {
                 const res: ProductsInventoryResponse = await this.graphql.request<ProductsInventoryResponse>(
                     auth,
                     PRODUCTS_INVENTORY_QUERY,
-                    { first: GRAPHQL_PAGE_SIZE, after: cursor },
+                    { first: GRAPHQL_PAGE_SIZE, after: cursor, query: queryString },
                 );
                 for (const product of res.products.nodes) {
                     for (const variant of product.variants.nodes) {
@@ -856,12 +1106,13 @@ export class ShopifySyncService {
             // One GraphQL connection covers custom AND smart collections —
             // `ruleSet` is non-null only for smart ones. Product membership
             // (previously REST `collects.json`) is inlined per collection.
+            const queryString = await this.resolveEntityQuery(channelId, 'collections');
             let cursor: string | null = syncLog.cursor ?? null;
             do {
                 const res: CollectionsListResponse = await this.graphql.request<
                     CollectionsListResponse,
                     CollectionsListVariables
-                >(auth, COLLECTIONS_LIST_QUERY, { first: 25, after: cursor });
+                >(auth, COLLECTIONS_LIST_QUERY, { first: 25, after: cursor, query: queryString });
 
                 for (const node of res.collections.nodes) {
                     try {
@@ -1720,6 +1971,157 @@ export class ShopifySyncService {
         const ps = parseProductSettings(row?.productSettings ?? null);
         if (!ps.vendorMetafieldEnabled) return null;
         return { namespace: ps.vendorMetafieldNamespace, key: ps.vendorMetafieldKey };
+    }
+
+    // ─── PER-ENTITY SYNC STATE ───
+    //
+    // The sync filter used to come from a single channel-level watermark
+    // (`Channel.lastSyncedAt`), and only orders consulted it. Two consequences,
+    // both of which showed up as rate-limit failures on large stores:
+    //
+    //   * products / customers / inventory / collections had NO filter, so
+    //     every run refetched the entire catalogue and customer list;
+    //   * `lastSyncedAt` only advanced when EVERY entity succeeded, so a
+    //     failing orders sync meant orders stayed a full-history scan forever
+    //     AND each of BullMQ's retries rescanned everything else from page 1.
+    //
+    // Each entity now owns its watermark, stamped the moment that entity
+    // succeeds, so a retry costs almost nothing for the parts that already
+    // finished.
+
+    /**
+     * The Shopify search filter for this entity's next pull, or null for
+     * "everything".
+     *
+     * Incremental runs filter on `updated_at` rather than `created_at` on
+     * purpose: an order edited today must arrive even if it was placed long
+     * before the backfill window.
+     */
+    private async resolveEntityQuery(
+        channelId: string,
+        entityType: string,
+    ): Promise<string | null> {
+        // Never let missing bookkeeping fail a sync. If the table is not there
+        // yet (code deployed ahead of its migration), fall through to the
+        // first-backfill behaviour: more work, but never missing data.
+        let state: { backfillDone: boolean; watermark: Date | null } | null = null;
+        try {
+            state = await this.prisma.channelSyncState.findUnique({
+                where: {
+                    channelId_direction_entityType: {
+                        channelId,
+                        direction: 'pull',
+                        entityType,
+                    },
+                },
+                select: { backfillDone: true, watermark: true },
+            });
+        } catch (err) {
+            this.logger.error(
+                `Could not read the ${entityType} sync state for channel ${channelId} - ` +
+                'falling back to a full backfill for this run.',
+                err instanceof Error ? err.stack : err,
+            );
+        }
+
+        if (state?.backfillDone && state.watermark) {
+            return `updated_at:>='${state.watermark.toISOString()}'`;
+        }
+
+        // First backfill. ONLY orders is windowed: the catalogue has to be
+        // complete for products and inventory to be usable at all, and those
+        // queries carry no nested fan-out so a full pull is cheap. Customers is
+        // likewise unwindowed — `upsertOrder` already creates a stub row for
+        // anyone on a synced order, so a merchant who finds it slow can simply
+        // turn the customers pull off.
+        if (entityType === 'orders') {
+            const days = this.initialOrderWindowDays();
+            const floor = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+            return `created_at:>='${floor.toISOString()}'`;
+        }
+        return null;
+    }
+
+    private initialOrderWindowDays(): number {
+        const raw = this.config.get<number>('shopify.initialOrderWindowDays');
+        return Number.isFinite(raw) && (raw as number) > 0 ? (raw as number) : 60;
+    }
+
+    /**
+     * Record that this entity finished cleanly.
+     *
+     * `watermark` is the run's START time (already rewound by
+     * SYNC_WATERMARK_SKEW_MS), not its end: Shopify stamps `updated_at` with
+     * its own clock, and anything edited while the run was in flight must be
+     * re-covered by the next one rather than silently skipped.
+     */
+    private async markEntitySynced(
+        channelId: string,
+        entityType: string,
+        watermark: Date,
+    ): Promise<void> {
+        const windowStart =
+            entityType === 'orders'
+                ? new Date(Date.now() - this.initialOrderWindowDays() * 24 * 60 * 60 * 1000)
+                : null;
+        try {
+            await this.prisma.channelSyncState.upsert({
+                where: {
+                    channelId_direction_entityType: {
+                        channelId,
+                        direction: 'pull',
+                        entityType,
+                    },
+                },
+                create: {
+                    channelId,
+                    direction: 'pull',
+                    entityType,
+                    watermark,
+                    backfillDone: true,
+                    windowStart,
+                },
+                // `windowStart` records the floor the FIRST backfill used, so
+                // it is deliberately not overwritten on later runs.
+                update: { watermark, backfillDone: true },
+            });
+        } catch (err) {
+            // Never let bookkeeping fail a sync that actually succeeded — the
+            // worst case is the next run redoing work, not losing data.
+            this.logger.error(
+                `Could not stamp the ${entityType} watermark for channel ${channelId}`,
+                err instanceof Error ? err.stack : err,
+            );
+        }
+    }
+
+    /**
+     * Entity types the merchant has NOT switched off for this direction.
+     *
+     * Read as "enabled unless a row says otherwise" so channels that predate
+     * the toggles — and any entity a merchant has never touched — keep syncing
+     * exactly as they do today without needing rows seeded for them.
+     */
+    private async enabledEntities(
+        channelId: string,
+        direction: 'pull' | 'push',
+    ): Promise<Set<string>> {
+        const known: readonly string[] =
+            direction === 'pull' ? PULL_ENTITY_TYPES : PUSH_ENTITY_TYPES;
+        try {
+            const rows = await this.prisma.channelSyncState.findMany({
+                where: { channelId, direction, enabled: false },
+                select: { entityType: true },
+            });
+            const disabled = new Set(rows.map((r) => r.entityType));
+            return new Set(known.filter((e) => !disabled.has(e)));
+        } catch (err) {
+            this.logger.error(
+                `Could not read ${direction} sync toggles for channel ${channelId} — assuming all enabled`,
+                err instanceof Error ? err.stack : err,
+            );
+            return new Set(known);
+        }
     }
 
     // ─── SYNC LOG HELPERS ───

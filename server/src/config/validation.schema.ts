@@ -11,6 +11,9 @@ export const validationSchema = Joi.object({
     SHOPIFY_CLIENT_ID: Joi.string().optional(),
     SHOPIFY_CLIENT_SECRET: Joi.string().optional(),
     SHOPIFY_SCOPES: Joi.string().optional(),
+    // Floor for the first orders backfill. Bounded so a typo cannot turn the
+    // initial pull into an unbounded full-history scan (or into nothing).
+    SHOPIFY_INITIAL_ORDER_WINDOW_DAYS: Joi.number().integer().min(1).max(3650).optional(),
     ENCRYPTION_KEY: Joi.string().length(32).optional(),
     META_APP_ID: Joi.string().optional(),
     META_APP_SECRET: Joi.string().optional(),

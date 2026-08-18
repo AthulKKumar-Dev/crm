@@ -580,6 +580,37 @@ export interface TriggerSyncRequest {
   entityTypes: string[];
 }
 
+/** One entity's toggle + sync state, for a single direction. */
+export interface ChannelSyncEntityState {
+  entityType: string;
+  /** Absent server-side row means enabled — only an explicit false turns it off. */
+  enabled: boolean;
+  /** False until this entity has completed a first full/windowed backfill. */
+  backfillDone: boolean;
+  /** ISO timestamp this entity last synced cleanly, or null. */
+  watermark: string | null;
+}
+
+/** Per-entity sync settings for a channel, both directions. */
+export interface ChannelSyncSettings {
+  channelId: string;
+  platform: ChannelPlatform;
+  pull: ChannelSyncEntityState[];
+  push: ChannelSyncEntityState[];
+  /**
+   * How many local records a push would send RIGHT NOW. Shown next to the push
+   * toggles because enabling one sends the whole backlog, and each pushed order
+   * becomes a real Shopify order that cannot be un-created.
+   */
+  pendingPush: { orders: number; products: number };
+}
+
+/** Payload for saving per-entity sync settings. Full intent, not a delta. */
+export interface UpdateSyncSettingsRequest {
+  pull: string[];
+  push: string[];
+}
+
 /** Payload for starting Shopify OAuth with merchant's custom app credentials. */
 export interface ShopifyInstallRequest {
   // "my-store" | "my-store.myshopify.com" | full URL — server normalizes

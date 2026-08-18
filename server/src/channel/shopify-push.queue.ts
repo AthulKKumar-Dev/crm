@@ -35,4 +35,18 @@ export type ShopifyPushJobData =
       type: 'push-availability';
       organizationId: string;
       variantIds: string[];
+    }
+  | {
+      /**
+       * Mirror the store's Shopify locations as warehouses, then reconcile
+       * per-location stock into them. Enqueued by InventoryModule at the end
+       * of the warehousing enable flow, for the same reason as
+       * `push-availability` above: the queue name is the cycle-free seam, so
+       * the inventory side can reach ChannelModule without importing it.
+       *
+       * Named for its effect, not its direction — this one pulls. It rides
+       * this queue because the seam is what matters, not the verb.
+       */
+      type: 'sync-locations';
+      organizationId: string;
     };
