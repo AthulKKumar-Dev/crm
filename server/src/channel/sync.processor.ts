@@ -1,9 +1,11 @@
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
-import { ChannelStatus, SyncStatus } from '@prisma/client';
+import { SyncStatus } from '@prisma/client';
 import { SYNC_QUEUE, SyncJobData } from './sync.queue';
 import { ShopifySyncService } from './shopify-sync.service';
+import { ShopifyOAuthService } from './shopify-oauth.service';
+import { ShopifyPixelService } from './shopify-pixel.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 /// How many syncs may run at once. BullMQ's default is 1 — per queue, for the
@@ -20,11 +22,18 @@ export class SyncProcessor extends WorkerHost {
     constructor(
         private readonly syncService: ShopifySyncService,
         private readonly prisma: PrismaService,
+        private readonly shopifyOAuth: ShopifyOAuthService,
+        private readonly shopifyPixel: ShopifyPixelService,
     ) {
         super();
     }
 
     async process(job: Job<SyncJobData>): Promise<void> {
+        if (job.data.type === 'setup') {
+            await this.runSetup(job);
+            return;
+        }
+
         const { channelId, organizationId, entityTypes } = job.data;
 
         this.logger.log(
@@ -34,6 +43,39 @@ export class SyncProcessor extends WorkerHost {
         await this.syncService.runSync(channelId, organizationId, entityTypes);
 
         this.logger.log(`Sync job ${job.id} completed`);
+    }
+
+    /**
+     * Post-connect setup, moved off the HTTP request path.
+     *
+     * Both halves are best-effort and independently caught: a store with no
+     * webhooks still syncs on demand, and the pixel is analytics-only. What we
+     * must NOT do is fail the job for either, because BullMQ would then retry
+     * the whole thing and re-issue 20 more mutations against a shop that is
+     * very likely already rate-limited.
+     */
+    private async runSetup(job: Job<SyncJobData>): Promise<void> {
+        const { channelId } = job.data;
+        this.logger.log(`Running post-connect setup for channel ${channelId}`);
+
+        try {
+            await this.shopifyOAuth.registerWebhooks(channelId);
+        } catch (error) {
+            this.logger.warn(
+                `Webhook registration failed for channel ${channelId} (non-fatal; " +
+                "POST /channels/:id/register-webhooks re-runs it): ${error instanceof Error ? error.message : error}`,
+            );
+        }
+
+        try {
+            await this.shopifyPixel.activatePixel(channelId);
+        } catch (error) {
+            this.logger.warn(
+                `Pixel activation failed for channel ${channelId} (non-fatal): ${error instanceof Error ? error.message : error}`,
+            );
+        }
+
+        this.logger.log(`Setup job ${job.id} completed for channel ${channelId}`);
     }
 
     /**
@@ -95,9 +137,14 @@ export class SyncProcessor extends WorkerHost {
                 });
             }
 
+            // `syncStatus` only. Setting `status: ERROR` here made a failed
+            // backfill indistinguishable from a store we can no longer reach,
+            // so the channels page showed "Error" for a store that was
+            // connected and healthy. Genuine auth failures are handled in
+            // runSync, which flips the channel to DISCONNECTED.
             await this.prisma.channel.update({
                 where: { id: channelId },
-                data: { syncStatus: SyncStatus.FAILED, status: ChannelStatus.ERROR },
+                data: { syncStatus: SyncStatus.FAILED },
             });
         } catch (recordErr) {
             // Never let the reporting path throw — it would be swallowed by

@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { SkipThrottle } from '@nestjs/throttler';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, Prisma, StockBucket } from '@prisma/client';
 import { Public } from '../auth/decorators/public.decorator';
 import { PrismaService } from '../prisma/prisma.service';
 import { EncryptionService } from './encryption.service';
@@ -463,19 +463,6 @@ export class ShopifyWebhookController {
         orgId: string,
         body: { inventory_item_id: number; available: number; location_id: number },
     ) {
-        // Warehousing orgs own their physical stock: variant.inventoryQuantity
-        // is a derived cache (SUM of StockLevel.available) and must not be
-        // overwritten by Shopify's last-writer-wins aggregate. Reconcile-with-
-        // drift-detection for these orgs is the Phase D flow; until then the
-        // webhook is a no-op for them (legacy orgs keep the existing behavior,
-        // including its known multi-location limitation).
-        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
-            this.logger.debug(
-                `inventory_levels/update ignored for warehousing-enabled org ${orgId}`,
-            );
-            return;
-        }
-
         const variant = await this.prisma.productVariant.findFirst({
             where: {
                 product: { channelId },
@@ -485,6 +472,20 @@ export class ShopifyWebhookController {
 
         if (!variant) return;
 
+        // Warehousing orgs hold stock per warehouse, so `body.available` — the
+        // quantity at ONE location — is routed to the warehouse mapped to
+        // `body.location_id` rather than being assigned as the variant's whole
+        // stock. That assignment is what made the number flip to whichever
+        // location changed last on a multi-location store.
+        if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
+            await this.applyWarehousedInventoryUpdate(orgId, variant.id, body);
+            return;
+        }
+
+        // Legacy (single-number) orgs are deliberately unchanged, INCLUDING
+        // the multi-location flip described above: they have one quantity per
+        // variant and nowhere to put a per-location split, so fixing it means
+        // moving them to warehousing, not patching this branch.
         const newQuantity = body.available;
         if (variant.inventoryQuantity === newQuantity) return;
 
@@ -508,6 +509,62 @@ export class ShopifyWebhookController {
 
         this.logger.log(
             `Inventory updated via webhook: variant ${variant.id}, ${variant.inventoryQuantity} → ${newQuantity}`,
+        );
+    }
+
+    /**
+     * Route a single location's quantity into the warehouse mirroring it.
+     *
+     * Compare-and-skip is what makes this safe to receive repeatedly, and it
+     * doubles as echo suppression: a CRM-origin push comes straight back as
+     * this webhook carrying the value we just wrote, the delta is zero, and no
+     * ledger row is written.
+     */
+    private async applyWarehousedInventoryUpdate(
+        orgId: string,
+        variantId: string,
+        body: { available: number; location_id: number },
+    ) {
+        const locationId = String(body.location_id);
+        const warehouse = await this.prisma.warehouse.findFirst({
+            where: { organizationId: orgId, shopifyLocationId: locationId, isActive: true },
+            select: { id: true },
+        });
+        if (!warehouse) {
+            // A location added in Shopify since the last locations sync. Doing
+            // nothing is correct: the next sync creates the warehouse and the
+            // reconcile picks up the current quantity anyway.
+            this.logger.debug(
+                `inventory_levels/update for unmapped Shopify location ${locationId} (org ${orgId})`,
+            );
+            return;
+        }
+
+        const level = await this.prisma.stockLevel.findFirst({
+            where: { variantId, warehouseId: warehouse.id, locationId: null },
+            select: { available: true },
+        });
+        const delta = body.available - (level?.available ?? 0);
+        if (delta === 0) return;
+
+        await this.inventoryLedger.applyMovement({
+            orgId,
+            variantId,
+            warehouseId: warehouse.id,
+            fromBucket: delta < 0 ? StockBucket.AVAILABLE : null,
+            toBucket: delta > 0 ? StockBucket.AVAILABLE : null,
+            quantity: Math.abs(delta),
+            reason: 'webhook',
+            referenceType: 'webhook',
+            referenceId: locationId,
+            // Shopify is authoritative on what was sold. Refusing a decrease
+            // that crosses zero would desync the two systems permanently;
+            // oversold surfaces as an alert on the stock screen instead.
+            allowNegativeAvailable: true,
+        });
+
+        this.logger.log(
+            `Inventory updated via webhook: variant ${variantId} at warehouse ${warehouse.id}, ${delta > 0 ? '+' : ''}${delta} → ${body.available}`,
         );
     }
 }

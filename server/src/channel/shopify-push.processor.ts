@@ -3,12 +3,16 @@ import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { SHOPIFY_PUSH_QUEUE, ShopifyPushJobData } from './shopify-push.queue';
 import { ShopifyPushService } from './shopify-push.service';
+import { ShopifyLocationSyncService } from './shopify-location-sync.service';
 
 @Processor(SHOPIFY_PUSH_QUEUE)
 export class ShopifyPushProcessor extends WorkerHost {
   private readonly logger = new Logger(ShopifyPushProcessor.name);
 
-  constructor(private readonly pushService: ShopifyPushService) {
+  constructor(
+    private readonly pushService: ShopifyPushService,
+    private readonly locationSync: ShopifyLocationSyncService,
+  ) {
     super();
   }
 
@@ -38,6 +42,9 @@ export class ShopifyPushProcessor extends WorkerHost {
             data.organizationId,
             data.variantIds,
           );
+          break;
+        case 'sync-locations':
+          await this.locationSync.runForOrganization(data.organizationId);
           break;
         default: {
           // Exhaustiveness check — if a new job type is added without a

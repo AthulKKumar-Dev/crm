@@ -221,7 +221,15 @@ export class SkuGeneratorService {
       VALUES (${`invseq_${orgId}`}, ${orgId}, NOW(), NOW())
       ON CONFLICT ("organization_id") DO NOTHING
     `;
-    const rows = await this.prisma.$queryRaw<Array<{ next_seq: number }>>`
+    // `next_seq` arrives as a BigInt, not a number. `${count}` is a bind
+    // parameter and Prisma sends integer JS numbers to Postgres as int8, so
+    // `int4 - int8` resolves to the bigint operator and the column comes back
+    // as int8 — the `::int` on the left operand does not stop the promotion.
+    // The old `number` annotation was a lie the compiler could not catch
+    // ($queryRaw type params are an unchecked assertion), so the caller's
+    // `seq - startSeq - variants.length` threw "Cannot mix BigInt and other
+    // types". Converting here keeps every caller on plain numbers.
+    const rows = await this.prisma.$queryRaw<Array<{ next_seq: number | bigint }>>`
       UPDATE "organization_settings"
       SET "inventory_settings" = jsonb_set(
         COALESCE("inventory_settings", '{}'::jsonb),
@@ -232,6 +240,6 @@ export class SkuGeneratorService {
       WHERE "organization_id" = ${orgId}
       RETURNING ("inventory_settings"->>'skuSequence')::int - ${count} AS next_seq
     `;
-    return rows[0]?.next_seq ?? 1;
+    return Number(rows[0]?.next_seq ?? 1);
   }
 }

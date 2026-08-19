@@ -34,6 +34,7 @@ export default [
     route("products/:id", "routes/app/products/$id.tsx"),
     route("inventory", "routes/app/inventory.tsx"),
     route("inventory/ledger", "routes/app/inventory/ledger.tsx"),
+    route("inventory/warehouses", "routes/app/inventory/warehouses.tsx"),
     // Ends in /print → the app layout renders it chrome-free (same regex as
     // packing-slip / pick-slip / invoice print).
     route("inventory/labels/print", "routes/app/inventory/labels-print.tsx"),

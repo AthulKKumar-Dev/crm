@@ -45,16 +45,34 @@ export function useCreateAdjustmentMutation() {
   });
 }
 
+/**
+ * The response cannot tell us how many were left alone: the service filters
+ * out anything that already has a code BEFORE counting, so `skipped` comes
+ * back as `variants.length - generated` — always 0. When the caller named an
+ * explicit set of variants we can work it out ourselves, since React Query
+ * hands the mutation variables to onSuccess alongside the result.
+ *
+ * Reported as "unchanged" rather than "already had one": existing codes
+ * dominate the difference, but it also absorbs variants deleted between render
+ * and submit, and the toast should not assert a reason it cannot verify.
+ */
+function unchangedCount(vars: GenerateCodesRequest, accountedFor: number): number {
+  const asked = vars.variantIds?.length;
+  if (!asked) return 0;
+  return Math.max(0, asked - accountedFor);
+}
+
 export function useGenerateSkusMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: GenerateCodesRequest) => inventoryService.generateSkus(data),
-    onSuccess: (res) => {
+    onSuccess: (res, variables) => {
       queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      const unchanged = unchangedCount(variables, res.generated);
       toast.success(
         `Generated ${res.generated} SKU${res.generated === 1 ? "" : "s"}` +
-          (res.skipped > 0 ? ` (${res.skipped} skipped)` : "") + ".",
+          (unchanged > 0 ? ` · ${unchanged} unchanged` : "") + ".",
       );
     },
     onError: (error) => handleMutationError(error, "Failed to generate SKUs."),
@@ -65,12 +83,17 @@ export function useGenerateBarcodesMutation() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (data: GenerateCodesRequest) => inventoryService.generateBarcodes(data),
-    onSuccess: (res) => {
+    onSuccess: (res, variables) => {
       queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
+      // `skipped` IS meaningful here (unlike SKUs): generateBarcodes records a
+      // real conflict for every variant that has no SKU to copy from. Those
+      // are already accounted for, so only the remainder is "unchanged".
+      const unchanged = unchangedCount(variables, res.generated + res.skipped);
       toast.success(
         `Generated ${res.generated} barcode${res.generated === 1 ? "" : "s"}` +
-          (res.skipped > 0 ? ` (${res.skipped} skipped — no SKU yet)` : "") + ".",
+          (res.skipped > 0 ? ` · ${res.skipped} need a SKU first` : "") +
+          (unchanged > 0 ? ` · ${unchanged} unchanged` : "") + ".",
       );
     },
     onError: (error) => handleMutationError(error, "Failed to generate barcodes."),

@@ -172,6 +172,11 @@ export class ProductService {
               id: true,
               title: true,
               sku: true,
+              // barcode rides along for the products bulk bar, which counts
+              // how many selected variants still need one before calling
+              // /inventory/labels/generate-barcodes. Without it the button
+              // could only offer a blind "generate" with no idea of the scope.
+              barcode: true,
               price: true,
               inventoryQuantity: true,
               option1: true,
