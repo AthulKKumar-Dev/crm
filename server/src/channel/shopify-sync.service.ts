@@ -16,7 +16,11 @@ import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
-import { ShopifyGraphqlClient, ShopifyGraphqlError } from './shopify-graphql.client';
+import {
+    ShopifyGraphqlClient,
+    ShopifyGraphqlError,
+    ShopifyAuthResolver,
+} from './shopify-graphql.client';
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { ShopifyLocationSyncService } from './shopify-location-sync.service';
@@ -227,7 +231,6 @@ export class ShopifySyncService {
         });
 
         let allSucceeded = true;
-        let authFailed = false;
         /// Entities that finished cleanly in THIS run. Drives the inventory
         /// pass's skip so the catalogue is only walked once.
         const completedEntities = new Set<string>();
@@ -265,6 +268,10 @@ export class ShopifySyncService {
             }
 
             if (token && shopDomain) {
+                // The initial resolve above stays, purely so bad credentials
+                // fail fast before any entity runs. Everything below re-resolves
+                // per request through this.
+                const getAuth = this.authResolver(channelId);
                 const enabledPull = await this.enabledEntities(channelId, 'pull');
 
                 // Run in PULL_ENTITY_TYPES order rather than the order the job
@@ -282,25 +289,25 @@ export class ShopifySyncService {
                     try {
                         switch (entityType) {
                             case 'locations':
-                                await this.locationSync.syncLocations(channelId, orgId, shopDomain, token);
+                                await this.locationSync.syncLocations(channelId, orgId, getAuth);
                                 break;
                             case 'products':
-                                await this.syncProducts(channelId, orgId, shopDomain, token);
+                                await this.syncProducts(channelId, orgId, getAuth);
                                 break;
                             case 'orders':
-                                await this.syncOrders(channelId, orgId, shopDomain, token);
+                                await this.syncOrders(channelId, orgId, getAuth);
                                 break;
                             case 'customers':
-                                await this.syncCustomers(channelId, orgId, shopDomain, token);
+                                await this.syncCustomers(channelId, orgId, getAuth);
                                 break;
                             case 'inventory':
                                 await this.syncInventory(
-                                    channelId, orgId, shopDomain, token,
+                                    channelId, orgId, getAuth,
                                     completedEntities.has('products'),
                                 );
                                 break;
                             case 'collections':
-                                await this.syncCollections(channelId, orgId, shopDomain, token);
+                                await this.syncCollections(channelId, orgId, getAuth);
                                 break;
                         }
                         completedEntities.add(entityType);
@@ -314,11 +321,18 @@ export class ShopifySyncService {
                         await this.markEntitySynced(channelId, entityType, syncStartedAt);
                     } catch (error) {
                         allSucceeded = false;
-                        // Token revoked (app uninstalled / secret rotated) —
-                        // mark the channel DISCONNECTED so the UI surfaces
-                        // "Reconnect" and retries stop.
+                        // A 401 here does NOT mean the grant is dead. It used to
+                        // flip the channel to DISCONNECTED, which stranded a
+                        // perfectly healthy store behind a Reconnect button every
+                        // time a token expired mid-run. Only the token layer can
+                        // tell "expired" from "revoked", and
+                        // `refreshAccessToken` / `getAccessToken` already set
+                        // DISCONNECTED themselves when the grant really is gone.
+                        // Recorded here only so the cause is visible in the log.
                         if (error instanceof ShopifyGraphqlError && error.code === 'AUTH_FAILED') {
-                            authFailed = true;
+                            this.logger.warn(
+                                `Auth failed during ${entityType} on channel ${channelId}. Leaving the channel's connection status alone - the token layer owns that decision.`,
+                            );
                         }
                         this.logger.error(`Sync failed for ${entityType} on channel ${channelId}`, error);
                     }
@@ -331,17 +345,13 @@ export class ShopifySyncService {
                 where: { id: channelId },
                 data: {
                     syncStatus: allSucceeded ? SyncStatus.COMPLETED : SyncStatus.FAILED,
-                    // ONLY a revoked token is a connection failure. A sync
-                    // that merely failed leaves `status` alone: it used to be
-                    // set to ERROR here, which is what made a rate-limited
-                    // backfill look identical to a store that could not be
-                    // connected at all. On success we still repair a stale
-                    // ERROR/SYNCING left behind by the old behaviour.
-                    ...(authFailed
-                        ? { status: ChannelStatus.DISCONNECTED }
-                        : allSucceeded
-                            ? { status: ChannelStatus.CONNECTED }
-                            : {}),
+                    // `status` is CONNECTION health and this method no longer
+                    // writes a failure into it at all -- neither ERROR (which
+                    // made a rate-limited backfill look unconnectable) nor
+                    // DISCONNECTED (which a merely-expired token would trigger).
+                    // Both belong to the token layer. On success we still repair
+                    // a stale ERROR/SYNCING left behind by the old behaviour.
+                    ...(allSucceeded ? { status: ChannelStatus.CONNECTED } : {}),
                     // Display only (the channels page's "5m ago"). The sync
                     // FILTER now comes from ChannelSyncState per entity.
                     lastSyncedAt: allSucceeded ? syncStartedAt : undefined,
@@ -400,19 +410,18 @@ export class ShopifySyncService {
     }
 
     // ─── SYNC PRODUCTS ───
-    private async syncProducts(channelId: string, orgId: string, shopDomain: string, token: string) {
+    private async syncProducts(channelId: string, orgId: string, getAuth: ShopifyAuthResolver) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'products');
         let processed = 0;
         let failed = 0;
 
         try {
-            const auth = { shopDomain, accessToken: token };
-            await this.updateTotalEstimated(syncLog.id, auth, PRODUCTS_COUNT_QUERY, 'productsCount');
+            await this.updateTotalEstimated(syncLog.id, getAuth, PRODUCTS_COUNT_QUERY, 'productsCount');
 
             const vendorMetafield = await this.getVendorMetafieldConfig(orgId);
             const queryString = await this.resolveEntityQuery(channelId, 'products');
             let pages = 0;
-            for await (const page of this.paginateProductsGraphql(auth, syncLog.cursor, vendorMetafield, queryString)) {
+            for await (const page of this.paginateProductsGraphql(getAuth, syncLog.cursor, vendorMetafield, queryString)) {
                 for (const node of page.products) {
                     try {
                         const sp = this.transformGraphqlProduct(node);
@@ -454,7 +463,7 @@ export class ShopifySyncService {
     }
 
     private async *paginateProductsGraphql(
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         startCursor: string | null,
         vendorMetafield: { namespace: string; key: string } | null,
         queryString: string | null,
@@ -472,7 +481,9 @@ export class ShopifySyncService {
                 mfKey: vendorMetafield?.key ?? 'vendor',
             };
             const res = await this.graphql.request<ProductsListResponse, ProductsListVariables>(
-                auth,
+                // Resolved per page, not per job: a catalogue backfill can
+                // easily outlive the one-hour token.
+                await getAuth(),
                 PRODUCTS_LIST_QUERY,
                 variables,
             );
@@ -550,14 +561,14 @@ export class ShopifySyncService {
     // Note: if an existing syncLog has a REST `page_info` cursor from before
     // this migration, the next run will re-start that entity from the
     // beginning. Cursors are opaque per-API so we can't translate.
-    private async syncOrders(channelId: string, orgId: string, shopDomain: string, token: string) {
+    private async syncOrders(channelId: string, orgId: string, getAuth: ShopifyAuthResolver) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'orders');
         let processed = 0;
         let failed = 0;
 
         try {
             // Informational only (drives the totalEstimated progress UI).
-            await this.updateTotalEstimated(syncLog.id, { shopDomain, accessToken: token }, ORDERS_COUNT_QUERY, 'ordersCount');
+            await this.updateTotalEstimated(syncLog.id, getAuth, ORDERS_COUNT_QUERY, 'ordersCount');
 
             // First backfill → the initial window; afterwards → only what has
             // changed since THIS entity last completed. Previously this read
@@ -568,13 +579,12 @@ export class ShopifySyncService {
                 `Orders sync for channel ${channelId}: ${queryString ?? 'no filter (full pull)'}`,
             );
 
-            const auth = { shopDomain, accessToken: token };
             let pages = 0;
-            for await (const page of this.paginateOrdersGraphql(auth, syncLog.cursor, queryString)) {
+            for await (const page of this.paginateOrdersGraphql(getAuth, syncLog.cursor, queryString)) {
                 for (const node of page.orders) {
                     try {
-                        await this.drainLineItems(auth, node);
-                        await this.drainRefunds(auth, node);
+                        await this.drainLineItems(getAuth, node);
+                        await this.drainRefunds(getAuth, node);
                         const so = this.transformGraphqlOrder(node);
                         await this.upsertOrder(channelId, orgId, so);
                         processed++;
@@ -611,7 +621,7 @@ export class ShopifySyncService {
     // checkpoint stored in syncLog walks forward chronologically — matches
     // the previous REST behavior of `updated_at_min` filtering.
     private async *paginateOrdersGraphql(
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         startCursor: string | null,
         queryString: string | null,
     ): AsyncGenerator<{ orders: OrderNode[]; nextCursor: string | null }> {
@@ -628,7 +638,7 @@ export class ShopifySyncService {
             let res: OrdersListResponse;
             try {
                 res = await this.graphql.request<OrdersListResponse, OrdersListVariables>(
-                    auth,
+                    await getAuth(),
                     ORDERS_LIST_QUERY,
                     variables,
                 );
@@ -685,7 +695,7 @@ export class ShopifySyncService {
      * caps remain.
      */
     private async drainLineItems(
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         node: OrderNode,
     ): Promise<void> {
         let page = node.lineItems.pageInfo;
@@ -694,7 +704,7 @@ export class ShopifySyncService {
             const res = await this.graphql.request<
                 OrderLineItemsPageResponse,
                 OrderLineItemsPageVariables
-            >(auth, ORDER_LINE_ITEMS_PAGE_QUERY, {
+            >(await getAuth(), ORDER_LINE_ITEMS_PAGE_QUERY, {
                 id: node.id,
                 first: 100,
                 after: page.endCursor,
@@ -726,7 +736,7 @@ export class ShopifySyncService {
      * and the ones that do need a call pay for exactly what they use.
      */
     private async drainRefunds(
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         node: OrderNode,
     ): Promise<void> {
         const status = node.displayFinancialStatus ?? '';
@@ -744,8 +754,10 @@ export class ShopifySyncService {
             return;
         }
 
+        // Resolved only here, past the has-refunds gate, so the common case
+        // (no refunds) still costs zero extra work.
         const res = await this.graphql.request<OrderRefundsResponse, OrderRefundsVariables>(
-            auth,
+            await getAuth(),
             ORDER_REFUNDS_QUERY,
             { id: node.id },
         );
@@ -889,18 +901,17 @@ export class ShopifySyncService {
     }
 
     // ─── SYNC CUSTOMERS ───
-    private async syncCustomers(channelId: string, orgId: string, shopDomain: string, token: string) {
+    private async syncCustomers(channelId: string, orgId: string, getAuth: ShopifyAuthResolver) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'customers');
         let processed = 0;
         let failed = 0;
 
         try {
-            const auth = { shopDomain, accessToken: token };
-            await this.updateTotalEstimated(syncLog.id, auth, CUSTOMERS_COUNT_QUERY, 'customersCount');
+            await this.updateTotalEstimated(syncLog.id, getAuth, CUSTOMERS_COUNT_QUERY, 'customersCount');
 
             const queryString = await this.resolveEntityQuery(channelId, 'customers');
             let pages = 0;
-            for await (const page of this.paginateCustomersGraphql(auth, syncLog.cursor, queryString)) {
+            for await (const page of this.paginateCustomersGraphql(getAuth, syncLog.cursor, queryString)) {
                 for (const node of page.customers) {
                     try {
                         await this.upsertCustomer(channelId, orgId, this.transformGraphqlCustomer(node));
@@ -936,7 +947,7 @@ export class ShopifySyncService {
     }
 
     private async *paginateCustomersGraphql(
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         startCursor: string | null,
         queryString: string | null,
     ): AsyncGenerator<{ customers: CustomerSyncNode[]; nextCursor: string | null }> {
@@ -948,7 +959,7 @@ export class ShopifySyncService {
                 query: queryString,
             };
             const res = await this.graphql.request<CustomersListResponse, CustomersListVariables>(
-                auth,
+                await getAuth(),
                 CUSTOMERS_LIST_QUERY,
                 variables,
             );
@@ -990,8 +1001,7 @@ export class ShopifySyncService {
     private async syncInventory(
         channelId: string,
         orgId: string,
-        shopDomain: string,
-        token: string,
+        getAuth: ShopifyAuthResolver,
         productsAlreadySynced: boolean,
     ) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'inventory');
@@ -1019,7 +1029,7 @@ export class ShopifySyncService {
         // warehousing org's stock never updated from Shopify at all.
         if (warehousing) {
             await this.completeSyncLog(syncLog.id, 0, 0);
-            await this.locationSync.pullLocationInventory(channelId, orgId, shopDomain, token);
+            await this.locationSync.pullLocationInventory(channelId, orgId, getAuth);
             return;
         }
 
@@ -1040,12 +1050,11 @@ export class ShopifySyncService {
         }
 
         try {
-            const auth = { shopDomain, accessToken: token };
             const queryString = await this.resolveEntityQuery(channelId, 'inventory');
             let cursor: string | null = syncLog.cursor ?? null;
             do {
                 const res: ProductsInventoryResponse = await this.graphql.request<ProductsInventoryResponse>(
-                    auth,
+                    await getAuth(),
                     PRODUCTS_INVENTORY_QUERY,
                     { first: GRAPHQL_PAGE_SIZE, after: cursor, query: queryString },
                 );
@@ -1096,13 +1105,12 @@ export class ShopifySyncService {
     }
 
     // ─── SYNC COLLECTIONS ───
-    private async syncCollections(channelId: string, orgId: string, shopDomain: string, token: string) {
+    private async syncCollections(channelId: string, orgId: string, getAuth: ShopifyAuthResolver) {
         const syncLog = await this.createSyncLog(channelId, orgId, 'collections');
         let processed = 0;
         let failed = 0;
 
         try {
-            const auth = { shopDomain, accessToken: token };
             // One GraphQL connection covers custom AND smart collections —
             // `ruleSet` is non-null only for smart ones. Product membership
             // (previously REST `collects.json`) is inlined per collection.
@@ -1112,7 +1120,7 @@ export class ShopifySyncService {
                 const res: CollectionsListResponse = await this.graphql.request<
                     CollectionsListResponse,
                     CollectionsListVariables
-                >(auth, COLLECTIONS_LIST_QUERY, { first: 25, after: cursor, query: queryString });
+                >(await getAuth(), COLLECTIONS_LIST_QUERY, { first: 25, after: cursor, query: queryString });
 
                 for (const node of res.collections.nodes) {
                     try {
@@ -1130,7 +1138,7 @@ export class ShopifySyncService {
                             channelId, orgId, col,
                             node.ruleSet ? 'smart' : 'custom',
                         );
-                        await this.syncCollectionProducts(channelId, auth, node);
+                        await this.syncCollectionProducts(channelId, getAuth, node);
                         processed++;
                     } catch (error) {
                         failed++;
@@ -1159,7 +1167,7 @@ export class ShopifySyncService {
     // collections are drained with COLLECTION_PRODUCTS_QUERY.
     private async syncCollectionProducts(
         channelId: string,
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         node: CollectionSyncNode,
     ): Promise<void> {
         const collection = await this.prisma.collection.findFirst({
@@ -1188,7 +1196,7 @@ export class ShopifySyncService {
             }
             if (!pageInfo.hasNextPage || !pageInfo.endCursor) break;
             const res = await this.graphql.request<CollectionProductsResponse>(
-                auth,
+                await getAuth(),
                 COLLECTION_PRODUCTS_QUERY,
                 { id: node.id, first: 100, after: pageInfo.endCursor },
             );
@@ -1941,12 +1949,12 @@ export class ShopifySyncService {
     // count must never fail the sync (some shops/plans gate count fields).
     private async updateTotalEstimated(
         logId: string,
-        auth: { shopDomain: string; accessToken: string },
+        getAuth: ShopifyAuthResolver,
         query: string,
         field: 'productsCount' | 'customersCount' | 'ordersCount',
     ): Promise<void> {
         try {
-            const res = await this.graphql.request<Record<string, { count: number } | null>>(auth, query);
+            const res = await this.graphql.request<Record<string, { count: number } | null>>(await getAuth(), query);
             await this.prisma.syncLog.update({
                 where: { id: logId },
                 data: { totalEstimated: res?.[field]?.count ?? 0 },
@@ -1971,6 +1979,23 @@ export class ShopifySyncService {
         const ps = parseProductSettings(row?.productSettings ?? null);
         if (!ps.vendorMetafieldEnabled) return null;
         return { namespace: ps.vendorMetafieldNamespace, key: ps.vendorMetafieldKey };
+    }
+
+    /**
+     * A credentials getter bound to one channel.
+     *
+     * Cheap on the happy path: `getAccessToken` is one indexed read plus a
+     * decrypt while the token still has >2 minutes of life, and only then does
+     * it hit Shopify to refresh (Redis-locked and double-checked, so concurrent
+     * workers do not race the rotating refresh token). Calling it per request
+     * therefore costs almost nothing and is what lets a backfill outlive the
+     * one-hour token lifetime.
+     */
+    private authResolver(channelId: string): ShopifyAuthResolver {
+        return async () => {
+            const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(channelId);
+            return { shopDomain, accessToken: token };
+        };
     }
 
     // ─── PER-ENTITY SYNC STATE ───

@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, StockBucket, SyncStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
-import { ShopifyGraphqlClient } from './shopify-graphql.client';
+import { ShopifyGraphqlClient , ShopifyAuthResolver } from './shopify-graphql.client';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import {
   LOCATIONS_QUERY,
@@ -85,9 +85,14 @@ export class ShopifyLocationSyncService {
       return;
     }
 
-    const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(channel.id);
-    await this.syncLocations(channel.id, orgId, shopDomain, token);
-    await this.pullLocationInventory(channel.id, orgId, shopDomain, token);
+    // A resolver, not a captured token: `pullLocationInventory` pages every
+    // variant and can easily outlive the one-hour access token.
+    const getAuth: ShopifyAuthResolver = async () => {
+      const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(channel.id);
+      return { shopDomain, accessToken: token };
+    };
+    await this.syncLocations(channel.id, orgId, getAuth);
+    await this.pullLocationInventory(channel.id, orgId, getAuth);
   }
 
   // ─────────────────────────── locations → warehouses ───────────────────────────
@@ -104,8 +109,7 @@ export class ShopifyLocationSyncService {
   async syncLocations(
     channelId: string,
     orgId: string,
-    shopDomain: string,
-    token: string,
+    getAuth: ShopifyAuthResolver,
   ): Promise<void> {
     // Authoritative guard, deliberately here and not only in
     // runForOrganization: `runSync` reaches this directly through the
@@ -127,9 +131,9 @@ export class ShopifyLocationSyncService {
     let processed = 0;
 
     try {
-      const nodes = await this.fetchAllLocations(shopDomain, token);
+      const nodes = await this.fetchAllLocations(getAuth);
       if (nodes.length === 0) {
-        this.logger.warn(`Shop ${shopDomain} returned no locations`);
+        this.logger.warn(`Channel ${channelId} returned no locations`);
         await this.completeSyncLog(syncLog.id, 0, 0);
         return;
       }
@@ -333,16 +337,14 @@ export class ShopifyLocationSyncService {
   }
 
   private async fetchAllLocations(
-    shopDomain: string,
-    token: string,
+    getAuth: ShopifyAuthResolver,
   ): Promise<ShopifyLocationNode[]> {
-    const auth = { shopDomain, accessToken: token };
     const all: ShopifyLocationNode[] = [];
     let cursor: string | null = null;
 
     do {
       const res: LocationsResponse = await this.graphql.request<LocationsResponse>(
-        auth,
+        await getAuth(),
         LOCATIONS_QUERY,
         { first: LOCATION_PAGE_SIZE, after: cursor },
       );
@@ -371,8 +373,7 @@ export class ShopifyLocationSyncService {
   async pullLocationInventory(
     channelId: string,
     orgId: string,
-    shopDomain: string,
-    token: string,
+    getAuth: ShopifyAuthResolver,
   ): Promise<void> {
     // Deliberately NOT the 'inventory' entity type used by the legacy pull.
     // Both resume from a saved cursor, but they page different connections
@@ -395,7 +396,7 @@ export class ShopifyLocationSyncService {
         this.logger.log(
           `No Shopify-mapped warehouses for org ${orgId}; running the locations pass first.`,
         );
-        await this.syncLocations(channelId, orgId, shopDomain, token);
+        await this.syncLocations(channelId, orgId, getAuth);
         warehouses = await this.loadMappedWarehouses(orgId);
       }
       if (warehouses.length === 0) {
@@ -409,13 +410,15 @@ export class ShopifyLocationSyncService {
         warehouses.map((w) => [w.shopifyLocationId as string, w.id]),
       );
 
-      const auth = { shopDomain, accessToken: token };
+
       let cursor: string | null = syncLog.cursor ?? null;
 
       do {
         const res: VariantInventoryLevelsResponse =
           await this.graphql.request<VariantInventoryLevelsResponse>(
-            auth,
+            // Per page: this walks every variant in the catalogue and is the
+            // single longest-running Shopify read in the codebase.
+            await getAuth(),
             VARIANT_INVENTORY_LEVELS_QUERY,
             {
               first: VARIANT_PAGE_SIZE,
