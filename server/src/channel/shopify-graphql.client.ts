@@ -8,6 +8,18 @@ export interface ShopifyAuthContext {
 }
 
 /**
+ * Resolves credentials immediately before a request, rather than once per job.
+ *
+ * Public-app access tokens live ONE HOUR. A long backfill that captured a
+ * decrypted token at the start and reused the string would start 401ing about
+ * an hour in, with nothing left to refresh it -- which is exactly how a
+ * multi-hour first sync failed three times, one hour apart, and left the
+ * channel DISCONNECTED. Callers pass this instead of a frozen string so the
+ * refresh in ShopifyOAuthService.getAccessToken actually gets a chance to run.
+ */
+export type ShopifyAuthResolver = () => Promise<ShopifyAuthContext>;
+
+/**
  * Thrown whenever a Shopify GraphQL call fails in a way the caller might want
  * to distinguish (auth, throttling exhausted, query errors, etc.). The `code`
  * is one of: AUTH_FAILED, HTTP_ERROR, GRAPHQL_ERROR, RETRY_EXHAUSTED,
