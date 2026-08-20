@@ -45,7 +45,7 @@ export function ProfitBarChart({ currency }: { currency: string }) {
   const profitMargin = totalRevenue > 0 ? Math.round((totalProfit / totalRevenue) * 100) : 0;
 
   return (
-    <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+    <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
       <div className="mb-1 flex items-start justify-between">
         <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Total Profit Overview</p>
         <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">
@@ -64,7 +64,7 @@ export function ProfitBarChart({ currency }: { currency: string }) {
               {formatCurrency(totalProfit, currency)}
             </p>
             {profitMargin !== 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-xs font-semibold text-[#084734]">
+              <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2 py-0.5 text-caption font-semibold text-brand">
                 {profitMargin > 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
                 {profitMargin}%
               </span>
@@ -73,31 +73,33 @@ export function ProfitBarChart({ currency }: { currency: string }) {
 
           <div className="mb-3 flex items-center gap-4 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 rounded-full bg-gray-300" />
+              <span className="inline-block size-2 rounded-full bg-border" />
               Total Revenue
             </span>
             <span className="flex items-center gap-1.5">
-              <span className="inline-block size-2 rounded-full bg-orange-400" />
+              <span className="inline-block size-2 rounded-full bg-brand" />
               Total Profit
             </span>
           </div>
 
           {chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={160}>
-              <BarChart data={chartData} barGap={3} barCategoryGap="35%">
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
-                <XAxis
-                  dataKey="month"
-                  tick={{ fontSize: 10, fill: "#9ca3af" }}
-                  axisLine={false}
-                  tickLine={false}
-                />
-                <YAxis hide />
-                <Tooltip content={<CustomTooltip currency={currency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
-                <Bar dataKey="revenue" fill="#e5e7eb" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="profit" fill="#fb923c" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <div className="min-h-40 flex-1">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} barGap={3} barCategoryGap="35%">
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis
+                    dataKey="month"
+                    tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis hide />
+                  <Tooltip content={<CustomTooltip currency={currency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
+                  <Bar dataKey="profit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="profit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
           ) : (
             <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
               No sales data available yet

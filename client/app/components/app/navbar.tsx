@@ -134,10 +134,10 @@ export function Navbar() {
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
         <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
+          {/* <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
             <Leaf className="size-4 text-gray-900" />
-          </div>
-          <span className="hidden text-base font-bold text-gray-900 dark:text-gray-100 sm:block">Collabo</span>
+          </div> */}
+          <span className="font-display text-stat text-brand-strong">collabo</span>
         </Link>
 
         {/* ── Nav — pill container ─────────────────────────────── */}

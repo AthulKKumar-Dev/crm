@@ -17,17 +17,30 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { cn, formatCurrency } from "~/lib/utils";
 import { useSyncOrderMutation } from "~/hooks/use-order-mutations";
-import type { Order, FinancialStatus, FulfillmentStatus } from "~/types/api";
+import ShopifyIcon from "~/assests/icon/shopifyIcon";
+import InstagramIcon from "~/assests/icon/instagramIcon";
+import WhatsappIcon from "~/assests/icon/whatsappIcon";
+import MailIcon from "~/assests/icon/mailIcon";
+import type { Order, FinancialStatus, FulfillmentStatus, ChannelPlatform } from "~/types/api";
+
 
 const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
-  PAID: "bg-[#CEF17B]/30 text-[#084734]",
-  PARTIALLY_PAID: "bg-blue-100 text-blue-700",
-  PENDING: "bg-orange-100 text-orange-600",
-  AUTHORIZED: "bg-blue-100 text-blue-700",
-  PARTIALLY_REFUNDED: "bg-yellow-100 text-yellow-700",
-  REFUNDED: "bg-gray-100 text-gray-600",
-  VOIDED: "bg-red-100 text-red-600",
+  PAID: "bg-brand/30 text-brand-strong",
+  PARTIALLY_PAID: "bg-info-subtle text-info",
+  PENDING: "bg-warning-strong-subtle text-warning-strong",
+  AUTHORIZED: "bg-info-subtle text-info",
+  PARTIALLY_REFUNDED: "bg-warning-subtle text-warning",
+  REFUNDED: "bg-muted text-muted-foreground",
+  VOIDED: "bg-danger-subtle text-danger",
 };
+
+const FULFILLMENT_CLASSES: Record<FulfillmentStatus, string> = {
+  FULFILLED: "bg-brand/30 text-brand-strong",
+  PARTIAL: "bg-info-subtle text-info",
+  UNFULFILLED: "bg-warning-strong-subtle text-warning-strong",
+  RESTOCKED: "bg-muted text-muted-foreground",
+};
+
 
 const FINANCIAL_LABELS: Record<FinancialStatus, string> = {
   PAID: "Paid",
@@ -37,13 +50,6 @@ const FINANCIAL_LABELS: Record<FinancialStatus, string> = {
   PARTIALLY_REFUNDED: "Partial Refund",
   REFUNDED: "Refunded",
   VOIDED: "Voided",
-};
-
-const FULFILLMENT_CLASSES: Record<FulfillmentStatus, string> = {
-  FULFILLED: "bg-[#CEF17B]/30 text-[#084734]",
-  PARTIAL: "bg-blue-100 text-blue-700",
-  UNFULFILLED: "bg-orange-100 text-orange-600",
-  RESTOCKED: "bg-gray-100 text-gray-600",
 };
 
 const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
@@ -58,6 +64,33 @@ type OrderRow = Pick<
   "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer" | "channel" | "metadata"
 >;
 
+type IconCmp = React.ComponentType<{ width?: number; height?: number }>;
+
+const CHANNEL_ICON: Partial<Record<ChannelPlatform, IconCmp>> = {
+  SHOPIFY: ShopifyIcon,
+  INSTAGRAM: InstagramIcon,
+  WHATSAPP: WhatsappIcon,
+  MANUAL: MailIcon,
+};
+
+const CHANNEL_LABEL: Record<ChannelPlatform, string> = {
+  SHOPIFY: "Shopify",
+  WOOCOMMERCE: "WooCommerce",
+  INSTAGRAM: "Instagram",
+  FACEBOOK: "Facebook",
+  WHATSAPP: "WhatsApp",
+  TIKTOK: "TikTok",
+  MANUAL: "Manual",
+};
+
+function customerOf(order: OrderRow) {
+  const first = order.customer?.firstName?.trim() ?? "";
+  const last = order.customer?.lastName?.trim() ?? "";
+  const name = `${first} ${last}`.trim();
+  const initials = `${first.charAt(0)}${last.charAt(0)}`.toUpperCase();
+  return { name: name || "Guest", initials: initials || "G" };
+}
+
 interface OrdersTableProps {
   orders: OrderRow[];
   currency: string;
@@ -65,13 +98,84 @@ interface OrdersTableProps {
   onViewDetail?: (orderId: string) => void;
   onGenerateInvoice?: (orderId: string) => void;
   gstEnabled?: boolean;
+  variant?: "compact" | "default";
 }
 
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions.
  *  Row click navigates to /orders/:id. Cells with their own click handlers
  *  (checkbox, dropdown menu) stop propagation. */
-export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
+export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false, variant = "default" }: OrdersTableProps) {
   const navigate = useNavigate();
+
+  if (variant === "compact") {
+    return (
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead>Order</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Amount</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {orders.map((order) => {
+            const platform = order.channel?.platform as ChannelPlatform | undefined;
+            const Icon = platform ? CHANNEL_ICON[platform] : undefined;
+            const { name, initials } = customerOf(order);
+
+            return (
+              <TableRow
+                key={order.id}
+                className="cursor-pointer"
+                onClick={() =>
+                  onViewDetail ? onViewDetail(order.id) : navigate(`/orders/${order.id}`)
+                }
+              >
+                <TableCell>
+                  <div className="flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand text-caption font-semibold text-brand-foreground">
+                      {initials}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-caption font-semibold text-foreground">
+                        {name}
+                        <span className="font-normal text-muted-foreground"> · {order.name}</span>
+                      </p>
+                      <p className="flex items-center gap-1 text-micro text-muted-foreground">
+                        {Icon && <Icon width={12} height={12} />}
+                        {platform ? CHANNEL_LABEL[platform] : "—"} · {order.itemCount} item
+                        {order.itemCount !== 1 ? "s" : ""} ·{" "}
+                        {new Date(order.createdAt).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                </TableCell>
+
+                <TableCell>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-micro font-medium", FINANCIAL_CLASSES[order.financialStatus])}>
+                      {FINANCIAL_LABELS[order.financialStatus]}
+                    </span>
+                    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-micro font-medium", FULFILLMENT_CLASSES[order.fulfillmentStatus])}>
+                      {FULFILLMENT_LABELS[order.fulfillmentStatus]}
+                    </span>
+                  </div>
+                </TableCell>
+
+                <TableCell className="text-right text-caption font-semibold tabular-nums text-foreground">
+                  {formatCurrency(order.totalPrice, currency)}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    );
+  }
+
   return (
     // NOTE: the row-level Sync-to-Shopify dropdown item is wired per-row
     // below via `OrderRowSyncItem` (so each row can own its own mutation

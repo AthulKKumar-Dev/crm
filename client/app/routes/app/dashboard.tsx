@@ -1,5 +1,14 @@
 import { ArrowRight, Download, Upload, Search, Target, Box, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
+
+import { Button } from "~/components/ui/button";
+import {
+  PageHeader,
+  PageHeaderContent,
+  PageHeaderTitle,
+  PageHeaderDescription,
+  PageHeaderActions,
+} from "~/components/ui/page-header";
 import { ProfitBarChart } from "~/components/app/profit-bar-chart";
 import { SalesDonutChart } from "~/components/app/sales-donut-chart";
 import { OrdersTable } from "~/components/app/orders-table";
@@ -11,6 +20,8 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { useDashboard, useExportDashboard } from "~/hooks/use-dashboard-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { formatCurrency } from "~/lib/utils";
+import { StatCard } from "~/components/ui/stat-card";
+import { ProductsPanel } from "~/components/app/products-panel";
 
 export function meta() {
   return [
@@ -30,87 +41,74 @@ export default function DashboardPage() {
     <div className="space-y-6">
 
       {/* Page header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">
-            An overview of recent data of customers info, products details and analysis.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* <div className="relative hidden lg:block">
-            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="search"
-              placeholder="Search here..."
-              className="h-8 w-48 rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-10 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
-            />
-            <kbd className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 rounded border border-border bg-muted px-1 font-mono text-[10px] text-muted-foreground">
-              ⌘K
-            </kbd>
-          </div> */}
-          <button
-            onClick={() => exportCsv()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 shadow-sm hover:bg-gray-50 dark:hover:bg-gray-800/60"
-          >
-            <Upload className="size-3.5" />
-            Export CSV
-          </button>
-          <button
-            onClick={() => exportJson()}
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
-          >
-            <Download className="size-3.5" />
-            Download Report
-          </button>
-        </div>
+      <div>
+        <PageHeader>
+          <PageHeaderContent>
+            <PageHeaderTitle>Overview</PageHeaderTitle>
+            <PageHeaderDescription>
+              An overview of recent data of customers info, products details and analysis.
+            </PageHeaderDescription>
+          </PageHeaderContent>
+          <PageHeaderActions>
+            <Button className="h-auto px-4.5 py-2" variant="outline" onClick={() => exportCsv()}>
+              <Upload className="size-3.5" />
+              Export CSV
+            </Button>
+            <Button className="text-brand h-auto px-4.5 py-2" onClick={() => exportJson()}>
+              <Download className="size-3.5" />
+              Download Report
+            </Button>
+          </PageHeaderActions>
+        </PageHeader>
       </div>
 
       {/* Stat cards row */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatCard
-          label="Total Sales"
-          value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
-          icon={<Target className="size-4" />}
-          linkTo="/orders"
-          linkLabel="View Sales"
-          isLoading={isLoading}
-        />
-        <StatCard
+      <div className="flex gap-3 ">
+        <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
+          <StatCard
+            label="Total Sales"
+            value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
+            icon={<Target className="size-4" />}
+            linkTo="/orders"
+            linkLabel="View Sales"
+            isLoading={isLoading}
+          />
+          {/* <StatCard
           label="Active Products"
           value={dashboard ? dashboard.totalProducts.toLocaleString() : undefined}
           icon={<Box className="size-4" />}
           linkTo="/products"
           linkLabel="View Products"
           isLoading={isLoading}
-        />
-        <StatCard
-          label="Total Orders"
-          value={dashboard ? dashboard.totalOrders.toLocaleString() : undefined}
-          icon={<ShoppingBag className="size-4" />}
-          linkTo="/orders"
-          linkLabel="View Orders"
-          isLoading={isLoading}
-        />
-        <StatCard
-          label="Total Customers"
-          value={dashboard ? dashboard.totalCustomers.toLocaleString() : undefined}
-          icon={<Users className="size-4" />}
-          linkTo="/customers"
-          linkLabel="View Customers"
-          isLoading={isLoading}
-        />
-      </div>
+        /> */}
+          <StatCard
+            label="Total Orders"
+            value={dashboard ? dashboard.totalOrders.toLocaleString() : undefined}
+            icon={<ShoppingBag className="size-4" />}
+            linkTo="/orders"
+            linkLabel="View Orders"
+            isLoading={isLoading}
+          />
+          <StatCard
+            label="Total Customers"
+            value={dashboard ? dashboard.totalCustomers.toLocaleString() : undefined}
+            icon={<Users className="size-4" />}
+            linkTo="/customers"
+            linkLabel="View Customers"
+            isLoading={isLoading}
+          />
+        </div>
 
-      {/* Charts row — 2 equal columns */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <ProfitBarChart currency={orgCurrency} />
-        <SalesDonutChart currency={orgCurrency} />
+        {/* Charts row — 2 equal columns */}
+        <div className="flex flex-col flex-2  overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
+          <ProfitBarChart currency={orgCurrency} />
+          {/* <SalesDonutChart currency={orgCurrency} /> */}
+        </div>
       </div>
 
       {/* Bottom row — recent orders table and top products */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border lg:col-span-2">
+      <div className="flex gap-3 justify-between">
+        <div className="rounded-xl flex-2 flex flex-col bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
           <div className="flex items-center justify-between border-b px-5 py-4">
             <div>
               <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recent Orders</p>
@@ -125,7 +123,7 @@ export default function DashboardPage() {
               <TableSkeleton rows={5} columns={7} />
             </div>
           ) : recentOrders.length === 0 ? (
-            <div className="p-8">
+            <div className="flex flex-1 items-center justify-center p-8">
               <EmptyState
                 title="No orders yet"
                 description="Orders will appear here once synced from your channels."
@@ -133,13 +131,18 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <OrdersTable orders={recentOrders} currency={orgCurrency} />
+              <OrdersTable orders={recentOrders} currency={orgCurrency} variant="compact" />
             </div>
           )}
         </div>
-        <div className="flex flex-col gap-4">
-          <TopProductsPanel products={dashboard?.topSellingProducts} isLoading={isLoading} currency={orgCurrency} />
-          <LowStockProductsPanel products={dashboard?.lowStockProducts} isLoading={isLoading} currency={orgCurrency} />
+        <div className="flex flex-1 flex-col gap-4">
+          <ProductsPanel
+            topProducts={dashboard?.topSellingProducts}
+            lowStockProducts={dashboard?.lowStockProducts}
+            isLoading={isLoading}
+            currency={orgCurrency}
+            className="flex-1"
+          />
         </div>
       </div>
     </div>
@@ -148,41 +151,41 @@ export default function DashboardPage() {
 
 /* ─── Inline stat card ───────────────────────────────────────── */
 
-function StatCard({
-  label,
-  value,
-  icon,
-  linkTo,
-  linkLabel,
-  isLoading,
-}: {
-  label: string;
-  value?: string;
-  icon: React.ReactNode;
-  linkTo: string;
-  linkLabel: string;
-  isLoading?: boolean;
-}) {
-  return (
-    <div className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
-      <div className="flex items-start justify-between">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
-        <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-gray-100 dark:border-gray-700 text-gray-400">
-          {icon}
-        </div>
-      </div>
-      <div className="mt-3">
-        {isLoading ? (
-          <Skeleton className="h-7 w-24" />
-        ) : (
-          <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">
-            {value ?? "—"}
-          </p>
-        )}
-      </div>
-      <Link to={linkTo} className="mt-4 flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
-        {linkLabel} <ArrowRight className="size-3" />
-      </Link>
-    </div>
-  );
-}
+// function StatCard({
+//   label,
+//   value,
+//   icon,
+//   linkTo,
+//   linkLabel,
+//   isLoading,
+// }: {
+//   label: string;
+//   value?: string;
+//   icon: React.ReactNode;
+//   linkTo: string;
+//   linkLabel: string;
+//   isLoading?: boolean;
+// }) {
+//   return (
+//     <div className=" bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
+//       <div className="flex items-start justify-between">
+//         <p className="text-xs font-medium text-muted-foreground">{label}</p>
+//         <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-gray-100 dark:border-gray-700 text-gray-400">
+//           {icon}
+//         </div>
+//       </div>
+//       <div className="mt-3">
+//         {isLoading ? (
+//           <Skeleton className="h-7 w-24" />
+//         ) : (
+//           <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">
+//             {value ?? "—"}
+//           </p>
+//         )}
+//       </div>
+//       <Link to={linkTo} className="mt-4 flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
+//         {linkLabel} <ArrowRight className="size-3" />
+//       </Link>
+//     </div>
+//   );
+// } 
