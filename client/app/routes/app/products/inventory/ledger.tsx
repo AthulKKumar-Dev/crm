@@ -66,7 +66,7 @@ export default function InventoryLedgerPage() {
     <div className="space-y-4">
       <div className="flex items-center gap-3">
         <Button asChild variant="ghost" size="sm">
-          <Link to="/inventory">
+          <Link to="/products/inventory">
             <ArrowLeft className="size-4" />
           </Link>
         </Button>

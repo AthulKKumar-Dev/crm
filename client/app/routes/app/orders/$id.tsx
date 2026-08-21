@@ -315,7 +315,7 @@ export default function OrderDetailPage() {
                   Total: <span className="tabular-nums font-medium">{formatCurrency(invoice.grandTotal, currency)}</span>
                 </p>
                 <Link
-                  to={`/invoices/${invoice.id}/print`}
+                  to={`/orders/invoices/${invoice.id}/print`}
                   target="_blank"
                   className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-gray-900 dark:bg-gray-100 px-3 py-2 text-[11px] font-medium text-white dark:text-gray-900 hover:opacity-90"
                 >

@@ -21,7 +21,7 @@ interface CustomTooltipProps {
 function CustomTooltip({ active, payload, label, currency }: CustomTooltipProps) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-lg border bg-popover px-3 py-2 text-xs shadow-md">
+    <div className="rounded-lg border bg-popover px-3 py-2 text-caption shadow-md">
       <p className="mb-1 font-medium text-popover-foreground">{label}</p>
       {payload.map((entry) => (
         <p key={entry.name} className="text-muted-foreground">
@@ -47,8 +47,8 @@ export function ProfitBarChart({ currency }: { currency: string }) {
   return (
     <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
       <div className="mb-1 flex items-start justify-between">
-        <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Total Profit Overview</p>
-        <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800">
+        <p className="text-body font-semibold text-foreground">Total Profit Overview</p>
+        <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted">
           <MoreHorizontal className="size-4" />
         </button>
       </div>
@@ -60,7 +60,7 @@ export function ProfitBarChart({ currency }: { currency: string }) {
       ) : (
         <>
           <div className="mb-3 flex items-center gap-2">
-            <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
+            <p className="text-stat text-foreground">
               {formatCurrency(totalProfit, currency)}
             </p>
             {profitMargin !== 0 && (
@@ -71,7 +71,7 @@ export function ProfitBarChart({ currency }: { currency: string }) {
             )}
           </div>
 
-          <div className="mb-3 flex items-center gap-4 text-xs text-muted-foreground">
+          <div className="mb-3 flex items-center gap-4 text-caption text-muted-foreground">
             <span className="flex items-center gap-1.5">
               <span className="inline-block size-2 rounded-full bg-border" />
               Total Revenue
@@ -95,13 +95,13 @@ export function ProfitBarChart({ currency }: { currency: string }) {
                   />
                   <YAxis hide />
                   <Tooltip content={<CustomTooltip currency={currency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
-                  <Bar dataKey="profit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="revenue" fill="var(--border)" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="profit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           ) : (
-            <div className="flex items-center justify-center py-8 text-xs text-muted-foreground">
+            <div className="flex items-center justify-center py-8 text-caption text-muted-foreground">
               No sales data available yet
             </div>
           )}

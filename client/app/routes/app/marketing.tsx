@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Plus, Send, Mail, Smartphone, BarChart2, Users, Eye, MousePointer, TrendingUp, TrendingDown } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from "recharts";
+import { PreviewNotice } from "~/components/app/preview-notice";
 
 export function meta() {
-  return [{ title: "Marketing | Collabo CRM" }];
+  return [{ title: "Campaigns | Collabo CRM" }];
 }
 
 /* ─── Static data ──────────────────────────────────────────────── */
@@ -73,10 +74,15 @@ export default function MarketingPage() {
   return (
     <div className="space-y-6">
 
+      <PreviewNotice>
+        Preview — every figure below is sample data, not your account. Campaign
+        sending is not connected yet.
+      </PreviewNotice>
+
       {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Marketing</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Campaigns</h1>
           <p className="text-sm text-muted-foreground">
             Manage campaigns, track engagement, and grow your audience.
           </p>

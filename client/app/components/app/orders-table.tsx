@@ -61,8 +61,12 @@ const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
 
 type OrderRow = Pick<
   Order,
-  "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer" | "channel" | "metadata"
->;
+  "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer"
+> &
+  // The dashboard's `DashboardRecentOrder` carries neither of these, so they are
+  // optional here rather than required — the compact variant degrades to no
+  // channel line, and the sync menu item simply does not render.
+  Partial<Pick<Order, "channel" | "metadata">>;
 
 type IconCmp = React.ComponentType<{ width?: number; height?: number }>;
 

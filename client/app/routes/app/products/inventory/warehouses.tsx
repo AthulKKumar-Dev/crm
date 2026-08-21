@@ -48,7 +48,7 @@ export default function WarehousesPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
-            <Link to="/inventory">
+            <Link to="/products/inventory">
               <ArrowLeft className="size-3.5" /> Inventory
             </Link>
           </Button>

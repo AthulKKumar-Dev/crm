@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Search, Send, Mail, MessageSquare, Smartphone, Phone, Filter } from "lucide-react";
 import { SAMPLE_CONVERSATIONS, type MessageChannel } from "~/lib/placeholder-data";
+import { PreviewNotice } from "~/components/app/preview-notice";
 
 export function meta() {
-  return [{ title: "Conversation | Collabo CRM" }];
+  return [{ title: "Chat | Collabo CRM" }];
 }
 
 /* ─── Channel display configuration ────────────────────────────── */
@@ -81,10 +82,15 @@ export default function ConversationPage() {
   return (
     <div className="space-y-4">
 
+      <PreviewNotice>
+        Preview — these are sample conversations, not your inbox. Incoming
+        messages are not connected yet, and replies sent here go nowhere.
+      </PreviewNotice>
+
       {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Conversation</h1>
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Chat</h1>
           <p className="text-sm text-muted-foreground">
             Unified inbox for all customer conversations across every channel.
           </p>

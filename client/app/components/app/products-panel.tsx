@@ -91,7 +91,7 @@ export function ProductsPanel({
                         {tab === "top"
                             ? topProducts!.map((p, i) => (
                                 <ProductRow
-                                    key={p.id}
+                                    key={p.externalProductId}
                                     image={p.image}
                                     rank={i + 1}
                                     title={p.title}

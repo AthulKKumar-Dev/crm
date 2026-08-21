@@ -191,7 +191,7 @@ function StockScreen() {
 
   const labelHref =
     selectedIds.size > 0
-      ? `/inventory/labels/print?variantIds=${[...selectedIds].join(",")}`
+      ? `/products/inventory/labels/print?variantIds=${[...selectedIds].join(",")}`
       : null;
 
   // Code generation acts on the selection when there is one, and on the whole
@@ -346,12 +346,12 @@ function StockScreen() {
         </Select>
         <div className="ml-auto flex items-center gap-1">
           <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
-            <Link to="/inventory/warehouses">
+            <Link to="/products/inventory/warehouses">
               <WarehouseIcon className="size-3.5" /> Warehouses
             </Link>
           </Button>
           <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
-            <Link to="/inventory/ledger">
+            <Link to="/products/inventory/ledger">
               <History className="size-3.5" /> Movement ledger
             </Link>
           </Button>

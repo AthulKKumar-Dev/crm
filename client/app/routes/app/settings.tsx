@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
-  Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag,
+  Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag, Layers,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -42,6 +42,7 @@ import {
   ProductSettingsTab,
   OrderSettingsTab,
 } from "~/components/app/settings/sync-settings-tab";
+import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-tab";
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
@@ -56,6 +57,7 @@ const TABS = [
   { id: "general", label: "General", icon: Building2 },
   { id: "products", label: "Products", icon: Package },
   { id: "orders", label: "Orders", icon: ShoppingBag },
+  { id: "channels", label: "Channels", icon: Layers },
   { id: "tax-gst", label: "Tax & GST", icon: Receipt },
   { id: "loyalty", label: "Loyalty Tiers", icon: Star },
   { id: "security", label: "Security", icon: Lock },
@@ -1098,7 +1100,8 @@ function AppearanceTab() {
 /** Main settings page with tabbed navigation for workspace, security, and preferences. */
 export default function SettingsPage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("general");
+  const { tab } = useParams();
+  const activeTab = TABS.some((t) => t.id === tab) ? tab! : "general";
   const [showInvite, setShowInvite] = useState(false);
   /**
    * Drives the org-setup sheet:
@@ -1207,9 +1210,10 @@ export default function SettingsPage() {
         <aside className="hidden w-52 shrink-0 md:block">
           <div className="rounded-xl bg-white dark:bg-gray-900 p-2 shadow-sm ring-1 ring-border">
             {TABS.map(({ id, label, icon: Icon }) => (
-              <button
+              <Link
                 key={id}
-                onClick={() => setActiveTab(id)}
+                to={`/settings/${id}`}
+                aria-current={activeTab === id ? "page" : undefined}
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
                   activeTab === id
@@ -1220,7 +1224,7 @@ export default function SettingsPage() {
                 <Icon className="size-4 shrink-0" />
                 {label}
                 {activeTab === id && <ChevronRight className="ml-auto size-3.5" />}
-              </button>
+              </Link>
             ))}
           </div>
         </aside>
@@ -1228,9 +1232,10 @@ export default function SettingsPage() {
         {/* Mobile tabs */}
         <div className="flex gap-1 overflow-x-auto md:hidden">
           {TABS.map(({ id, label }) => (
-            <button
+            <Link
               key={id}
-              onClick={() => setActiveTab(id)}
+              to={`/settings/${id}`}
+              aria-current={activeTab === id ? "page" : undefined}
               className={cn(
                 "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                 activeTab === id
@@ -1239,7 +1244,7 @@ export default function SettingsPage() {
               )}
             >
               {label}
-            </button>
+            </Link>
           ))}
         </div>
 
@@ -1696,6 +1701,9 @@ export default function SettingsPage() {
 
           {/* ─── ORDER SETTINGS ─── */}
           {activeTab === "orders" && <OrderSettingsTab />}
+
+          {/* ── Channels ─────────────────────────────────────────── */}
+          {activeTab === "channels" && <ChannelSettingsTab />}
 
           {/* ─── TAX & GST ─── */}
           {activeTab === "tax-gst" && org && (

@@ -21,10 +21,6 @@ import { orgKeys } from "~/hooks/use-org-queries";
 import { useTriggerSyncMutation, useDisconnectChannelMutation } from "~/hooks/use-channel-mutations";
 import type { ChannelPlatform, ChannelStatus, SyncStatus } from "~/types/api";
 
-export function meta() {
-  return [{ title: "Channel | Collabo CRM" }];
-}
-
 /* ─── Visual config for channel status ────────────────────────── */
 
 const STATUS_CONFIG: Record<ChannelStatus, { label: string; className: string; icon: React.ReactNode }> = {
@@ -124,7 +120,7 @@ const SHOPIFY_ERROR_MESSAGES: Record<string, string> = {
   connect_failed: "Could not connect to Shopify. Please try again.",
 };
 
-export default function ChannelPage() {
+export function ChannelSettingsTab() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isShopifyDialogOpen, setIsShopifyDialogOpen] = useState(false);
   const [isWhatsAppDialogOpen, setIsWhatsAppDialogOpen] = useState(false);
@@ -179,11 +175,13 @@ export default function ChannelPage() {
   return (
     <div className="space-y-6">
 
-      {/* Page header */}
+      {/* Tab header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Channel</h1>
-          <p className="text-sm text-muted-foreground">
+          <h2 className="text-base font-bold text-gray-900 dark:text-gray-100">
+            Channels
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
             Connect and manage all your sales channels in one place.
           </p>
         </div>

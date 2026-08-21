@@ -20,8 +20,9 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { useDashboard, useExportDashboard } from "~/hooks/use-dashboard-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { formatCurrency } from "~/lib/utils";
-import { StatCard } from "~/components/ui/stat-card";
+import { StatCard } from "~/components/app/stat-card";
 import { ProductsPanel } from "~/components/app/products-panel";
+import { SectionCard } from "~/components/app/section-card";
 
 export function meta() {
   return [
@@ -54,7 +55,7 @@ export default function DashboardPage() {
               <Upload className="size-3.5" />
               Export CSV
             </Button>
-            <Button className="text-brand h-auto px-4.5 py-2" onClick={() => exportJson()}>
+            <Button variant="brand" className="h-auto px-4.5 py-2" onClick={() => exportJson()}>
               <Download className="size-3.5" />
               Download Report
             </Button>
@@ -66,6 +67,7 @@ export default function DashboardPage() {
       <div className="flex gap-3 ">
         <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
           <StatCard
+            sparkline
             label="Total Sales"
             value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
             icon={<Target className="size-4" />}
@@ -82,6 +84,7 @@ export default function DashboardPage() {
           isLoading={isLoading}
         /> */}
           <StatCard
+            sparkline
             label="Total Orders"
             value={dashboard ? dashboard.totalOrders.toLocaleString() : undefined}
             icon={<ShoppingBag className="size-4" />}
@@ -90,10 +93,11 @@ export default function DashboardPage() {
             isLoading={isLoading}
           />
           <StatCard
+            sparkline
             label="Total Customers"
             value={dashboard ? dashboard.totalCustomers.toLocaleString() : undefined}
             icon={<Users className="size-4" />}
-            linkTo="/customers"
+            linkTo="/orders/customers"
             linkLabel="View Customers"
             isLoading={isLoading}
           />
@@ -108,16 +112,16 @@ export default function DashboardPage() {
 
       {/* Bottom row — recent orders table and top products */}
       <div className="flex gap-3 justify-between">
-        <div className="rounded-xl flex-2 flex flex-col bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
-          <div className="flex items-center justify-between border-b px-5 py-4">
-            <div>
-              <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">Recent Orders</p>
-              <p className="text-xs text-muted-foreground">Keep track of recent order data and others information.</p>
-            </div>
-            <Link to="/orders" className="flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
+        <SectionCard
+          className="flex flex-2 flex-col"
+          title="Recent Orders"
+          description="Keep track of recent order data and others information."
+          action={
+            <Link to="/orders" className="flex items-center gap-1 text-caption font-medium text-brand-strong hover:text-brand-strong-hover">
               View All <ArrowRight className="size-3.5" />
             </Link>
-          </div>
+          }
+        >
           {isLoading ? (
             <div className="p-4">
               <TableSkeleton rows={5} columns={7} />
@@ -134,7 +138,7 @@ export default function DashboardPage() {
               <OrdersTable orders={recentOrders} currency={orgCurrency} variant="compact" />
             </div>
           )}
-        </div>
+        </SectionCard>
         <div className="flex flex-1 flex-col gap-4">
           <ProductsPanel
             topProducts={dashboard?.topSellingProducts}
@@ -148,44 +152,3 @@ export default function DashboardPage() {
     </div>
   );
 }
-
-/* ─── Inline stat card ───────────────────────────────────────── */
-
-// function StatCard({
-//   label,
-//   value,
-//   icon,
-//   linkTo,
-//   linkLabel,
-//   isLoading,
-// }: {
-//   label: string;
-//   value?: string;
-//   icon: React.ReactNode;
-//   linkTo: string;
-//   linkLabel: string;
-//   isLoading?: boolean;
-// }) {
-//   return (
-//     <div className=" bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border">
-//       <div className="flex items-start justify-between">
-//         <p className="text-xs font-medium text-muted-foreground">{label}</p>
-//         <div className="flex size-8 shrink-0 items-center justify-center rounded-full border border-gray-100 dark:border-gray-700 text-gray-400">
-//           {icon}
-//         </div>
-//       </div>
-//       <div className="mt-3">
-//         {isLoading ? (
-//           <Skeleton className="h-7 w-24" />
-//         ) : (
-//           <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-none">
-//             {value ?? "—"}
-//           </p>
-//         )}
-//       </div>
-//       <Link to={linkTo} className="mt-4 flex items-center gap-1 text-xs font-medium text-[#084734] hover:text-[#3d6000]">
-//         {linkLabel} <ArrowRight className="size-3" />
-//       </Link>
-//     </div>
-//   );
-// } 

@@ -91,7 +91,7 @@ export default function DraftsPage() {
           </p>
         </div>
         <Link
-          to="/drafts/new"
+          to="/orders/drafts/new"
           className="inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F]"
         >
           <Plus className="size-3.5" />
@@ -138,7 +138,7 @@ export default function DraftsPage() {
           description="Save an order as a draft from the order create page, or start a fresh one from here."
           action={
             <Link
-              to="/drafts/new"
+              to="/orders/drafts/new"
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F]"
             >
               <Plus className="size-3.5" />
@@ -166,7 +166,7 @@ export default function DraftsPage() {
                   key={d.id}
                   draft={d}
                   currency={currency}
-                  onOpen={() => navigate(`/drafts/${d.id}`)}
+                  onOpen={() => navigate(`/orders/drafts/${d.id}`)}
                   onDelete={() => deleteDraft.mutate(d.id)}
                   deleting={deleteDraft.isPending && deleteDraft.variables === d.id}
                 />

@@ -47,6 +47,7 @@ html.dark { color-scheme: dark; }
   /* ── Surfaces ───────────────────────────────────────────────────────────── */
   --surface-sunken: #f1f7fa;   /* app shell background */
   --ink: #000000;
+  --ink-hover: #1a1a1a;
 
   /* ── Status ─────────────────────────────────────────────────────────────── */
   --success:               oklch(0.627 0.194 149.214);  /* green-600  */
@@ -188,7 +189,7 @@ html.dark { color-scheme: dark; }
 
   --text-page-title: var(--font-size-2xl);    /* 24px — page H1 */
   --text-page-title--line-height: var(--line-height-2xl);
-  --text-page-title--font-weight: 700;
+  --text-page-title--font-weight: 600;
 
   --text-stat:       var(--font-size-stat);   /* 30px — KPI numerals */
   --text-stat--line-height: var(--line-height-stat);
@@ -207,6 +208,7 @@ html.dark { color-scheme: dark; }
   /* ── Surfaces ── */
    --color-surface-sunken: var(--surface-sunken);
   --color-ink: var(--ink);
+  --color-ink-hover: var(--ink-hover);
 
   /* ── Status ── */
   --color-success:               var(--success);

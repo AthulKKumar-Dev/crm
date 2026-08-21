@@ -23,7 +23,7 @@ export default function NewDraftPage() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <Link
-            to="/drafts"
+            to="/orders/drafts"
             className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100"
           >
             <ArrowLeft className="size-3.5" />

@@ -2390,7 +2390,7 @@ function VariantEditDialog({
               {warehousingEnabled && (
                 <p className="text-[11px] text-muted-foreground">
                   Set per warehouse in{" "}
-                  <Link to="/inventory" className="underline">Inventory</Link>
+                  <Link to="/products/inventory" className="underline">Inventory</Link>
                 </p>
               )}
             </div>

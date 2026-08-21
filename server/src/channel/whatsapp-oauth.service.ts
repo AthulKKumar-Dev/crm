@@ -222,7 +222,7 @@ export class WhatsAppOAuthService {
             `WhatsApp connected: WABA ${wabaId} (${phoneNumber.verified_name || phoneNumber.display_phone_number}) → org ${stateData.orgId}`,
         );
 
-        const redirectUrl = `${this.frontendUrl}/app/channel?connected=whatsapp&channelId=${channel.id}`;
+        const redirectUrl = `${this.frontendUrl}/settings/channels?connected=whatsapp&channelId=${channel.id}`;
 
         return { channelId: channel.id, redirectUrl };
     }

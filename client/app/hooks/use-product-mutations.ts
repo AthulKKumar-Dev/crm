@@ -102,8 +102,8 @@ export function useSyncProductMutation() {
 // product one. Variants carry inventoryQuantity, and the inventory screens
 // render the same number (per warehouse once warehousing is on) — the
 // inventory→products direction was already handled in use-inventory-mutations,
-// but not this one, so editing stock here left /inventory showing the old
-// figure until its 30s staleTime expired, or indefinitely on an already-mounted
+// but not this one, so editing stock here left /products/inventory showing
+// the old figure until its 30s staleTime expired, or indefinitely on an already-mounted
 // tab since refetchOnWindowFocus is off.────────
 
 /** Add a new variant to an existing product. */
