@@ -289,6 +289,10 @@ export class OrderService {
                 title: true,
                 sku: true,
                 price: true,
+                // Order line items never snapshot weight, so the detail page's
+                // shipping-weight total has to come off the live variant.
+                weight: true,
+                weightUnit: true,
                 image: { select: { src: true } },
                 product: {
                   select: {

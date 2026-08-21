@@ -304,7 +304,7 @@ const CANCEL_REASONS: { value: OrderCancelReason; label: string }[] = [
   { value: "OTHER", label: "Other" },
 ];
 
-function CancelOrderDialog({
+export function CancelOrderDialog({
   order,
   onClose,
 }: {
@@ -410,7 +410,7 @@ function CancelOrderDialog({
 
 // ─── Capture Payment Dialog (Shopify only) ─────────────────────────────────
 
-function CapturePaymentDialog({
+export function CapturePaymentDialog({
   order,
   onClose,
 }: {

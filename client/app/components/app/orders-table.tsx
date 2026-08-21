@@ -17,47 +17,16 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { cn, formatCurrency } from "~/lib/utils";
 import { useSyncOrderMutation } from "~/hooks/use-order-mutations";
-import ShopifyIcon from "~/assests/icon/shopifyIcon";
-import InstagramIcon from "~/assests/icon/instagramIcon";
-import WhatsappIcon from "~/assests/icon/whatsappIcon";
-import MailIcon from "~/assests/icon/mailIcon";
-import type { Order, FinancialStatus, FulfillmentStatus, ChannelPlatform } from "~/types/api";
+import {
+  FINANCIAL_CLASSES,
+  FULFILLMENT_CLASSES,
+  FINANCIAL_LABELS,
+  FULFILLMENT_LABELS,
+} from "~/lib/order-status";
+import { ChannelBadge } from "~/components/app/channel-badge";
+import type { Order, ChannelPlatform } from "~/types/api";
 
 
-const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
-  PAID: "bg-brand/30 text-brand-strong",
-  PARTIALLY_PAID: "bg-info-subtle text-info",
-  PENDING: "bg-warning-strong-subtle text-warning-strong",
-  AUTHORIZED: "bg-info-subtle text-info",
-  PARTIALLY_REFUNDED: "bg-warning-subtle text-warning",
-  REFUNDED: "bg-muted text-muted-foreground",
-  VOIDED: "bg-danger-subtle text-danger",
-};
-
-const FULFILLMENT_CLASSES: Record<FulfillmentStatus, string> = {
-  FULFILLED: "bg-brand/30 text-brand-strong",
-  PARTIAL: "bg-info-subtle text-info",
-  UNFULFILLED: "bg-warning-strong-subtle text-warning-strong",
-  RESTOCKED: "bg-muted text-muted-foreground",
-};
-
-
-const FINANCIAL_LABELS: Record<FinancialStatus, string> = {
-  PAID: "Paid",
-  PARTIALLY_PAID: "Partial",
-  PENDING: "Pending",
-  AUTHORIZED: "Authorized",
-  PARTIALLY_REFUNDED: "Partial Refund",
-  REFUNDED: "Refunded",
-  VOIDED: "Voided",
-};
-
-const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
-  FULFILLED: "Fulfilled",
-  PARTIAL: "Partial",
-  UNFULFILLED: "Unfulfilled",
-  RESTOCKED: "Restocked",
-};
 
 type OrderRow = Pick<
   Order,
@@ -68,24 +37,6 @@ type OrderRow = Pick<
   // channel line, and the sync menu item simply does not render.
   Partial<Pick<Order, "channel" | "metadata">>;
 
-type IconCmp = React.ComponentType<{ width?: number; height?: number }>;
-
-const CHANNEL_ICON: Partial<Record<ChannelPlatform, IconCmp>> = {
-  SHOPIFY: ShopifyIcon,
-  INSTAGRAM: InstagramIcon,
-  WHATSAPP: WhatsappIcon,
-  MANUAL: MailIcon,
-};
-
-const CHANNEL_LABEL: Record<ChannelPlatform, string> = {
-  SHOPIFY: "Shopify",
-  WOOCOMMERCE: "WooCommerce",
-  INSTAGRAM: "Instagram",
-  FACEBOOK: "Facebook",
-  WHATSAPP: "WhatsApp",
-  TIKTOK: "TikTok",
-  MANUAL: "Manual",
-};
 
 function customerOf(order: OrderRow) {
   const first = order.customer?.firstName?.trim() ?? "";
@@ -124,7 +75,6 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
         <TableBody>
           {orders.map((order) => {
             const platform = order.channel?.platform as ChannelPlatform | undefined;
-            const Icon = platform ? CHANNEL_ICON[platform] : undefined;
             const { name, initials } = customerOf(order);
 
             return (
@@ -146,8 +96,7 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                         <span className="font-normal text-muted-foreground"> · {order.name}</span>
                       </p>
                       <p className="flex items-center gap-1 text-micro text-muted-foreground">
-                        {Icon && <Icon width={12} height={12} />}
-                        {platform ? CHANNEL_LABEL[platform] : "—"} · {order.itemCount} item
+                        <ChannelBadge platform={platform} /> · {order.itemCount} item
                         {order.itemCount !== 1 ? "s" : ""} ·{" "}
                         {new Date(order.createdAt).toLocaleDateString("en-US", {
                           month: "short",

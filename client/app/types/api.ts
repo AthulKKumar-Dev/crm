@@ -919,6 +919,26 @@ export interface OrderCustomer {
   firstName: string;
   lastName: string;
   email: string;
+  /** Selected by the detail endpoint only — absent on list responses. */
+  phone?: string | null;
+  /** Selected by the detail endpoint only. Same untyped shape as `Order.shippingAddress`. */
+  defaultAddress?: Record<string, unknown> | null;
+}
+
+/**
+ * Push-sync state for a MANUAL order we created in Shopify. Mirrors
+ * `ShopifySyncMetadata` in server/src/channel/shopify-push.service.ts.
+ *
+ * Natively-Shopify orders never carry this blob — their external identity is
+ * the `externalId` column instead.
+ */
+export interface OrderShopifySync {
+  status: "PENDING" | "SYNCED" | "FAILED";
+  shopifyOrderId?: string;
+  shopifyOrderName?: string;
+  error?: string;
+  syncedAt?: string;
+  attempts?: number;
 }
 
 /** An order in a list response (summary view). */
@@ -940,9 +960,13 @@ export interface Order {
   cancelledAt: string | null;
   /** Present on detail responses; absent on list responses. */
   closedAt?: string | null;
-  /** Present on detail responses; absent on list responses. */
+  /**
+   * @deprecated Always `undefined`. The `orders` table has no email/phone
+   * columns, and the detail handler spreads the raw row, so neither of these is
+   * ever populated on either endpoint. Read `customer.email` / `customer.phone`.
+   */
   email?: string | null;
-  /** Present on detail responses; absent on list responses. */
+  /** @deprecated Always `undefined` — see `email`. Read `customer.phone`. */
   phone?: string | null;
   /** Present on detail responses; absent on list responses. */
   shippingAddress?: Record<string, unknown> | null;
@@ -950,8 +974,28 @@ export interface Order {
   billingAddress?: Record<string, unknown> | null;
   customer: OrderCustomer | null;
   channel: ChannelRef;
+  /**
+   * Computed via `_count` on the LIST endpoint only — `undefined` on detail
+   * responses despite the non-optional type. Fall back to `lineItems.length`.
+   */
   itemCount: number;
+  /**
+   * Row insert time. On the DETAIL endpoint this is the local DB timestamp, not
+   * when the order was placed — the list and vendor endpoints map
+   * `externalCreatedAt ?? createdAt` but `findOne` does not. Prefer
+   * `externalCreatedAt ?? createdAt` when rendering a detail page.
+   */
   createdAt: string;
+  /** When the order was placed on the source channel. Null for CRM-native orders. */
+  externalCreatedAt?: string | null;
+  /**
+   * The source channel's own order id. For CRM-native orders this is NOT a
+   * channel id — the server writes a synthetic `manual_<uuid>`, so gate any
+   * display of it on the prefix or on `channel.platform`.
+   */
+  externalId?: string | null;
+  /** GST place-of-supply state code. Only set when a seller GSTIN resolved at order time. */
+  placeOfSupplyCode?: string | null;
   /** Free-form metadata, includes `source`, `paymentMethod`, `shopifySync`, etc. */
   metadata?: Record<string, unknown> | null;
 }
@@ -972,15 +1016,59 @@ export interface OrderLineItem {
   trackingNumber: string | null;
   trackingUrl: string | null;
   trackingCompany: string | null;
+  /**
+   * Line-level discount. Serialized as a STRING (Prisma Decimal) — wrap in
+   * `Number()` before doing arithmetic with it.
+   */
+  totalDiscount?: number | string | null;
+  /**
+   * The live variant this line points at. Included by the detail endpoint only,
+   * and null when the variant has since been deleted.
+   *
+   * Line items never snapshot weight, so shipping weight has to be read from
+   * here — see the `variant` select in `OrderService.findOne`.
+   */
+  variant?: {
+    id: string;
+    title: string | null;
+    sku: string | null;
+    /** Prisma Decimal — serialized as a string. */
+    price: number | string;
+    /** Prisma Decimal — serialized as a string. */
+    weight?: number | string | null;
+    /** Free-form: "kg" | "g" | "lb" | "oz". Nullable, and can differ per line. */
+    weightUnit?: string | null;
+  } | null;
 }
 
-/** A fulfillment record within an order detail. */
+/**
+ * A fulfillment record within an order detail.
+ *
+ * The server includes this relation with no `select`, so the whole row is on
+ * the wire; the optional fields below are declared to make that usable.
+ */
 export interface OrderFulfillment {
   id: string;
+  /**
+   * Free-form. The only values ever written are `pending`, `fulfilled`,
+   * `delivered`, `cancelled` (plus whatever Shopify's own status carries).
+   * There is no packed / picked-up / in-transit state.
+   */
   status: string;
   trackingNumber: string | null;
   trackingUrl: string | null;
   createdAt: string;
+  trackingCompany?: string | null;
+  shippedAt?: string | null;
+  deliveredAt?: string | null;
+  /** The source channel's fulfilment id. */
+  externalId?: string | null;
+  /**
+   * Carries `lineItemIds: string[]` for CRM-created fulfilments. Shopify sync
+   * never writes it, so do NOT rely on this to work out shipment membership —
+   * derive from `lineItems[].fulfillmentStatus` instead.
+   */
+  metadata?: Record<string, unknown> | null;
 }
 
 /** A refund record within an order detail. */
@@ -991,11 +1079,38 @@ export interface OrderRefund {
   createdAt: string;
 }
 
-/** A timeline event within an order detail. */
+/**
+ * A timeline event within an order detail.
+ *
+ * Written only by CRM-initiated actions — Shopify sync produces no timeline
+ * rows, so an order fulfilled or captured in Shopify admin never appears here.
+ */
 export interface OrderTimeline {
   id: string;
   message: string;
   createdAt: string;
+  /**
+   * The complete set written by any code path — all eleven write sites are in
+   * `OrderService`:
+   * `created` | `updated` | `cancelled` | `closed` | `reopened` | `paid` |
+   * `captured` | `fulfilled` | `tracking_updated` | `fulfillment_cancelled`.
+   *
+   * Typed as a free string, not a union, because the column is a bare `String`
+   * with no server-side enum. (The Prisma schema comment also lists `refunded`,
+   * which nothing ever writes.)
+   */
+  action?: string | null;
+  /**
+   * The acting user's id. **Never null in practice** — every write site passes a
+   * real user id, so there are no system-authored events and this cannot be used
+   * to tell system from user activity.
+   *
+   * `OrderTimelineEvent.actorId` has no Prisma relation to `User`, so the server
+   * cannot resolve it to a name; a display name needs a client-side join against
+   * the org member list on `member.user.id`.
+   */
+  actorId?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 /** Full order detail with line items, fulfillments, refunds, and timeline. */
