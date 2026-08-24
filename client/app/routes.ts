@@ -30,6 +30,7 @@ export default [
     route("orders/drafts/new", "routes/app/orders/drafts/new.tsx"),
     route("orders/drafts/:id", "routes/app/orders/drafts/$id.tsx"),
     route("orders/customers", "routes/app/orders/customers.tsx"),
+    route("orders/customers/:id", "routes/app/orders/customers/$id.tsx"),
     route("orders/invoices", "routes/app/orders/invoices.tsx"),
     route("orders/invoices/:id/print", "routes/app/orders/invoices/print.tsx"),
     route("orders/:id", "routes/app/orders/$id.tsx"),

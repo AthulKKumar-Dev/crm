@@ -51,6 +51,7 @@ export class CustomerService {
         totalSpent: c.totalSpent, ordersCount: c.ordersCount,
         tags: c.tags, segments: c.segments, state: c.state,
         channel: c.channel, orderCount: c._count.orders,
+        gstin: c.gstin, billingStateCode: c.billingStateCode, billingStateName: c.billingStateName,
         createdAt: c.externalCreatedAt || c.createdAt,
       })),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },

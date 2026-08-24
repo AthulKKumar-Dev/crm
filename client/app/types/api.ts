@@ -714,7 +714,7 @@ export interface ProductOption {
 export interface ChannelRef {
   id: string;
   name: string;
-  platform: string;
+  platform: ChannelPlatform;
 }
 
 /** Per-product Shopify sync status (sub-object of `Product.metadata.shopifySync`). */
@@ -1520,20 +1520,76 @@ export interface Customer {
   segments: string[];
   state: string | null;
   channel: ChannelRef;
+  /**
+   * GST columns. Present on every customer row, but the server's `findAll`
+   * projection used to drop them, so the list's GSTIN column always read
+   * "Not set" — masked by an `as any` cast at the call site.
+   */
+  gstin: string | null;
+  billingStateCode: string | null;
+  billingStateName: string | null;
   createdAt: string;
 }
 
-/** A customer activity log entry. */
+/**
+ * A customer activity log entry.
+ *
+ * These are the real `customer_activity_logs` columns. The interface used to
+ * declare a `details` field, which does not exist on the table — the payload
+ * carries `description` plus `oldValue`/`newValue`, so anything reading
+ * `details` got `undefined` at runtime with no compile error.
+ */
 export interface CustomerActivityLog {
   id: string;
+  /** Free-form. Only 'vip_changed' and 'vip_auto_recompute' are ever written today. */
   action: string;
-  details: Record<string, unknown> | null;
+  actorId: string | null;
+  description: string | null;
+  oldValue: string | null;
+  newValue: string | null;
+  metadata: Record<string, unknown> | null;
   createdAt: string;
 }
 
-/** Full customer detail with recent orders and activity history. */
+/**
+ * One of a customer's recent orders.
+ *
+ * NOT an `Order` — `CustomerService.findOne` selects exactly these eight
+ * fields, so `itemCount`, `createdAt` and the nested `customer` are absent.
+ * That is why `OrdersTable` cannot render these rows: its `OrderRow` requires
+ * `itemCount` and `createdAt`.
+ */
+export interface CustomerOrderSummary {
+  id: string;
+  orderNumber: number;
+  name: string;
+  totalPrice: number;
+  financialStatus: FinancialStatus;
+  fulfillmentStatus: FulfillmentStatus;
+  currency: string;
+  externalCreatedAt: string | null;
+}
+
+/**
+ * Full customer detail with recent orders and activity history.
+ *
+ * `findOne` uses no `select`, so it spreads the whole customer row — the extra
+ * fields below are already on the wire and were simply never declared.
+ */
 export interface CustomerDetail extends Customer {
-  orders: Order[];
+  /** The channel's own id for this customer (Shopify's numeric customer id). */
+  externalId: string | null;
+  addresses: Record<string, unknown>[] | null;
+  defaultAddress: Record<string, unknown> | null;
+  internalNotes: string | null;
+  /** Free-text note synced from Shopify, distinct from `internalNotes`. */
+  note: string | null;
+  acceptsMarketing: boolean;
+  verifiedEmail: boolean;
+  externalCreatedAt: string | null;
+  /** Capped at the 10 most recent by the server. */
+  orders: CustomerOrderSummary[];
+  /** Capped at the 20 most recent by the server. */
   activityLogs: CustomerActivityLog[];
 }
 

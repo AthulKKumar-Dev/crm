@@ -121,8 +121,10 @@ it shifts every corner in the app.
 ## Migrated so far
 
 `app.css` (token layer) · `_layout.tsx` · `dashboard.tsx` · `orders.tsx` ·
-`stat-card.tsx` · `products-panel.tsx` · `orders-table.tsx` · `profit-bar-chart.tsx` ·
-`section-card.tsx` · `page-header.tsx` · `empty-state.tsx`
+`orders/customers.tsx` · `orders/customers/$id.tsx` · `stat-card.tsx` ·
+`products-panel.tsx` · `orders-table.tsx` · `profit-bar-chart.tsx` · `section-card.tsx` ·
+`page-header.tsx` · `empty-state.tsx` · `lib/customer-status.ts` · `lib/address.ts` ·
+`customer-activity.tsx` · `customer-gst-dialog.tsx` · `customer-orders-panel.tsx`
 
 ## Remaining debt, ranked
 

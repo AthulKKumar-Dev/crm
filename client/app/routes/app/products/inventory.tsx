@@ -26,6 +26,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
+import { Separator } from "~/components/ui/separator";
+import { Skeleton } from "~/components/ui/skeleton";
 import { useDebounced } from "~/hooks/use-debounced";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import {
@@ -189,6 +191,43 @@ function StockScreen() {
       maximumFractionDigits: 0,
     }).format(n);
 
+  // Mirrors the Products page stat row: one wrapper card, inline tiles with a
+  // sparkline, vertical separators between them. Each tile resolves its own
+  // em-dash fallback, so the row needs no separate error branch.
+  const s = stats.data;
+  const STAT_TILES = [
+    {
+      key: "unitsOnHand",
+      label: "Units on hand",
+      icon: <Boxes className="size-4" />,
+      value: s ? String(s.unitsOnHand) : "—",
+      changeLabel: s
+        ? `${s.unitsAvailable} available · ${s.unitsReserved} reserved`
+        : undefined,
+    },
+    {
+      key: "stockValue",
+      label: "Known cost value",
+      icon: <IndianRupee className="size-4" />,
+      value: s ? fmtMoney(s.stockValue) : "—",
+      changeLabel: "On-hand units × recorded cost",
+    },
+    {
+      key: "lowStockLines",
+      label: "Low stock lines",
+      icon: <AlertTriangle className="size-4" />,
+      value: s ? String(s.lowStockLines) : "—",
+      changeLabel: s ? `Threshold: ${s.lowStockThreshold}` : undefined,
+    },
+    {
+      key: "oversoldLines",
+      label: "Oversold lines",
+      icon: <PackageX className="size-4" />,
+      value: s ? String(s.oversoldLines) : "—",
+      changeLabel: "Available below zero",
+    },
+  ];
+
   const labelHref =
     selectedIds.size > 0
       ? `/products/inventory/labels/print?variantIds=${[...selectedIds].join(",")}`
@@ -278,35 +317,35 @@ function StockScreen() {
       </div>
 
       {/* Stats */}
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          label="Units on hand"
-          value={stats.data ? String(stats.data.unitsOnHand) : "—"}
-          changeLabel={
-            stats.data
-              ? `${stats.data.unitsAvailable} available · ${stats.data.unitsReserved} reserved`
-              : undefined
-          }
-          icon={<Boxes className="size-4" />}
-        />
-        <StatCard
-          label="Known cost value"
-          value={stats.data ? fmtMoney(stats.data.stockValue) : "—"}
-          changeLabel="On-hand units × recorded cost"
-          icon={<IndianRupee className="size-4" />}
-        />
-        <StatCard
-          label="Low stock lines"
-          value={stats.data ? String(stats.data.lowStockLines) : "—"}
-          changeLabel={stats.data ? `Threshold: ${stats.data.lowStockThreshold}` : undefined}
-          icon={<AlertTriangle className="size-4" />}
-        />
-        <StatCard
-          label="Oversold lines"
-          value={stats.data ? String(stats.data.oversoldLines) : "—"}
-          changeLabel="Available below zero"
-          icon={<PackageX className="size-4" />}
-        />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-white dark:bg-gray-900 p-3 rounded-xl gap-5">
+        {stats.isLoading ? (
+          Array.from({ length: 4 }).map((_, i) => (
+            <div
+              key={i}
+              className="rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border"
+            >
+              <Skeleton className="h-3 w-24 mb-4" />
+              <Skeleton className="h-7 w-20" />
+            </div>
+          ))
+        ) : (
+          STAT_TILES.map(({ key, label, icon, value, changeLabel }, i, arr) => (
+            <div key={key} className="flex items-center gap-4">
+              <StatCard
+                variant="inline"
+                label={label}
+                value={value}
+                changeLabel={changeLabel}
+                change={0}
+                icon={icon}
+                className="flex-1"
+              />
+              {i < arr.length - 1 && (
+                <Separator orientation="vertical" className="hidden md:block h-15" />
+              )}
+            </div>
+          ))
+        )}
       </div>
 
       {/* Filters */}
