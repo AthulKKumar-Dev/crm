@@ -48,6 +48,8 @@ html.dark { color-scheme: dark; }
   --surface-sunken: #f1f7fa;   /* app shell background */
   --ink: #000000;
   --ink-hover: #1a1a1a;
+  /* Fixed white, to pair with the fixed-black `ink` in both themes. */
+  --ink-foreground: #ffffff;
 
   /* ── Status ─────────────────────────────────────────────────────────────── */
   --success:               oklch(0.627 0.194 149.214);  /* green-600  */
@@ -209,6 +211,7 @@ html.dark { color-scheme: dark; }
    --color-surface-sunken: var(--surface-sunken);
   --color-ink: var(--ink);
   --color-ink-hover: var(--ink-hover);
+  --color-ink-foreground: var(--ink-foreground);
 
   /* ── Status ── */
   --color-success:               var(--success);

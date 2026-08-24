@@ -2,6 +2,21 @@ import { IsOptional, IsString, IsInt, Max, Min, IsEnum } from 'class-validator';
 import { Type } from 'class-transformer';
 import { InvoiceStatus } from '@prisma/client';
 
+/** Registered (has a GSTIN) vs. unregistered buyers. */
+export enum InvoiceBuyerType {
+  B2B = 'B2B',
+  B2C = 'B2C',
+}
+
+/**
+ * Modelled as an enum rather than a `?unpaid=true` boolean: booleans arriving
+ * as query strings need a `@Transform`, and "true"/"1"/"" all had to be handled
+ * before `@IsBoolean` would pass. An enum validates as-is.
+ */
+export enum InvoicePaymentState {
+  UNPAID = 'UNPAID',
+}
+
 export class QueryInvoicesDto {
   @IsOptional()
   @Type(() => Number)
@@ -41,4 +56,18 @@ export class QueryInvoicesDto {
   @IsOptional()
   @IsString()
   sellerGstinId?: string;
+
+  /** Registered vs. unregistered buyers — the B2B filter chip. */
+  @IsOptional()
+  @IsEnum(InvoiceBuyerType)
+  buyerType?: InvoiceBuyerType;
+
+  /**
+   * Narrows to issued invoices whose order still owes money. The invoice itself
+   * stores no payment state, so this filters on the related order's
+   * `financialStatus`.
+   */
+  @IsOptional()
+  @IsEnum(InvoicePaymentState)
+  paymentState?: InvoicePaymentState;
 }

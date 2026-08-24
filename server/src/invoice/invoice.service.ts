@@ -5,7 +5,12 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
-import { GstType, InvoiceStatus, Prisma } from '@prisma/client';
+import {
+  GstType,
+  InvoiceStatus,
+  OrderFinancialStatus,
+  Prisma,
+} from '@prisma/client';
 import {
   retryOnNumberingConflict,
   uniqueViolationTargets,
@@ -22,11 +27,13 @@ import {
   resolvePlaceOfSupply,
 } from '../gst/place-of-supply.util';
 import {
+  getFinancialYear,
   gstPeriodRange,
   INDIA_TZ,
   resolveGstTimeZone,
   zonedDayEndExclusive,
   zonedDayStart,
+  zonedParts,
 } from '../common/utils/zoned-date.util';
 
 /**
@@ -42,11 +49,23 @@ const EXPORT_ROW_CAP = 10_000;
  * the point is to surface the misconfiguration once, not once per invoice.
  */
 const gstTimeZoneFallbackWarned = new Set<string>();
+
+/**
+ * Order payment states that leave money outstanding on an issued invoice.
+ * `REFUNDED` and `VOIDED` are deliberately absent — nothing is owed on either,
+ * so neither should count towards "Outstanding".
+ */
+const OUTSTANDING_FINANCIAL_STATES: OrderFinancialStatus[] = [
+  OrderFinancialStatus.PENDING,
+  OrderFinancialStatus.AUTHORIZED,
+  OrderFinancialStatus.PARTIALLY_PAID,
+];
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
+import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 
 @Injectable()
 export class InvoiceService {
@@ -377,6 +396,18 @@ export class InvoiceService {
       ...(query.financialYear && { financialYear: query.financialYear }),
       ...(query.status && { status: query.status }),
       ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+      // B2B/B2C is not a stored column — a buyer is registered exactly when the
+      // invoice captured a GSTIN for them.
+      ...(query.buyerType === 'B2B' && { buyerGstin: { not: null } }),
+      ...(query.buyerType === 'B2C' && { buyerGstin: null }),
+      // "Unpaid" means issued AND the order still owes. The status is pinned
+      // here rather than left to `query.status` so the filter cannot be
+      // combined into something self-contradictory (a cancelled-but-unpaid
+      // invoice is not a thing the UI should be able to ask for).
+      ...(query.paymentState === 'UNPAID' && {
+        status: InvoiceStatus.ISSUED,
+        order: { financialStatus: { in: OUTSTANDING_FINANCIAL_STATES } },
+      }),
       ...(query.search && {
         OR: [
           { invoiceNumber: { contains: query.search, mode: 'insensitive' } },
@@ -408,7 +439,11 @@ export class InvoiceService {
         take: limit,
         orderBy: { invoiceDate: 'desc' },
         include: {
-          order: { select: { name: true, orderNumber: true } },
+          // `financialStatus` backs the derived "Unpaid" pill in the list — the
+          // invoice itself has no payment state.
+          order: {
+            select: { name: true, orderNumber: true, financialStatus: true },
+          },
         },
       }),
       this.prisma.invoice.count({ where }),
@@ -504,6 +539,143 @@ export class InvoiceService {
     }
 
     return this.generateGstr1(invoices);
+  }
+
+  /**
+   * Aggregates for the invoice KPI row and the filter-chip counts.
+   *
+   * The chips must count the whole set rather than the current page, so this
+   * cannot be derived from `findAll`'s response.
+   *
+   * Month boundaries go through `gstPeriodRange` in the merchant's timezone for
+   * the reason documented on `getGstReturn`: naive local-time month maths on a
+   * UTC server shifts every edge by the offset, which for IST silently moved
+   * the first 5.5 hours of each month into the wrong one.
+   */
+  async getStats(orgId: string, query: QueryInvoiceStatsDto) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true, currency: true },
+    });
+
+    const timeZone = this.gstTimeZone(orgId, org);
+    const now = new Date();
+
+    const currentMonth = gstPeriodRange(
+      getFinancialYear(now, timeZone),
+      String(zonedParts(now, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    // One millisecond before this month began is always inside the previous
+    // month, so this needs no special case for January.
+    const lastInstantOfPrevMonth = new Date(currentMonth.from.getTime() - 1);
+    const previousMonth = gstPeriodRange(
+      getFinancialYear(lastInstantOfPrevMonth, timeZone),
+      String(zonedParts(lastInstantOfPrevMonth, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    // Counts are scoped to the financial year the list is showing; the
+    // month-to-date money figures are not, since they are always "this month".
+    const scope: Prisma.InvoiceWhereInput = {
+      organizationId: orgId,
+      ...(query.financialYear && { financialYear: query.financialYear }),
+      ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+    };
+
+    const issuedInMonth = (range: { from: Date; toExclusive: Date }) => ({
+      organizationId: orgId,
+      ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+      status: InvoiceStatus.ISSUED,
+      invoiceDate: { gte: range.from, lt: range.toExclusive },
+    });
+
+    const outstandingWhere: Prisma.InvoiceWhereInput = {
+      ...scope,
+      status: InvoiceStatus.ISSUED,
+      order: { financialStatus: { in: OUTSTANDING_FINANCIAL_STATES } },
+    };
+
+    const [
+      thisMonth,
+      lastMonth,
+      outstanding,
+      all,
+      issued,
+      draft,
+      cancelled,
+      b2b,
+      unpaid,
+    ] = await Promise.all([
+      this.prisma.invoice.aggregate({
+        where: issuedInMonth(currentMonth),
+        _sum: { grandTotal: true, totalTax: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where: issuedInMonth(previousMonth),
+        _sum: { grandTotal: true, totalTax: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where: outstandingWhere,
+        _sum: { grandTotal: true },
+      }),
+      this.prisma.invoice.count({ where: scope }),
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.ISSUED },
+      }),
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.DRAFT },
+      }),
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.CANCELLED },
+      }),
+      this.prisma.invoice.count({
+        where: { ...scope, buyerGstin: { not: null } },
+      }),
+      this.prisma.invoice.count({ where: outstandingWhere }),
+    ]);
+
+    const decimal = (value: Prisma.Decimal | null | undefined) =>
+      value ? Math.round(parseFloat(value.toString()) * 100) / 100 : 0;
+
+    const invoicedNow = decimal(thisMonth._sum.grandTotal);
+    const invoicedPrev = decimal(lastMonth._sum.grandTotal);
+    const taxNow = decimal(thisMonth._sum.totalTax);
+    const taxPrev = decimal(lastMonth._sum.totalTax);
+
+    return {
+      invoicedThisMonth: {
+        amount: invoicedNow,
+        changePct: this.percentChange(invoicedNow, invoicedPrev),
+      },
+      taxCollected: {
+        amount: taxNow,
+        changePct: this.percentChange(taxNow, taxPrev),
+      },
+      outstanding: {
+        amount: decimal(outstanding._sum.grandTotal),
+        invoiceCount: unpaid,
+        // Outstanding is a running balance, not a monthly flow. Reporting a
+        // month-over-month delta would need a historical snapshot of what was
+        // owed at the end of last month, which nothing records — so this is
+        // null and the card omits its trend badge rather than inventing one.
+        changePct: null,
+      },
+      periodStart: currentMonth.from.toISOString(),
+      periodEnd: now.toISOString(),
+      counts: { all, issued, unpaid, b2b, draft, cancelled },
+      currency: org?.currency ?? 'INR',
+    };
+  }
+
+  /**
+   * Percentage change, rounded. Null when there is no prior basis: a jump from
+   * zero is not "100% up", and passing 0 would render a green up-trend badge.
+   */
+  private percentChange(current: number, previous: number): number | null {
+    if (!previous) return null;
+    return Math.round(((current - previous) / previous) * 100);
   }
 
   // ─── GSTR-1: DETAILED SALES RETURN ───
@@ -636,10 +808,46 @@ export class InvoiceService {
     const interStateInvoices = invoices.filter(
       (inv) => inv.gstType === GstType.IGST,
     );
+    // Table 3.2 is inter-state supplies to *unregistered* persons, so it is
+    // narrower than the aggregate above (which spans every IGST invoice, B2B
+    // included). The aggregate keeps its existing meaning because the CSV
+    // exporter reads it.
+    const byStateMap = new Map<
+      string,
+      { name: string; invoiceCount: number; taxable: number; igst: number }
+    >();
+
+    for (const inv of interStateInvoices) {
+      if (inv.buyerGstin) continue; // registered buyer — not a 3.2 row
+
+      const code = inv.placeOfSupply;
+      const existing = byStateMap.get(code) || {
+        name: inv.placeOfSupplyName || getStateName(code) || code,
+        invoiceCount: 0,
+        taxable: 0,
+        igst: 0,
+      };
+      existing.invoiceCount += 1;
+      existing.taxable += parseFloat(inv.subtotal.toString());
+      existing.igst += parseFloat(inv.totalIgst.toString());
+      byStateMap.set(code, existing);
+    }
+
+    const byState = Array.from(byStateMap.entries())
+      .map(([placeOfSupply, data]) => ({
+        placeOfSupply,
+        placeOfSupplyName: data.name,
+        invoiceCount: data.invoiceCount,
+        totalTaxable: Math.round(data.taxable * 100) / 100,
+        totalIgst: Math.round(data.igst * 100) / 100,
+      }))
+      .sort((a, b) => b.totalTaxable - a.totalTaxable);
+
     const interState = {
       invoiceCount: interStateInvoices.length,
       totalTaxable: this.sumField(interStateInvoices, 'subtotal'),
       totalIgst: this.sumField(interStateInvoices, 'totalIgst'),
+      byState,
     };
 
     // Tax payable

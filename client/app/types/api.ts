@@ -1855,7 +1855,8 @@ export interface Invoice {
   grandTotal: number;
   currency: string;
   status: InvoiceStatus;
-  order: { name: string; orderNumber: number };
+  /** `financialStatus` drives the derived "Unpaid" pill — see `lib/invoice-status.ts`. */
+  order: { name: string; orderNumber: number; financialStatus: FinancialStatus };
   createdAt: string;
 }
 
@@ -1892,7 +1893,48 @@ export interface InvoiceListParams {
   search?: string;
   dateFrom?: string;
   dateTo?: string;
+  /** Registered (has a GSTIN) vs. unregistered buyers — the B2B filter chip. */
+  buyerType?: "B2B" | "B2C";
+  /**
+   * Narrows to issued invoices whose order still owes money. Derived from the
+   * order's `financialStatus`; the invoice itself stores no payment state.
+   */
+  paymentState?: "UNPAID";
   sellerGstinId?: string;
+}
+
+/**
+ * Aggregates for the invoice KPI row and the filter-chip counts.
+ *
+ * Separate from the paginated list because the chips must count the whole set,
+ * not the current page.
+ */
+export interface InvoiceStats {
+  /**
+   * Month-to-date figures. `changePct` is null when there is no comparable
+   * prior period — `StatCard` omits the trend badge rather than rendering a
+   * green "0%", which is what made a failed request look healthy.
+   */
+  invoicedThisMonth: { amount: number; changePct: number | null };
+  taxCollected: { amount: number; changePct: number | null };
+  outstanding: {
+    amount: number;
+    invoiceCount: number;
+    changePct: number | null;
+  };
+  /** ISO dates bounding the month-to-date window, for the card sub-labels. */
+  periodStart: string;
+  periodEnd: string;
+  /** Drives both the chip counts and the "of N · M drafts" sub-label. */
+  counts: {
+    all: number;
+    issued: number;
+    unpaid: number;
+    b2b: number;
+    draft: number;
+    cancelled: number;
+  };
+  currency: string;
 }
 
 /** Query parameters for the GST return summary endpoint. */
@@ -1970,6 +2012,15 @@ export interface Gstr3bOutwardSupply {
   totalTax: number;
 }
 
+/** One state's row in the GSTR-3B 3.2 breakdown. */
+export interface Gstr3bInterStateRow {
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  invoiceCount: number;
+  totalTaxable: number;
+  totalIgst: number;
+}
+
 /** Full GSTR-3B return data. */
 export interface GstReturnGstr3B {
   outwardSupplies: Gstr3bOutwardSupply[];
@@ -1977,6 +2028,13 @@ export interface GstReturnGstr3B {
     invoiceCount: number;
     totalTaxable: number;
     totalIgst: number;
+    /**
+     * Per-state breakdown for GSTR-3B table 3.2 (inter-state supplies to
+     * *unregistered* persons), so the aggregate above can be shown as rows.
+     * Narrower than the aggregate by design: 3.2 is B2C-only, whereas the
+     * totals beside it cover every inter-state invoice.
+     */
+    byState: Gstr3bInterStateRow[];
   };
   taxPayable: {
     cgst: number;

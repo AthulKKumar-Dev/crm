@@ -84,7 +84,8 @@ both themes — for gradients and graphics that must stay forest), `brand-deep`,
 `brand-mid`
 
 **Surface** — `background`, `card`, `popover`, `muted`, `surface-sunken` (app shell),
-`ink` (fixed black in both themes — the black-on-lime pairings)
+`ink` (fixed black in both themes — the black-on-lime pairings), `ink-foreground`
+(fixed white, for text on an `ink` fill)
 
 **Status** — `success`, `warning` (amber), `warning-strong` (orange), `danger`, `info`
 — each with a `-subtle` background companion
@@ -113,7 +114,8 @@ it shifts every corner in the app.
 | `text-red-600 bg-red-50` | `text-danger bg-danger-subtle` |
 | `text-[10px]` / `text-[11px]` / `text-xs` | `text-micro` / `text-caption` / `text-caption` |
 | `text-sm` / `text-[24px]` | `text-body` / `text-page-title` |
-| raw `<button className="… bg-brand …">` | `<Button variant="brand">` |
+| raw `<button className="… bg-brand …">` | `<Button variant="accent">` (lime fill) |
+| raw `<button className="… bg-ink …">` | `<Button variant="brand">` (ink fill, lime text) |
 | hand-rolled panel + header + `border-b` | `<SectionCard>` |
 
 ---
@@ -124,13 +126,16 @@ it shifts every corner in the app.
 `orders/customers.tsx` · `orders/customers/$id.tsx` · `stat-card.tsx` ·
 `products-panel.tsx` · `orders-table.tsx` · `profit-bar-chart.tsx` · `section-card.tsx` ·
 `page-header.tsx` · `empty-state.tsx` · `lib/customer-status.ts` · `lib/address.ts` ·
-`customer-activity.tsx` · `customer-gst-dialog.tsx` · `customer-orders-panel.tsx`
+`customer-activity.tsx` · `customer-gst-dialog.tsx` · `customer-orders-panel.tsx` ·
+`orders/invoices.tsx` · `invoices-table.tsx` · `invoice-detail-dialog.tsx` ·
+`gstr1-panels.tsx` · `gstr3b-panels.tsx` · `gst-filing-sidebar.tsx` ·
+`segmented-tabs.tsx` · `lib/invoice-status.ts` · `lib/gst-return.ts`
 
 ## Remaining debt, ranked
 
 1. `routes/app/settings.tsx` — 1,730 LOC, 86 hex, 126 palette utils, 46 raw buttons
 2. `routes/app/products/$id.tsx` — 2,793 LOC
-3. `routes/app/invoices.tsx`, `routes/app/orders/$id.tsx`
+3. `routes/app/orders/$id.tsx`
 4. `routes/auth/*`, `routes/onboarding/*`
 
 `routes/app/products/inventory*`, `products.tsx` and `admin/*` are already partly on

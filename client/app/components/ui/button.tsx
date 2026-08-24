@@ -12,6 +12,11 @@ const buttonVariants = cva(
         default: "bg-primary text-primary-foreground hover:bg-primary/80",
         brand:
           "bg-ink text-brand shadow-sm hover:bg-ink-hover focus-visible:ring-brand/50",
+        // The lime-filled primary. `brand` is the inverse pairing (ink fill,
+        // lime text); this one was hand-rolled as a `bg-brand …` className on
+        // top of another variant at several call sites.
+        accent:
+          "bg-brand text-brand-foreground shadow-sm hover:bg-brand-hover focus-visible:ring-brand/50",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:

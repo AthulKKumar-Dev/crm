@@ -13,6 +13,7 @@ import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto } from './dto/query-gst-return.dto';
+import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('invoices')
@@ -24,6 +25,13 @@ export class InvoiceController {
   @Roles(...ORG_MANAGERS)
   create(@OrgId() orgId: string, @Body() dto: CreateInvoiceDto) {
     return this.invoiceService.create(orgId, dto);
+  }
+
+  // GET /api/v1/invoices/stats — KPI aggregates and filter-chip counts
+  // IMPORTANT: static routes BEFORE :id param route
+  @Get('stats')
+  getStats(@OrgId() orgId: string, @Query() query: QueryInvoiceStatsDto) {
+    return this.invoiceService.getStats(orgId, query);
   }
 
   // GET /api/v1/invoices/gst-return — GSTR-1 or GSTR-3B summary

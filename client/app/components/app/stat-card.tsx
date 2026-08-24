@@ -34,6 +34,11 @@ interface StatCardProps {
      * "inline" — compact strip layout with sparkline for Products.
      */
     variant?: "card" | "inline";
+    /**
+     * "inverted" fills the card with `ink` for a bottom-line figure that should
+     * outrank the cards beside it. `variant="card"` only.
+     */
+    tone?: "default" | "inverted";
 }
 
 const iconChip =
@@ -52,15 +57,20 @@ export function StatCard({
     isLoading,
     sparkline = false,
     variant = "card",
+    tone = "default",
 }: StatCardProps) {
     const hasTrend = change !== undefined;
     const isPositive = (change ?? 0) >= 0;
+    const isInverted = tone === "inverted";
 
     const trendBadge = hasTrend && (
         <span
             className={cn(
                 "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-caption font-semibold",
-                isPositive ? "bg-ink text-brand" : "bg-danger-subtle text-danger"
+                isPositive ? "bg-ink text-brand" : "bg-danger-subtle text-danger",
+                // The default positive badge is ink-on-lime, which disappears
+                // against an inverted card.
+                isInverted && isPositive && "bg-brand text-brand-foreground"
             )}
         >
             {isPositive ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
@@ -94,11 +104,24 @@ export function StatCard({
     }
 
     return (
-        <div className={cn(" bg-card p-5 shadow-sm ring-1 ring-border", className)}>
+        <div
+            className={cn(
+                "bg-card p-5 shadow-sm ring-1 ring-border",
+                isInverted && "bg-ink ring-ink",
+                className
+            )}
+        >
             <div className="flex items-start justify-between gap-4">
                 <div className="flex flex-2 flex-col gap-3">
                     <div className="flex items-start justify-between gap-2">
-                        <p className="text-body font-medium text-muted-foreground">{label}</p>
+                        <p
+                            className={cn(
+                                "text-body font-medium",
+                                isInverted ? "text-ink-foreground/70" : "text-muted-foreground"
+                            )}
+                        >
+                            {label}
+                        </p>
                         {/* {icon && <div className={iconChip}>{icon}</div>} */}
                     </div>
 
@@ -106,13 +129,16 @@ export function StatCard({
                         {isLoading ? (
                             <Skeleton className="h-7 w-24" />
                         ) : (
-                            <p className="text-stat text-foreground">{value ?? "—"}</p>
+                            <p
+                                className={cn(
+                                    "text-stat",
+                                    isInverted ? "text-ink-foreground" : "text-foreground"
+                                )}
+                            >
+                                {value ?? "—"}
+                            </p>
                         )}
                         {trendBadge}
-                    </div>
-                    <div className="flex items-start justify-between gap-2">
-                        <p className="text-body font-medium text-muted-foreground">{label}</p>
-                        {/* {icon && <div className={iconChip}>{icon}</div>} */}
                     </div>
                 </div>
 
@@ -124,7 +150,14 @@ export function StatCard({
             </div>
 
             {changeLabel && (
-                <p className="mt-1.5 text-caption text-muted-foreground">{changeLabel}</p>
+                <p
+                    className={cn(
+                        "mt-1.5 text-caption",
+                        isInverted ? "text-ink-foreground/70" : "text-muted-foreground"
+                    )}
+                >
+                    {changeLabel}
+                </p>
             )}
 
             {/* {linkTo && linkLabel && (
@@ -138,4 +171,3 @@ export function StatCard({
         </div>
     );
 }
-

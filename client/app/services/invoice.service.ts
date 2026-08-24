@@ -5,6 +5,7 @@ import type {
   InvoiceDetail,
   CreateInvoiceRequest,
   InvoiceListParams,
+  InvoiceStats,
   GstReturnParams,
   GstReturnGstr1,
   GstReturnGstr3B,
@@ -24,6 +25,12 @@ export const invoiceService = {
   list: (params?: InvoiceListParams) =>
     apiClient
       .get<PaginatedResponse<Invoice>>("/invoices", { params })
+      .then((res) => res.data),
+
+  /** Aggregates for the KPI row and filter-chip counts. */
+  stats: (params?: { financialYear?: string }) =>
+    apiClient
+      .get<InvoiceStats>("/invoices/stats", { params })
       .then((res) => res.data),
 
   /** Get full invoice detail. */
