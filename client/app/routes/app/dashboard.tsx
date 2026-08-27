@@ -1,4 +1,4 @@
-import { ArrowRight, Download, Upload, Search, Target, Box, Users, ShoppingBag } from "lucide-react";
+import { ArrowRight, Download, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
@@ -16,8 +16,9 @@ import { TopProductsPanel } from "~/components/app/top-products-panel";
 import { LowStockProductsPanel } from "~/components/app/low-stock-products-panel";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
-import { Skeleton } from "~/components/ui/skeleton";
-import { useDashboard, useExportDashboard } from "~/hooks/use-dashboard-queries";
+import { useDashboard, useExportDashboard, useMonthlySales } from "~/hooks/use-dashboard-queries";
+import type { SparklinePoint } from "~/components/app/chart-line-default";
+import type { MonthlySalesPoint } from "~/services/dashboard.service";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { formatCurrency } from "~/lib/utils";
 import { StatCard } from "~/components/app/stat-card";
@@ -35,8 +36,12 @@ export default function DashboardPage() {
   const { data: dashboard, isLoading } = useDashboard();
   const { exportCsv, exportJson } = useExportDashboard();
   const { data: org } = useCurrentOrg();
+  // Shares a query key with the call inside ProfitBarChart, so React Query
+  // serves both from one request.
+  const { data: monthlySales } = useMonthlySales();
   const orgCurrency = org?.currency ?? "USD";
   const recentOrders = dashboard?.recentOrders ?? [];
+  const monthly = monthlySales?.data;
 
   return (
     <div className="space-y-6">
@@ -51,11 +56,19 @@ export default function DashboardPage() {
             </PageHeaderDescription>
           </PageHeaderContent>
           <PageHeaderActions>
-            <Button className="h-auto px-4.5 py-2" variant="outline" onClick={() => exportCsv()}>
+            <Button
+              className="h-auto rounded-full px-4.5 py-2"
+              variant="outline"
+              onClick={() => exportCsv()}
+            >
               <Upload className="size-3.5" />
               Export CSV
             </Button>
-            <Button variant="brand" className="h-auto px-4.5 py-2" onClick={() => exportJson()}>
+            <Button
+              variant="brand"
+              className="h-auto rounded-full px-4.5 py-2"
+              onClick={() => exportJson()}
+            >
               <Download className="size-3.5" />
               Download Report
             </Button>
@@ -68,6 +81,7 @@ export default function DashboardPage() {
         <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
           <StatCard
             sparkline
+            sparklineData={sparklineFor(monthly, "revenue")}
             label="Total Sales"
             value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
             icon={<Target className="size-4" />}
@@ -85,6 +99,7 @@ export default function DashboardPage() {
         /> */}
           <StatCard
             sparkline
+            sparklineData={sparklineFor(monthly, "orders")}
             label="Total Orders"
             value={dashboard ? dashboard.totalOrders.toLocaleString() : undefined}
             icon={<ShoppingBag className="size-4" />}
@@ -94,6 +109,7 @@ export default function DashboardPage() {
           />
           <StatCard
             sparkline
+            sparklineData={sparklineFor(monthly, "newCustomers")}
             label="Total Customers"
             value={dashboard ? dashboard.totalCustomers.toLocaleString() : undefined}
             icon={<Users className="size-4" />}
@@ -151,4 +167,20 @@ export default function DashboardPage() {
       </div>
     </div>
   );
+}
+
+/**
+ * The sparkline beside each KPI, drawn from the same 12-month series the profit
+ * chart below plots. Mirrors `sparklineFor` on the analytics route.
+ *
+ * The card's own figure is an all-time cumulative total while the line is a
+ * per-month series — the line is the shape that produced the total, not a
+ * breakdown of it. Returns undefined while the request is in flight so the
+ * chart renders empty rather than briefly plotting a partial series.
+ */
+function sparklineFor(
+  monthly: MonthlySalesPoint[] | undefined,
+  metric: "revenue" | "orders" | "newCustomers",
+): SparklinePoint[] | undefined {
+  return monthly?.map((point) => ({ label: point.month, value: point[metric] }));
 }

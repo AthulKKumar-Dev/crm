@@ -44,6 +44,9 @@ export default [
     route("invoices/*", "routes/app/legacy-redirect.tsx", { id: "legacy-invoices" }),
     route("inventory/*", "routes/app/legacy-redirect.tsx", { id: "legacy-inventory" }),
     route("channel/*", "routes/app/legacy-redirect.tsx", { id: "legacy-channel" }),
+    // The nav label and page title were always "Campaigns"; only the URL said
+    // "marketing". Renamed before three more URLs got built on top of it.
+    route("marketing/*", "routes/app/legacy-redirect.tsx", { id: "legacy-marketing" }),
     // Products section. Inventory (and its ledger / warehouses / label sheets)
     // lives under /products/* so the navbar can present them as one section.
     route("products", "routes/app/products.tsx"),
@@ -54,10 +57,33 @@ export default [
     // packing-slip / pick-slip / invoice print).
     route("products/inventory/labels/print", "routes/app/products/inventory/labels-print.tsx"),
     route("products/:id", "routes/app/products/$id.tsx"),
-    // Visual previews with no backend yet — each renders a PreviewNotice.
-    route("marketing", "routes/app/marketing.tsx"),
-    route("logistics", "routes/app/logistics.tsx"),
+    // Logistics section, presented as one section by the navbar strip the same
+    // way Orders and Products are. "/logistics" IS the shipments list — there
+    // is no separate overview, the stat cards sit on top of the table. Creating
+    // a shipment is a dialog over the queue, so it has no route of its own.
+    route("logistics", "routes/app/logistics/shipments.tsx"),
+    route("logistics/orders-to-ship", "routes/app/logistics/orders-to-ship.tsx"),
+    route("logistics/returns", "routes/app/logistics/returns.tsx"),
+    route("logistics/carriers", "routes/app/logistics/carriers.tsx"),
+    route("logistics/zones", "routes/app/logistics/zones.tsx"),
+    route("logistics/analytics", "routes/app/logistics/analytics.tsx"),
+    route("logistics/shipments/:id", "routes/app/logistics/shipments/$id.tsx"),
+
+    // Campaigns section. Broadcasts / Automations live under /campaigns/* so the
+    // navbar can present them as one section. Static segments outrank ":id", so
+    // "broadcasts/new" never hits "broadcasts/:id".
+    // Still a visual preview — these pages read placeholder data.
+    route("campaigns", "routes/app/campaigns.tsx"),
+    route("campaigns/broadcasts", "routes/app/campaigns/broadcasts.tsx"),
+    route("campaigns/broadcasts/new", "routes/app/campaigns/broadcasts/new.tsx"),
+    route("campaigns/broadcasts/:id", "routes/app/campaigns/broadcasts/$id.tsx"),
+    route("campaigns/automations", "routes/app/campaigns/automations.tsx"),
+    route("campaigns/automations/new", "routes/app/campaigns/automations/new.tsx"),
+    route("campaigns/automations/:id", "routes/app/campaigns/automations/$id.tsx"),
+
+    // Chat runs on a mocked conversations layer; its catalogue search is real.
     route("conversation", "routes/app/conversation.tsx"),
+    // A visual preview with no backend yet.
     route("analytics", "routes/app/analytics.tsx"),
     route("profile", "routes/app/profile.tsx"),
     route("settings", "routes/app/settings.tsx"),

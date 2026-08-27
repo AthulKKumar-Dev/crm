@@ -11,15 +11,20 @@ import {
 } from "recharts";
 import { RefreshCw } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { Separator } from "~/components/ui/separator";
+import { Skeleton } from "~/components/ui/skeleton";
 import { StatCard } from "~/components/app/stat-card";
 import {
   useAnalyticsDashboard,
   useRefreshAnalytics,
 } from "~/hooks/use-analytics-queries";
 import { QueryErrorState } from "~/components/app/query-error-state";
+import type { SparklinePoint } from "~/components/app/chart-line-default";
 import type {
   AnalyticsRange,
   AnalyticsChannelFilter,
+  DashboardStat,
+  DashboardTrendPoint,
 } from "~/services/analytics.service";
 
 export function meta() {
@@ -98,29 +103,46 @@ export default function AnalyticsPage() {
       </div>
 
       {/* 1. Basic stats */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        {stats.map(({ key, label, value, change, changeLabel }) => (
-          <StatCard
-            key={key}
-            label={label}
-            value={value.toLocaleString()}
-            change={change}
-            changeLabel={changeLabel}
-          />
-        ))}
-        {/* On failure the grid rendered completely blank: `stats` fell back to
-            [] so nothing mapped, and this placeholder is gated on isLoading,
-            so it disappeared too — a broken page and a quiet one looked the
-            same. */}
+      <div className="grid grid-cols-1 gap-5 rounded-xl bg-card p-3 sm:grid-cols-2 lg:grid-cols-3">
+        {/* Error and loading guard the whole panel rather than sitting beside
+            the mapped stats as extra grid children. That older shape rendered
+            completely blank on failure: `stats` fell back to [] so nothing
+            mapped, and the placeholder was gated on isLoading, so it
+            disappeared too — a broken page and a quiet one looked the same. */}
         {isError && !data ? (
           <div className="col-span-full">
             <QueryErrorState resource="analytics" onRetry={() => refetch()} />
           </div>
         ) : isLoading && stats.length === 0 ? (
-          <div className="col-span-full rounded-xl bg-white dark:bg-gray-900 p-5 shadow-sm ring-1 ring-border text-xs text-muted-foreground">
-            Loading analytics…
-          </div>
-        ) : null}
+          Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-4">
+              <div className="flex-1">
+                <Skeleton className="mb-3 h-3 w-24" />
+                <Skeleton className="h-7 w-20" />
+              </div>
+              {i < 2 && (
+                <Separator orientation="vertical" className="hidden h-15 md:block" />
+              )}
+            </div>
+          ))
+        ) : (
+          stats.map(({ key, label, value, change, changeLabel }, i, all) => (
+            <div key={key} className="flex items-center gap-4">
+              <StatCard
+                variant="inline"
+                label={label}
+                value={value.toLocaleString()}
+                change={change}
+                changeLabel={changeLabel}
+                sparklineData={sparklineFor(key, trend)}
+                className="flex-1"
+              />
+              {i < all.length - 1 && (
+                <Separator orientation="vertical" className="hidden h-15 md:block" />
+              )}
+            </div>
+          ))
+        )}
       </div>
 
       {/* 2. Top lists */}
@@ -239,6 +261,28 @@ function formatLastRefreshed(iso: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `on ${then.toLocaleDateString()} at ${then.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+/**
+ * The sparkline beside each stat, drawn from the same trend series the chart
+ * at the bottom of the page plots. `totalAbandonedCarts` has no series of its
+ * own, so it is derived as the carts that never reached checkout — clamped,
+ * because a period whose checkouts were attributed differently could otherwise
+ * plot a negative value.
+ */
+function sparklineFor(
+  key: DashboardStat["key"],
+  trend: DashboardTrendPoint[],
+): SparklinePoint[] {
+  return trend.map((point) => ({
+    label: point.label,
+    value:
+      key === "totalAddToCart"
+        ? point.addToCart
+        : key === "totalCheckout"
+          ? point.reachedCheckout
+          : Math.max(0, point.addToCart - point.reachedCheckout),
+  }));
 }
 
 interface TopListRow {

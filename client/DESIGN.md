@@ -129,7 +129,11 @@ it shifts every corner in the app.
 `customer-activity.tsx` · `customer-gst-dialog.tsx` · `customer-orders-panel.tsx` ·
 `orders/invoices.tsx` · `invoices-table.tsx` · `invoice-detail-dialog.tsx` ·
 `gstr1-panels.tsx` · `gstr3b-panels.tsx` · `gst-filing-sidebar.tsx` ·
-`segmented-tabs.tsx` · `lib/invoice-status.ts` · `lib/gst-return.ts`
+`segmented-tabs.tsx` · `lib/invoice-status.ts` · `lib/gst-return.ts` ·
+`conversation.tsx` · `components/app/conversation/*` (21 files) ·
+`lib/conversation-format.ts` · `lib/session-window.ts` · `lib/product-drag.ts` ·
+`routes/app/logistics/*` (5 screens) · `components/app/logistics/*` (4 files) ·
+`lib/logistics-status.ts` · `lib/logistics-format.ts` · `ui/{radio-group,alert}.tsx`
 
 ## Remaining debt, ranked
 

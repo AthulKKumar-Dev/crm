@@ -3,6 +3,7 @@ import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { cn } from "~/lib/utils";
 
 // Vendors may only reach these sections (the server enforces the real boundary;
 // this is UX so a vendor never lands on a forbidden, empty/403 page).
@@ -25,6 +26,18 @@ function isUnder(pathname: string, prefix: string) {
   return pathname === prefix || pathname.startsWith(`${prefix}/`);
 }
 
+// Routes that fill the window height and scroll their own panes instead of the
+// page. The inbox needs this so its composer stays pinned and each column
+// scrolls independently. It does NOT change the content width — these pages sit
+// in the same max-w-screen-xl container as every other page.
+//
+// A flex column rather than h-[calc(100vh-Npx)] in the route, because the
+// chrome above it is not a fixed height — the navbar is 72px, a sub-nav row
+// appears for sections that have children, and ImpersonationBanner adds 40px
+// when a super admin is impersonating. Any calc() is wrong in at least one of
+// those states; the flex column is exact in all of them with no magic number.
+const FULL_HEIGHT_PREFIXES = ["/conversation"];
+
 export default function AppLayout() {
   const { isVendor } = useCurrentRole();
   const location = useLocation();
@@ -45,12 +58,30 @@ export default function AppLayout() {
     );
   }
 
+  const isFullHeight = FULL_HEIGHT_PREFIXES.some((p) =>
+    isUnder(location.pathname, p),
+  );
+
   return (
     <AuthGuard>
-      <div className="min-h-screen bg-surface-sunken">
+      <div
+        className={cn(
+          "bg-surface-sunken",
+          isFullHeight ? "flex h-dvh flex-col overflow-hidden" : "min-h-screen",
+        )}
+      >
         <ImpersonationBanner />
         <Navbar />
-        <main className="mx-auto max-w-screen-xl px-4 py-6 lg:px-6">
+        {/* Same container on every route — only the vertical behaviour differs. */}
+        <main
+          className={cn(
+            // Identical container and padding on every route, so the inbox
+            // lines up with Orders and Products rather than sitting flush
+            // against the navbar.
+            "mx-auto w-full max-w-screen-xl px-4 py-6 lg:px-6",
+            isFullHeight && "min-h-0 flex-1 overflow-hidden",
+          )}
+        >
           {vendorBlocked ? <Navigate to="/orders" replace /> : <Outlet />}
         </main>
       </div>

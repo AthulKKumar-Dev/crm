@@ -4,7 +4,7 @@ import { ArrowRight, TrendingUp, TrendingDown } from "lucide-react";
 
 import { Skeleton } from "~/components/ui/skeleton";
 import { cn } from "~/lib/utils";
-import { ChartLineDefault } from "./chart-line-default";
+import { ChartLineDefault, type SparklinePoint } from "./chart-line-default";
 
 interface StatCardProps {
     label: string;
@@ -29,6 +29,12 @@ interface StatCardProps {
      * this card and only the dashboard wants a chart in it.
      */
     sparkline?: boolean;
+    /**
+     * Series for the sparkline. Without it the chart area renders empty rather
+     * than inventing a curve, so a card with no series — or one still fetching —
+     * shows nothing instead of a plausible-looking fake.
+     */
+    sparklineData?: SparklinePoint[];
     /**
      * "card" — standalone card for Orders / Customers / Analytics (default).
      * "inline" — compact strip layout with sparkline for Products.
@@ -56,6 +62,7 @@ export function StatCard({
     icon,
     isLoading,
     sparkline = false,
+    sparklineData,
     variant = "card",
     tone = "default",
 }: StatCardProps) {
@@ -93,7 +100,7 @@ export function StatCard({
                         </div>
                     </div>
                     <div className="w-full flex-1">
-                        <ChartLineDefault />
+                        <ChartLineDefault data={sparklineData} />
                     </div>
                 </div>
                 {changeLabel && (
@@ -144,7 +151,7 @@ export function StatCard({
 
                 {sparkline && (
                     <div className="w-full flex-2">
-                        <ChartLineDefault variant="area" tone="brand" />
+                        <ChartLineDefault variant="area" tone="brand" data={sparklineData} />
                     </div>
                 )}
             </div>

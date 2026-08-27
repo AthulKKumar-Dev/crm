@@ -9,7 +9,7 @@ import {
 } from "recharts";
 import { TrendingUp, TrendingDown, MoreHorizontal, Loader2 } from "lucide-react";
 import { useMonthlySales } from "~/hooks/use-dashboard-queries";
-import { formatCurrency } from "~/lib/utils";
+import { cn, formatCurrency } from "~/lib/utils";
 
 interface CustomTooltipProps {
   active?: boolean;
@@ -40,9 +40,17 @@ export function ProfitBarChart({ currency }: { currency: string }) {
   const { data: monthlySales, isLoading } = useMonthlySales();
 
   const chartData = monthlySales?.data ?? [];
-  const totalRevenue = monthlySales?.totalRevenue ?? 0;
   const totalProfit = monthlySales?.totalProfit ?? 0;
-  const profitMargin = totalRevenue > 0 ? Math.round((totalProfit / totalRevenue) * 100) : 0;
+
+  // Last 30 days against the 30 before it. This used to show the profit margin
+  // (profit ÷ revenue) inside a trending-up pill, which could essentially never
+  // point down and so always read as growth. `previous === 0` means there is no
+  // comparison period yet — the API reports that as a nominal 100% up, so the
+  // badge is hidden rather than presenting growth-from-nothing as a trend.
+  const trend = monthlySales?.profitTrend;
+  const showTrend =
+    trend !== undefined && trend.previous !== 0 && trend.change.direction !== "same";
+  const isUp = trend?.change.direction === "up";
 
   return (
     <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
@@ -63,11 +71,21 @@ export function ProfitBarChart({ currency }: { currency: string }) {
             <p className="text-stat text-foreground">
               {formatCurrency(totalProfit, currency)}
             </p>
-            {profitMargin !== 0 && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-ink px-2 py-0.5 text-caption font-semibold text-brand">
-                {profitMargin > 0 ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
-                {profitMargin}%
-              </span>
+            {showTrend && (
+              <>
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-caption font-semibold",
+                    isUp ? "bg-ink text-brand" : "bg-danger-subtle text-danger"
+                  )}
+                >
+                  {isUp ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
+                  {trend.change.percentage}%
+                </span>
+                {/* The figure beside it is the 12-month total that the bars add
+                    up to, so the badge has to say which period it covers. */}
+                <span className="text-caption text-muted-foreground">vs. previous 30 days</span>
+              </>
             )}
           </div>
 

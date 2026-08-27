@@ -20,6 +20,11 @@ import {
   ArrowLeftRight,
   FileText,
   Truck,
+  ClipboardList,
+  RotateCcw,
+  MapPin,
+  Send,
+  Zap,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -66,16 +71,42 @@ const PRODUCTS_CHILDREN: NavChild[] = [
   { label: "Inventory", href: "/products/inventory", icon: Boxes },
 ];
 
+/**
+ * Sub-nav for the Logistics section. Shipment detail stays off the strip and is
+ * reached from inside the list, the same way Inventory's ledger and warehouses
+ * are.
+ */
+const LOGISTICS_CHILDREN: NavChild[] = [
+  { label: "Shipments", href: "/logistics", icon: Truck },
+  { label: "Fulfilment queue", href: "/logistics/orders-to-ship", icon: ClipboardList },
+  { label: "Returns / RTO", href: "/logistics/returns", icon: RotateCcw },
+  { label: "Carriers & rates", href: "/logistics/carriers", icon: Receipt },
+  { label: "Zones", href: "/logistics/zones", icon: MapPin },
+  { label: "Analytics", href: "/logistics/analytics", icon: BarChart3 },
+];
+
+/**
+ * Sub-nav for the Campaigns section. Overview keeps the parent href so the pill
+ * and the strip's first item agree, matching "All orders" and "All products".
+ * The broadcast composer and the automation builder stay off the strip and are
+ * reached from inside their lists.
+ */
+const CAMPAIGNS_CHILDREN: NavChild[] = [
+  { label: "Overview", href: "/campaigns", icon: Megaphone },
+  { label: "Broadcasts", href: "/campaigns/broadcasts", icon: Send },
+  { label: "Automations", href: "/campaigns/automations", icon: Zap },
+];
+
 const NAV_LINKS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Orders", href: "/orders", icon: ShoppingCart, children: ORDERS_CHILDREN },
   { label: "Products", href: "/products", icon: Package, children: PRODUCTS_CHILDREN },
-  // The three below are visual previews with no backend — each page carries a
-  // PreviewNotice banner saying so. Deliberately no badge count: the old one was
-  // hardcoded to match the six sample conversations.
+  // Chat, Campaigns and Analytics still run on placeholder data rather than a
+  // real backend. Deliberately no badge count on Chat: the old one was
+  // hardcoded to match the sample conversations.
   { label: "Chat", href: "/conversation", icon: MessageSquare },
-  { label: "Campaigns", href: "/marketing", icon: Megaphone },
-  { label: "Logistics", href: "/logistics", icon: Truck },
+  { label: "Campaigns", href: "/campaigns", icon: Megaphone, children: CAMPAIGNS_CHILDREN },
+  { label: "Logistics", href: "/logistics", icon: Truck, children: LOGISTICS_CHILDREN },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
 
