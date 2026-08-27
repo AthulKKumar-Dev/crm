@@ -1090,14 +1090,22 @@ export interface OrderTimeline {
   message: string;
   createdAt: string;
   /**
-   * The complete set written by any code path — all eleven write sites are in
-   * `OrderService`:
+   * The complete set written by any code path.
+   *
+   * From `OrderService` (a real user acted; `actorId` is set):
    * `created` | `updated` | `cancelled` | `closed` | `reopened` | `paid` |
-   * `captured` | `fulfilled` | `tracking_updated` | `fulfillment_cancelled`.
+   * `captured` | `fulfilled` | `tracking_updated` | `fulfillment_cancelled` |
+   * `delivered` | `items_status_changed` | `item_delivered` |
+   * `item_unfulfilled` | `sync_queued`.
+   *
+   * From `ShopifySyncService` (changed in Shopify Admin; `actorId` is null and
+   * `metadata.source === "shopify"`):
+   * `created` | `paid` | `payment_status_changed` | `fulfilled` |
+   * `fulfillment_status_changed` | `cancelled` | `closed` | `reopened` |
+   * `refunded`.
    *
    * Typed as a free string, not a union, because the column is a bare `String`
-   * with no server-side enum. (The Prisma schema comment also lists `refunded`,
-   * which nothing ever writes.)
+   * with no server-side enum.
    */
   action?: string | null;
   /**
@@ -1128,6 +1136,17 @@ export interface OrderDetail extends Order {
 }
 
 /** Query parameters for the order list endpoint. */
+/** Neighbours of one order in the newest-first list, for the detail page rail. */
+export interface AdjacentOrders {
+  /** The order before this one (newer). Null at the start of the list. */
+  previousId: string | null;
+  /** The order after this one (older). Null at the end of the list. */
+  nextId: string | null;
+  /** 1-based position across ALL orders, not a fetched window. */
+  position: number;
+  total: number;
+}
+
 export interface OrderListParams {
   page?: number;
   limit?: number;

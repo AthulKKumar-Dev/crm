@@ -7,30 +7,39 @@ import {
   useUnfulfillMutation,
   useUpdateItemTrackingMutation,
 } from "~/hooks/use-order-mutations";
+import { Button } from "~/components/ui/button";
+import { CarrierDatalist } from "~/components/app/carrier-datalist";
+import { EmptyState } from "~/components/app/empty-state";
 import { lineStatusClass, lineStatusLabel } from "~/lib/order-status";
 import { cn, formatCurrency } from "~/lib/utils";
 
-// Shipping carriers offered in the tracking dropdowns.
-const CARRIERS = ["Shiprocket"];
-
-function CarrierSelect({
+/**
+ * Carrier entry. Free text with suggestions rather than a closed dropdown —
+ * see the note on CARRIER_SUGGESTIONS. This was a one-entry `<select>` that
+ * made any non-Shiprocket shipment unrecordable.
+ */
+function CarrierInput({
   value,
   onChange,
   className,
+  listId,
 }: {
   value: string;
   onChange: (v: string) => void;
   className?: string;
+  listId: string;
 }) {
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className={className}>
-      <option value="">Shipping carrier</option>
-      {CARRIERS.map((c) => (
-        <option key={c} value={c}>
-          {c}
-        </option>
-      ))}
-    </select>
+    <>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        list={listId}
+        placeholder="Shipping carrier"
+        className={className}
+      />
+      <CarrierDatalist id={listId} />
+    </>
   );
 }
 
@@ -99,6 +108,7 @@ export function OrderItemsFulfillment({
   const [trackingLine, setTrackingLine] = useState<string | null>(null);
   const [tNumber, setTNumber] = useState("");
   const [tCompany, setTCompany] = useState("");
+  const [tUrl, setTUrl] = useState("");
 
   const isDetail = variant === "detail";
   const columnCount = isDetail ? 8 : 6;
@@ -179,59 +189,85 @@ export function OrderItemsFulfillment({
     setTrackingLine(li.id);
     setTNumber(li.trackingNumber ?? "");
     setTCompany(li.trackingCompany ?? "");
+    setTUrl(li.trackingUrl ?? "");
   }
 
   function saveTracking(lineId: string) {
     updateTracking.mutate(
       {
         lineId,
-        data: { tracking: { number: tNumber || undefined, company: tCompany || undefined } },
+        data: {
+          tracking: {
+            number: tNumber || undefined,
+            company: tCompany || undefined,
+            url: tUrl || undefined,
+          },
+        },
       },
       { onSuccess: () => setTrackingLine(null) },
     );
   }
 
   const subtotal = items.reduce((sum, li) => sum + Number(li.price) * li.quantity, 0);
-  const busy = setStatus.isPending || createFulfillment.isPending;
+  // Every mutation this component can fire. It previously listed only the two
+  // bulk ones, so the bulk toolbar stayed live while a per-row Mark delivered /
+  // Unfulfill / tracking save was still in flight — letting a second write race
+  // the first against the same line items.
+  const busy =
+    setStatus.isPending ||
+    createFulfillment.isPending ||
+    markDelivered.isPending ||
+    unfulfill.isPending ||
+    updateTracking.isPending;
 
   /** Per-line actions. Delivered is terminal — no actions. */
   function lineActions(li: FulfillmentItem) {
     if (li.fulfillmentStatus !== "fulfilled") return null;
+    // Tracking used to stay clickable mid-mutation while the other two were
+    // disabled, so the dialog could open over an in-flight fulfil/unfulfil.
+    const rowBusy = markDelivered.isPending || unfulfill.isPending;
     return (
       <div className="flex flex-wrap items-center justify-end gap-1">
-        <button
+        <Button
+          variant="brand"
+          size="xs"
           onClick={() => markDelivered.mutate(li.id)}
-          disabled={markDelivered.isPending || unfulfill.isPending}
-          className="inline-flex items-center gap-1 rounded-md bg-ink px-2 py-1 text-micro font-medium text-brand hover:bg-ink-hover disabled:opacity-50"
+          disabled={rowBusy}
+          className="text-micro"
         >
           {markDelivered.isPending && markDelivered.variables === li.id ? (
-            <Loader2 className="size-3 animate-spin" />
+            <Loader2 className="animate-spin" />
           ) : (
-            <Truck className="size-3" />
+            <Truck />
           )}
           Mark delivered
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
           onClick={() => openTracking(li)}
+          disabled={rowBusy}
           title="Add or update tracking"
-          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
+          className="text-micro text-muted-foreground"
         >
-          <MapPin className="size-3" />
+          <MapPin />
           {li.trackingNumber ? "Edit tracking" : "Add tracking"}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
           onClick={() => unfulfill.mutate(li.id)}
-          disabled={markDelivered.isPending || unfulfill.isPending}
+          disabled={rowBusy}
           title="Switch back to unfulfilled"
-          className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted disabled:opacity-50"
+          className="text-micro text-muted-foreground"
         >
           {unfulfill.isPending && unfulfill.variables === li.id ? (
-            <Loader2 className="size-3 animate-spin" />
+            <Loader2 className="animate-spin" />
           ) : (
-            <Undo2 className="size-3" />
+            <Undo2 />
           )}
           Unfulfill
-        </button>
+        </Button>
       </div>
     );
   }
@@ -273,9 +309,10 @@ export function OrderItemsFulfillment({
               placeholder="Tracking number (optional)"
               className="rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
             />
-            <CarrierSelect
+            <CarrierInput
               value={trackingCompany}
               onChange={setTrackingCompany}
+              listId="carriers-bulk"
               className="rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
             />
             <input
@@ -292,10 +329,11 @@ export function OrderItemsFulfillment({
             className="w-full rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
           />
           <div className="flex flex-wrap gap-2">
-            <button
+            <Button
+              variant="accent"
               onClick={handleFulfill}
               disabled={busy}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-caption font-semibold text-brand-strong hover:bg-brand-hover disabled:opacity-50"
+              className="text-caption font-semibold text-brand-strong"
             >
               {createFulfillment.isPending ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -303,12 +341,13 @@ export function OrderItemsFulfillment({
                 <CheckCircle2 className="size-3.5" />
               )}
               Mark fulfilled
-            </button>
+            </Button>
             {allowInProgress && (
-              <button
+              <Button
+                variant="ghost"
                 onClick={handleInProgress}
                 disabled={busy}
-                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-info-subtle px-3 py-2 text-caption font-medium text-info hover:opacity-80 disabled:opacity-50"
+                className="bg-info-subtle text-caption text-info hover:bg-info-subtle hover:text-info hover:opacity-80 dark:hover:bg-info-subtle"
               >
                 {setStatus.isPending && setStatus.variables?.status === "in_progress" ? (
                   <Loader2 className="size-3.5 animate-spin" />
@@ -316,12 +355,13 @@ export function OrderItemsFulfillment({
                   <Clock className="size-3.5" />
                 )}
                 Mark in progress
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              variant="ghost"
               onClick={handleHold}
               disabled={busy}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-warning-subtle px-3 py-2 text-caption font-medium text-warning hover:opacity-80 disabled:opacity-50"
+              className="bg-warning-subtle text-caption text-warning hover:bg-warning-subtle hover:text-warning hover:opacity-80 dark:hover:bg-warning-subtle"
             >
               {setStatus.isPending && setStatus.variables?.status === "on_hold" ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -329,11 +369,12 @@ export function OrderItemsFulfillment({
                 <PauseCircle className="size-3.5" />
               )}
               Add hold
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="outline"
               onClick={handleRelease}
               disabled={busy}
-              className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2 text-caption font-medium text-foreground hover:bg-muted disabled:opacity-50"
+              className="text-caption text-foreground"
             >
               {setStatus.isPending && setStatus.variables?.status === "released" ? (
                 <Loader2 className="size-3.5 animate-spin" />
@@ -341,11 +382,23 @@ export function OrderItemsFulfillment({
                 <PlayCircle className="size-3.5" />
               )}
               Release hold
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
+      {items.length === 0 ? (
+        /* Previously this rendered the table anyway, so an order with no lines
+           showed a header row above an empty tbody — a ghost table that reads
+           as a broken page rather than an empty one. */
+        <div className="px-5 py-10">
+          <EmptyState
+            icon={Package}
+            title="No items on this order"
+            description="This order has no line items to fulfil."
+          />
+        </div>
+      ) : (
       <div className="overflow-x-auto">
         <table className="w-full text-caption">
           <thead className="text-micro uppercase tracking-wider text-muted-foreground">
@@ -514,15 +567,27 @@ export function OrderItemsFulfillment({
                           placeholder="Tracking number"
                           className="min-w-[10rem] flex-1 rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
                         />
-                        <CarrierSelect
+                        <CarrierInput
                           value={tCompany}
                           onChange={setTCompany}
+                          listId="carriers-line"
                           className="min-w-[8rem] flex-1 rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
                         />
-                        <button
+                        {/* Tracking URL must be present here too: the endpoint
+                            is a FULL REPLACE (order.service.ts writes
+                            `trackingUrl: dto.tracking.url ?? null`), so a form
+                            that omits the field silently erases a stored URL. */}
+                        <input
+                          value={tUrl}
+                          onChange={(e) => setTUrl(e.target.value)}
+                          placeholder="Tracking URL"
+                          className="min-w-[10rem] flex-1 rounded-lg border bg-background px-3 py-2 text-caption outline-none focus:ring-1 focus:ring-brand"
+                        />
+                        <Button
+                          variant="brand"
                           onClick={() => saveTracking(li.id)}
                           disabled={updateTracking.isPending}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-ink px-3 py-2 text-caption font-medium text-brand hover:bg-ink-hover disabled:opacity-50"
+                          className="text-caption"
                         >
                           {updateTracking.isPending ? (
                             <Loader2 className="size-3.5 animate-spin" />
@@ -530,13 +595,14 @@ export function OrderItemsFulfillment({
                             <MapPin className="size-3.5" />
                           )}
                           Save
-                        </button>
-                        <button
+                        </Button>
+                        <Button
+                          variant="ghost"
                           onClick={() => setTrackingLine(null)}
-                          className="rounded-lg px-3 py-2 text-caption text-muted-foreground hover:bg-muted"
+                          className="text-caption text-muted-foreground"
                         >
                           Cancel
-                        </button>
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -560,6 +626,7 @@ export function OrderItemsFulfillment({
           )}
         </table>
       </div>
+      )}
 
       {footer}
     </section>

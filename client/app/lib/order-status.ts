@@ -91,3 +91,28 @@ export function lineStatusClass(status: string | null): string {
 export function isLineFulfilled(status: string | null): boolean {
   return status === "fulfilled" || status === "delivered";
 }
+
+/**
+ * Suggested shipping carriers, shared by every tracking input on the order
+ * detail page.
+ *
+ * These are *suggestions*, not a closed set — each input is free text backed by
+ * a `<datalist>`. Shopify's `fulfillmentTrackingInfoUpdate` accepts an arbitrary
+ * carrier string, so restricting the UI to a dropdown only prevents recording a
+ * shipment we can otherwise represent perfectly well. The per-line and bulk
+ * inputs used to be a hardcoded one-entry `<select>` (`["Shiprocket"]`) while
+ * the shipment dialog was free text hinting "UPS, USPS, FedEx, BlueDart" — two
+ * vocabularies for one field. This is the one list; keep all three inputs on it.
+ */
+export const CARRIER_SUGGESTIONS = [
+  "Shiprocket",
+  "Delhivery",
+  "Blue Dart",
+  "DTDC",
+  "Ecom Express",
+  "India Post",
+  "XpressBees",
+  "FedEx",
+  "DHL",
+  "UPS",
+] as const;

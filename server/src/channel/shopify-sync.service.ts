@@ -1311,6 +1311,78 @@ export class ShopifySyncService {
         }
     }
 
+    /**
+     * Timeline entries for what changed on an order in Shopify.
+     *
+     * Nothing in the inbound path used to write `OrderTimelineEvent` at all, so
+     * an order paid, fulfilled or cancelled in Shopify Admin left no trace and a
+     * Shopify-sourced order's activity feed was permanently empty.
+     *
+     * Three properties keep this from inventing history:
+     *  - It diffs STORED state against the payload, so a webhook redelivery or a
+     *    re-run of the full sync produces no transition and therefore no event.
+     *  - The caller only invokes it after the compare-and-set on
+     *    `externalUpdatedAt` has actually applied, so stale payloads are already
+     *    excluded.
+     *  - Events are stamped with the Shopify timestamp, not now(). Otherwise a
+     *    first-time sync of a two-year-old store would date every historical
+     *    order to today.
+     *
+     * `actorId` is null: the actor is a Shopify user we have no record of.
+     */
+    private buildShopifyTimelineEvents(
+        before: {
+            financialStatus: OrderFinancialStatus;
+            fulfillmentStatus: OrderFulfillmentStatus;
+            cancelledAt: Date | null;
+            closedAt: Date | null;
+        },
+        after: {
+            financialStatus: OrderFinancialStatus;
+            fulfillmentStatus: OrderFulfillmentStatus;
+            cancelledAt: Date | null;
+            closedAt: Date | null;
+        },
+        at: Date,
+    ): { action: string; message: string; createdAt: Date }[] {
+        const events: { action: string; message: string; createdAt: Date }[] = [];
+        const push = (action: string, message: string) =>
+            events.push({ action, message, createdAt: at });
+
+        if (before.financialStatus !== after.financialStatus) {
+            if (after.financialStatus === OrderFinancialStatus.PAID) {
+                push('paid', 'Payment received in Shopify');
+            } else {
+                push(
+                    'payment_status_changed',
+                    `Payment status changed to ${after.financialStatus} in Shopify`,
+                );
+            }
+        }
+
+        if (before.fulfillmentStatus !== after.fulfillmentStatus) {
+            if (after.fulfillmentStatus === OrderFulfillmentStatus.FULFILLED) {
+                push('fulfilled', 'Order fulfilled in Shopify');
+            } else {
+                push(
+                    'fulfillment_status_changed',
+                    `Fulfilment status changed to ${after.fulfillmentStatus} in Shopify`,
+                );
+            }
+        }
+
+        if (!before.cancelledAt && after.cancelledAt) {
+            push('cancelled', 'Order cancelled in Shopify');
+        }
+        if (!before.closedAt && after.closedAt) {
+            push('closed', 'Order archived in Shopify');
+        } else if (before.closedAt && !after.closedAt) {
+            push('reopened', 'Order re-opened in Shopify');
+        }
+
+        return events;
+    }
+
     async upsertOrder(channelId: string, orgId: string, so: any) {
         const externalId = String(so.id);
 
@@ -1368,7 +1440,13 @@ export class ShopifySyncService {
         // the MANUAL-platform filter closes the remaining gap.
         let existing = await this.prisma.order.findUnique({
             where: { channelId_externalId: { channelId, externalId } },
-            select: { id: true, externalUpdatedAt: true },
+            // financialStatus/fulfillmentStatus/cancelledAt/closedAt are read
+            // ONLY to diff against the incoming payload for timeline events —
+            // see buildShopifyTimelineEvents. Nothing else consumes them.
+            select: {
+                id: true, externalUpdatedAt: true, financialStatus: true,
+                fulfillmentStatus: true, cancelledAt: true, closedAt: true,
+            },
         });
         if (
             !existing &&
@@ -1381,7 +1459,11 @@ export class ShopifySyncService {
                     organizationId: orgId,
                     channel: { platform: ChannelPlatform.MANUAL },
                 },
-                select: { id: true, name: true, customerId: true, externalUpdatedAt: true },
+                select: {
+                    id: true, name: true, customerId: true, externalUpdatedAt: true,
+                    financialStatus: true, fulfillmentStatus: true,
+                    cancelledAt: true, closedAt: true,
+                },
             });
             if (pushedLocally) {
                 await this.prisma.order.update({
@@ -1405,6 +1487,10 @@ export class ShopifySyncService {
                 existing = {
                     id: pushedLocally.id,
                     externalUpdatedAt: pushedLocally.externalUpdatedAt,
+                    financialStatus: pushedLocally.financialStatus,
+                    fulfillmentStatus: pushedLocally.fulfillmentStatus,
+                    cancelledAt: pushedLocally.cancelledAt,
+                    closedAt: pushedLocally.closedAt,
                 };
                 this.logger.log(
                     `Rebadged locally-pushed order ${pushedLocally.name} (${pushedLocally.id}) ` +
@@ -1518,6 +1604,20 @@ export class ShopifySyncService {
                     select: { id: true },
                 });
                 orderId = created.id;
+
+                // First time we have seen this order. One 'created' entry, dated
+                // to Shopify's own created_at so a backfill of an existing store
+                // does not date every historical order to the sync run.
+                await tx.orderTimelineEvent.create({
+                    data: {
+                        orderId,
+                        actorId: null,
+                        action: 'created',
+                        message: `Order placed in ${so.source_name === 'collabo-crm' ? 'the CRM' : 'Shopify'}`,
+                        metadata: { source: 'shopify' } as Prisma.InputJsonValue,
+                        createdAt: so.created_at ? new Date(so.created_at) : new Date(),
+                    },
+                });
             } else {
                 // Compare-and-set on `externalUpdatedAt`. It was written on
                 // every upsert and never read, so an `orders/create` arriving
@@ -1548,6 +1648,31 @@ export class ShopifySyncService {
                     return;
                 }
                 orderId = existing.id;
+
+                // Only reached when the write actually applied, so a redelivered
+                // or stale payload can never produce a duplicate entry.
+                const timelineEvents = this.buildShopifyTimelineEvents(
+                    existing,
+                    {
+                        financialStatus: patch.financialStatus as OrderFinancialStatus,
+                        fulfillmentStatus: patch.fulfillmentStatus as OrderFulfillmentStatus,
+                        cancelledAt: (patch.cancelledAt as Date | null) ?? null,
+                        closedAt: (patch.closedAt as Date | null) ?? null,
+                    },
+                    incomingUpdatedAt ?? new Date(),
+                );
+                if (timelineEvents.length > 0) {
+                    await tx.orderTimelineEvent.createMany({
+                        data: timelineEvents.map((e) => ({
+                            orderId,
+                            actorId: null,
+                            action: e.action,
+                            message: e.message,
+                            metadata: { source: 'shopify' } as Prisma.InputJsonValue,
+                            createdAt: e.createdAt,
+                        })),
+                    });
+                }
             }
 
             await this.writeOrderChildren(tx, orderId, so, payloadLines, {
@@ -1708,15 +1833,50 @@ export class ShopifySyncService {
         }
 
         const amount = refund.transactions?.[0]?.amount ?? '0';
-        await this.prisma.orderRefund.upsert({
+
+        // Is this refund new to us? Decides whether a timeline entry is written.
+        // `refunds/create` is redelivered on failure, and the full sync re-reads
+        // every refund on every run, so writing unconditionally would append a
+        // duplicate 'refunded' entry each time.
+        const alreadyRecorded = await this.prisma.orderRefund.findUnique({
             where: { orderId_externalId: { orderId: order.id, externalId: String(refund.id) } },
-            create: {
-                orderId: order.id, externalId: String(refund.id), amount,
-                currency: order.currency, reason: refund.note, note: refund.note,
-                lineItems: refund.refund_line_items ?? null,
-                processedAt: refund.processed_at ? new Date(refund.processed_at) : null,
-            },
-            update: { amount, note: refund.note, lineItems: refund.refund_line_items ?? null },
+            select: { id: true },
+        });
+
+        await this.prisma.$transaction(async (tx) => {
+            await tx.orderRefund.upsert({
+                where: { orderId_externalId: { orderId: order.id, externalId: String(refund.id) } },
+                create: {
+                    orderId: order.id, externalId: String(refund.id), amount,
+                    currency: order.currency, reason: refund.note, note: refund.note,
+                    lineItems: refund.refund_line_items ?? null,
+                    processedAt: refund.processed_at ? new Date(refund.processed_at) : null,
+                },
+                update: { amount, note: refund.note, lineItems: refund.refund_line_items ?? null },
+            });
+
+            if (!alreadyRecorded) {
+                // 'refunded' is named in the OrderTimelineEvent schema comment but
+                // nothing had ever written it — refunds are read-only inbound.
+                await tx.orderTimelineEvent.create({
+                    data: {
+                        orderId: order.id,
+                        actorId: null,
+                        action: 'refunded',
+                        message:
+                            `Refund of ${amount} ${order.currency} processed in Shopify` +
+                            (refund.note ? `: ${refund.note}` : ''),
+                        metadata: {
+                            source: 'shopify',
+                            refundExternalId: String(refund.id),
+                            amount,
+                        } as Prisma.InputJsonValue,
+                        createdAt: refund.processed_at
+                            ? new Date(refund.processed_at)
+                            : new Date(),
+                    },
+                });
+            }
         });
         this.logger.log(`Recorded refund ${refund.id} on order ${orderExternalId}.`);
     }

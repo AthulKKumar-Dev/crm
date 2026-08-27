@@ -6,6 +6,7 @@ import {
   ExternalLink,
   AlertCircle,
   Loader2,
+  Truck,
 } from "lucide-react";
 import {
   ModalShell,
@@ -17,7 +18,9 @@ import {
   useCreateFulfillmentMutation,
   useUpdateTrackingMutation,
   useCancelFulfillmentMutation,
+  useMarkFulfillmentDeliveredMutation,
 } from "~/hooks/use-order-mutations";
+import { CarrierDatalist } from "~/components/app/carrier-datalist";
 import type {
   OrderDetail,
   OrderFulfillment,
@@ -37,6 +40,9 @@ import type {
 export function OrderFulfillmentsSection({ order }: { order: OrderDetail }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  // Held here rather than in the row so every row shares one in-flight state —
+  // `variables` identifies which shipment is actually pending.
+  const markDelivered = useMarkFulfillmentDeliveredMutation(order.id);
 
   if (!order.fulfillments || order.fulfillments.length === 0) {
     return null;
@@ -58,6 +64,9 @@ export function OrderFulfillmentsSection({ order }: { order: OrderDetail }) {
               fulfillment={f}
               onEditTracking={() => setEditingId(f.id)}
               onCancel={() => setCancellingId(f.id)}
+              onMarkDelivered={() => markDelivered.mutate(f.id)}
+              deliveringId={markDelivered.isPending ? markDelivered.variables : undefined}
+              busy={markDelivered.isPending}
             />
           ))}
         </div>
@@ -85,12 +94,20 @@ function FulfillmentRow({
   fulfillment,
   onEditTracking,
   onCancel,
+  onMarkDelivered,
+  deliveringId,
+  busy,
 }: {
   fulfillment: OrderFulfillment;
   onEditTracking: () => void;
   onCancel: () => void;
+  onMarkDelivered: () => void;
+  /** Id of the shipment currently being marked delivered, if any. */
+  deliveringId?: string;
+  busy: boolean;
 }) {
   const isCancelled = fulfillment.status === "cancelled";
+  const isDelivered = fulfillment.status === "delivered";
   return (
     <div className="flex items-start justify-between gap-3 px-5 py-3">
       <div className="flex-1 min-w-0">
@@ -142,16 +159,34 @@ function FulfillmentRow({
       </div>
       {!isCancelled && (
         <div className="flex shrink-0 items-center gap-1">
+          {/* Delivered is terminal, so this disappears once set — matching how
+              the per-line actions treat it. */}
+          {!isDelivered && (
+            <button
+              onClick={onMarkDelivered}
+              disabled={busy}
+              className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-50"
+              title="Mark shipment delivered"
+            >
+              {deliveringId === fulfillment.id ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Truck className="size-3.5" />
+              )}
+            </button>
+          )}
           <button
             onClick={onEditTracking}
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"
+            disabled={busy}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-50"
             title="Edit tracking"
           >
             <Pencil className="size-3.5" />
           </button>
           <button
             onClick={onCancel}
-            className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600"
+            disabled={busy}
+            className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600 disabled:opacity-50"
             title="Cancel fulfillment"
           >
             <XCircle className="size-3.5" />
@@ -355,9 +390,10 @@ export function FulfillDialog({
               />
               <TextField
                 label="Carrier"
+                listId="carriers-shipment"
                 value={tracking.company ?? ""}
                 onChange={(v) => setTracking({ ...tracking, company: v })}
-                placeholder="e.g. UPS, USPS, FedEx, BlueDart"
+                placeholder="e.g. Shiprocket, Delhivery, Blue Dart"
               />
               <TextField
                 label="Tracking URL"
@@ -486,10 +522,16 @@ function EditTrackingDialog({
 }) {
   const isShopify = order.channel.platform === "SHOPIFY";
   const mutation = useUpdateTrackingMutation(order.id);
+  // Every field must be seeded from the record. PATCH .../tracking is a FULL
+  // REPLACE — order.service.ts writes trackingCompany: dto.tracking.company ?? null
+  // and pushes the same null to Shopify — so a field this form does not carry is
+  // a field it erases. company was hardcoded to "" here, so correcting a typo in
+  // a tracking number silently wiped the carrier in both systems. Clearing a
+  // value stays expressible: empty the box and it is written as null.
   const [tracking, setTracking] = useState<TrackingInfoInput>({
     number: fulfillment.trackingNumber ?? "",
     url: fulfillment.trackingUrl ?? "",
-    company: "",
+    company: fulfillment.trackingCompany ?? "",
   });
   const [notifyCustomer, setNotifyCustomer] = useState(false);
 
@@ -525,9 +567,10 @@ function EditTrackingDialog({
         />
         <TextField
           label="Carrier"
+          listId="carriers-edit"
           value={tracking.company ?? ""}
           onChange={(v) => setTracking({ ...tracking, company: v })}
-          placeholder="e.g. UPS, USPS, FedEx, BlueDart"
+          placeholder="e.g. Shiprocket, Delhivery, Blue Dart"
         />
         <TextField
           label="Tracking URL"
@@ -598,11 +641,14 @@ function TextField({
   value,
   onChange,
   placeholder,
+  listId,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
+  /** When set, backs the input with the shared carrier suggestion list. */
+  listId?: string;
 }) {
   return (
     <div>
@@ -613,8 +659,10 @@ function TextField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        list={listId}
         className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
       />
+      {listId && <CarrierDatalist id={listId} />}
     </div>
   );
 }

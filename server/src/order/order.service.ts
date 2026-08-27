@@ -305,7 +305,10 @@ export class OrderService {
         },
         fulfillments: true,
         refunds: true,
-        timeline: { orderBy: { createdAt: 'desc' } },
+        // Capped: the feed is rendered in full, and a long-lived order that has
+        // been re-synced, held, released and re-tracked can accumulate hundreds
+        // of rows. Newest 100 is far more than the UI meaningfully shows.
+        timeline: { orderBy: { createdAt: 'desc' }, take: 100 },
         // The order's live GST invoice (at most one — enforced by the partial
         // unique index invoices_order_id_active_key). Lets the client show the
         // invoice card / gate the Generate button without scanning the
@@ -1000,7 +1003,72 @@ export class OrderService {
   // Push a single MANUAL offline order to the connected Shopify store on
   // demand. Idempotent — already-synced orders return early; already-queued
   // ones don't re-enqueue; failed pushes are retried.
-  async syncToShopify(id: string, orgId: string) {
+  /**
+   * The orders immediately either side of this one, for the detail page's
+   * Previous / Next rail.
+   *
+   * Replaces a client-side approach that fetched the first 100 UNFULFILLED
+   * orders and searched them: opening a FULFILLED order found nothing, so both
+   * buttons were dead (16 of 48 orders on the dev data), and past 100 orders
+   * even open ones fell off the end. It also pulled 100 fully-hydrated orders on
+   * every detail page view to compute two ids.
+   *
+   * Ordering is `COALESCE(external_created_at, created_at) DESC, id DESC` —
+   * newest first, matching the orders list. The COALESCE matters because
+   * `externalCreatedAt` is null for CRM-native orders, and the list's raw
+   * `externalCreatedAt` sort would clump them; `id` breaks ties so the sequence
+   * is total and stable (two orders can share a timestamp).
+   *
+   * Row-value comparison `(a, b) < (c, d)` gives the neighbour in one indexed
+   * seek per direction rather than a scan.
+   */
+  async findAdjacent(id: string, orgId: string, vendorScope?: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id, organizationId: orgId, deletedAt: null },
+      select: { id: true, externalCreatedAt: true, createdAt: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const anchor = order.externalCreatedAt ?? order.createdAt;
+    // A vendor navigates only orders containing their own items — the same rule
+    // the list applies via `where.lineItems.some.vendor`.
+    const vendorFilter = vendorScope
+      ? Prisma.sql`AND EXISTS (
+          SELECT 1 FROM "order_line_items" li
+          WHERE li."order_id" = o."id" AND li."vendor" = ${vendorScope}
+        )`
+      : Prisma.empty;
+    const scope = Prisma.sql`
+      o."organization_id" = ${orgId} AND o."deleted_at" IS NULL ${vendorFilter}`;
+
+    const [older, newer, before, total] = await Promise.all([
+      // "Next order" — the row after this one in a newest-first list.
+      this.prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT o."id" FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") < (${anchor}, ${order.id})
+        ORDER BY COALESCE(o."external_created_at", o."created_at") DESC, o."id" DESC LIMIT 1`,
+      // "Previous" — the row before it.
+      this.prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT o."id" FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") > (${anchor}, ${order.id})
+        ORDER BY COALESCE(o."external_created_at", o."created_at") ASC, o."id" ASC LIMIT 1`,
+      // How many sort ahead of it — gives an exact "N of M" with no window.
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") > (${anchor}, ${order.id})`,
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count FROM "orders" o WHERE ${scope}`,
+    ]);
+
+    return {
+      previousId: newer[0]?.id ?? null,
+      nextId: older[0]?.id ?? null,
+      position: Number(before[0]?.count ?? 0) + 1,
+      total: Number(total[0]?.count ?? 0),
+    };
+  }
+
+  async syncToShopify(id: string, orgId: string, userId?: string) {
     const order = await this.loadOrderWithChannel(id, orgId);
 
     if (order.channel.platform !== ChannelPlatform.MANUAL) {
@@ -1036,6 +1104,18 @@ export class OrderService {
     if (!claimed) {
       return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
     }
+
+    // Recorded only once the claim is won, so the timeline shows one entry per
+    // push actually enqueued rather than one per button press. The push's own
+    // success/failure lands in metadata.shopifySync, not here.
+    await this.prisma.orderTimelineEvent.create({
+      data: {
+        orderId: order.id,
+        actorId: userId ?? null,
+        action: 'sync_queued',
+        message: 'Queued for sync to Shopify',
+      },
+    });
 
     await this.shopifyPushEnqueuer.enqueueOrderPush({
       type: 'order',
@@ -1812,7 +1892,7 @@ export class OrderService {
   async setVendorItemsStatus(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     status: 'in_progress' | 'on_hold' | 'released',
     lineItemIds: string[],
     vendorScope?: string,
@@ -1825,9 +1905,30 @@ export class OrderService {
       await this.assertLineItemsOwnedByVendor(orderId, lineItemIds, vendorScope);
     }
     // 'released' clears the hold → the items go back to unfulfilled locally.
-    await this.prisma.orderLineItem.updateMany({
-      where: { id: { in: lineItemIds }, orderId },
-      data: { fulfillmentStatus: status === 'released' ? null : status },
+    // Paired with its timeline entry in one transaction: holds are the action a
+    // merchant is most likely to need to account for later, and this endpoint
+    // recorded nothing at all.
+    const STATUS_MESSAGE: Record<typeof status, string> = {
+      in_progress: 'Items marked in progress',
+      on_hold: 'Items put on hold',
+      released: 'Hold released on items',
+    };
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderLineItem.updateMany({
+        where: { id: { in: lineItemIds }, orderId },
+        data: { fulfillmentStatus: status === 'released' ? null : status },
+      });
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'items_status_changed',
+          message:
+            `${STATUS_MESSAGE[status]} (${lineItemIds.length})` +
+            (reason ? `: ${reason}` : ''),
+          metadata: { status, lineItemIds, reason } as Prisma.InputJsonValue,
+        },
+      });
     });
 
     if (order.channel.platform === ChannelPlatform.SHOPIFY) {
@@ -2086,7 +2187,7 @@ export class OrderService {
   async markFulfillmentDelivered(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     fulfillmentId: string,
     vendorScope?: string,
   ) {
@@ -2099,19 +2200,41 @@ export class OrderService {
       await this.assertFulfillmentOwnedByVendor(orderId, fulfillmentId, vendorScope);
     }
 
-    await this.prisma.orderFulfillment.update({
-      where: { id: fulfillmentId },
-      data: { status: 'delivered', deliveredAt: new Date() },
-    });
-
     // Reflect delivery on the line items so the per-product UI shows "delivered".
     const deliveredLineIds = this.fulfillmentLineItemIds(fulfillment.metadata);
-    if (deliveredLineIds.length > 0) {
-      await this.prisma.orderLineItem.updateMany({
-        where: { id: { in: deliveredLineIds }, orderId },
-        data: { fulfillmentStatus: 'delivered' },
+
+    // One transaction: the shipment, its line items and the timeline entry were
+    // three independent commits, so a failure between them left a delivered
+    // shipment whose lines still read "fulfilled" and no record of who did it.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderFulfillment.update({
+        where: { id: fulfillmentId },
+        data: { status: 'delivered', deliveredAt: new Date() },
       });
-    }
+
+      if (deliveredLineIds.length > 0) {
+        await tx.orderLineItem.updateMany({
+          where: { id: { in: deliveredLineIds }, orderId },
+          data: { fulfillmentStatus: 'delivered' },
+        });
+      }
+
+      // `userId` was accepted and discarded, so this action left no trace at all.
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'delivered',
+          message: fulfillment.trackingNumber
+            ? `Shipment delivered (${fulfillment.trackingNumber})`
+            : 'Shipment delivered',
+          metadata: {
+            fulfillmentId,
+            lineItemIds: deliveredLineIds,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    });
 
     if (order.channel.platform === ChannelPlatform.SHOPIFY && fulfillment.externalId) {
       await this.markDeliveredOnShopify(order, fulfillment.externalId).catch((e) =>
@@ -2223,7 +2346,7 @@ export class OrderService {
   async markVendorItemDelivered(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     lineId: string,
     vendorScope?: string,
   ) {
@@ -2239,15 +2362,32 @@ export class OrderService {
 
     const fulfillment = await this.resolveFulfillmentForLine(order, line);
 
-    await this.prisma.orderLineItem.update({
-      where: { id: lineId },
-      data: { fulfillmentStatus: 'delivered' },
-    });
-    if (fulfillment) {
-      await this.prisma.orderFulfillment.update({
-        where: { id: fulfillment.id },
-        data: { status: 'delivered', deliveredAt: new Date() },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderLineItem.update({
+        where: { id: lineId },
+        data: { fulfillmentStatus: 'delivered' },
       });
+      if (fulfillment) {
+        await tx.orderFulfillment.update({
+          where: { id: fulfillment.id },
+          data: { status: 'delivered', deliveredAt: new Date() },
+        });
+      }
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'item_delivered',
+          message: 'Item marked as delivered',
+          metadata: {
+            lineItemId: lineId,
+            fulfillmentId: fulfillment?.id ?? null,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    });
+
+    if (fulfillment) {
       if (order.channel.platform === ChannelPlatform.SHOPIFY && fulfillment.externalId) {
         await this.markDeliveredOnShopify(order, fulfillment.externalId).catch((e) =>
           this.logger.warn(
@@ -2267,7 +2407,7 @@ export class OrderService {
   async unfulfillVendorItem(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     lineId: string,
     vendorScope?: string,
   ) {
@@ -2297,20 +2437,41 @@ export class OrderService {
     // Cancelling a fulfilment reverts ALL of its lines to unfulfilled.
     const revertIds = fulfillment ? this.fulfillmentLineItemIds(fulfillment.metadata) : [];
     const ids = revertIds.length ? revertIds : [lineId];
-    await this.prisma.orderLineItem.updateMany({
-      where: { id: { in: ids }, orderId },
-      data: { fulfillmentStatus: null },
-    });
-    if (fulfillment) {
-      await this.prisma.orderFulfillment.update({
-        where: { id: fulfillment.id },
-        data: { status: 'cancelled' },
+    // One transaction: reverting the lines, cancelling the shipment and
+    // recomputing the order's status are a single logical change, and a partial
+    // apply leaves the order header disagreeing with its own line items.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderLineItem.updateMany({
+        where: { id: { in: ids }, orderId },
+        data: { fulfillmentStatus: null },
       });
-    }
-    const allItems = await this.prisma.orderLineItem.findMany({ where: { orderId } });
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { fulfillmentStatus: this.computeFulfillmentStatus(allItems) },
+      if (fulfillment) {
+        await tx.orderFulfillment.update({
+          where: { id: fulfillment.id },
+          data: { status: 'cancelled' },
+        });
+      }
+      const allItems = await tx.orderLineItem.findMany({ where: { orderId } });
+      await tx.order.update({
+        where: { id: orderId },
+        data: { fulfillmentStatus: this.computeFulfillmentStatus(allItems) },
+      });
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'item_unfulfilled',
+          message:
+            ids.length > 1
+              ? `Item switched back to unfulfilled (${ids.length} lines on the shipment)`
+              : 'Item switched back to unfulfilled',
+          metadata: {
+            lineItemId: lineId,
+            lineItemIds: ids,
+            fulfillmentId: fulfillment?.id ?? null,
+          } as Prisma.InputJsonValue,
+        },
+      });
     });
     return { id: lineId, status: 'unfulfilled' };
   }

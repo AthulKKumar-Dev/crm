@@ -9,9 +9,10 @@ type Filter = "all" | EventCategory;
 
 /**
  * The complete set of `action` values any code path writes, mapped to a
- * category. All eleven write sites live in server/src/order/order.service.ts —
- * there is no shared enum server-side, so this map is the only place the
- * vocabulary is collected.
+ * category. Write sites live in server/src/order/order.service.ts (user
+ * actions) and server/src/channel/shopify-sync.service.ts (inbound Shopify
+ * changes). There is no shared enum server-side, so this map is the only place
+ * the vocabulary is collected.
  *
  * The column is a free-form string, so `categoryOf` must tolerate anything.
  */
@@ -21,9 +22,17 @@ const EVENT_CATEGORY: Record<string, EventCategory> = {
   cancelled: "order",
   closed: "order",
   reopened: "order",
+  sync_queued: "order",
   paid: "payment",
   captured: "payment",
+  payment_status_changed: "payment",
+  refunded: "payment",
   fulfilled: "fulfilment",
+  delivered: "fulfilment",
+  item_delivered: "fulfilment",
+  item_unfulfilled: "fulfilment",
+  items_status_changed: "fulfilment",
+  fulfillment_status_changed: "fulfilment",
   tracking_updated: "fulfilment",
   fulfillment_cancelled: "fulfilment",
 };
@@ -59,7 +68,22 @@ function categoryOf(action?: string | null): EventCategory {
 
 /** Cancellations read as destructive regardless of which category they sit in. */
 function isDestructive(action?: string | null): boolean {
-  return action === "cancelled" || action === "fulfillment_cancelled";
+  return (
+    action === "cancelled" ||
+    action === "fulfillment_cancelled" ||
+    action === "item_unfulfilled" ||
+    action === "refunded"
+  );
+}
+
+/**
+ * Did this event come from Shopify rather than a user here?
+ *
+ * The sync path stamps `metadata.source` and leaves `actorId` null, because the
+ * actor is a Shopify Admin user we hold no record of.
+ */
+function isFromShopify(evt: { actorId?: string | null; metadata?: Record<string, unknown> | null }) {
+  return !evt.actorId && evt.metadata?.source === "shopify";
 }
 
 /** "Premium Cotton Shirt" → "PCS". Stands in for a missing product image. */
@@ -75,13 +99,15 @@ function initialsOf(title: string): string {
 /**
  * Order lifecycle feed.
  *
- * Every event here is user-initiated: all eleven server write sites pass a real
- * user id, so `actorId` is never null and there is no system-vs-user split to
- * filter on. Chips therefore filter by event type instead.
+ * Two kinds of event land here. User actions carry an `actorId` resolved to a
+ * name against the org member list. Changes made in Shopify Admin arrive through
+ * the sync/webhook path with a null `actorId` and `metadata.source === "shopify"`,
+ * and are attributed to Shopify instead. Chips filter by event type, since both
+ * kinds can appear in any category.
  *
- * Shopify writes no timeline rows at all — an order paid, refunded, fulfilled or
- * cancelled in Shopify Admin produces nothing here, and Shopify-created orders
- * have no `created` event.
+ * Shopify events are only recorded from the moment that path started writing
+ * them — history before then was deliberately not backfilled, because
+ * reconstructing it from current state would be inventing it.
  */
 export function OrderActivity({
   order,
@@ -154,7 +180,8 @@ export function OrderActivity({
 
       {timeline.length === 0 ? (
         <p className="px-5 py-4 text-caption text-muted-foreground">
-          No activity recorded. Actions taken directly in Shopify do not appear here.
+          No activity recorded yet. Changes made here and in Shopify both appear on
+          this feed from the point they happen.
         </p>
       ) : (
         <div className="px-5 py-4">
@@ -202,7 +229,14 @@ export function OrderActivity({
                           hour: "2-digit",
                           minute: "2-digit",
                         })}
-                        {actor && ` · ${actor}`}
+                        {/* A Shopify event has no actor we can name, so say
+                            where it came from rather than leaving it blank and
+                            looking like a failed name lookup. */}
+                        {actor
+                          ? ` · ${actor}`
+                          : isFromShopify(evt)
+                            ? " · Shopify"
+                            : ""}
                       </p>
                     </div>
                   </li>

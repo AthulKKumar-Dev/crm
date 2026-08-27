@@ -10,7 +10,7 @@ import {
   Truck,
   X,
 } from "lucide-react";
-import { useOrder, useOrders } from "~/hooks/use-order-queries";
+import { useOrder, useAdjacentOrders } from "~/hooks/use-order-queries";
 import { useCustomer } from "~/hooks/use-customer-queries";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg, useOrgMembers } from "~/hooks/use-org-queries";
@@ -20,6 +20,7 @@ import {
   OrderActionsMenu,
   CancelOrderDialog,
   CapturePaymentDialog,
+  useOrderActionGates,
 } from "~/components/app/order-actions";
 import { OrderFulfillmentsSection, FulfillDialog } from "~/components/app/order-fulfillments";
 import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
@@ -61,8 +62,8 @@ export function meta() {
 /** Placeholder for a field the API does not expose yet. */
 const DASH = "—";
 
-/** How many open orders the prev/next rail can see. 100 is the server's `@Max`. */
-const OPEN_PAGE_SIZE = 100;
+/** Statutory GST rates. Used to decide whether an effective rate is a real slab. */
+const GST_SLABS = [0, 0.25, 3, 5, 12, 18, 28];
 
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -72,17 +73,21 @@ export default function OrderDetailPage() {
 
   // Every hook must run before the vendor early-return below, or the hook order
   // changes between renders.
-  const { data: openOrders } = useOrders({
-    fulfillmentStatus: "UNFULFILLED",
-    limit: OPEN_PAGE_SIZE,
-    page: 1,
-  });
-  const { data: customer } = useCustomer(order?.customer?.id);
+  const { data: adjacent } = useAdjacentOrders(id);
+  const {
+    data: customer,
+    isError: customerError,
+    refetch: refetchCustomer,
+  } = useCustomer(order?.customer?.id);
   // Only source of a display name for the order's owner — `OrderTimelineEvent.actorId`
   // and `metadata.createdByUserId` are bare user ids with no Prisma relation to User.
   const { data: orgMembers } = useOrgMembers(org?.id);
   const [showInvoiceDialog, setShowInvoiceDialog] = useState(false);
   const [dialog, setDialog] = useState<"fulfill" | "capture" | "cancel" | null>(null);
+  // Same gates the Actions menu uses, so the rail below can't offer a button
+  // the menu deliberately hides. Called here, above the early-returns, for the
+  // hook-order reason noted above.
+  const { canCapture, canCancel, canFulfill, canEdit } = useOrderActionGates(order);
 
   const currency = order?.currency ?? org?.currency ?? "INR";
   const gstEnabled = org?.gstEnabled ?? false;
@@ -144,9 +149,17 @@ export default function OrderDetailPage() {
   const total = Number(order.totalPrice);
   const shipping = Number(order.totalShippingPrice);
   const discounts = Number(order.totalDiscounts);
-  // Derived, not stored. Wrong for a mixed-rate cart — the real per-line rate
-  // lives on the invoice, which the order payload does not carry.
-  const gstRate = subtotal > 0 ? Math.round((tax / subtotal) * 100) : null;
+  // Derived, not stored — the real per-line rate lives on the invoice, which the
+  // order payload does not carry. tax/subtotal is the *effective* rate, so a cart
+  // mixing 5% and 18% lines used to print a blended "GST 11%" that matches no
+  // line and no slab. Only claim a rate when the effective rate lands on an
+  // actual GST slab, which a mixed cart essentially never does; otherwise show
+  // the tax amount with no rate rather than an invented one.
+  const gstRate = (() => {
+    if (subtotal <= 0 || tax <= 0) return null;
+    const effective = (tax / subtotal) * 100;
+    return GST_SLABS.find((slab) => Math.abs(effective - slab) < 0.05) ?? null;
+  })();
 
   const balance = deriveBalance(order, total);
   const balanceCaption = balanceCaptionFor(order, balance, currency);
@@ -173,14 +186,15 @@ export default function OrderDetailPage() {
 
   const weightLabel = totalWeightLabel(order.lineItems);
 
-  // Locate this order in the open-order list to drive the prev/next rail. There
-  // is no positional endpoint, so we can only see the first page of open orders.
-  const openList = openOrders?.data ?? [];
-  const openTotal = openOrders?.meta?.total ?? 0;
-  const openIndex = openList.findIndex((o) => o.id === order.id);
-  const prevId = openIndex > 0 ? openList[openIndex - 1].id : null;
-  const nextId =
-    openIndex >= 0 && openIndex < openList.length - 1 ? openList[openIndex + 1].id : null;
+  // Prev/next comes from GET /orders/:id/adjacent, which walks ALL orders
+  // newest-first and is exact at any position.
+  //
+  // This used to fetch the first 100 UNFULFILLED orders and search them, which
+  // failed two ways: opening a FULFILLED order found nothing and disabled BOTH
+  // buttons (a third of orders on the dev data), and any order past the first
+  // 100 did the same. It also pulled 100 hydrated orders on every page view.
+  const prevId = adjacent?.previousId ?? null;
+  const nextId = adjacent?.nextId ?? null;
 
   // The customer query carries a phone; the order's embedded customer only has
   // one on the detail endpoint. Neither is guaranteed.
@@ -198,14 +212,10 @@ export default function OrderDetailPage() {
           <span className="font-medium text-foreground">{order.name}</span>
         </nav>
         <div className="flex items-center gap-2">
-          {openIndex >= 0 ? (
+          {adjacent && adjacent.total > 0 && (
             <span className="text-caption text-muted-foreground">
-              {openIndex + 1} of {openTotal} open
+              {adjacent.position} of {adjacent.total}
             </span>
-          ) : (
-            openTotal > 0 && (
-              <span className="text-caption text-muted-foreground">{openTotal} open</span>
-            )
           )}
           <Button asChild={!!prevId} variant="outline" size="sm" disabled={!prevId}>
             {prevId ? <Link to={`/orders/${prevId}`}>Previous</Link> : <span>Previous</span>}
@@ -267,7 +277,7 @@ export default function OrderDetailPage() {
 
           {/* Tags */}
           <RailSection label="Tags">
-            <OrderTags order={order} />
+            <OrderTags order={order} canEdit={canEdit} />
           </RailSection>
 
           {/* Metadata */}
@@ -310,27 +320,24 @@ export default function OrderDetailPage() {
             allowInProgress
             headerAction={
               <div className="flex items-center gap-3 text-caption font-medium">
+                {/* Labelled for what it does — this opens FulfillDialog, not
+                    the Actions menu's Edit details dialog. */}
                 <button
                   onClick={() => setDialog("fulfill")}
                   className="text-brand-strong hover:underline"
                 >
-                  Edit
+                  Fulfil items
                 </button>
-                {/* No restock endpoint exists — the only restock in the API is a
-                    boolean on cancel-order. */}
-                <button
-                  disabled
-                  title="Coming soon — no restock endpoint yet"
-                  className="cursor-not-allowed text-muted-foreground opacity-60"
-                >
-                  Restock
-                </button>
+                {/* A standalone Restock button used to sit here, permanently
+                    disabled — there is no restock endpoint. Restocking is real,
+                    but it is a checkbox on Cancel order, which is where it
+                    belongs; a dead control is worse than no control. */}
               </div>
             }
             footer={
               <div className="flex flex-wrap items-start justify-between gap-4 rounded-b-xl border-t bg-[#f5f5f5] px-5 py-3 dark:bg-muted/40">
                 <p className="text-caption text-muted-foreground">
-                  Select items to fulfil, hold or refund in bulk
+                  Select items to fulfil, hold or release in bulk
                 </p>
                 <dl className="w-full max-w-56 space-y-1 text-caption flex flex-col gap-1.5">
                   <TotalRow label="Subtotal" value={formatCurrency(subtotal, currency)} />
@@ -443,16 +450,20 @@ export default function OrderDetailPage() {
           {/* The order total lives in the left rail now — this rail opens with
               the actions rather than repeating the same figure. */}
           <div className="space-y-2">
-            <Button
-              className="w-full bg-brand text-brand-strong hover:bg-brand-hover"
-              disabled={outstanding.length === 0}
-              onClick={() => setDialog("fulfill")}
-            >
-              Fulfil items
-            </Button>
-            <Button variant="brand" className="w-full" onClick={() => setDialog("capture")}>
-              Capture payment
-            </Button>
+            {canFulfill && (
+              <Button
+                className="w-full bg-brand text-brand-strong hover:bg-brand-hover"
+                disabled={outstanding.length === 0}
+                onClick={() => setDialog("fulfill")}
+              >
+                Fulfil items
+              </Button>
+            )}
+            {canCapture && (
+              <Button variant="brand" className="w-full" onClick={() => setDialog("capture")}>
+                Capture payment
+              </Button>
+            )}
             {invoice ? (
               <Button asChild variant="outline" className="w-full">
                 <Link to={`/orders/invoices/${invoice.id}/print`} target="_blank">
@@ -462,7 +473,7 @@ export default function OrderDetailPage() {
               </Button>
             ) : (
               <Button
-                variant="outline"
+                variant="brand"
                 className="w-full"
                 disabled={!gstEnabled}
                 title={gstEnabled ? undefined : "GST is not enabled for this organization"}
@@ -478,18 +489,27 @@ export default function OrderDetailPage() {
                 Packing slip
               </Link>
             </Button>
-            <Button
-              variant="ghost"
-              className="w-full text-muted-foreground"
-              onClick={() => setDialog("cancel")}
-            >
-              Cancel order
-            </Button>
+            {canCancel && (
+              <Button
+                variant="ghost"
+                className="w-full text-muted-foreground"
+                onClick={() => setDialog("cancel")}
+              >
+                Cancel order
+              </Button>
+            )}
           </div>
 
-          <CustomerRail order={order} customer={customer} currency={currency} phone={phone} />
+          <CustomerRail
+            order={order}
+            customer={customer}
+            customerError={customerError}
+            onRetryCustomer={refetchCustomer}
+            currency={currency}
+            phone={phone}
+          />
 
-          <InternalNote order={order} />
+          <InternalNote order={order} canEdit={canEdit} />
         </aside>
       </div>
 
@@ -513,28 +533,26 @@ export default function OrderDetailPage() {
 /**
  * Outstanding balance.
  *
- * There is no transactions table and no `amountCaptured` column, so the
- * captured figure is only knowable where `financialStatus` makes it
- * unambiguous. `PARTIALLY_PAID` / `PARTIALLY_REFUNDED` return null rather than
- * inventing a number.
+ * There is no transactions table and no `amountCaptured` column, so the amount
+ * outstanding is only knowable where `financialStatus` makes it unambiguous.
+ * `PARTIALLY_PAID` / `PARTIALLY_REFUNDED` return null rather than inventing a
+ * number. (A `captured` figure was computed here too and never read by anything
+ * — dropped rather than left as a second source of truth.)
  */
-function deriveBalance(
-  order: OrderDetail,
-  total: number,
-): { due: number | null; captured: number | null } {
+function deriveBalance(order: OrderDetail, total: number): { due: number | null } {
   const refunded = (order.refunds ?? []).reduce((sum, r) => sum + Number(r.amount), 0);
   switch (order.financialStatus) {
     case "PAID":
-      return { due: 0, captured: total };
+      return { due: 0 };
     case "REFUNDED":
     case "VOIDED":
-      return { due: 0, captured: 0 };
+      return { due: 0 };
     case "PENDING":
     case "AUTHORIZED":
-      return { due: total - refunded, captured: 0 };
+      return { due: total - refunded };
     default:
       // PARTIALLY_PAID, PARTIALLY_REFUNDED — genuinely unknowable.
-      return { due: null, captured: null };
+      return { due: null };
   }
 }
 
@@ -622,7 +640,7 @@ function totalWeightLabel(lineItems: OrderDetail["lineItems"]): string | null {
 
 function balanceCaptionFor(
   order: OrderDetail,
-  balance: { due: number | null; captured: number | null },
+  balance: { due: number | null },
   currency: string,
 ): string {
   switch (order.financialStatus) {
@@ -682,7 +700,7 @@ function RailSection({ label, children }: { label: string; children: React.React
  * `PATCH /orders/:id` takes the full tag array — there is no add/remove delta
  * endpoint — so every edit sends the whole list.
  */
-function OrderTags({ order }: { order: OrderDetail }) {
+function OrderTags({ order, canEdit }: { order: OrderDetail; canEdit: boolean }) {
   const mutation = useUpdateOrderMutation(order.id);
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
@@ -708,19 +726,23 @@ function OrderTags({ order }: { order: OrderDetail }) {
           className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-micro font-medium text-foreground"
         >
           {tag}
-          <button
-            type="button"
-            onClick={() => remove(tag)}
-            disabled={mutation.isPending}
-            aria-label={`Remove tag ${tag}`}
-            className="text-muted-foreground hover:text-danger disabled:opacity-50"
-          >
-            <X className="size-2.5" />
-          </button>
+          {/* Tags write through PATCH /orders/:id (ORG_OPERATORS). Without this
+              a VIEWER got remove buttons and an Add control that only 403. */}
+          {canEdit && (
+            <button
+              type="button"
+              onClick={() => remove(tag)}
+              disabled={mutation.isPending}
+              aria-label={`Remove tag ${tag}`}
+              className="text-muted-foreground hover:text-danger disabled:opacity-50"
+            >
+              <X className="size-2.5" />
+            </button>
+          )}
         </span>
       ))}
 
-      {adding ? (
+      {!canEdit ? null : adding ? (
         <input
           autoFocus
           value={draft}
@@ -794,21 +816,23 @@ function TotalRow({
 /**
  * Shipment progress.
  *
- * Only two of these four steps are actually backed by data: `OrderFulfillment`
- * carries `createdAt`, `shippedAt` and `deliveredAt`, and its `status` is a
- * free-form string that never takes a "packed" or "in transit" value. The
- * unbacked steps stay grey until carrier-scan ingestion exists.
+ * One step per timestamp `OrderFulfillment` actually carries — `createdAt`,
+ * `shippedAt`, `deliveredAt` (or `status === "delivered"`).
+ *
+ * This used to show four steps including "Packed" and "In transit", neither of
+ * which is observed: "Packed" was just `!!fulfillment` (the same fact as step
+ * one) and "In transit" was `shipped && !delivered`, so it *un-completed* when
+ * the parcel arrived. Both implied carrier scan events that nothing ingests.
+ * Add steps back when there is a carrier feed to back them.
  */
 function ShipmentStepper({ fulfillment }: { fulfillment?: OrderFulfillment }) {
   const steps = useMemo(() => {
-    const packed = !!fulfillment;
-    const shipped = !!fulfillment?.shippedAt;
     const delivered =
       !!fulfillment?.deliveredAt || fulfillment?.status === "delivered";
+    const shipped = !!fulfillment?.shippedAt || delivered;
     return [
-      { label: "Packed", done: packed },
-      { label: "Picked up", done: shipped },
-      { label: "In transit", done: shipped && !delivered },
+      { label: "Fulfilled", done: !!fulfillment },
+      { label: "Shipped", done: shipped },
       { label: "Delivered", done: delivered },
     ];
   }, [fulfillment]);
@@ -889,11 +913,16 @@ function sameAddress(
 function CustomerRail({
   order,
   customer,
+  customerError,
+  onRetryCustomer,
   currency,
   phone,
 }: {
   order: OrderDetail;
   customer?: CustomerDetail;
+  /** The customer lookup failed — distinct from the order having no customer. */
+  customerError?: boolean;
+  onRetryCustomer?: () => void;
   currency: string;
   phone: string | null;
 }) {
@@ -951,21 +980,34 @@ function CustomerRail({
         )}
       </div>
 
-      {/* Lifetime value */}
+      {/* Lifetime value. A failed lookup used to render the same em dash as a
+          customer with no spend — "unknown" shown as "zero". */}
       <div className="flex items-baseline justify-between gap-2  pt-3">
         <span className="text-caption text-muted-foreground">Lifetime value</span>
-        <span className="text-caption font-semibold tabular-nums text-foreground">
-          {customer ? formatCurrency(Number(customer.totalSpent), currency) : DASH}
-        </span>
+        {customerError ? (
+          <button
+            type="button"
+            onClick={onRetryCustomer}
+            className="text-caption font-medium text-danger underline"
+          >
+            Couldn't load — retry
+          </button>
+        ) : (
+          <span className="text-caption font-semibold tabular-nums text-foreground">
+            {customer ? formatCurrency(Number(customer.totalSpent), currency) : DASH}
+          </span>
+        )}
       </div>
 
-      {/* No per-customer route exists yet, so this lands on the customers list. */}
-      <Link
-        to="/orders/customers"
-        className=" pt-3 text-center text-caption font-medium text-foreground hover:underline"
-      >
-        View customer →
-      </Link>
+      {/* Walk-in sales carry no customer record, so there is nothing to link to. */}
+      {order.customer && (
+        <Link
+          to={`/orders/customers/${order.customer.id}`}
+          className=" pt-3 text-center text-caption font-medium text-foreground hover:underline"
+        >
+          View customer →
+        </Link>
+      )}
 
       {/* Shipping */}
       <div className="flex flex-col gap-2.5 border-t pt-3">
@@ -1002,10 +1044,22 @@ function CustomerRail({
  * reads it back, so this is the customer-facing order note. A genuinely private
  * field needs its own column — `Customer.internalNotes` is the precedent.
  */
-function InternalNote({ order }: { order: OrderDetail }) {
+function InternalNote({ order, canEdit }: { order: OrderDetail; canEdit: boolean }) {
   const mutation = useUpdateOrderMutation(order.id);
   const [note, setNote] = useState(order.note ?? "");
   const dirty = note !== (order.note ?? "");
+
+  // Read-only roles still see the note — they just cannot write it. An empty
+  // block would hide real order context from a VIEWER for no reason.
+  if (!canEdit) {
+    return (
+      <RailBlock label="Order note">
+        <p className="whitespace-pre-wrap text-caption text-muted-foreground">
+          {order.note?.trim() || "No note on this order."}
+        </p>
+      </RailBlock>
+    );
+  }
 
   return (
     <RailBlock label="Order note">
@@ -1048,9 +1102,23 @@ function GenerateInvoiceDialog({
   currency: string;
   onClose: () => void;
 }) {
-  const { data: gstins = [] } = useGstins();
-  const { data: states = [] } = useIndianStates();
+  // Both lists must distinguish "empty" from "failed to load". Previously a
+  // failed request rendered exactly like a genuinely empty one — an empty
+  // <Select> and the label "(No GSTINs registered)" — telling the user to go
+  // register a GSTIN they may well already have.
+  const {
+    data: gstins = [],
+    isLoading: gstinsLoading,
+    isError: gstinsError,
+    refetch: refetchGstins,
+  } = useGstins();
+  const {
+    data: states = [],
+    isError: statesError,
+    refetch: refetchStates,
+  } = useIndianStates();
   const createInvoice = useCreateInvoiceMutation();
+  const lookupsFailed = gstinsError || statesError;
 
   const [sellerGstinId, setSellerGstinId] = useState("");
   const [buyerGstin, setBuyerGstin] = useState("");
@@ -1090,9 +1158,40 @@ function GenerateInvoiceDialog({
         </div>
 
         <div className="space-y-4 px-6 py-4">
+          {/* Not a blocker: every field below is optional and the server
+              auto-resolves the seller GSTIN and place of supply when they are
+              omitted. So say what broke and offer a retry, but still let the
+              invoice be generated. */}
+          {lookupsFailed && (
+            <div className="flex items-start justify-between gap-3 rounded-lg bg-danger-subtle px-3 py-2">
+              <p className="text-micro text-danger">
+                Couldn't load {gstinsError ? "your GSTINs" : ""}
+                {gstinsError && statesError ? " and " : ""}
+                {statesError ? "the state list" : ""}. You can still generate the
+                invoice — the server will auto-select.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (gstinsError) refetchGstins();
+                  if (statesError) refetchStates();
+                }}
+                className="shrink-0 text-micro font-medium text-danger underline"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           <div>
             <label className="text-micro font-medium text-muted-foreground">
-              Seller GSTIN {activeGstins.length === 0 && "(No GSTINs registered)"}
+              Seller GSTIN{" "}
+              {gstinsError
+                ? "(Couldn't load)"
+                : gstinsLoading
+                  ? "(Loading…)"
+                  : activeGstins.length === 0
+                    ? "(No GSTINs registered)"
+                    : ""}
             </label>
             <Select value={sellerGstinId} onValueChange={setSellerGstinId}>
               <SelectTrigger className="mt-1 h-9 text-caption">
