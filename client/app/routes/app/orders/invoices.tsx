@@ -204,7 +204,7 @@ export default function InvoicesPage() {
         <PageHeaderActions>
           <Button
             variant="outline"
-            className="h-auto rounded-full px-4.5 py-2"
+            size="action"
             disabled={isDownloading}
             onClick={() =>
               download(
@@ -218,7 +218,7 @@ export default function InvoicesPage() {
           </Button>
           {/* Invoices are raised against an order, so this goes to the order
               list rather than to a standalone create form — there isn't one. */}
-          <Button variant="brand" className="h-auto rounded-full px-4.5 py-2" asChild>
+          <Button variant="brand" size="action" asChild>
             <Link to="/orders" title="Pick an order to raise an invoice against">
               <Plus className="size-3.5" />
               New invoice

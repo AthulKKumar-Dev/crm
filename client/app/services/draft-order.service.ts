@@ -9,6 +9,7 @@ import type {
   CompleteDraftRequest,
   CompleteDraftResponse,
   SendDraftInvoiceRequest,
+  DraftOrderStats,
 } from "~/types/api";
 
 /**
@@ -19,6 +20,12 @@ export const draftOrderService = {
   list: (params?: DraftOrderListParams) =>
     apiClient
       .get<PaginatedResponse<DraftOrder>>("/draft-orders", { params })
+      .then((r) => r.data),
+
+  /** Org-wide aggregates for the KPI row and the filter chips. */
+  stats: (params?: { channelId?: string }) =>
+    apiClient
+      .get<DraftOrderStats>("/draft-orders/stats", { params })
       .then((r) => r.data),
 
   get: (id: string) =>

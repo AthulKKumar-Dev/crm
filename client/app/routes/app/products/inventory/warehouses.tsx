@@ -55,9 +55,9 @@ export default function WarehousesPage() {
           <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Warehouses</h1>
         </div>
         <Button
-          size="sm"
+          variant="brand"
+          size="action"
           onClick={() => setCreating(true)}
-          className="bg-[#CEF17B] text-gray-900 hover:bg-[#b8e67d]"
         >
           <Plus className="size-3.5" /> New warehouse
         </Button>

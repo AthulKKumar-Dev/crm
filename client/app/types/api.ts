@@ -1493,6 +1493,33 @@ export interface DraftOrderListParams {
   sortOrder?: "asc" | "desc";
 }
 
+/**
+ * Aggregates for the drafts KPI row and the filter-chip counts.
+ *
+ * Org-wide, not page-derived — the list pages at 15 rows, so summing the
+ * response would have made every figure change when the user pressed Next.
+ */
+export interface DraftOrderStats {
+  /** `value` is the whole pipeline still in play: OPEN + INVOICE_SENT. */
+  openDrafts: { count: number; value: number };
+  invoiceSent: { count: number };
+  /**
+   * `changePct` is null when last month had none — `StatCard` omits the badge
+   * on `undefined`, and passing 0 renders a green "0%" up-trend instead.
+   */
+  convertedThisMonth: {
+    count: number;
+    value: number;
+    changePct: number | null;
+    valueChangePct: number | null;
+  };
+  /** ISO bounds of the month-to-date window, for the card sub-labels. */
+  periodStart: string;
+  periodEnd: string;
+  counts: { all: number; open: number; invoiceSent: number; completed: number };
+  currency: string;
+}
+
 /** Response from POST /draft-orders/:id/complete. */
 export interface CompleteDraftResponse {
   draftId: string;

@@ -57,7 +57,7 @@ export default function DashboardPage() {
           </PageHeaderContent>
           <PageHeaderActions>
             <Button
-              className="h-auto rounded-full px-4.5 py-2"
+              size="action"
               variant="outline"
               onClick={() => exportCsv()}
             >
@@ -66,7 +66,7 @@ export default function DashboardPage() {
             </Button>
             <Button
               variant="brand"
-              className="h-auto rounded-full px-4.5 py-2"
+              size="action"
               onClick={() => exportJson()}
             >
               <Download className="size-3.5" />

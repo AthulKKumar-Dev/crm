@@ -13,6 +13,11 @@ import {
 } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  getFinancialYear,
+  gstPeriodRange,
+  zonedParts,
+} from '../common/utils/zoned-date.util';
 import { GstCalculatorService } from '../gst/gst-calculator.service';
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { OrderService } from '../order/order.service';
@@ -46,6 +51,7 @@ import { UpdateDraftOrderDto } from './dto/update-draft-order.dto';
 import { CompleteDraftDto } from './dto/complete-draft.dto';
 import { SendDraftInvoiceDto } from './dto/send-invoice.dto';
 import { QueryDraftOrdersDto } from './dto/query-drafts.dto';
+import { QueryDraftStatsDto } from './dto/query-draft-stats.dto';
 
 /**
  * Draft orders — in-progress / quote-style orders that haven't been
@@ -172,6 +178,142 @@ export class DraftOrderService {
       })),
       meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     };
+  }
+
+  /**
+   * KPI aggregates for the drafts dashboard, plus the filter-chip counts.
+   *
+   * Deliberately server-side: the list endpoint pages at 15 rows, so anything
+   * derived from `findAll`'s response would describe the visible page rather
+   * than the workspace, and would silently change every time the user pressed
+   * Next.
+   *
+   * Month boundaries go through `gstPeriodRange` in the merchant's timezone.
+   * The helper is GST-named but is a plain timezone-correct month window —
+   * naive local-month maths on a UTC server shifts every edge by the offset,
+   * which for IST moves the first 5.5 hours of each month into the wrong one.
+   */
+  async getStats(orgId: string, query: QueryDraftStatsDto) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, currency: true },
+    });
+
+    const timeZone = org?.timezone || 'Asia/Kolkata';
+    const now = new Date();
+
+    const currentMonth = gstPeriodRange(
+      getFinancialYear(now, timeZone),
+      String(zonedParts(now, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    // One millisecond before this month began is always inside the previous
+    // month, so this needs no special case for January.
+    const lastInstantOfPrevMonth = new Date(currentMonth.from.getTime() - 1);
+    const previousMonth = gstPeriodRange(
+      getFinancialYear(lastInstantOfPrevMonth, timeZone),
+      String(zonedParts(lastInstantOfPrevMonth, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    const scope: Prisma.DraftOrderWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      ...(query.channelId && { channelId: query.channelId }),
+    };
+
+    // Half-open on purpose, matching `gstPeriodRange`: an inclusive upper bound
+    // drops anything in the last millisecond of the month.
+    const completedIn = (range: { from: Date; toExclusive: Date }) => ({
+      ...scope,
+      status: DraftOrderStatus.COMPLETED,
+      completedAt: { gte: range.from, lt: range.toExclusive },
+    });
+
+    // "Open" for the money figure means everything still in play — an
+    // invoice-sent draft is unpaid, not finished, so it belongs in the
+    // pipeline value alongside OPEN.
+    const inPlay: Prisma.DraftOrderWhereInput = {
+      ...scope,
+      status: {
+        in: [DraftOrderStatus.OPEN, DraftOrderStatus.INVOICE_SENT],
+      },
+    };
+
+    const [
+      all,
+      open,
+      invoiceSent,
+      completed,
+      inPlayValue,
+      thisMonth,
+      lastMonth,
+    ] = await Promise.all([
+      this.prisma.draftOrder.count({ where: scope }),
+      this.prisma.draftOrder.count({
+        where: { ...scope, status: DraftOrderStatus.OPEN },
+      }),
+      this.prisma.draftOrder.count({
+        where: { ...scope, status: DraftOrderStatus.INVOICE_SENT },
+      }),
+      this.prisma.draftOrder.count({
+        where: { ...scope, status: DraftOrderStatus.COMPLETED },
+      }),
+      this.prisma.draftOrder.aggregate({
+        where: inPlay,
+        _sum: { totalPrice: true },
+      }),
+      this.prisma.draftOrder.aggregate({
+        where: completedIn(currentMonth),
+        _sum: { totalPrice: true },
+        _count: true,
+      }),
+      this.prisma.draftOrder.aggregate({
+        where: completedIn(previousMonth),
+        _sum: { totalPrice: true },
+        _count: true,
+      }),
+    ]);
+
+    const decimal = (value: Prisma.Decimal | null | undefined) =>
+      value ? Math.round(parseFloat(value.toString()) * 100) / 100 : 0;
+
+    const convertedNow = decimal(thisMonth._sum.totalPrice);
+    const convertedPrev = decimal(lastMonth._sum.totalPrice);
+
+    return {
+      openDrafts: {
+        count: open,
+        // The whole pipeline still in play, which is why the card's sub-label
+        // reads "open + invoice sent" rather than just "open".
+        value: decimal(inPlayValue._sum.totalPrice),
+      },
+      invoiceSent: { count: invoiceSent },
+      convertedThisMonth: {
+        count: thisMonth._count,
+        value: convertedNow,
+        changePct: this.percentChange(thisMonth._count, lastMonth._count),
+        valueChangePct: this.percentChange(convertedNow, convertedPrev),
+      },
+      // ISO bounds of the month-to-date window, for the card sub-labels. `to`
+      // is the inclusive last instant so the UI can render a date, not the
+      // 1st of the following month.
+      periodStart: currentMonth.from.toISOString(),
+      periodEnd: new Date(currentMonth.toExclusive.getTime() - 1).toISOString(),
+      counts: { all, open, invoiceSent, completed },
+      currency: org?.currency ?? 'INR',
+    };
+  }
+
+  /**
+   * Percentage change, rounded. Null when there is no prior basis: a jump from
+   * zero is not "100% up", and passing 0 would render a green up-trend badge —
+   * which is exactly how a month with no conversions came out looking healthy.
+   */
+  private percentChange(current: number, previous: number): number | null {
+    if (!previous) return null;
+    return Math.round(((current - previous) / previous) * 100);
   }
 
   // ─── DETAIL ───

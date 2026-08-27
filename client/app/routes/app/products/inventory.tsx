@@ -109,9 +109,9 @@ function EnableInventoryCta({ seeding }: { seeding: boolean }) {
             </Button>
           ) : (
             <Button
+              variant="brand"
               onClick={() => enable.mutate()}
               disabled={enable.isPending}
-              className="bg-[#CEF17B] text-gray-900 hover:bg-[#b8e67d]"
             >
               {enable.isPending ? "Starting…" : "Enable warehousing"}
             </Button>
@@ -252,7 +252,7 @@ function StockScreen() {
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
-            size="sm"
+            size="action"
             onClick={() =>
               generateSkus.mutate(
                 hasSelection
@@ -276,7 +276,7 @@ function StockScreen() {
           </Button>
           <Button
             variant="outline"
-            size="sm"
+            size="action"
             onClick={() =>
               generateBarcodes.mutate(
                 hasSelection
@@ -301,14 +301,14 @@ function StockScreen() {
                 : "Generate all missing barcodes"}
           </Button>
           {labelHref ? (
-            <Button asChild size="sm" className="bg-[#CEF17B] text-gray-900 hover:bg-[#b8e67d]">
+            <Button asChild variant="brand" size="action">
               <Link to={labelHref} target="_blank">
                 <Printer className="size-3.5" />
                 Print labels ({selectedIds.size})
               </Link>
             </Button>
           ) : (
-            <Button size="sm" disabled variant="outline" title="Select rows to print labels">
+            <Button size="action" disabled variant="outline" title="Select rows to print labels">
               <Printer className="size-3.5" />
               Print labels
             </Button>

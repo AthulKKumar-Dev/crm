@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import JsBarcode from "jsbarcode";
 import { Printer } from "lucide-react";
+import { Button } from "~/components/ui/button";
 import { inventoryService } from "~/services/inventory.service";
 import { inventoryKeys } from "~/hooks/use-inventory-queries";
 import type { LabelData } from "~/types/api";
@@ -224,13 +225,15 @@ export default function LabelsPrintPage() {
             ? "Prints on A4, 3 per row — cut along the guides."
             : "Set printer paper to 50×25 mm. Use Chrome/Edge for custom label sizes."}
         </span>
-        <button
+        <Button
+          variant="brand"
+          size="action"
+          className="ml-auto"
           onClick={() => window.print()}
           disabled={printable.length === 0}
-          className="ml-auto inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-4 py-2 font-semibold text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50"
         >
           <Printer className="size-3.5" /> Print
-        </button>
+        </Button>
       </div>
 
       {/* Per-variant quantity editor */}

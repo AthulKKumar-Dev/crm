@@ -152,10 +152,14 @@ export default function CustomerDetailPage() {
 
             <div className="flex items-center justify-end gap-2">
               <DropdownMenu>
+                {/* 38px is the measured height of a `size="action"` pill, so the
+                    circle sits flush beside Send Message. The stock icon size
+                    (32px) left it visibly short. */}
                 <DropdownMenuTrigger asChild>
                   <Button
                     variant="outline"
-                    size="icon-sm"
+                    size="icon"
+                    className="size-9.5 rounded-full"
                     aria-label="Customer actions"
                   >
                     <MoreHorizontal className="size-4" />
@@ -173,7 +177,7 @@ export default function CustomerDetailPage() {
               </DropdownMenu>
 
               <NotYet title="Messaging customers isn't wired up yet">
-                <Button variant="brand" size="sm" disabled>
+                <Button variant="brand" size="action" disabled>
                   Send Message
                 </Button>
               </NotYet>

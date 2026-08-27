@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import {
-  ArrowLeft,
+  ChevronRight,
   Loader2,
   CheckCircle2,
   Trash2,
-  FileText,
   ExternalLink,
 } from "lucide-react";
 import { useDraftOrder } from "~/hooks/use-draft-order-queries";
@@ -14,34 +13,40 @@ import {
   useDeleteDraftOrderMutation,
   useCompleteDraftOrderMutation,
 } from "~/hooks/use-draft-order-mutations";
+import { Button } from "~/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import { SectionCard } from "~/components/app/section-card";
+import { QueryErrorState } from "~/components/app/query-error-state";
 import { cn, formatCurrency } from "~/lib/utils";
+import { DRAFT_STATUS_CLASSES, DRAFT_STATUS_LABELS } from "~/lib/draft-status";
 import {
   ModalShell,
   DialogFooter,
   CheckboxRow,
 } from "~/components/app/order-dialog-primitives";
-import type { DraftOrderStatus, OfflinePaymentMethod } from "~/types/api";
+import type { OfflinePaymentMethod } from "~/types/api";
 
 export function meta() {
   return [{ title: "Draft | Collabo CRM" }];
 }
 
-const STATUS_LABEL: Record<DraftOrderStatus, string> = {
-  OPEN: "Open",
-  INVOICE_SENT: "Invoice sent",
-  COMPLETED: "Completed",
-};
-
-const STATUS_CLASS: Record<DraftOrderStatus, string> = {
-  OPEN: "bg-blue-100 text-blue-700",
-  INVOICE_SENT: "bg-amber-100 text-amber-700",
-  COMPLETED: "bg-[#CEF17B]/30 text-[#084734]",
-};
+const PAYMENT_METHODS: ReadonlyArray<{ value: OfflinePaymentMethod; label: string }> = [
+  { value: "CASH", label: "Cash" },
+  { value: "CARD", label: "Card" },
+  { value: "UPI", label: "UPI" },
+  { value: "OTHER", label: "Other" },
+];
 
 export default function DraftDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { data: draft, isLoading } = useDraftOrder(id);
+  const { data: draft, isLoading, isError, refetch } = useDraftOrder(id);
   const { data: org } = useCurrentOrg();
   const currency = draft?.currency ?? org?.currency ?? "INR";
 
@@ -50,6 +55,17 @@ export default function DraftDetailPage() {
 
   const [showComplete, setShowComplete] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
+
+  // Must precede the spinner below: on failure `isLoading` is false and `draft`
+  // undefined, so `isLoading || !draft` held the spinner on screen for ever
+  // with no retry and no way out.
+  if (isError && !draft) {
+    return (
+      <div className="p-8">
+        <QueryErrorState resource="this draft" onRetry={() => refetch()} />
+      </div>
+    );
+  }
 
   if (isLoading || !draft) {
     return (
@@ -61,62 +77,57 @@ export default function DraftDetailPage() {
 
   const isCompleted = draft.status === "COMPLETED";
   const isShopify = draft.channel.platform === "SHOPIFY";
+  const draftName = draft.name ?? `Draft ${draft.id.slice(-6)}`;
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <Link
-            to="/orders/drafts"
-            className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100"
-          >
-            <ArrowLeft className="size-3.5" />
-            Back to drafts
+      {/* Breadcrumb + actions */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-caption">
+          <Link to="/orders/drafts" className="text-muted-foreground hover:text-foreground">
+            Drafts
           </Link>
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-              {draft.name ?? `Draft ${draft.id.slice(-6)}`}
-            </h1>
-            <span
-              className={cn(
-                "rounded-full px-2 py-0.5 text-[10px] font-medium",
-                STATUS_CLASS[draft.status],
-              )}
-            >
-              {STATUS_LABEL[draft.status]}
-            </span>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Created {new Date(draft.createdAt).toLocaleString("en-IN")} • Updated{" "}
-            {new Date(draft.updatedAt).toLocaleString("en-IN")}
-            {draft.channel && ` • ${draft.channel.name}`}
-          </p>
-        </div>
+          <ChevronRight className="size-3 text-muted-foreground" />
+          <span className="font-medium text-foreground">{draftName}</span>
+        </nav>
         {!isCompleted && (
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowDelete(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg border bg-white dark:bg-gray-900 px-3 py-2 text-xs font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-            >
+            <Button variant="destructive" size="action" onClick={() => setShowDelete(true)}>
               <Trash2 className="size-3.5" />
               Delete
-            </button>
-            <button
-              onClick={() => setShowComplete(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 py-2 text-xs font-semibold text-gray-900 hover:bg-[#BADE6F]"
-            >
+            </Button>
+            <Button variant="brand" size="action" onClick={() => setShowComplete(true)}>
               <CheckCircle2 className="size-3.5" />
               Complete draft
-            </button>
+            </Button>
           </div>
         )}
       </div>
 
+      {/* Title */}
+      <div className="space-y-1">
+        <div className="flex items-center gap-3">
+          <h1 className="text-subhead text-foreground">{draftName}</h1>
+          <span
+            className={cn(
+              "rounded-full px-2 py-0.5 text-micro font-medium",
+              DRAFT_STATUS_CLASSES[draft.status],
+            )}
+          >
+            {DRAFT_STATUS_LABELS[draft.status]}
+          </span>
+        </div>
+        <p className="text-caption text-muted-foreground">
+          Created {new Date(draft.createdAt).toLocaleString("en-IN")} • Updated{" "}
+          {new Date(draft.updatedAt).toLocaleString("en-IN")}
+          {draft.channel && ` • ${draft.channel.name}`}
+        </p>
+      </div>
+
       {/* Banner for completed drafts pointing to the resulting order */}
       {isCompleted && draft.completedOrder && (
-        <div className="rounded-xl border border-[#CEF17B] bg-[#CEF17B]/10 px-4 py-3 text-xs">
-          <p className="font-medium text-[#084734]">
+        <div className="rounded-xl border border-brand bg-brand/10 px-4 py-3 text-caption">
+          <p className="font-medium text-brand-strong">
             This draft was completed as order{" "}
             <Link
               to={`/orders/${draft.completedOrder.id}`}
@@ -133,32 +144,34 @@ export default function DraftDetailPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
           {/* Customer */}
-          <Section title="Customer">
-            {draft.customer ? (
-              <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {(draft.customer.firstName ?? "") +
-                    " " +
-                    (draft.customer.lastName ?? "")}
-                </p>
-                {draft.customer.email && (
-                  <p className="text-xs text-muted-foreground">
-                    {draft.customer.email}
+          <SectionCard title="Customer">
+            <div className="px-5 py-4">
+              {draft.customer ? (
+                <div>
+                  <p className="text-body font-medium text-foreground">
+                    {(draft.customer.firstName ?? "") +
+                      " " +
+                      (draft.customer.lastName ?? "")}
                   </p>
-                )}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground italic">
-                Anonymous draft — no customer attached yet.
-              </p>
-            )}
-          </Section>
+                  {draft.customer.email && (
+                    <p className="text-caption text-muted-foreground">
+                      {draft.customer.email}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-caption text-muted-foreground italic">
+                  Anonymous draft — no customer attached yet.
+                </p>
+              )}
+            </div>
+          </SectionCard>
 
           {/* Line items */}
-          <Section title={`Line items (${draft.lineItems.length})`}>
-            <div className="overflow-x-auto -mx-5">
-              <table className="w-full text-xs">
-                <thead className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          <SectionCard title={`Line items (${draft.lineItems.length})`}>
+            <div className="overflow-x-auto">
+              <table className="w-full text-caption">
+                <thead className="text-micro uppercase tracking-wider text-muted-foreground">
                   <tr className="border-b">
                     <th className="px-5 py-2 text-left font-medium">Item</th>
                     <th className="px-5 py-2 text-right font-medium">Qty</th>
@@ -170,16 +183,14 @@ export default function DraftDetailPage() {
                   {draft.lineItems.map((li) => (
                     <tr key={li.id}>
                       <td className="px-5 py-3">
-                        <p className="font-medium text-gray-900 dark:text-gray-100">
-                          {li.title}
-                        </p>
+                        <p className="font-medium text-foreground">{li.title}</p>
                         {li.variantTitle && (
-                          <p className="text-[10px] text-muted-foreground">
+                          <p className="text-micro text-muted-foreground">
                             {li.variantTitle}
                           </p>
                         )}
                         {li.sku && (
-                          <p className="text-[10px] font-mono text-muted-foreground">
+                          <p className="text-micro font-mono text-muted-foreground">
                             SKU {li.sku}
                           </p>
                         )}
@@ -191,29 +202,23 @@ export default function DraftDetailPage() {
                         {formatCurrency(li.price, currency)}
                       </td>
                       <td className="px-5 py-3 text-right tabular-nums font-semibold">
-                        {formatCurrency(
-                          Number(li.price) * li.quantity,
-                          currency,
-                        )}
+                        {formatCurrency(Number(li.price) * li.quantity, currency)}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          </Section>
+          </SectionCard>
 
           {/* Totals */}
-          <Section title="Totals">
-            <div className="space-y-1 text-xs">
+          <SectionCard title="Totals">
+            <div className="space-y-1 px-5 py-4 text-caption">
               <Row
                 label="Subtotal"
                 value={formatCurrency(draft.subtotalPrice, currency)}
               />
-              <Row
-                label="Tax"
-                value={formatCurrency(draft.totalTax, currency)}
-              />
+              <Row label="Tax" value={formatCurrency(draft.totalTax, currency)} />
               {Number(draft.totalShippingPrice) > 0 && (
                 <Row
                   label="Shipping"
@@ -228,20 +233,20 @@ export default function DraftDetailPage() {
                 />
               </div>
             </div>
-          </Section>
+          </SectionCard>
 
           {draft.note && (
-            <Section title="Note">
-              <p className="text-xs whitespace-pre-wrap">{draft.note}</p>
-            </Section>
+            <SectionCard title="Note">
+              <p className="whitespace-pre-wrap px-5 py-4 text-caption">{draft.note}</p>
+            </SectionCard>
           )}
         </div>
 
         {/* Sidebar */}
         <div className="space-y-6">
-          <Section title="Status">
-            <div className="space-y-2 text-xs">
-              <DescRow label="Status" value={STATUS_LABEL[draft.status]} />
+          <SectionCard title="Status">
+            <div className="space-y-2 px-5 py-4 text-caption">
+              <DescRow label="Status" value={DRAFT_STATUS_LABELS[draft.status]} />
               <DescRow label="Items" value={String(draft.lineItems.length)} />
               {draft.completedAt && (
                 <DescRow
@@ -252,18 +257,16 @@ export default function DraftDetailPage() {
               {draft.invoiceSentAt && (
                 <DescRow
                   label="Invoice sent"
-                  value={new Date(draft.invoiceSentAt).toLocaleDateString(
-                    "en-IN",
-                  )}
+                  value={new Date(draft.invoiceSentAt).toLocaleDateString("en-IN")}
                 />
               )}
               {draft.invoiceUrl && (
-                <p className="text-[10px]">
+                <p className="text-micro">
                   <a
                     href={draft.invoiceUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                    className="inline-flex items-center gap-1 text-info hover:underline"
                   >
                     Shopify invoice link
                     <ExternalLink className="size-3" />
@@ -271,22 +274,22 @@ export default function DraftDetailPage() {
                 </p>
               )}
             </div>
-          </Section>
+          </SectionCard>
 
-          <Section title="Channel">
-            <p className="text-xs text-gray-900 dark:text-gray-100">
-              {draft.channel.name}
-            </p>
-            <p className="text-[10px] text-muted-foreground">
-              {draft.channel.platform}
-            </p>
-            {isShopify && (
-              <p className="mt-2 text-[10px] text-amber-700 dark:text-amber-400">
-                Shopify drafts are not yet mirrored from this CRM — completion
-                is supported via the offline path for now.
+          <SectionCard title="Channel">
+            <div className="px-5 py-4">
+              <p className="text-caption text-foreground">{draft.channel.name}</p>
+              <p className="text-micro text-muted-foreground">
+                {draft.channel.platform}
               </p>
-            )}
-          </Section>
+              {isShopify && (
+                <p className="mt-2 text-micro text-warning-strong">
+                  Shopify drafts are not yet mirrored from this CRM — completion
+                  is supported via the offline path for now.
+                </p>
+              )}
+            </div>
+          </SectionCard>
         </div>
       </div>
 
@@ -309,7 +312,7 @@ export default function DraftDetailPage() {
       {/* Delete confirm dialog */}
       {showDelete && (
         <ModalShell title="Delete this draft?" onClose={() => setShowDelete(false)}>
-          <p className="px-6 py-4 text-xs text-muted-foreground">
+          <p className="px-6 py-4 text-caption text-muted-foreground">
             The draft will be removed from your list. This can't be undone.
           </p>
           <DialogFooter
@@ -348,27 +351,34 @@ function CompleteDraftDialog({
   return (
     <ModalShell title="Complete draft" onClose={onClose}>
       <div className="space-y-4 px-6 py-4">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-caption text-muted-foreground">
           Converts this draft into a finalized order. Inventory, customer
           counters, and (optionally) a GST invoice will all be created.
         </p>
 
-        <div>
-          <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+        <div className="space-y-1">
+          <label className="text-micro font-medium text-muted-foreground">
             Payment method
           </label>
-          <select
+          <Select
             value={paymentMethod}
-            onChange={(e) =>
-              setPaymentMethod(e.target.value as OfflinePaymentMethod)
-            }
-            className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-1 focus:ring-[#CEF17B]/60"
+            onValueChange={(next) => setPaymentMethod(next as OfflinePaymentMethod)}
           >
-            <option value="CASH">Cash</option>
-            <option value="CARD">Card</option>
-            <option value="UPI">UPI</option>
-            <option value="OTHER">Other</option>
-          </select>
+            <SelectTrigger className="h-9 w-full text-caption">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAYMENT_METHODS.map((method) => (
+                <SelectItem
+                  key={method.value}
+                  value={method.value}
+                  className="text-caption"
+                >
+                  {method.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         <CheckboxRow
@@ -388,23 +398,6 @@ function CompleteDraftDialog({
   );
 }
 
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
-      <h2 className="border-b px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {title}
-      </h2>
-      <div className="px-5 py-4">{children}</div>
-    </section>
-  );
-}
-
 function Row({
   label,
   value,
@@ -419,7 +412,7 @@ function Row({
       <span
         className={cn(
           "text-muted-foreground",
-          highlight === "bold" && "font-semibold text-gray-900 dark:text-gray-100",
+          highlight === "bold" && "font-semibold text-foreground",
         )}
       >
         {label}
@@ -437,7 +430,7 @@ function DescRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between">
       <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium text-gray-900 dark:text-gray-100">{value}</span>
+      <span className="font-medium text-foreground">{value}</span>
     </div>
   );
 }

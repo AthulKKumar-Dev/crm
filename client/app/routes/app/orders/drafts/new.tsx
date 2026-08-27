@@ -1,5 +1,11 @@
 import { Link } from "react-router";
-import { ArrowLeft } from "lucide-react";
+import { ChevronRight } from "lucide-react";
+import {
+  PageHeader,
+  PageHeaderContent,
+  PageHeaderTitle,
+  PageHeaderDescription,
+} from "~/components/ui/page-header";
 import { OfflineOrderForm } from "~/components/app/order-create/offline-order-form";
 
 export function meta() {
@@ -20,24 +26,23 @@ export function meta() {
 export default function NewDraftPage() {
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <Link
-            to="/orders/drafts"
-            className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100"
-          >
-            <ArrowLeft className="size-3.5" />
-            Back to drafts
-          </Link>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            New draft
-          </h1>
-          <p className="text-sm text-muted-foreground">
+      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-caption">
+        <Link to="/orders/drafts" className="text-muted-foreground hover:text-foreground">
+          Drafts
+        </Link>
+        <ChevronRight className="size-3 text-muted-foreground" />
+        <span className="font-medium text-foreground">New draft</span>
+      </nav>
+
+      <PageHeader>
+        <PageHeaderContent>
+          <PageHeaderTitle>New draft</PageHeaderTitle>
+          <PageHeaderDescription>
             Compose an in-progress order. Save now, edit anytime, then complete
             to turn it into a real order.
-          </p>
-        </div>
-      </div>
+          </PageHeaderDescription>
+        </PageHeaderContent>
+      </PageHeader>
 
       <OfflineOrderForm draftOnly />
     </div>

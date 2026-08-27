@@ -160,7 +160,6 @@ export default function OrdersPage() {
           <Button
             variant="brand"
             size="action"
-            className="h-auto px-4.5 py-2.5"
             onClick={() => downloadBlob(
               () => dashboardService.exportCsv(statsParams),
               `orders-report-${dateRange}.csv`,
@@ -173,7 +172,6 @@ export default function OrdersPage() {
           <Button
             variant="outline"
             size="action"
-            className="h-auto px-4.5 py-2.5"
             onClick={() => downloadBlob(
               () => orderService.exportCsv(params),
               `orders-${dateRange}.csv`,
@@ -183,7 +181,7 @@ export default function OrdersPage() {
             <Upload className="size-3.5" />
             Export CSV
           </Button>
-          <Button asChild variant="brand" size="action" className="h-auto px-4.5 py-2.5">
+          <Button asChild variant="brand" size="action">
             <Link to="/orders/new">
               <Plus className="size-3.5" />
               Create Order

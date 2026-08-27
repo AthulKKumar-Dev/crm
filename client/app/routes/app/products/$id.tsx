@@ -922,25 +922,27 @@ export default function ProductDetailPage() {
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {isProductDirty && (
             <>
-              <button
+              <Button
                 type="button"
+                variant="outline"
+                size="action"
                 onClick={handleDiscardChanges}
                 disabled={isSaving}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-input bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800/60"
               >
                 Discard
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
+                variant="brand"
+                size="action"
                 onClick={handleSaveProduct}
                 disabled={isSaving}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 py-2 text-xs font-medium text-[#084734] disabled:opacity-50"
               >
                 {isSaving && (
                   <Loader2 className="size-3.5 animate-spin" />
                 )}
                 Save
-              </button>
+              </Button>
             </>
           )}
         </div>
