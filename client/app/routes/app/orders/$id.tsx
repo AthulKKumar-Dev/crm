@@ -217,9 +217,9 @@ export default function OrderDetailPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[200px_minmax(0,1fr)_240px]">
+      <div className="flex gap-4">
         {/* ── Left rail: order meta ─────────────────────────────────────── */}
-        <aside className="flex flex-col gap-4.5 rounded-xl bg-card p-4">
+        <aside className="flex flex-1 flex-col gap-4.5 rounded-xl bg-card p-4">
           {/* Header */}
           <div className="flex flex-col gap-2">
             <h1 className="text-subhead text-foreground">{order.name}</h1>
@@ -300,7 +300,7 @@ export default function OrderDetailPage() {
         </aside>
 
         {/* ── Center: line items, fulfilment, activity ───────────────────── */}
-        <div className="space-y-5">
+        <div className="flex-3 space-y-5">
           <OrderItemsFulfillment
             orderId={order.id}
             items={order.lineItems}
@@ -328,7 +328,7 @@ export default function OrderDetailPage() {
               </div>
             }
             footer={
-              <div className="flex flex-wrap items-start justify-between gap-4 border-t px-5 py-3 bg-surface-sunken">
+              <div className="flex flex-wrap items-start justify-between gap-4 rounded-b-xl border-t bg-[#f5f5f5] px-5 py-3 dark:bg-muted/40">
                 <p className="text-caption text-muted-foreground">
                   Select items to fulfil, hold or refund in bulk
                 </p>
@@ -439,7 +439,7 @@ export default function OrderDetailPage() {
         </div>
 
         {/* ── Right rail: money, actions, customer, note ─────────────────── */}
-        <aside className="flex flex-col gap-1.5 rounded-xl bg-card p-4 lg:sticky lg:top-6 lg:self-start">
+        <aside className="flex flex-1 flex-col gap-1.5 rounded-xl bg-card p-4 lg:sticky lg:top-6 lg:self-start">
           {/* The order total lives in the left rail now — this rail opens with
               the actions rather than repeating the same figure. */}
           <div className="space-y-2">

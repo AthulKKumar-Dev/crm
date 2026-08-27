@@ -1,4 +1,4 @@
-import { Outlet, Navigate, useLocation } from "react-router";
+import { Outlet, Navigate, useLocation, useMatches } from "react-router";
 import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
@@ -29,7 +29,8 @@ function isUnder(pathname: string, prefix: string) {
 // Routes that fill the window height and scroll their own panes instead of the
 // page. The inbox needs this so its composer stays pinned and each column
 // scrolls independently. It does NOT change the content width — these pages sit
-// in the same max-w-screen-xl container as every other page.
+// in the same container as every other page; only the order detail page opts
+// out of the shared width (see FULL_WIDTH_ROUTE_IDS below).
 //
 // A flex column rather than h-[calc(100vh-Npx)] in the route, because the
 // chrome above it is not a fixed height — the navbar is 72px, a sub-nav row
@@ -38,9 +39,26 @@ function isUnder(pathname: string, prefix: string) {
 // those states; the flex column is exact in all of them with no magic number.
 const FULL_HEIGHT_PREFIXES = ["/conversation"];
 
+// Routes that drop the shared page width. The order detail page flanks its
+// line-items table with two fixed-width rails (200px + 240px), which leaves the
+// table cramped once the container caps the row at 1280px.
+//
+// Matched by route id rather than pathname prefix: "/orders/<x>" is also
+// /orders/new, /orders/drafts, /orders/customers and /orders/invoices, so a
+// pathname test would need an exclusion list that silently rots as sibling
+// routes are added. The id is the route file path minus its extension — see
+// routes.ts, where only files reused across several routes declare their own.
+//
+// The navbar keeps its own max-w-screen-xl, so on a wide viewport this page is
+// deliberately wider than the chrome above it.
+const FULL_WIDTH_ROUTE_IDS = ["routes/app/orders/$id"];
+
 export default function AppLayout() {
   const { isVendor } = useCurrentRole();
   const location = useLocation();
+  // Read before the print-route early return below, so the hook order is the
+  // same on every route.
+  const matches = useMatches();
 
   const vendorBlocked =
     isVendor &&
@@ -62,6 +80,8 @@ export default function AppLayout() {
     isUnder(location.pathname, p),
   );
 
+  const isFullWidth = matches.some((m) => FULL_WIDTH_ROUTE_IDS.includes(m.id));
+
   return (
     <AuthGuard>
       <div
@@ -72,13 +92,15 @@ export default function AppLayout() {
       >
         <ImpersonationBanner />
         <Navbar />
-        {/* Same container on every route — only the vertical behaviour differs. */}
+        {/* Same container on every route except a full-width one — otherwise
+            only the vertical behaviour differs. */}
         <main
           className={cn(
-            // Identical container and padding on every route, so the inbox
-            // lines up with Orders and Products rather than sitting flush
-            // against the navbar.
-            "mx-auto w-full max-w-screen-xl px-4 py-6 lg:px-6",
+            // Identical padding on every route, and an identical container on
+            // every route but a full-width one, so the inbox lines up with
+            // Orders and Products rather than sitting flush against the navbar.
+            "mx-auto w-full px-4 py-6 lg:px-6",
+            !isFullWidth && "max-w-screen-xl",
             isFullHeight && "min-h-0 flex-1 overflow-hidden",
           )}
         >
