@@ -151,6 +151,8 @@ export interface VendorOrderLine {
   variantTitle: string | null;
   sku: string | null;
   quantity: number;
+  /** Units shipped so far, 0..quantity. */
+  fulfilledQuantity: number;
   price: string | number;
   lineTotal: number;
   imageUrl: string | null;
@@ -1005,6 +1007,11 @@ export interface OrderLineItem {
   id: string;
   title: string;
   quantity: number;
+  /**
+   * Units shipped so far, 0..quantity. Authoritative for partial shipments —
+   * `fulfillmentStatus` alone cannot express "2 of 5 sent".
+   */
+  fulfilledQuantity: number;
   price: number;
   sku: string | null;
   variantTitle: string | null;

@@ -65,7 +65,10 @@ export const LINE_STATUS_CLASSES: Record<string, string> = {
   delivered: "bg-success-subtle text-success",
   in_progress: "bg-info-subtle text-info",
   on_hold: "bg-muted text-muted-foreground",
-  partial: "bg-info-subtle text-info",
+  // Amber, matching the "Partly shipped" group on the order detail page. It was
+  // blue, which made it indistinguishable from in_progress — two different
+  // things (units already gone out vs. being prepared).
+  partial: "bg-warning-subtle text-warning",
 };
 
 export const LINE_STATUS_LABELS: Record<string, string> = {
@@ -73,7 +76,7 @@ export const LINE_STATUS_LABELS: Record<string, string> = {
   delivered: "Delivered",
   in_progress: "In progress",
   on_hold: "On hold",
-  partial: "Partial",
+  partial: "Partly shipped",
 };
 
 /** `null` means the line was never actioned — the API stores no "unfulfilled" value. */

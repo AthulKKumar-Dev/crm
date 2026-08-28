@@ -21,7 +21,10 @@ import {
   useOrderActionGates,
 } from "~/components/app/order-actions";
 import { OrderFulfillmentsSection, FulfillDialog } from "~/components/app/order-fulfillments";
-import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
+import {
+  OrderItemsFulfillment,
+  type LineGroupKey,
+} from "~/components/app/order-items-fulfillment";
 import { ChannelBadge } from "~/components/app/channel-badge";
 import { OrderActivity } from "~/components/app/order-activity";
 import { VendorOrderDetail } from "~/components/app/vendor-order-detail";
@@ -134,6 +137,36 @@ export default function OrderDetailPage() {
   const trackedLine = order.lineItems.find((li) => li.trackingNumber || li.trackingCompany);
   const carrier = primaryFulfilment?.trackingCompany ?? trackedLine?.trackingCompany ?? null;
   const awb = primaryFulfilment?.trackingNumber ?? trackedLine?.trackingNumber ?? null;
+
+  // Captions for the fulfilled / delivered groups on the line-items card. Only
+  // facts the order actually carries — a shipment date and its tracking ref.
+  // A group with nothing to say is left out entirely, and the card falls back
+  // to the tracking it can read off the lines themselves.
+  //
+  // Shipment membership is NOT derivable (`metadata.lineItemIds` is only
+  // written for CRM-created fulfilments — see the note on OrderFulfillment), so
+  // these describe the order's shipments, not one group's lines. That holds for
+  // the single-shipment case, which is nearly all of them; multi-shipment
+  // orders fall through to the per-line summary instead.
+  const lineGroupCaptions = (() => {
+    const live = (order.fulfillments ?? []).filter((f) => f.status !== "cancelled");
+    if (live.length !== 1) return undefined;
+    const [f] = live;
+    const ref = [f.trackingCompany, f.trackingNumber ? `AWB ${f.trackingNumber}` : null]
+      .filter(Boolean)
+      .join(" ");
+    const captions: Partial<Record<LineGroupKey, string | null>> = {};
+
+    const shippedAt = f.shippedAt ?? f.createdAt;
+    if (shippedAt) {
+      captions.fulfilled =
+        [`Shipped ${shortDate(shippedAt)}`, ref || null].filter(Boolean).join(" · ") || null;
+    }
+    if (f.deliveredAt) {
+      captions.delivered = `Delivered ${shortDateTime(f.deliveredAt)}`;
+    }
+    return captions;
+  })();
 
   const subtotal = Number(order.subtotalPrice);
   const tax = Number(order.totalTax);
@@ -309,42 +342,58 @@ export default function OrderDetailPage() {
             variant="detail"
             title="Line items"
             allowInProgress
+            canAct={canFulfill}
+            groupCaptions={lineGroupCaptions}
             headerAction={
-              <div className="flex items-center gap-3 text-caption font-medium">
-                {/* Labelled for what it does — this opens FulfillDialog, not
-                    the Actions menu's Edit details dialog. */}
-                <button
-                  onClick={() => setDialog("fulfill")}
-                  className="text-brand-strong hover:underline"
-                >
+              /* Labelled for what it does — this opens FulfillDialog, not the
+                 Actions menu's Edit details dialog.
+
+                 A standalone Restock button used to sit beside it, permanently
+                 disabled — there is no restock endpoint. Restocking is real,
+                 but it is a checkbox on Cancel order, which is where it
+                 belongs; a dead control is worse than no control.
+
+                 Gated: this and the rail button below both used to render
+                 unconditionally while only the third entry point checked
+                 `canFulfill`, so a VIEWER got two buttons that could only 403. */
+              canFulfill ? (
+                <Button variant="accent" size="sm" onClick={() => setDialog("fulfill")}>
                   Fulfil items
-                </button>
-                {/* A standalone Restock button used to sit here, permanently
-                    disabled — there is no restock endpoint. Restocking is real,
-                    but it is a checkbox on Cancel order, which is where it
-                    belongs; a dead control is worse than no control. */}
-              </div>
+                </Button>
+              ) : null
             }
             footer={
-              <div className="flex flex-wrap items-start justify-between gap-4 rounded-b-xl border-t bg-[#f5f5f5] px-5 py-3 dark:bg-muted/40">
-                <p className="text-caption text-muted-foreground">
-                  Select items to fulfil, hold or release in bulk
-                </p>
-                <dl className="w-full max-w-56 space-y-1 text-caption flex flex-col gap-1.5">
-                  <TotalRow label="Subtotal" value={formatCurrency(subtotal, currency)} />
+              <div className="flex justify-end rounded-b-xl border-t bg-[#f5f5f5] px-5 py-3 dark:bg-muted/40">
+                {/* Order of rows matters here. Shopify's `subtotalPrice` is
+                    already NET of discounts, so printing it as "Subtotal" and
+                    then a separate "-Discounts" row read as if the discount came
+                    off twice and never reconciled to the Total. Worse, the line
+                    rows above show gross (price x qty), so on a discounted order
+                    the visible rows didn't add up to the Subtotal either — e.g.
+                    #1002: rows 785.95, subtotal 628.76, discount -157.19,
+                    total 628.76.
+
+                    Gross is derived from the order's own numbers rather than by
+                    summing the rows, so it stays exact when a line carries its
+                    own `totalDiscount`. */}
+                <dl className="flex w-full max-w-56 flex-col gap-1.5 text-caption">
                   <TotalRow
-                    label={gstRate !== null ? `GST ${gstRate}%` : "GST"}
-                    value={formatCurrency(tax, currency)}
+                    label="Subtotal"
+                    value={formatCurrency(subtotal + discounts, currency)}
                   />
-                  {shipping > 0 && (
-                    <TotalRow label="Shipping" value={formatCurrency(shipping, currency)} />
-                  )}
                   {discounts > 0 && (
                     <TotalRow
                       label="Discounts"
                       value={`-${formatCurrency(discounts, currency)}`}
                       negative
                     />
+                  )}
+                  <TotalRow
+                    label={gstRate !== null ? `GST ${gstRate}%` : "GST"}
+                    value={formatCurrency(tax, currency)}
+                  />
+                  {shipping > 0 && (
+                    <TotalRow label="Shipping" value={formatCurrency(shipping, currency)} />
                   )}
                   <TotalRow label="Total" value={formatCurrency(total, currency)} bold />
                 </dl>
@@ -391,16 +440,18 @@ export default function OrderDetailPage() {
                     Every item on this order has been fulfilled.
                   </p>
                 )}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full"
-                  disabled={outstanding.length === 0}
-                  onClick={() => setDialog("fulfill")}
-                >
-                  <Truck className="size-3.5" />
-                  Create fulfilment
-                </Button>
+                {canFulfill && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full"
+                    disabled={outstanding.length === 0}
+                    onClick={() => setDialog("fulfill")}
+                  >
+                    <Truck className="size-3.5" />
+                    Create fulfilment
+                  </Button>
+                )}
               </div>
             </div>
           </section>
@@ -533,6 +584,21 @@ export default function OrderDetailPage() {
  * number. (A `captured` figure was computed here too and never read by anything
  * — dropped rather than left as a second source of truth.)
  */
+/** "27 Aug" — for group captions, where the year is noise. */
+function shortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+}
+
+/** "28 Aug, 11:30 am". */
+function shortDateTime(iso: string): string {
+  return new Date(iso).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 function deriveBalance(order: OrderDetail, total: number): { due: number | null } {
   const refunded = (order.refunds ?? []).reduce((sum, r) => sum + Number(r.amount), 0);
   switch (order.financialStatus) {

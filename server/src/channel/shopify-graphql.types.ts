@@ -583,9 +583,32 @@ export interface FulfillmentOrderLineItemNode {
   };
 }
 
+/**
+ * Shopify's FulfillmentOrderStatus, in full.
+ *
+ * Spelled out rather than left as `string` so an unhandled status is a compile
+ * error. It was `string`, and the code only ever named OPEN / IN_PROGRESS /
+ * ON_HOLD — the ones it wanted to *repair* — while implicitly treating every
+ * other value as fulfillable. `CLOSED` appeared nowhere, which is how a closed
+ * fulfilment order ended up inside a `fulfillmentCreate` payload.
+ *
+ * `(string & {})` keeps an unrecognised future value assignable (Shopify can add
+ * one without breaking the build) while still autocompleting the known set.
+ */
+export type FulfillmentOrderStatus =
+  | 'OPEN'
+  | 'IN_PROGRESS'
+  | 'ON_HOLD'
+  | 'SCHEDULED'
+  | 'CLOSED'
+  | 'CANCELLED'
+  | 'INCOMPLETE'
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  | (string & {});
+
 export interface FulfillmentOrderNode {
   id: string;
-  status: string;
+  status: FulfillmentOrderStatus;
   requestStatus: string;
   assignedLocation: {
     name: string | null;

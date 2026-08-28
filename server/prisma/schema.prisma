@@ -780,6 +780,11 @@ model OrderLineItem {
   quantity          Int
   price             Decimal  @db.Decimal(12, 2) // Per unit
   totalDiscount     Decimal  @default(0) @map("total_discount") @db.Decimal(12, 2)
+  /// Units shipped so far, 0..quantity. `fulfillmentStatus` alone cannot express
+  /// a partial shipment: Shopify accepts a per-line quantity on fulfillmentCreate,
+  /// so fulfilling 2 of 5 used to flip the whole line to 'fulfilled' and report
+  /// the order complete while 3 units were still unshipped.
+  fulfilledQuantity Int      @default(0) @map("fulfilled_quantity")
   fulfillmentStatus String?  @map("fulfillment_status")
   requiresShipping  Boolean  @default(true) @map("requires_shipping")
   taxable           Boolean  @default(true)
