@@ -32,6 +32,25 @@ export function getCurrentFinancialYear(now: Date = new Date()): string {
   return `${startYear}-${String(startYear + 1).slice(2)}`;
 }
 
+/**
+ * Financial years to offer in the year picker: the current one first, then
+ * `count - 1` prior years, newest first.
+ *
+ * The invoice list used to pin the FY at mount with no setter, so every prior
+ * year — and every prior year's GST return — was unreachable from the UI even
+ * though the API filters on it.
+ */
+export function financialYearOptions(
+  count = 4,
+  now: Date = new Date(),
+): string[] {
+  const currentStart = Number(getCurrentFinancialYear(now).slice(0, 4));
+  return Array.from({ length: count }, (_unused, index) => {
+    const start = currentStart - index;
+    return `${start}-${String(start + 1).slice(2)}`;
+  });
+}
+
 /** The period the app should land on by default — the current calendar month. */
 export function getCurrentPeriod(now: Date = new Date()): string {
   return String(now.getMonth() + 1).padStart(2, "0");

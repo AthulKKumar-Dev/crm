@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import {
-  Check,
   ChevronRight,
   Loader2,
   Plus,
@@ -12,9 +11,8 @@ import {
 } from "lucide-react";
 import { useOrder, useAdjacentOrders } from "~/hooks/use-order-queries";
 import { useCustomer } from "~/hooks/use-customer-queries";
-import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { useCurrentOrg, useOrgMembers } from "~/hooks/use-org-queries";
-import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
+import { GenerateInvoiceDialog } from "~/components/app/generate-invoice-dialog";
 import { useUpdateOrderMutation } from "~/hooks/use-order-mutations";
 import {
   OrderActionsMenu,
@@ -28,13 +26,6 @@ import { ChannelBadge } from "~/components/app/channel-badge";
 import { OrderActivity } from "~/components/app/order-activity";
 import { VendorOrderDetail } from "~/components/app/vendor-order-detail";
 import { useCurrentRole } from "~/hooks/use-current-role";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
 import { Button } from "~/components/ui/button";
 import { Textarea } from "~/components/ui/textarea";
 import { cn, formatCurrency } from "~/lib/utils";
@@ -52,7 +43,6 @@ import type {
   OrderDetail,
   OrderFulfillment,
   OrderShopifySync,
-  OrganizationGstin,
 } from "~/types/api";
 
 export function meta() {
@@ -87,7 +77,8 @@ export default function OrderDetailPage() {
   // Same gates the Actions menu uses, so the rail below can't offer a button
   // the menu deliberately hides. Called here, above the early-returns, for the
   // hook-order reason noted above.
-  const { canCapture, canCancel, canFulfill, canEdit } = useOrderActionGates(order);
+  const { canManage, canCapture, canCancel, canFulfill, canEdit } =
+    useOrderActionGates(order);
 
   const currency = order?.currency ?? org?.currency ?? "INR";
   const gstEnabled = org?.gstEnabled ?? false;
@@ -472,16 +463,20 @@ export default function OrderDetailPage() {
                 </Link>
               </Button>
             ) : (
-              <Button
-                variant="brand"
-                className="w-full"
-                disabled={!gstEnabled}
-                title={gstEnabled ? undefined : "GST is not enabled for this organization"}
-                onClick={() => setShowInvoiceDialog(true)}
-              >
-                <Receipt className="size-3.5" />
-                Generate GST invoice
-              </Button>
+              /* POST /invoices is ORG_MANAGERS-only, so this carried no gate
+                 and handed a VIEWER or AGENT a guaranteed 403. */
+              canManage && (
+                <Button
+                  variant="brand"
+                  className="w-full"
+                  disabled={!gstEnabled}
+                  title={gstEnabled ? undefined : "GST is not enabled for this organization"}
+                  onClick={() => setShowInvoiceDialog(true)}
+                >
+                  <Receipt className="size-3.5" />
+                  Generate GST invoice
+                </Button>
+              )
             )}
             <Button asChild variant="outline" className="w-full">
               <Link to={`/orders/${order.id}/packing-slip`} target="_blank">
@@ -519,13 +514,12 @@ export default function OrderDetailPage() {
         <CapturePaymentDialog order={order} onClose={() => setDialog(null)} />
       )}
       {dialog === "cancel" && <CancelOrderDialog order={order} onClose={() => setDialog(null)} />}
-      {showInvoiceDialog && (
-        <GenerateInvoiceDialog
-          order={order}
-          currency={currency}
-          onClose={() => setShowInvoiceDialog(false)}
-        />
-      )}
+      <GenerateInvoiceDialog
+        order={order}
+        currency={currency}
+        open={showInvoiceDialog}
+        onClose={() => setShowInvoiceDialog(false)}
+      />
     </div>
   );
 }
@@ -1086,196 +1080,5 @@ function InternalNote({ order, canEdit }: { order: OrderDetail; canEdit: boolean
         Save note
       </Button>
     </RailBlock>
-  );
-}
-
-// ── Generate Invoice Dialog ─────────────────────────────────────────────────
-// Same as the one previously in orders.tsx — mirrors the dialog used by the
-// list page so the look and behaviour match.
-
-function GenerateInvoiceDialog({
-  order,
-  currency,
-  onClose,
-}: {
-  order: OrderDetail;
-  currency: string;
-  onClose: () => void;
-}) {
-  // Both lists must distinguish "empty" from "failed to load". Previously a
-  // failed request rendered exactly like a genuinely empty one — an empty
-  // <Select> and the label "(No GSTINs registered)" — telling the user to go
-  // register a GSTIN they may well already have.
-  const {
-    data: gstins = [],
-    isLoading: gstinsLoading,
-    isError: gstinsError,
-    refetch: refetchGstins,
-  } = useGstins();
-  const {
-    data: states = [],
-    isError: statesError,
-    refetch: refetchStates,
-  } = useIndianStates();
-  const createInvoice = useCreateInvoiceMutation();
-  const lookupsFailed = gstinsError || statesError;
-
-  const [sellerGstinId, setSellerGstinId] = useState("");
-  const [buyerGstin, setBuyerGstin] = useState("");
-  const [placeOfSupplyCode, setPlaceOfSupplyCode] = useState("");
-
-  const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
-
-  function handleGenerate() {
-    createInvoice.mutate(
-      {
-        orderId: order.id,
-        sellerGstinId: sellerGstinId || undefined,
-        buyerGstin: buyerGstin || undefined,
-        placeOfSupplyCode: placeOfSupplyCode || undefined,
-      },
-      { onSuccess: () => onClose() },
-    );
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-md rounded-xl bg-card shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b px-6 py-4">
-          <div>
-            <h2 className="text-body font-bold text-foreground">Generate GST Invoice</h2>
-            <p className="text-micro text-muted-foreground">Order {order.name}</p>
-          </div>
-          <button onClick={onClose} className="rounded-md p-1.5 hover:bg-muted">
-            <X className="size-4" />
-          </button>
-        </div>
-
-        <div className="space-y-4 px-6 py-4">
-          {/* Not a blocker: every field below is optional and the server
-              auto-resolves the seller GSTIN and place of supply when they are
-              omitted. So say what broke and offer a retry, but still let the
-              invoice be generated. */}
-          {lookupsFailed && (
-            <div className="flex items-start justify-between gap-3 rounded-lg bg-danger-subtle px-3 py-2">
-              <p className="text-micro text-danger">
-                Couldn't load {gstinsError ? "your GSTINs" : ""}
-                {gstinsError && statesError ? " and " : ""}
-                {statesError ? "the state list" : ""}. You can still generate the
-                invoice — the server will auto-select.
-              </p>
-              <button
-                type="button"
-                onClick={() => {
-                  if (gstinsError) refetchGstins();
-                  if (statesError) refetchStates();
-                }}
-                className="shrink-0 text-micro font-medium text-danger underline"
-              >
-                Retry
-              </button>
-            </div>
-          )}
-          <div>
-            <label className="text-micro font-medium text-muted-foreground">
-              Seller GSTIN{" "}
-              {gstinsError
-                ? "(Couldn't load)"
-                : gstinsLoading
-                  ? "(Loading…)"
-                  : activeGstins.length === 0
-                    ? "(No GSTINs registered)"
-                    : ""}
-            </label>
-            <Select value={sellerGstinId} onValueChange={setSellerGstinId}>
-              <SelectTrigger className="mt-1 h-9 text-caption">
-                <SelectValue placeholder="Auto-select based on place of supply" />
-              </SelectTrigger>
-              <SelectContent>
-                {activeGstins.map((g: OrganizationGstin) => (
-                  <SelectItem key={g.id} value={g.id} className="text-caption">
-                    {g.gstin} — {g.stateName} {g.isDefault ? "(Default)" : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div>
-            <label className="text-micro font-medium text-muted-foreground">
-              Buyer GSTIN (optional — leave empty for B2C)
-            </label>
-            <input
-              value={buyerGstin}
-              onChange={(e) => setBuyerGstin(e.target.value.toUpperCase())}
-              placeholder="e.g. 29AABCT1332L1ZN"
-              maxLength={15}
-              className="mt-1 w-full rounded-lg border bg-background px-3 py-2 font-mono text-caption outline-none focus:ring-1 focus:ring-brand"
-            />
-          </div>
-
-          <div>
-            <label className="text-micro font-medium text-muted-foreground">Place of Supply</label>
-            <Select value={placeOfSupplyCode} onValueChange={setPlaceOfSupplyCode}>
-              <SelectTrigger className="mt-1 h-9 text-caption">
-                <SelectValue placeholder="Auto-detect from shipping address" />
-              </SelectTrigger>
-              <SelectContent>
-                {states.map((s) => (
-                  <SelectItem key={s.code} value={s.code} className="text-caption">
-                    {s.code} - {s.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="rounded-lg border bg-surface-sunken p-3 dark:bg-muted/40">
-            <p className="mb-1 text-micro uppercase tracking-wider text-muted-foreground">
-              Order Summary
-            </p>
-            <div className="space-y-0.5 text-caption">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Items</span>
-                <span>{order.lineItems.length}</span>
-              </div>
-              <div className="flex justify-between font-semibold text-foreground">
-                <span>Total</span>
-                <span className="tabular-nums">
-                  {formatCurrency(Number(order.totalPrice), currency)}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 border-t px-6 py-4">
-          <button
-            onClick={handleGenerate}
-            disabled={createInvoice.isPending || activeGstins.length === 0}
-            className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-caption font-semibold text-brand-strong hover:bg-brand-hover disabled:opacity-50"
-          >
-            {createInvoice.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Check className="size-3.5" />
-            )}
-            Generate Invoice
-          </button>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-caption text-muted-foreground hover:bg-muted"
-          >
-            Cancel
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }

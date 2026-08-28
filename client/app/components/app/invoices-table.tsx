@@ -1,5 +1,16 @@
 import { Link } from "react-router";
-import { Download, MoreHorizontal, Ban, Eye } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Ban,
+  Copy,
+  Download,
+  Eye,
+  MoreHorizontal,
+  ShoppingBag,
+} from "lucide-react";
+import { toast } from "sonner";
 
 import {
   Table,
@@ -25,13 +36,19 @@ import {
   effectiveGstRate,
   resolveDisplayStatus,
 } from "~/lib/invoice-status";
-import type { Invoice } from "~/types/api";
+import type { Invoice, InvoiceSortField } from "~/types/api";
 
 interface InvoicesTableProps {
   invoices: ReadonlyArray<Invoice>;
   currency: string;
   onSelect: (id: string) => void;
-  onCancel: (id: string) => void;
+  /** Opens the cancel confirmation — never cancels directly. */
+  onCancel: (invoice: Invoice) => void;
+  /** Cancelling is ORG_MANAGERS-only server-side — see `useInvoiceActionGates`. */
+  canCancel: boolean;
+  sortBy: InvoiceSortField;
+  sortOrder: "asc" | "desc";
+  onSortChange: (field: InvoiceSortField) => void;
 }
 
 function formatInvoiceDate(value: string): string {
@@ -42,24 +59,109 @@ function formatInvoiceDate(value: string): string {
   });
 }
 
+/**
+ * A column header that sorts.
+ *
+ * Sorting is server-side (`sortBy` / `sortOrder` on the list DTO, whitelisted
+ * there to the columns below), so this only reports the intent upwards. It
+ * deliberately does not reorder the page-sized slice it is holding — that would
+ * be a sort silently confined to the current page.
+ */
+function SortableHead({
+  field,
+  label,
+  sortBy,
+  sortOrder,
+  onSortChange,
+  align = "left",
+}: {
+  field: InvoiceSortField;
+  label: string;
+  sortBy: InvoiceSortField;
+  sortOrder: "asc" | "desc";
+  onSortChange: (field: InvoiceSortField) => void;
+  align?: "left" | "right";
+}) {
+  const active = sortBy === field;
+  const Icon = !active ? ArrowUpDown : sortOrder === "asc" ? ArrowUp : ArrowDown;
+
+  return (
+    <TableHead
+      className={align === "right" ? "text-right" : undefined}
+      aria-sort={
+        active ? (sortOrder === "asc" ? "ascending" : "descending") : "none"
+      }
+    >
+      <button
+        type="button"
+        onClick={() => onSortChange(field)}
+        className={cn(
+          "inline-flex items-center gap-1 rounded-sm hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/50",
+          align === "right" && "flex-row-reverse",
+          active && "text-foreground"
+        )}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <Icon
+          aria-hidden
+          className={cn("size-3", active ? "opacity-100" : "opacity-40")}
+        />
+      </button>
+    </TableHead>
+  );
+}
+
 export function InvoicesTable({
   invoices,
   currency,
   onSelect,
   onCancel,
+  canCancel,
+  sortBy,
+  sortOrder,
+  onSortChange,
 }: InvoicesTableProps) {
+  const sortProps = { sortBy, sortOrder, onSortChange };
+
+  async function copyInvoiceNumber(invoiceNumber: string) {
+    try {
+      await navigator.clipboard.writeText(invoiceNumber);
+      toast.success(`Copied ${invoiceNumber}`);
+    } catch {
+      // Clipboard access is denied outside secure contexts and under some
+      // policies. Say so, rather than reporting a copy that did not happen.
+      toast.error("Couldn't copy — your browser blocked clipboard access.");
+    }
+  }
+
   return (
     <div className="overflow-x-auto">
       <Table>
         <TableHeader>
           <TableRow className="hover:bg-transparent">
-            <TableHead>Invoice</TableHead>
-            <TableHead>Buyer</TableHead>
-            <TableHead>Date</TableHead>
+            <SortableHead field="invoiceNumber" label="Invoice" {...sortProps} />
+            <SortableHead field="buyerName" label="Buyer" {...sortProps} />
+            <SortableHead field="invoiceDate" label="Date" {...sortProps} />
             <TableHead>Order</TableHead>
-            <TableHead className="text-right">Taxable</TableHead>
-            <TableHead className="text-right">Tax</TableHead>
-            <TableHead className="text-right">Total</TableHead>
+            <SortableHead
+              field="subtotal"
+              label="Taxable"
+              align="right"
+              {...sortProps}
+            />
+            <SortableHead
+              field="totalTax"
+              label="Tax"
+              align="right"
+              {...sortProps}
+            />
+            <SortableHead
+              field="grandTotal"
+              label="Total"
+              align="right"
+              {...sortProps}
+            />
             <TableHead>Status</TableHead>
             {/* Actions — deliberately unlabelled, per the other tables. */}
             <TableHead />
@@ -117,8 +219,15 @@ export function InvoicesTable({
                   {formatInvoiceDate(invoice.invoiceDate)}
                 </TableCell>
 
-                <TableCell className="text-caption text-muted-foreground">
-                  {invoice.order.name}
+                {/* Links through to the order the invoice was raised against.
+                    Stops propagation so it doesn't also open the dialog. */}
+                <TableCell onClick={(event) => event.stopPropagation()}>
+                  <Link
+                    to={`/orders/${invoice.order.id}`}
+                    className="text-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                  >
+                    {invoice.order.name}
+                  </Link>
                 </TableCell>
 
                 <TableCell className="text-right text-caption tabular-nums text-foreground">
@@ -152,11 +261,15 @@ export function InvoicesTable({
                       variant="ghost"
                       size="icon-sm"
                       asChild
-                      title="Download invoice"
+                      title="Open printable invoice"
                     >
+                      {/* New tab, matching how order detail opens this same
+                          route — printing shouldn't lose the list you were on. */}
                       <Link
                         to={`/orders/invoices/${invoice.id}/print`}
-                        aria-label={`Download invoice ${invoice.invoiceNumber}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Open printable invoice ${invoice.invoiceNumber}`}
                       >
                         <Download />
                       </Link>
@@ -177,10 +290,24 @@ export function InvoicesTable({
                           <Eye />
                           View details
                         </DropdownMenuItem>
-                        {invoice.status === "ISSUED" && (
+                        <DropdownMenuItem asChild>
+                          <Link to={`/orders/${invoice.order.id}`}>
+                            <ShoppingBag />
+                            Open order {invoice.order.name}
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => copyInvoiceNumber(invoice.invoiceNumber)}
+                        >
+                          <Copy />
+                          Copy invoice number
+                        </DropdownMenuItem>
+                        {/* Cancelling is ORG_MANAGERS-only server-side; without
+                            the role check this item could only ever 403. */}
+                        {canCancel && invoice.status === "ISSUED" && (
                           <DropdownMenuItem
                             variant="destructive"
-                            onClick={() => onCancel(invoice.id)}
+                            onClick={() => onCancel(invoice)}
                           >
                             <Ban />
                             Cancel invoice

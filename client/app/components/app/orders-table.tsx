@@ -24,6 +24,7 @@ import {
   FULFILLMENT_LABELS,
 } from "~/lib/order-status";
 import { ChannelBadge } from "~/components/app/channel-badge";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import type { Order, ChannelPlatform } from "~/types/api";
 
 
@@ -51,7 +52,6 @@ interface OrdersTableProps {
   currency: string;
   showCustomerName?: boolean;
   onViewDetail?: (orderId: string) => void;
-  onGenerateInvoice?: (orderId: string) => void;
   gstEnabled?: boolean;
   variant?: "compact" | "default";
 }
@@ -59,7 +59,10 @@ interface OrdersTableProps {
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions.
  *  Row click navigates to /orders/:id. Cells with their own click handlers
  *  (checkbox, dropdown menu) stop propagation. */
-export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false, variant = "default" }: OrdersTableProps) {
+export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, gstEnabled = false, variant = "default" }: OrdersTableProps) {
+  // Mirrors ORG_MANAGERS — the tier that may issue a GST invoice.
+  const { role } = useCurrentRole();
+  const canManage = role === "OWNER" || role === "ADMIN" || role === "MANAGER";
   const navigate = useNavigate();
 
   if (variant === "compact") {
@@ -218,15 +221,15 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                     View details
                   </DropdownMenuItem>
                   <OrderRowSyncItem order={order} />
-                  {gstEnabled && (
+                  {/* Issuing an invoice is ORG_MANAGERS-only server-side, so
+                      this item only ever led somewhere useful for a manager.
+                      It navigates to the order, where the gated Generate button
+                      lives — there is no standalone create route. */}
+                  {gstEnabled && canManage && (
                     <>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
-                        onClick={() =>
-                          onGenerateInvoice
-                            ? onGenerateInvoice(order.id)
-                            : navigate(`/orders/${order.id}`)
-                        }
+                        onClick={() => navigate(`/orders/${order.id}`)}
                       >
                         <Receipt className="mr-1.5 size-3.5" />
                         Generate GST Invoice

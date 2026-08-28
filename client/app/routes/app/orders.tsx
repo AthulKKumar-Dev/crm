@@ -23,11 +23,11 @@ import { useDebounced } from "~/hooks/use-debounced";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Separator } from "~/components/ui/separator";
 import { formatCurrency } from "~/lib/utils";
+import { downloadBlob } from "~/lib/download-blob";
 import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { orderService } from "~/services/order.service";
 import { dashboardService } from "~/services/dashboard.service";
-import { toast } from "sonner";
 import type { OrderListParams, DashboardQueryParams, OrderStatsResponse } from "~/types/api";
 
 export function meta() {
@@ -61,25 +61,6 @@ const STAT_CARDS: ReadonlyArray<{
   { key: "totalSales", label: "Total Sales", icon: <Target className="size-4" />, currency: true },
   { key: "totalProductsSold", label: "Products Sold", icon: <Box className="size-4" /> },
 ];
-
-/** Fetch a Blob and save it, surfacing failures as a toast rather than silence. */
-async function downloadBlob(
-  fetchBlob: () => Promise<Blob>,
-  filename: string,
-  errorMessage: string,
-): Promise<void> {
-  try {
-    const blob = await fetchBlob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  } catch {
-    toast.error(errorMessage);
-  }
-}
 
 export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");

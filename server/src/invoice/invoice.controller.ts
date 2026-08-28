@@ -90,10 +90,14 @@ export class InvoiceController {
         'placeOfSupply',
         'gstType',
         'subtotal',
+        'discount',
         'cgst',
         'sgst',
         'igst',
         'totalTax',
+        // subtotal + totalTax + shipping = grandTotal. Without the shipping
+        // column the row does not reconcile and reads as an arithmetic error.
+        'shipping',
         'grandTotal',
         'status',
       ],
@@ -103,7 +107,7 @@ export class InvoiceController {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename=invoices.csv',
+      `attachment; filename=invoices${query.financialYear ? `-${query.financialYear}` : ''}.csv`,
     );
     res.send(csv);
   }

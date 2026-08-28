@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useParams } from "react-router";
 import { useInvoice } from "~/hooks/use-invoice-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { readAddress } from "~/lib/address";
 import { formatCurrency } from "~/lib/utils";
 
 export function meta() {
@@ -10,9 +11,10 @@ export function meta() {
 
 export default function InvoicePrintPage() {
   const { id } = useParams<{ id: string }>();
-  const { data: invoice, isLoading } = useInvoice(id);
+  const { data: invoice, isLoading, isError, refetch } = useInvoice(id);
   const { data: org } = useCurrentOrg();
   const currency = invoice?.currency ?? org?.currency ?? "INR";
+  const isCancelled = invoice?.status === "CANCELLED";
 
   // Print once per invoice, not once per response.
   //
@@ -23,14 +25,40 @@ export default function InvoicePrintPage() {
   // of true, and four separate call sites invalidate `invoiceKeys.all`, which
   // prefix-matches this query. Depending on the id fixes the common case; the
   // ref makes a same-id remount safe too.
+  //
+  // Cancelled invoices are excluded: auto-printing one puts a void document in
+  // someone's hand with no deliberate action. The button below still works if
+  // a printed copy is genuinely wanted — it carries the banner.
   const printedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!invoice?.id || printedRef.current === invoice.id) return;
+    if (!invoice?.id || isCancelled || printedRef.current === invoice.id) return;
     printedRef.current = invoice.id;
     // Small delay so layout settles before the dialog opens.
     const t = setTimeout(() => window.print(), 250);
     return () => clearTimeout(t);
-  }, [invoice?.id]);
+  }, [invoice?.id, isCancelled]);
+
+  // Error must be checked before the loading branch. `isError` leaves
+  // `isLoading` false and `invoice` undefined, so a 404 or a network failure
+  // fell into the loading branch and showed "Loading bill…" forever.
+  if (isError) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center gap-3 px-6 text-center">
+        <p className="text-sm font-medium text-foreground">
+          Couldn't load this invoice.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          It may have been removed, or the request failed on the way.
+        </p>
+        <button
+          onClick={() => refetch()}
+          className="rounded-lg bg-gray-900 px-4 py-2 text-xs font-medium text-white hover:bg-gray-800"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
 
   if (isLoading || !invoice) {
     return (
@@ -41,6 +69,21 @@ export default function InvoicePrintPage() {
   }
 
   const isIntra = invoice.gstType === "CGST_SGST";
+  // Money fields arrive as Prisma Decimals, i.e. strings. Coerce before any
+  // comparison — "0.00" is truthy and would render an empty discount row.
+  const num = (value: number | string | null | undefined) => Number(value ?? 0);
+  const discount = num(invoice.totalDiscount);
+  const shipping = num(invoice.shippingCharge);
+  // Pre-discount value of the goods. Shown so the "less discount" line has
+  // something to be subtracted from — `subtotal` is already net of it.
+  const grossValue = num(invoice.subtotal) + discount;
+
+  const sellerAddress = readAddress(
+    invoice.sellerAddress as Record<string, unknown> | null,
+  );
+  const buyerAddress = readAddress(
+    invoice.buyerAddress as Record<string, unknown> | null,
+  );
 
   return (
     <>
@@ -53,6 +96,26 @@ export default function InvoicePrintPage() {
       `}</style>
 
       <div className="mx-auto max-w-3xl bg-white p-8 text-[12px] text-gray-900">
+        {/* A cancelled invoice used to print byte-identical to a live one. */}
+        {isCancelled && (
+          <div className="mb-4 rounded-md border-2 border-red-600 px-4 py-2 text-center">
+            <p className="text-base font-bold uppercase tracking-widest text-red-600">
+              Cancelled
+            </p>
+            <p className="text-[11px] text-red-700">
+              This invoice was cancelled
+              {invoice.cancelledAt
+                ? ` on ${new Date(invoice.cancelledAt).toLocaleDateString("en-IN", {
+                    day: "2-digit",
+                    month: "long",
+                    year: "numeric",
+                  })}`
+                : ""}{" "}
+              and carries no tax liability.
+            </p>
+          </div>
+        )}
+
         {/* Header */}
         <div className="flex items-start justify-between border-b pb-4">
           <div>
@@ -76,23 +139,38 @@ export default function InvoicePrintPage() {
           </div>
         </div>
 
-        {/* Seller / Buyer */}
+        {/* Seller / Buyer. Address is a statutory field on both sides — it was
+            missing entirely because nothing ever captured the seller's. */}
         <div className="mt-4 grid grid-cols-2 gap-6">
           <Block title="Seller">
             <p className="font-semibold">{invoice.sellerLegalName}</p>
-            <p className="text-[11px]">GSTIN: {invoice.sellerGstin}</p>
+            {sellerAddress.lines.map((line) => (
+              <p key={line} className="text-[11px]">
+                {line}
+              </p>
+            ))}
             <p className="text-[11px]">
               {invoice.sellerStateCode} — {invoice.sellerStateName}
             </p>
+            <p className="text-[11px]">GSTIN: {invoice.sellerGstin}</p>
           </Block>
           <Block title="Buyer">
             <p className="font-semibold">{invoice.buyerName}</p>
-            {invoice.buyerGstin && (
-              <p className="text-[11px]">GSTIN: {invoice.buyerGstin}</p>
-            )}
+            {buyerAddress.lines.map((line) => (
+              <p key={line} className="text-[11px]">
+                {line}
+              </p>
+            ))}
             <p className="text-[11px]">
               {invoice.buyerStateCode} — {invoice.buyerStateName}
             </p>
+            {invoice.buyerGstin ? (
+              <p className="text-[11px]">GSTIN: {invoice.buyerGstin}</p>
+            ) : (
+              <p className="text-[11px] italic text-gray-600">
+                Unregistered (B2C)
+              </p>
+            )}
           </Block>
         </div>
 
@@ -116,6 +194,7 @@ export default function InvoicePrintPage() {
               <th className="px-2 py-1.5 font-medium">HSN</th>
               <th className="px-2 py-1.5 text-right font-medium">Qty</th>
               <th className="px-2 py-1.5 text-right font-medium">Unit</th>
+              <th className="px-2 py-1.5 text-right font-medium">Disc.</th>
               <th className="px-2 py-1.5 text-right font-medium">Taxable</th>
               {isIntra ? (
                 <>
@@ -138,6 +217,11 @@ export default function InvoicePrintPage() {
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">
                   {formatCurrency(li.unitPrice, currency)}
+                </td>
+                <td className="px-2 py-1.5 text-right tabular-nums">
+                  {num(li.discount) > 0
+                    ? `−${formatCurrency(li.discount, currency)}`
+                    : "—"}
                 </td>
                 <td className="px-2 py-1.5 text-right tabular-nums">
                   {formatCurrency(li.taxableValue, currency)}
@@ -164,10 +248,33 @@ export default function InvoicePrintPage() {
           </tbody>
         </table>
 
-        {/* Totals */}
-        <div className="mt-4 ml-auto w-72 space-y-1 text-[11px]">
+        {/*
+          Totals, as a ladder that actually reconciles to the grand total.
+
+          It previously printed: Subtotal, CGST, SGST, *Total tax* (a fourth row
+          double-listing the two above it), then "Discount" as a MINUS — but the
+          discount is already inside the subtotal, so it was being shown as a
+          deduction that had not been taken. Shipping, a real addend of
+          grandTotal, was missing entirely. Three separate reasons the printed
+          figures did not add up.
+
+          Now: gross → less discount → taxable → tax → shipping → grand total.
+        */}
+        <div className="mt-4 ml-auto w-80 space-y-1 text-[11px]">
+          {discount > 0 && (
+            <>
+              <Row
+                label="Gross value"
+                value={formatCurrency(grossValue, currency)}
+              />
+              <Row
+                label="Less: discount"
+                value={`−${formatCurrency(invoice.totalDiscount, currency)}`}
+              />
+            </>
+          )}
           <Row
-            label="Subtotal"
+            label="Taxable value"
             value={formatCurrency(invoice.subtotal, currency)}
           />
           {isIntra ? (
@@ -187,14 +294,10 @@ export default function InvoicePrintPage() {
               value={formatCurrency(invoice.totalIgst, currency)}
             />
           )}
-          <Row
-            label="Total tax"
-            value={formatCurrency(invoice.totalTax, currency)}
-          />
-          {invoice.totalDiscount > 0 && (
+          {shipping > 0 && (
             <Row
-              label="Discount"
-              value={`-${formatCurrency(invoice.totalDiscount, currency)}`}
+              label="Shipping (not taxed)"
+              value={formatCurrency(invoice.shippingCharge, currency)}
             />
           )}
           <div className="border-t pt-1">

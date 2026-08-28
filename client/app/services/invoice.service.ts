@@ -62,12 +62,6 @@ export const invoiceService = {
       })
       .then((res) => res.data),
 
-  /** Export invoices as JSON. */
-  exportJson: (params?: InvoiceListParams) =>
-    apiClient
-      .get("/invoices/export/json", { params })
-      .then((res) => res.data),
-
   /** Download GST return (GSTR-1 or GSTR-3B) as CSV blob. */
   exportGstReturnCsv: (params: GstReturnParams) =>
     apiClient

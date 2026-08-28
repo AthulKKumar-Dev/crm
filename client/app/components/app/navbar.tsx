@@ -41,6 +41,7 @@ import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { toast } from "sonner";
 
 type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
@@ -111,6 +112,15 @@ const NAV_LINKS: NavItem[] = [
 ];
 
 /**
+ * NAV_LINKS minus anything owned by a preview module — see feature-flags.ts.
+ * Dropping a pill drops its secondary strip with it, since the strip renders
+ * from the active entry's children and matchNav only ever searches this list.
+ */
+const BASE_NAV_LINKS: NavItem[] = showPreviewModules
+  ? NAV_LINKS
+  : NAV_LINKS.filter((item) => !isPreviewPath(item.href));
+
+/**
  * The nav entry owning `pathname`, longest matching href first — so
  * /orders/drafts/<id> selects "Drafts" rather than "All orders". Matching on a
  * segment boundary (not a bare startsWith) keeps /ordersomething from matching
@@ -142,8 +152,8 @@ export function Navbar() {
       { label: "Products", href: "/products", icon: Package },
     ]
     : user?.isSuperAdmin && !impersonatedBy
-      ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
-      : NAV_LINKS;
+      ? [...BASE_NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+      : BASE_NAV_LINKS;
 
   // Longest-prefix match, so a child route keeps its parent pill lit.
   const activeTop = matchNav(navLinks, location.pathname);

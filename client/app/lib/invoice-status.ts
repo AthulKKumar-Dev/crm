@@ -78,8 +78,15 @@ export function effectiveGstRate(invoice: {
   subtotal: number;
   totalTax: number;
 }): number | null {
-  if (!invoice.subtotal) return null;
-  return Math.round((invoice.totalTax / invoice.subtotal) * 100);
+  // Coerced, not truthiness-checked. Prisma `Decimal` columns serialise to
+  // JSON as STRINGS, so a zero subtotal arrives as "0.00" — which is truthy.
+  // The guard passed, the division ran as 0/0, and the row sub-label rendered
+  // "NaN%". The division itself worked by string coercion, which is exactly why
+  // this went unnoticed for every non-zero invoice.
+  const subtotal = Number(invoice.subtotal);
+  const totalTax = Number(invoice.totalTax);
+  if (!Number.isFinite(subtotal) || subtotal === 0) return null;
+  return Math.round((totalTax / subtotal) * 100);
 }
 
 /** Leading row dot. Same semantics as the pill, just the fill on its own. */

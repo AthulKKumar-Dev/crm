@@ -488,9 +488,15 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
   const updateGstin = useUpdateGstinMutation();
 
   // Form state for adding GSTIN
-  const [form, setForm] = useState<CreateGstinRequest>({
+  const EMPTY_GSTIN_FORM: CreateGstinRequest = {
     gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false,
-  });
+    address: {},
+  };
+  const [form, setForm] = useState<CreateGstinRequest>(EMPTY_GSTIN_FORM);
+
+  function patchAddress(patch: Partial<NonNullable<CreateGstinRequest["address"]>>) {
+    setForm((prev) => ({ ...prev, address: { ...prev.address, ...patch } }));
+  }
 
   function handleGstToggle() {
     const newValue = !gstEnabled;
@@ -503,12 +509,26 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
       toast.error("Please fill in GSTIN, legal name, and state.");
       return;
     }
-    createGstin.mutate(form, {
-      onSuccess: () => {
-        setShowAddForm(false);
-        setForm({ gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false });
+    // Drop blank address keys, and send `undefined` rather than `{}` when the
+    // address was left untouched — an empty object would still be stored, and
+    // `readAddress` reports `hasAddress: false` either way, so the record would
+    // just carry noise. `province` comes from the state picker, so the printed
+    // address names the state without needing a second input. The `> 1` check
+    // means "something beyond the auto-filled province was actually typed".
+    const address = Object.fromEntries(
+      Object.entries({ ...form.address, province: form.stateName })
+        .filter(([, value]) => typeof value === "string" && value.trim() !== ""),
+    );
+
+    createGstin.mutate(
+      { ...form, address: Object.keys(address).length > 1 ? address : undefined },
+      {
+        onSuccess: () => {
+          setShowAddForm(false);
+          setForm(EMPTY_GSTIN_FORM);
+        },
       },
-    });
+    );
   }
 
   function handleStateChange(code: string) {
@@ -659,6 +679,53 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
                     value={form.tradeName || ""}
                     onChange={(e) => setForm((prev) => ({ ...prev, tradeName: e.target.value }))}
                     placeholder="Brand/trade name (optional)"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+              </div>
+
+              {/* Registered address. A GST tax invoice must carry the
+                  supplier's address, and this form was the missing link: the
+                  DTO and the Prisma column already accepted one, so every
+                  invoice snapshotted a null sellerAddress and printed without
+                  it. Keys match the canonical shape lib/address.ts reads. */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <p className="sm:col-span-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                  Registered address — printed on every invoice issued under this GSTIN
+                </p>
+                <div className="sm:col-span-2">
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Address line 1</label>
+                  <input
+                    value={form.address?.address1 ?? ""}
+                    onChange={(e) => patchAddress({ address1: e.target.value })}
+                    placeholder="Building, street"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Address line 2</label>
+                  <input
+                    value={form.address?.address2 ?? ""}
+                    onChange={(e) => patchAddress({ address2: e.target.value })}
+                    placeholder="Area, landmark (optional)"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">City</label>
+                  <input
+                    value={form.address?.city ?? ""}
+                    onChange={(e) => patchAddress({ city: e.target.value })}
+                    placeholder="City"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">PIN code</label>
+                  <input
+                    value={form.address?.zip ?? ""}
+                    onChange={(e) => patchAddress({ zip: e.target.value })}
+                    placeholder="6-digit PIN"
                     className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
                   />
                 </div>

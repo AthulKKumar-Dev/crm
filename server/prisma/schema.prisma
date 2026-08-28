@@ -1228,7 +1228,12 @@ model OrganizationGstin {
   tradeName      String?  @map("trade_name") // Trade/brand name
   stateCode      String   @map("state_code") // 2-digit Indian state code e.g. "27"
   stateName      String   @map("state_name") // Full name e.g. "Maharashtra"
-  address        Json?    @db.JsonB // { line1, line2, city, pincode }
+  // Canonical address keys — the same shape every other address blob in the
+  // system uses, so `client/app/lib/address.ts readAddress()` can render it:
+  // { address1, address2, city, zip, province }. Snapshotted onto
+  // Invoice.sellerAddress at issue time; a GST tax invoice must carry the
+  // supplier's address.
+  address        Json?    @db.JsonB
   isDefault      Boolean  @default(false) @map("is_default")
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
@@ -1280,6 +1285,14 @@ model Invoice {
   totalIgst     Decimal @default(0) @map("total_igst") @db.Decimal(12, 2)
   totalTax      Decimal @default(0) @map("total_tax") @db.Decimal(12, 2)
   totalDiscount Decimal @default(0) @map("total_discount") @db.Decimal(12, 2)
+  // Shipping charged on the order, carried onto the invoice so grandTotal can
+  // agree with Order.totalPrice. NOT taxed — treating shipping as a composite
+  // supply would change the tax charged and is a deliberate decision, not an
+  // oversight (see GstCalculatorService.calculateInvoiceTotals). It IS part of
+  // grandTotal, which is why it has to be stored: without it the printed
+  // invoice's total exceeds subtotal + tax by an amount nothing on the document
+  // explains.
+  shippingCharge Decimal @default(0) @map("shipping_charge") @db.Decimal(12, 2)
   grandTotal    Decimal @map("grand_total") @db.Decimal(12, 2)
   currency      String  @default("INR")
 

@@ -3,6 +3,7 @@ import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { cn } from "~/lib/utils";
 
 // Vendors may only reach these sections (the server enforces the real boundary;
@@ -65,13 +66,23 @@ export default function AppLayout() {
     (VENDOR_DENIED_PREFIXES.some((p) => isUnder(location.pathname, p)) ||
       !VENDOR_ALLOWED_PREFIXES.some((p) => isUnder(location.pathname, p)));
 
+  // Chat / Campaigns / Logistics are UI-only previews running on mock data.
+  // The navbar already hides their pills outside dev; this stops a typed or
+  // bookmarked URL from rendering placeholder data in a production build.
+  const previewBlocked = !showPreviewModules && isPreviewPath(location.pathname);
+
+  // Vendors bounce to /orders (their home), everyone else to /dashboard. Vendor
+  // first on purpose: a vendor on /logistics is already outside the allow list
+  // and should keep landing where every other blocked vendor route sends them.
+  const redirectTo = vendorBlocked ? "/orders" : previewBlocked ? "/dashboard" : null;
+
   // Print/document routes render bare (no navbar/sidebar) so the app chrome
   // never bleeds into the printed PDF. AuthGuard still gates them.
   const isPrintRoute = /\/(packing-slip|pick-slip|print)$/.test(location.pathname);
   if (isPrintRoute) {
     return (
       <AuthGuard>
-        {vendorBlocked ? <Navigate to="/orders" replace /> : <Outlet />}
+        {redirectTo ? <Navigate to={redirectTo} replace /> : <Outlet />}
       </AuthGuard>
     );
   }
@@ -104,7 +115,7 @@ export default function AppLayout() {
             isFullHeight && "min-h-0 flex-1 overflow-hidden",
           )}
         >
-          {vendorBlocked ? <Navigate to="/orders" replace /> : <Outlet />}
+          {redirectTo ? <Navigate to={redirectTo} replace /> : <Outlet />}
         </main>
       </div>
     </AuthGuard>

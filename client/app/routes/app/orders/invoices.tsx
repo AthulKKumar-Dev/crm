@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock } from "lucide-react";
-import { toast } from "sonner";
+import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X } from "lucide-react";
 
 import {
   PageHeader,
@@ -25,6 +24,7 @@ import { StatCard } from "~/components/app/stat-card";
 import { SegmentedTabs } from "~/components/app/segmented-tabs";
 import { InvoicesTable } from "~/components/app/invoices-table";
 import { InvoiceDetailDialog } from "~/components/app/invoice-detail-dialog";
+import { CancelInvoiceDialog } from "~/components/app/cancel-invoice-dialog";
 import {
   Gstr1B2bPanel,
   Gstr1B2cPanel,
@@ -42,15 +42,18 @@ import { EmptyState } from "~/components/app/empty-state";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { QueryErrorState } from "~/components/app/query-error-state";
 import { useInvoices, useInvoiceStats, useGstReturn } from "~/hooks/use-invoice-queries";
-import { useCancelInvoiceMutation } from "~/hooks/use-invoice-mutations";
+import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useGstins } from "~/hooks/use-gst-queries";
 import { useDebounced } from "~/hooks/use-debounced";
 import { invoiceService } from "~/services/invoice.service";
+import { downloadBlob } from "~/lib/download-blob";
 import { formatCurrency } from "~/lib/utils";
 import {
   MONTHS,
   b2bSectionTotals,
   daysUntil,
+  financialYearOptions,
   formatPeriodLabel,
   getCurrentFinancialYear,
   getCurrentPeriod,
@@ -60,8 +63,11 @@ import {
 import type {
   GstReturnGstr1,
   GstReturnGstr3B,
+  Invoice,
   InvoiceListParams,
+  InvoiceSortField,
   InvoiceStats,
+  OrganizationGstin,
 } from "~/types/api";
 
 export function meta() {
@@ -74,16 +80,32 @@ export function meta() {
 const PAGE_SIZE = 15;
 
 type Tab = "invoices" | "filing";
-type Chip = "all" | "unpaid" | "b2b" | "drafts" | "cancelled";
+type Chip = "all" | "unpaid" | "b2b" | "cancelled";
 
-/** Chip → the list filter it applies. `all` deliberately carries none. */
+/**
+ * Chip → the list filter it applies. `all` deliberately carries none.
+ *
+ * There is no `drafts` chip: `InvoiceStatus.DRAFT` exists in the enum but no
+ * code path ever writes it, so the chip could only ever show zero and match
+ * nothing. It comes back with a real draft-invoice lifecycle.
+ */
 const CHIP_FILTERS: Record<Chip, Partial<InvoiceListParams>> = {
   all: {},
   unpaid: { paymentState: "UNPAID" },
   b2b: { buyerType: "B2B" },
-  drafts: { status: "DRAFT" },
   cancelled: { status: "CANCELLED" },
 };
+
+const CHIPS: ReadonlyArray<Chip> = ["all", "unpaid", "b2b", "cancelled"];
+const FY_OPTIONS = financialYearOptions();
+const SORT_FIELDS: ReadonlyArray<InvoiceSortField> = [
+  "invoiceDate",
+  "invoiceNumber",
+  "buyerName",
+  "subtotal",
+  "totalTax",
+  "grandTotal",
+];
 
 /** "1 – 24 Aug 2026" — the window the month-to-date figures cover. */
 function formatStatsWindow(stats: InvoiceStats): string {
@@ -100,44 +122,88 @@ function formatStatsWindow(stats: InvoiceStats): string {
 export default function InvoicesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
-  // Tab, return type and period live in the URL because the design links
-  // across them — the due banner jumps to the filing view and the sidebar
-  // crosses between GSTR-1 and GSTR-3B. Local state cannot express those as
-  // real links, and this makes a period shareable for free.
+  // Tab, return type, period, financial year, filters, page and the open
+  // invoice all live in the URL. The design links across them — the due banner
+  // jumps to the filing view and the sidebar crosses between GSTR-1 and
+  // GSTR-3B — and local state cannot express those as real links. It also means
+  // a filtered list, a chosen year and an open invoice all survive a reload and
+  // can be pasted to a colleague, and the back button behaves.
   const tab = (searchParams.get("tab") as Tab) ?? "invoices";
   const returnType = (searchParams.get("return") as ReturnType) ?? "GSTR1";
   const period = searchParams.get("period") ?? getCurrentPeriod();
-  const [financialYear] = useState(getCurrentFinancialYear);
 
-  const [chip, setChip] = useState<Chip>("all");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
-  const [isDownloading, setIsDownloading] = useState(false);
+  const fyParam = searchParams.get("fy");
+  const financialYear =
+    fyParam && FY_OPTIONS.includes(fyParam) ? fyParam : getCurrentFinancialYear();
+
+  const chipParam = searchParams.get("chip") as Chip | null;
+  const chip: Chip = chipParam && CHIPS.includes(chipParam) ? chipParam : "all";
+
+  const pageParam = Number(searchParams.get("page"));
+  const currentPage = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
+
+  const sortParam = searchParams.get("sort") as InvoiceSortField | null;
+  const sortBy: InvoiceSortField =
+    sortParam && SORT_FIELDS.includes(sortParam) ? sortParam : "invoiceDate";
+  const sortOrder = searchParams.get("order") === "asc" ? "asc" : "desc";
+
+  const dateFrom = searchParams.get("from") ?? "";
+  const dateTo = searchParams.get("to") ?? "";
+  const sellerGstinId = searchParams.get("gstin") ?? "";
+  const selectedInvoiceId = searchParams.get("invoice");
+
+  // Search stays local so typing is instant; only the debounced value reaches
+  // the query key and the URL.
+  const [searchQuery, setSearchQuery] = useState(
+    () => searchParams.get("q") ?? "",
+  );
+  const debouncedSearch = useDebounced(searchQuery, 350);
+
+  const [invoiceToCancel, setInvoiceToCancel] = useState<{
+    id: string;
+    invoiceNumber: string;
+  } | null>(null);
+  const [downloading, setDownloading] = useState<"list" | "return" | null>(null);
 
   const { data: org } = useCurrentOrg();
   const currency = org?.currency ?? "INR";
+  const { canIssue, canCancel } = useInvoiceActionGates();
 
-  function patchParams(patch: Record<string, string>) {
+  // Only used to decide whether a GSTIN filter is worth showing at all — a
+  // single-registration org has nothing to filter by.
+  const { data: gstins = [] } = useGstins();
+  const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  /**
+   * Patch the URL. `null` deletes a key so it stops appearing in the address
+   * bar once cleared, and any change other than paging itself resets to page 1
+   * — otherwise narrowing a filter while on page 4 lands on an empty page.
+   */
+  function patchParams(patch: Record<string, string | null>) {
     setSearchParams(
       (previous) => {
         const next = new URLSearchParams(previous);
-        for (const [key, value] of Object.entries(patch)) next.set(key, value);
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null || value === "") next.delete(key);
+          else next.set(key, value);
+        }
+        if (!("page" in patch)) next.delete("page");
         return next;
       },
       { replace: true },
     );
   }
 
-  // Debounced into the query key only — the input keeps the raw value, so
-  // typing stays instant without a request per keystroke.
-  const debouncedSearch = useDebounced(searchQuery, 350);
-
   const listParams: InvoiceListParams = {
     page: currentPage,
     limit: PAGE_SIZE,
     financialYear,
     search: debouncedSearch || undefined,
+    dateFrom: dateFrom || undefined,
+    dateTo: dateTo || undefined,
+    sellerGstinId: sellerGstinId || undefined,
+    sortBy,
+    sortOrder,
     ...CHIP_FILTERS[chip],
   };
 
@@ -147,8 +213,9 @@ export default function InvoicesPage() {
     isError,
     refetch,
   } = useInvoices(listParams);
-  const { data: stats, isLoading: statsLoading } = useInvoiceStats({ financialYear });
-  const cancelInvoice = useCancelInvoiceMutation();
+  const { data: stats, isLoading: statsLoading } = useInvoiceStats({
+    financialYear,
+  });
 
   const invoices = invoiceData?.data ?? [];
   const meta = invoiceData?.meta;
@@ -162,33 +229,52 @@ export default function InvoicesPage() {
   const gstr1DueDate = returnDueDate(financialYear, period, "GSTR1");
   const gstr1DaysLeft = gstr1DueDate ? daysUntil(gstr1DueDate) : null;
 
-  function handleChip(next: Chip) {
-    setChip(next);
-    setCurrentPage(1);
-  }
+  const hasFilters =
+    chip !== "all" ||
+    !!searchQuery ||
+    !!dateFrom ||
+    !!dateTo ||
+    !!sellerGstinId;
 
   function handleSearch(event: React.ChangeEvent<HTMLInputElement>) {
-    setSearchQuery(event.target.value);
-    setCurrentPage(1);
+    const value = event.target.value;
+    setSearchQuery(value);
+    patchParams({ q: value || null });
+  }
+
+  /** Clicking the active column flips direction; a new column starts descending. */
+  function handleSort(field: InvoiceSortField) {
+    if (field === sortBy) {
+      patchParams({ order: sortOrder === "asc" ? "desc" : "asc" });
+      return;
+    }
+    patchParams({ sort: field, order: "desc" });
+  }
+
+  function clearFilters() {
+    setSearchQuery("");
+    patchParams({
+      chip: null,
+      q: null,
+      from: null,
+      to: null,
+      gstin: null,
+    });
   }
 
   async function download(
+    kind: "list" | "return",
     fetcher: () => Promise<Blob>,
     filename: string,
+    errorMessage: string,
   ) {
-    setIsDownloading(true);
+    // Tracked per button. A single shared flag disabled the GST-return download
+    // while an invoice CSV was in flight, and vice versa.
+    setDownloading(kind);
     try {
-      const blob = await fetcher();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = filename;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      toast.error("Could not download the file. Please try again.");
+      await downloadBlob(fetcher, filename, errorMessage);
     } finally {
-      setIsDownloading(false);
+      setDownloading(null);
     }
   }
 
@@ -205,11 +291,16 @@ export default function InvoicesPage() {
           <Button
             variant="outline"
             size="action"
-            disabled={isDownloading}
+            disabled={downloading !== null}
             onClick={() =>
               download(
+                "list",
+                // Exports exactly what the table is showing: the server shares
+                // one `where` builder between the list and the export, so the
+                // search box, date range and chips all reach the file.
                 () => invoiceService.exportCsv(listParams),
                 `invoices-${financialYear}.csv`,
+                "Could not export invoices. Please try again.",
               )
             }
           >
@@ -217,13 +308,16 @@ export default function InvoicesPage() {
             Export CSV
           </Button>
           {/* Invoices are raised against an order, so this goes to the order
-              list rather than to a standalone create form — there isn't one. */}
-          <Button variant="brand" size="action" asChild>
-            <Link to="/orders" title="Pick an order to raise an invoice against">
-              <Plus className="size-3.5" />
-              New invoice
-            </Link>
-          </Button>
+              list rather than to a standalone create form — there isn't one.
+              Hidden for roles the server would reject at POST /invoices. */}
+          {canIssue && (
+            <Button variant="brand" size="action" asChild>
+              <Link to="/orders" title="Pick an order to raise an invoice against">
+                <Plus className="size-3.5" />
+                New invoice
+              </Link>
+            </Button>
+          )}
         </PageHeaderActions>
       </PageHeader>
 
@@ -239,7 +333,23 @@ export default function InvoicesPage() {
           ariaLabel="Invoice views"
           idPrefix="view"
         />
-        <span className="text-caption text-muted-foreground">FY {financialYear}</span>
+        {/* The financial year was pinned at mount with no setter, so no prior
+            year — or prior year's return — was reachable from the UI. */}
+        <Select
+          value={financialYear}
+          onValueChange={(next) => patchParams({ fy: next })}
+        >
+          <SelectTrigger className="h-8 w-30 text-caption" aria-label="Financial year">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FY_OPTIONS.map((year) => (
+              <SelectItem key={year} value={year} className="text-caption">
+                FY {year}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       {tab === "invoices" ? (
@@ -290,7 +400,7 @@ export default function InvoicesPage() {
                   key: "issued",
                   label: "Issued",
                   value: stats.counts.issued.toLocaleString("en-IN"),
-                  changeLabel: `of ${stats.counts.all} · ${stats.counts.draft} drafts`,
+                  changeLabel: `of ${stats.counts.all} in FY ${financialYear}`,
                 },
               ].map((card, index, all) => (
                 <div key={card.key} className="flex items-center gap-4">
@@ -336,27 +446,86 @@ export default function InvoicesPage() {
           )}
 
           {/* Filters */}
-          <SegmentedTabs
-            items={[
-              { value: "all", label: "All", count: stats?.counts.all },
-              { value: "unpaid", label: "Unpaid", count: stats?.counts.unpaid },
-              { value: "b2b", label: "B2B", count: stats?.counts.b2b },
-              { value: "drafts", label: "Drafts", count: stats?.counts.draft },
-              {
-                value: "cancelled",
-                label: "Cancelled",
-                count: stats?.counts.cancelled,
-              },
-            ]}
-            value={chip}
-            onChange={handleChip}
-            ariaLabel="Filter invoices"
-            behaviour="filter"
-          />
+          <div className="flex flex-wrap items-center gap-3">
+            <SegmentedTabs
+              items={[
+                { value: "all", label: "All", count: stats?.counts.all },
+                { value: "unpaid", label: "Unpaid", count: stats?.counts.unpaid },
+                { value: "b2b", label: "B2B", count: stats?.counts.b2b },
+                {
+                  value: "cancelled",
+                  label: "Cancelled",
+                  count: stats?.counts.cancelled,
+                },
+              ]}
+              value={chip}
+              onChange={(next) => patchParams({ chip: next === "all" ? null : next })}
+              ariaLabel="Filter invoices"
+              behaviour="filter"
+            />
+
+            {/* Date range. The server reads these as calendar days in the
+                merchant's timezone, so they agree with the GST return. */}
+            <div className="flex items-center gap-1.5">
+              <label className="text-micro text-muted-foreground" htmlFor="invoice-from">
+                From
+              </label>
+              <input
+                id="invoice-from"
+                type="date"
+                value={dateFrom}
+                max={dateTo || undefined}
+                onChange={(event) => patchParams({ from: event.target.value || null })}
+                className="h-8 rounded-lg border border-input bg-transparent px-2 text-caption focus:outline-none focus:ring-2 focus:ring-brand/50"
+              />
+              <label className="text-micro text-muted-foreground" htmlFor="invoice-to">
+                to
+              </label>
+              <input
+                id="invoice-to"
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(event) => patchParams({ to: event.target.value || null })}
+                className="h-8 rounded-lg border border-input bg-transparent px-2 text-caption focus:outline-none focus:ring-2 focus:ring-brand/50"
+              />
+            </div>
+
+            {/* Only meaningful for a multi-registration org. */}
+            {activeGstins.length > 1 && (
+              <Select
+                value={sellerGstinId || "all"}
+                onValueChange={(next) =>
+                  patchParams({ gstin: next === "all" ? null : next })
+                }
+              >
+                <SelectTrigger className="h-8 w-45 text-caption" aria-label="Seller GSTIN">
+                  <SelectValue placeholder="All GSTINs" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all" className="text-caption">
+                    All GSTINs
+                  </SelectItem>
+                  {activeGstins.map((gstin: OrganizationGstin) => (
+                    <SelectItem key={gstin.id} value={gstin.id} className="text-caption">
+                      {gstin.gstin} — {gstin.stateName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            {hasFilters && (
+              <Button variant="ghost" size="sm" onClick={clearFilters}>
+                <X className="size-3.5" />
+                Clear
+              </Button>
+            )}
+          </div>
 
           <SectionCard
             title="All invoices"
-            description="Every GST invoice raised against an order this financial year."
+            description={`Every GST invoice raised against an order in FY ${financialYear}.`}
             action={
               <div className="relative min-w-50 max-w-xs flex-1">
                 <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -365,6 +534,7 @@ export default function InvoicesPage() {
                   placeholder="Invoice #, buyer or GSTIN…"
                   value={searchQuery}
                   onChange={handleSearch}
+                  aria-label="Search invoices"
                   className="h-8 w-full rounded-lg border border-input bg-transparent pl-8 pr-3 text-caption placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand/50"
                 />
               </div>
@@ -387,9 +557,9 @@ export default function InvoicesPage() {
                 <EmptyState
                   title="No invoices found"
                   description={
-                    searchQuery || chip !== "all"
+                    hasFilters
                       ? "Try adjusting your search or filters."
-                      : "Generate a GST invoice from an order to see it here."
+                      : `No GST invoices were raised in FY ${financialYear}. Generate one from an order to see it here.`
                   }
                 />
               </div>
@@ -397,8 +567,17 @@ export default function InvoicesPage() {
               <InvoicesTable
                 invoices={invoices}
                 currency={currency}
-                onSelect={setSelectedInvoiceId}
-                onCancel={(id) => cancelInvoice.mutate(id)}
+                canCancel={canCancel}
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSortChange={handleSort}
+                onSelect={(id) => patchParams({ invoice: id, page: String(currentPage) })}
+                onCancel={(invoice: Invoice) =>
+                  setInvoiceToCancel({
+                    id: invoice.id,
+                    invoiceNumber: invoice.invoiceNumber,
+                  })
+                }
               />
             )}
 
@@ -407,7 +586,9 @@ export default function InvoicesPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                  onClick={() =>
+                    patchParams({ page: String(Math.max(1, currentPage - 1)) })
+                  }
                   disabled={currentPage === 1}
                 >
                   <ChevronLeft className="size-3.5" />
@@ -420,7 +601,9 @@ export default function InvoicesPage() {
                   variant="outline"
                   size="sm"
                   onClick={() =>
-                    setCurrentPage((page) => Math.min(totalPages, page + 1))
+                    patchParams({
+                      page: String(Math.min(totalPages, currentPage + 1)),
+                    })
                   }
                   disabled={currentPage >= totalPages}
                 >
@@ -456,7 +639,7 @@ export default function InvoicesPage() {
                 : "Summary return · tax payable"}
             </span>
             <Select value={period} onValueChange={(next) => patchParams({ period: next })}>
-              <SelectTrigger className="h-8 w-35 text-caption">
+              <SelectTrigger className="h-8 w-35 text-caption" aria-label="Return period">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -513,9 +696,10 @@ export default function InvoicesPage() {
                   : []
               }
               onSwitchReturn={(next) => patchParams({ return: next })}
-              isDownloading={isDownloading}
+              isDownloading={downloading === "return"}
               onDownloadCsv={() =>
                 download(
+                  "return",
                   () =>
                     invoiceService.exportGstReturnCsv({
                       financialYear,
@@ -523,6 +707,7 @@ export default function InvoicesPage() {
                       returnType,
                     }),
                   `${returnType}-${financialYear}-${period}.csv`,
+                  "Could not download the return. Please try again.",
                 )
               }
             />
@@ -533,7 +718,17 @@ export default function InvoicesPage() {
       <InvoiceDetailDialog
         invoiceId={selectedInvoiceId}
         currency={currency}
-        onClose={() => setSelectedInvoiceId(null)}
+        canCancel={canCancel}
+        onClose={() => patchParams({ invoice: null, page: String(currentPage) })}
+        onRequestCancel={setInvoiceToCancel}
+      />
+
+      <CancelInvoiceDialog
+        invoice={invoiceToCancel}
+        onClose={() => setInvoiceToCancel(null)}
+        // Close the detail dialog too — it would otherwise sit there showing an
+        // invoice whose status has just changed underneath it.
+        onCancelled={() => patchParams({ invoice: null, page: String(currentPage) })}
       />
     </div>
   );

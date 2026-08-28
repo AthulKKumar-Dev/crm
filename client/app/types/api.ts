@@ -1832,13 +1832,29 @@ export interface OrganizationGstin {
 }
 
 /** Payload for adding a new GSTIN registration. */
+/**
+ * Seller address on a GSTIN registration.
+ *
+ * Deliberately the same canonical keys every other address blob in the app
+ * uses, so `lib/address.ts readAddress()` can render it without a fourth set
+ * of aliases. Snapshotted onto `Invoice.sellerAddress` at issue time — a GST
+ * tax invoice must carry the supplier's address.
+ */
+export interface GstinAddress {
+  address1?: string;
+  address2?: string;
+  city?: string;
+  zip?: string;
+  province?: string;
+}
+
 export interface CreateGstinRequest {
   gstin: string;
   legalName: string;
   tradeName?: string;
   stateCode: string;
   stateName: string;
-  address?: Record<string, unknown>;
+  address?: GstinAddress;
   isDefault?: boolean;
 }
 
@@ -1849,7 +1865,7 @@ export interface UpdateGstinRequest {
   tradeName?: string;
   stateCode?: string;
   stateName?: string;
-  address?: Record<string, unknown>;
+  address?: GstinAddress;
   isDefault?: boolean;
   isActive?: boolean;
 }
@@ -1900,11 +1916,23 @@ export interface Invoice {
   totalIgst: number;
   totalTax: number;
   totalDiscount: number;
+  /**
+   * Shipping charged on the order, carried onto the invoice and INCLUDED in
+   * `grandTotal` but not taxed. Render it as its own line or the totals ladder
+   * will not sum to the grand total.
+   */
+  shippingCharge: number;
   grandTotal: number;
   currency: string;
   status: InvoiceStatus;
+  cancelledAt: string | null;
   /** `financialStatus` drives the derived "Unpaid" pill — see `lib/invoice-status.ts`. */
-  order: { name: string; orderNumber: number; financialStatus: FinancialStatus };
+  order: {
+    id: string;
+    name: string;
+    orderNumber: number;
+    financialStatus: FinancialStatus;
+  };
   createdAt: string;
 }
 
@@ -1949,7 +1977,19 @@ export interface InvoiceListParams {
    */
   paymentState?: "UNPAID";
   sellerGstinId?: string;
+  /** Whitelisted server-side — see `InvoiceSortField` in the query DTO. */
+  sortBy?: InvoiceSortField;
+  sortOrder?: "asc" | "desc";
 }
+
+/** Columns the invoice list may be ordered by. Mirrors the server enum. */
+export type InvoiceSortField =
+  | "invoiceDate"
+  | "invoiceNumber"
+  | "buyerName"
+  | "subtotal"
+  | "totalTax"
+  | "grandTotal";
 
 /**
  * Aggregates for the invoice KPI row and the filter-chip counts.
@@ -1973,13 +2013,18 @@ export interface InvoiceStats {
   /** ISO dates bounding the month-to-date window, for the card sub-labels. */
   periodStart: string;
   periodEnd: string;
-  /** Drives both the chip counts and the "of N · M drafts" sub-label. */
+  /**
+   * Drives the filter-chip counts.
+   *
+   * No `draft`: `InvoiceStatus.DRAFT` exists in the enum but nothing writes it,
+   * so the count was structurally always 0 and drove a chip that could never
+   * match. It returns alongside a real draft-invoice lifecycle.
+   */
   counts: {
     all: number;
     issued: number;
     unpaid: number;
     b2b: number;
-    draft: number;
     cancelled: number;
   };
   currency: string;

@@ -17,6 +17,29 @@ export enum InvoicePaymentState {
   UNPAID = 'UNPAID',
 }
 
+/**
+ * Columns the list may be ordered by.
+ *
+ * An ENUM, not the `sortBy?: string` used by query-orders / query-customers /
+ * query-products. Those spread an unvalidated caller-supplied key straight into
+ * `orderBy: { [sortBy]: sortOrder }`, which lets a request order by any scalar
+ * on the model (and 500s on anything else). Whitelisting keeps the surface to
+ * the columns the table actually renders.
+ */
+export enum InvoiceSortField {
+  invoiceDate = 'invoiceDate',
+  invoiceNumber = 'invoiceNumber',
+  buyerName = 'buyerName',
+  subtotal = 'subtotal',
+  totalTax = 'totalTax',
+  grandTotal = 'grandTotal',
+}
+
+export enum InvoiceSortOrder {
+  asc = 'asc',
+  desc = 'desc',
+}
+
 export class QueryInvoicesDto {
   @IsOptional()
   @Type(() => Number)
@@ -70,4 +93,12 @@ export class QueryInvoicesDto {
   @IsOptional()
   @IsEnum(InvoicePaymentState)
   paymentState?: InvoicePaymentState;
+
+  @IsOptional()
+  @IsEnum(InvoiceSortField)
+  sortBy?: InvoiceSortField = InvoiceSortField.invoiceDate;
+
+  @IsOptional()
+  @IsEnum(InvoiceSortOrder)
+  sortOrder?: InvoiceSortOrder = InvoiceSortOrder.desc;
 }
