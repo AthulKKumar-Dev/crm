@@ -492,15 +492,9 @@ export default function OrderDetailPage() {
           {/* The order total lives in the left rail now — this rail opens with
               the actions rather than repeating the same figure. */}
           <div className="space-y-2">
-            {canFulfill && (
-              <Button
-                className="w-full bg-brand text-brand-strong hover:bg-brand-hover"
-                disabled={outstanding.length === 0}
-                onClick={() => setDialog("fulfill")}
-              >
-                Fulfil items
-              </Button>
-            )}
+            {/* No Fulfil items button here on purpose — fulfilment belongs to the
+                Line Items card, which groups by state and can act per line. This
+                rail carried a third copy of the same setDialog("fulfill") call. */}
             {canCapture && (
               <Button variant="brand" className="w-full" onClick={() => setDialog("capture")}>
                 Capture payment
