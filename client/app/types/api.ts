@@ -1377,6 +1377,7 @@ export interface OrderSettings {
 export interface OrganizationSettingsResponse {
   productSettings: ProductSettings;
   orderSettings: OrderSettings;
+  inventorySettings: InventorySettings;
 }
 
 /** Patch payload for PATCH /organization/settings/products. */
@@ -2349,8 +2350,20 @@ export interface CreateAdjustmentRequest {
 
 export interface GenerateCodesRequest {
   variantIds?: string[];
-  filter?: "missing-sku" | "missing-barcode" | "all";
+  /**
+   * `missing-or-generated` (barcodes only) targets variants with no barcode
+   * plus those whose barcode the CRM minted. Use it instead of `overwrite`
+   * when switching a catalogue to short codes — `overwrite` bypasses filtering
+   * altogether and would clobber real GTINs synced from Shopify.
+   */
+  filter?: "missing-sku" | "missing-barcode" | "missing-or-generated" | "all";
   overwrite?: boolean;
+  /**
+   * Barcode value shape (generate-barcodes only). "sku" copies the SKU
+   * verbatim (default); "short" mints a 6-digit numeric code that fits small
+   * and jewellery label stock, which an 18-character SKU cannot.
+   */
+  format?: "sku" | "short";
 }
 
 export interface GenerateCodesResult {
@@ -2451,6 +2464,13 @@ export interface InventorySettings {
   skuPrefix: string;
   skuSequence: number;
   updateCostOnReceipt: boolean;
+  /**
+   * Include CRM-generated barcodes in Shopify product pushes. Default false —
+   * a generated code is an internal number, not a GTIN, and the push serialises
+   * the whole variant row, so without this gate it would silently occupy the
+   * Shopify barcode field a real GTIN belongs in.
+   */
+  pushGeneratedBarcodes: boolean;
 }
 
 export interface UpdateInventorySettingsRequest {
@@ -2458,6 +2478,7 @@ export interface UpdateInventorySettingsRequest {
   requireScanToPick?: boolean;
   skuPrefix?: string;
   updateCostOnReceipt?: boolean;
+  pushGeneratedBarcodes?: boolean;
 }
 
 /** One printable label definition (per variant; qty chosen at print time). */

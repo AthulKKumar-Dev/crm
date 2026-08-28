@@ -1255,19 +1255,49 @@ export class ShopifySyncService {
         const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
         const priorVariants = await this.prisma.productVariant.findMany({
             where: { productId: product.id },
-            select: { externalId: true, inventoryQuantity: true, sku: true },
+            // barcodeSource decides whether an incoming empty barcode is allowed
+            // to clear the local one — see the update branch below.
+            select: {
+                externalId: true, inventoryQuantity: true, sku: true,
+                barcode: true, barcodeSource: true,
+            },
         });
         const priorByExt = new Map(priorVariants.map((v) => [v.externalId, v]));
 
         for (const sv of sp.variants || []) {
             const incomingQty = sv.inventory_quantity ?? 0;
             const prior = priorByExt.get(String(sv.id));
+
+            // Barcode is the one field here Shopify is NOT unconditionally
+            // authoritative for.
+            //
+            // This branch used to write `barcode: sv.barcode` flat, so a Shopify
+            // variant with no barcode set the local value to NULL — destroying
+            // codes minted by SkuGeneratorService for label printing. That is
+            // not gated on the Sync button: the products/update webhook runs
+            // this same upsert, so any edit in Shopify Admin (or by another app)
+            // wiped them in real time, and labels already stuck on stock stopped
+            // resolving at inventory.service's `where: { barcode }` lookup.
+            //
+            // Only GENERATED codes are protected, and only against an ABSENT
+            // incoming value. A merchant who deliberately clears a Shopify-sourced
+            // barcode still has that respected, and a real barcode arriving from
+            // Shopify always wins — including over one of ours, because a GTIN
+            // outranks an internal code.
+            //
+            // `undefined` means "leave the column alone" in Prisma, the same
+            // idiom inventoryItemId uses two lines down.
+            const incomingBarcode = sv.barcode || null;
+            const keepLocalBarcode =
+                incomingBarcode === null && prior?.barcodeSource === 'GENERATED';
             const row = await this.prisma.productVariant.upsert({
                 where: { productId_externalId: { productId: product.id, externalId: String(sv.id) } },
                 create: {
                     productId: product.id, organizationId: orgId,
                     externalId: String(sv.id), title: sv.title || 'Default',
-                    sku: sv.sku, barcode: sv.barcode, price: sv.price,
+                    sku: sv.sku, barcode: incomingBarcode,
+                    barcodeSource: incomingBarcode ? 'SHOPIFY' : null,
+                    price: sv.price,
                     compareAtPrice: sv.compare_at_price,
                     inventoryQuantity: warehousing ? 0 : incomingQty,
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : null,
@@ -1277,7 +1307,13 @@ export class ShopifySyncService {
                     taxable: sv.taxable ?? true,
                 },
                 update: {
-                    title: sv.title || 'Default', sku: sv.sku, barcode: sv.barcode,
+                    title: sv.title || 'Default', sku: sv.sku,
+                    ...(keepLocalBarcode
+                        ? {}
+                        : {
+                              barcode: incomingBarcode,
+                              barcodeSource: incomingBarcode ? 'SHOPIFY' : null,
+                          }),
                     price: sv.price, compareAtPrice: sv.compare_at_price,
                     ...(warehousing ? {} : { inventoryQuantity: incomingQty }),
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : undefined,

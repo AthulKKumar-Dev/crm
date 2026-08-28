@@ -7,6 +7,7 @@ import type {
   OrganizationSettingsResponse,
   UpdateProductSettingsRequest,
   UpdateOrderSettingsRequest,
+  UpdateInventorySettingsRequest,
 } from "~/types/api";
 
 /**
@@ -88,6 +89,50 @@ export function useUpdateOrderSettingsMutation() {
     },
     onSuccess: () => {
       toast.success("Order settings updated.");
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: settingsKeys.all });
+    },
+  });
+}
+
+/**
+ * PATCH /organization/settings/inventory — merge-patch inventory settings.
+ * Same optimistic / rollback pattern as the two above.
+ *
+ * Unlike products and orders, this endpoint is role-gated server-side
+ * (`@Roles(...ORG_MANAGERS)`), so a VIEWER gets a 403 — `handleMutationError`
+ * surfaces it and the optimistic update rolls back.
+ */
+export function useUpdateInventorySettingsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: UpdateInventorySettingsRequest) =>
+      organizationSettingsService.updateInventorySettings(data),
+    onMutate: async (patch) => {
+      await queryClient.cancelQueries({ queryKey: settingsKeys.all });
+      const previous = queryClient.getQueryData<OrganizationSettingsResponse>(
+        settingsKeys.all,
+      );
+      if (previous) {
+        queryClient.setQueryData<OrganizationSettingsResponse>(
+          settingsKeys.all,
+          {
+            ...previous,
+            inventorySettings: { ...previous.inventorySettings, ...patch },
+          },
+        );
+      }
+      return { previous };
+    },
+    onError: (error, _patch, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(settingsKeys.all, context.previous);
+      }
+      handleMutationError(error, "Failed to update inventory settings.");
+    },
+    onSuccess: () => {
+      toast.success("Inventory settings updated.");
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: settingsKeys.all });

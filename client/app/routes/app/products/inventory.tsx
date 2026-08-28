@@ -300,6 +300,40 @@ function StockScreen() {
                 ? `Generate barcodes (${missingBarcodeCount})`
                 : "Generate all missing barcodes"}
           </Button>
+          {/* Switching an existing catalogue over to short codes.
+              `missing-or-generated` targets gaps PLUS barcodes this CRM minted;
+              real GTINs synced from Shopify and hand-typed codes are never in
+              scope. Kept as a separate, explicit button because it REPLACES
+              working barcodes — any label already printed and stuck on stock
+              stops matching, which the confirm below spells out. */}
+          <Button
+            variant="outline"
+            size="action"
+            onClick={() => {
+              if (
+                !window.confirm(
+                  "Replace CRM-generated barcodes with short 6-digit codes?\n\n" +
+                    "Short codes fit small and jewellery label stock, which a full SKU cannot. " +
+                    "Barcodes from Shopify and ones you typed yourself are left alone.\n\n" +
+                    "Any labels already printed with the old codes will stop matching and need reprinting.",
+                )
+              )
+                return;
+              // NOT `overwrite: true` — that flag bypasses the filter entirely
+              // in loadTargets and would clobber real GTINs synced from
+              // Shopify. `missing-or-generated` is precisely the safe set.
+              generateBarcodes.mutate(
+                hasSelection
+                  ? { variantIds: selectedVariantIds, filter: "missing-or-generated", format: "short" }
+                  : { filter: "missing-or-generated", format: "short" },
+              );
+            }}
+            disabled={generateBarcodes.isPending}
+            title="Replace barcodes the CRM generated with short 6-digit codes that fit small and jewellery labels. Shopify and hand-entered barcodes are untouched."
+          >
+            <Barcode className="size-3.5" />
+            {hasSelection ? "Switch to short codes" : "Switch all to short codes"}
+          </Button>
           {labelHref ? (
             <Button asChild variant="brand" size="action">
               <Link to={labelHref} target="_blank">

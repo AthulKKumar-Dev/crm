@@ -67,6 +67,28 @@ export class ShopifyPushService {
     private readonly inventoryLedger: InventoryLedgerService,
   ) { }
 
+  /**
+   * The `barcode` fragment of a variant push payload, or `{}` to omit it.
+   *
+   * Omitting is not the same as clearing: Shopify leaves an absent field
+   * untouched, so a suppressed generated code never disturbs whatever the store
+   * already holds. (The old spread was `v.barcode ? {...} : {}` for the same
+   * reason — the CRM can set a Shopify barcode but never blank one.)
+   *
+   * Only GENERATED codes are gated. A barcode that came from Shopify or was
+   * typed by a person is the merchant's own data and always round-trips.
+   * Legacy rows with a NULL source are treated as manual — we do not withhold a
+   * barcode we cannot prove we minted.
+   */
+  private barcodeForPush(
+    v: { barcode: string | null; barcodeSource: string | null },
+    pushGeneratedBarcodes: boolean,
+  ): Record<string, string> {
+    if (!v.barcode) return {};
+    if (v.barcodeSource === 'GENERATED' && !pushGeneratedBarcodes) return {};
+    return { barcode: v.barcode };
+  }
+
   /** Resolve the org's connected SHOPIFY channel (if any). Null = nothing to push. */
   async findShopifyChannel(orgId: string) {
     return this.prisma.channel.findUnique({
@@ -566,6 +588,15 @@ export class ShopifyPushService {
     const oversellGlobally = productSettings.allowOversellGlobally === true;
     const trackGlobally = productSettings.trackQuantityGlobally === true;
 
+    // Barcodes the CRM minted for label printing are internal codes, not GTINs.
+    // The push serialises the whole variant row, so without this gate one would
+    // land in the merchant's Shopify `barcode` field on the next unrelated push
+    // — occupying the slot a real GTIN belongs in, and detached from whatever
+    // action actually caused it. Opt-in per org; Shopify-sourced and
+    // hand-entered barcodes are unaffected either way.
+    const inventorySettings = await this.orgSettings.getInventorySettings(orgId);
+    const pushGeneratedBarcodes = inventorySettings.pushGeneratedBarcodes === true;
+
     // SHOPIFY-channel product → push as an update (PUT). The CRM allows
     // editing synced products; this is the path that propagates those local
     // edits back to the Shopify store. New variants are also handled (POST);
@@ -579,6 +610,7 @@ export class ShopifyPushService {
         token,
         oversellGlobally,
         trackGlobally,
+        pushGeneratedBarcodes,
       );
       await this.recordProductSuccess(productId, orgId, product.externalId);
       this.logger.log(
@@ -592,7 +624,13 @@ export class ShopifyPushService {
     // of origin / weight / tracked) all ride in a single synchronous mutation.
     const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
     const locationId = await this.resolveLocationId(shopify.id, shopDomain, token);
-    const input = this.buildProductSetInput(product, oversellGlobally, trackGlobally, locationId);
+    const input = this.buildProductSetInput(
+      product,
+      oversellGlobally,
+      trackGlobally,
+      pushGeneratedBarcodes,
+      locationId,
+    );
 
     const result = await this.graphql.request<ProductSetResponse>(auth, PRODUCT_SET_MUTATION, {
       input,
@@ -687,6 +725,7 @@ export class ShopifyPushService {
         requiresShipping: boolean;
         taxable: boolean;
         barcode: string | null;
+        barcodeSource: string | null;
         weight: any;
         weightUnit: string | null;
         cost: any;
@@ -700,6 +739,7 @@ export class ShopifyPushService {
     },
     oversellGlobally: boolean,
     trackGlobally: boolean,
+    pushGeneratedBarcodes: boolean,
     locationId: number | null,
   ): Record<string, unknown> {
     const optionNames = this.deriveOptionTypes(product);
@@ -735,7 +775,7 @@ export class ShopifyPushService {
       price: v.price.toString(),
       ...(v.compareAtPrice != null ? { compareAtPrice: v.compareAtPrice.toString() } : {}),
       ...(v.sku ? { sku: v.sku } : {}),
-      ...(v.barcode ? { barcode: v.barcode } : {}),
+      ...(this.barcodeForPush(v, pushGeneratedBarcodes)),
       taxable: v.taxable,
       inventoryPolicy:
         oversellGlobally || v.continueSellingWhenOutOfStock ? 'CONTINUE' : 'DENY',
@@ -827,6 +867,7 @@ export class ShopifyPushService {
         sku: string | null;
         compareAtPrice: any;
         barcode: string | null;
+        barcodeSource: string | null;
         weight: any;
         weightUnit: string | null;
         cost: any;
@@ -845,6 +886,7 @@ export class ShopifyPushService {
     token: string,
     oversellGlobally: boolean,
     trackGlobally: boolean,
+    pushGeneratedBarcodes: boolean,
   ): Promise<void> {
     const auth: ShopifyAuthContext = { shopDomain, accessToken: token };
     // The stock push below resolves its own target location(s) — per mapped
@@ -879,7 +921,7 @@ export class ShopifyPushService {
     const sharedVariantInput = (v: PushVariant): Record<string, unknown> => ({
       price: v.price.toString(),
       compareAtPrice: v.compareAtPrice != null ? v.compareAtPrice.toString() : null,
-      ...(v.barcode ? { barcode: v.barcode } : {}),
+      ...(this.barcodeForPush(v, pushGeneratedBarcodes)),
       taxable: v.taxable,
       inventoryPolicy:
         oversellGlobally || v.continueSellingWhenOutOfStock ? 'CONTINUE' : 'DENY',
