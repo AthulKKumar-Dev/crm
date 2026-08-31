@@ -231,6 +231,21 @@ export function useUpdateTrackingMutation(id: string) {
   });
 }
 
+/** POST /orders/:id/fulfillments/:fid/delivered — mark a whole shipment delivered. */
+export function useMarkFulfillmentDeliveredMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (fulfillmentId: string) =>
+      orderService.markFulfillmentDelivered(id, fulfillmentId),
+    onSuccess: () => {
+      invalidateOrder(queryClient, id);
+      queryClient.invalidateQueries({ queryKey: orderKeys.fulfillable(id) });
+      toast.success("Shipment marked as delivered.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to mark delivered."),
+  });
+}
+
 /** POST /orders/:id/fulfillments/:fid/cancel — cancel a fulfillment. */
 export function useCancelFulfillmentMutation(id: string) {
   const queryClient = useQueryClient();

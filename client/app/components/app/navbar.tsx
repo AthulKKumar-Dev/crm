@@ -6,7 +6,6 @@ import {
   Package,
   Boxes,
   Megaphone,
-  Layers,
   MessageSquare,
   Users,
   BarChart3,
@@ -20,6 +19,12 @@ import {
   ShieldCheck,
   ArrowLeftRight,
   FileText,
+  Truck,
+  ClipboardList,
+  RotateCcw,
+  MapPin,
+  Send,
+  Zap,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -36,21 +41,97 @@ import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { toast } from "sonner";
 
-const NAV_LINKS: Array<{ label: string; href: string; icon: typeof LayoutDashboard; badge?: number }> = [
+type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
+type NavItem = {
+  label: string;
+  href: string;
+  icon: typeof LayoutDashboard;
+  badge?: number;
+  /** Renders a secondary nav strip under the bar while this section is active. */
+  children?: NavChild[];
+};
+
+/** Sub-nav for the Orders section — these used to be four separate top-level pills. */
+const ORDERS_CHILDREN: NavChild[] = [
+  { label: "All orders", href: "/orders", icon: ShoppingCart },
+  { label: "Drafts", href: "/orders/drafts", icon: FileText },
+  { label: "Customers", href: "/orders/customers", icon: Users },
+  { label: "Invoices", href: "/orders/invoices", icon: Receipt },
+];
+
+/**
+ * Sub-nav for the Products section — Inventory used to be its own top-level
+ * pill. Warehouses and the movement ledger stay reachable from inside the
+ * Inventory page rather than the strip, so this stays a two-item section.
+ */
+const PRODUCTS_CHILDREN: NavChild[] = [
+  { label: "All products", href: "/products", icon: Package },
+  { label: "Inventory", href: "/products/inventory", icon: Boxes },
+];
+
+/**
+ * Sub-nav for the Logistics section. Shipment detail stays off the strip and is
+ * reached from inside the list, the same way Inventory's ledger and warehouses
+ * are.
+ */
+const LOGISTICS_CHILDREN: NavChild[] = [
+  { label: "Shipments", href: "/logistics", icon: Truck },
+  { label: "Fulfilment queue", href: "/logistics/orders-to-ship", icon: ClipboardList },
+  { label: "Returns / RTO", href: "/logistics/returns", icon: RotateCcw },
+  { label: "Carriers & rates", href: "/logistics/carriers", icon: Receipt },
+  { label: "Zones", href: "/logistics/zones", icon: MapPin },
+  { label: "Analytics", href: "/logistics/analytics", icon: BarChart3 },
+];
+
+/**
+ * Sub-nav for the Campaigns section. Overview keeps the parent href so the pill
+ * and the strip's first item agree, matching "All orders" and "All products".
+ * The broadcast composer and the automation builder stay off the strip and are
+ * reached from inside their lists.
+ */
+const CAMPAIGNS_CHILDREN: NavChild[] = [
+  { label: "Overview", href: "/campaigns", icon: Megaphone },
+  { label: "Broadcasts", href: "/campaigns/broadcasts", icon: Send },
+  { label: "Automations", href: "/campaigns/automations", icon: Zap },
+];
+
+const NAV_LINKS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { label: "Orders", href: "/orders", icon: ShoppingCart },
-  { label: "Drafts", href: "/drafts", icon: FileText },
-  { label: "Products", href: "/products", icon: Package },
-  { label: "Inventory", href: "/inventory", icon: Boxes },
-  // { label: "Marketing", href: "/marketing", icon: Megaphone },
-  { label: "Channel", href: "/channel", icon: Layers },
-  // { label: "Conversation", href: "/conversation", icon: MessageSquare, badge: 6 },
-  { label: "Customers", href: "/customers", icon: Users },
-  { label: "Invoices", href: "/invoices", icon: Receipt },
+  { label: "Orders", href: "/orders", icon: ShoppingCart, children: ORDERS_CHILDREN },
+  { label: "Products", href: "/products", icon: Package, children: PRODUCTS_CHILDREN },
+  // Chat, Campaigns and Analytics still run on placeholder data rather than a
+  // real backend. Deliberately no badge count on Chat: the old one was
+  // hardcoded to match the sample conversations.
+  { label: "Chat", href: "/conversation", icon: MessageSquare },
+  { label: "Campaigns", href: "/campaigns", icon: Megaphone, children: CAMPAIGNS_CHILDREN },
+  { label: "Logistics", href: "/logistics", icon: Truck, children: LOGISTICS_CHILDREN },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
+
+/**
+ * NAV_LINKS minus anything owned by a preview module — see feature-flags.ts.
+ * Dropping a pill drops its secondary strip with it, since the strip renders
+ * from the active entry's children and matchNav only ever searches this list.
+ */
+const BASE_NAV_LINKS: NavItem[] = showPreviewModules
+  ? NAV_LINKS
+  : NAV_LINKS.filter((item) => !isPreviewPath(item.href));
+
+/**
+ * The nav entry owning `pathname`, longest matching href first — so
+ * /orders/drafts/<id> selects "Drafts" rather than "All orders". Matching on a
+ * segment boundary (not a bare startsWith) keeps /ordersomething from matching
+ * /orders, and lights the parent pill on child routes like /orders/<id>, which
+ * the old exact-equality check never did.
+ */
+function matchNav<T extends { href: string }>(items: T[], pathname: string): T | undefined {
+  return items
+    .filter((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))
+    .sort((a, b) => b.href.length - a.href.length)[0];
+}
 
 /** Top navigation bar with pill-style nav links, notification icons, and user/workspace dropdown. */
 export function Navbar() {
@@ -65,14 +146,19 @@ export function Navbar() {
   // Vendors are locked down to Orders + Products only. Otherwise, an extra
   // Super Admin link is visible to real Collabo-team super admins (never while
   // impersonating — the impersonation token has isSuperAdmin=false).
-  const navLinks = isVendor
+  const navLinks: NavItem[] = isVendor
     ? [
       { label: "Orders", href: "/orders", icon: ShoppingCart },
       { label: "Products", href: "/products", icon: Package },
     ]
     : user?.isSuperAdmin && !impersonatedBy
-      ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
-      : NAV_LINKS;
+      ? [...BASE_NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+      : BASE_NAV_LINKS;
+
+  // Longest-prefix match, so a child route keeps its parent pill lit.
+  const activeTop = matchNav(navLinks, location.pathname);
+  const sectionChildren = activeTop?.children;
+  const activeChild = sectionChildren ? matchNav(sectionChildren, location.pathname) : undefined;
 
   async function handleSwitchOrg(orgId: string) {
     if (orgId === currentOrgId) return;
@@ -134,23 +220,23 @@ export function Navbar() {
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
         <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
+          {/* <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
             <Leaf className="size-4 text-gray-900" />
-          </div>
-          <span className="hidden text-base font-bold text-gray-900 dark:text-gray-100 sm:block">Collabo</span>
+          </div> */}
+          <span className="font-display text-stat text-brand-strong">collabo</span>
         </Link>
 
         {/* ── Nav — pill container ─────────────────────────────── */}
         <LayoutGroup id="navbar">
-          <nav className="hidden md:flex items-center gap-0.5 rounded-full bg-foreground/90 dark:bg-gray-900 px-2 py-1.5 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700">
+          <nav className="hidden md:flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-full bg-foreground/90 dark:bg-gray-900 px-2 py-1.5 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {navLinks.map(({ label, href, icon: Icon, badge }) => {
-              const isActive = location.pathname === href;
+              const isActive = activeTop?.href === href;
               return (
                 <Link
                   key={href}
                   to={href}
                   className={cn(
-                    "relative flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none p-2.5",
+                    "relative flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none p-2.5",
                     isActive
                       ? "font-semibold text-gray-900 dark:text-gray-900"
                       : "font-medium text-background hover:text-background/70 dark:text-gray-400 dark:hover:text-gray-200"
@@ -295,6 +381,47 @@ export function Navbar() {
         </div>
 
       </div>
+
+      {/* ── Section sub-nav — only for a section that has children ─── */}
+      {sectionChildren && (
+        <LayoutGroup id="section-nav">
+          <div className="mx-auto hidden max-w-screen-xl px-6 pb-3 mt-3 md:block">
+            <nav
+              aria-label={`${activeTop?.label} section`}
+              className="inline-flex items-center gap-0.5 rounded-full bg-white dark:bg-gray-900 px-1.5 py-1 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700"
+            >
+              {sectionChildren.map(({ label, href, icon: Icon }) => {
+                const isActive = activeChild?.href === href;
+                return (
+                  <Link
+                    key={href}
+                    to={href}
+                    aria-current={isActive ? "page" : undefined}
+                    className={cn(
+                      "relative flex items-center gap-1.5 rounded-full p-2.5 text-xs select-none",
+                      isActive
+                        ? "font-semibold text-gray-900"
+                        : "font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200"
+                    )}
+                  >
+                    {isActive && (
+                      <motion.span
+                        layoutId="section-nav-pill"
+                        initial={false}
+                        className="absolute inset-0 rounded-full bg-[#CEF17B]"
+                        transition={{ type: "spring", stiffness: 380, damping: 32, mass: 1 }}
+                      />
+                    )}
+                    <Icon className="relative z-10 size-3.5" />
+                    <span className="relative z-10">{label}</span>
+                  </Link>
+                );
+              })}
+            </nav>
+          </div>
+        </LayoutGroup>
+      )}
+
     </header>
   );
 }

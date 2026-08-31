@@ -46,7 +46,7 @@ export default function SignupPage() {
     <div>
       {/* Heading */}
       <div className="mb-7">
-        <span className="font-baumans text-[28px] font-bold text-[#084734]">collabo</span>
+        <span className="font-display text-page-title text-brand-forest">collabo</span>
         <h2 className="text-[38px] font-bold text-gray-900">Get Started</h2>
         <p className="mt-1.5 text-[14px] text-gray-500">
           Start managing your commerce operations

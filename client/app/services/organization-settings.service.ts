@@ -3,15 +3,19 @@ import type {
   OrganizationSettingsResponse,
   ProductSettings,
   OrderSettings,
+  InventorySettings,
   UpdateProductSettingsRequest,
   UpdateOrderSettingsRequest,
+  UpdateInventorySettingsRequest,
 } from "~/types/api";
 
 /**
- * Client for per-organization settings. Today there are two domains —
- * `productSettings` and `orderSettings` — but the surface area is designed
- * so future domains (customer, inventory, etc.) plug in by adding a new
- * column on the server and a new method here.
+ * Client for per-organization settings. Three domains — `productSettings`,
+ * `orderSettings` and `inventorySettings` — each mapping to a JSONB column and
+ * a PATCH endpoint on the server.
+ *
+ * Note the inventory PATCH is role-gated server-side (`@Roles(...ORG_MANAGERS)`)
+ * where the other two are not; a VIEWER calling it gets a 403.
  */
 export const organizationSettingsService = {
   get: () =>
@@ -27,5 +31,10 @@ export const organizationSettingsService = {
   updateOrderSettings: (data: UpdateOrderSettingsRequest) =>
     apiClient
       .patch<OrderSettings>("/organization/settings/orders", data)
+      .then((response) => response.data),
+
+  updateInventorySettings: (data: UpdateInventorySettingsRequest) =>
+    apiClient
+      .patch<InventorySettings>("/organization/settings/inventory", data)
       .then((response) => response.data),
 };

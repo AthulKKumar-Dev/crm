@@ -369,7 +369,7 @@ export class ShopifyOAuthService {
         // the Channels page Sync button (which now also pushes unsynced data).
 
         const frontendUrl = this.config.get<string>('frontendUrl');
-        const redirectUrl = `${frontendUrl}/channel?connected=shopify&channelId=${channel.id}`;
+        const redirectUrl = `${frontendUrl}/settings/channels?connected=shopify&channelId=${channel.id}`;
 
         return { channelId: channel.id, organizationId: stateData.orgId, redirectUrl };
     }

@@ -155,7 +155,7 @@ export function OfflineOrderForm({
     createOrder.mutate(payload, {
       onSuccess: (result) => {
         if (result.invoice) {
-          navigate(`/invoices/${result.invoice.id}/print`);
+          navigate(`/orders/invoices/${result.invoice.id}/print`);
         } else {
           navigate("/orders");
         }
@@ -189,7 +189,7 @@ export function OfflineOrderForm({
 
     createDraft.mutate(payload, {
       onSuccess: (draft) => {
-        navigate(`/drafts/${draft.id}`);
+        navigate(`/orders/drafts/${draft.id}`);
       },
     });
   }

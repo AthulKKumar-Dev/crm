@@ -550,6 +550,32 @@ export class ProductService {
       return created;
     });
 
+    // Give every new variant a scannable barcode before anything can push.
+    //
+    // Labels are printed from `barcode`, falling back to `sku` — and the SKU
+    // shape ({PREFIX}-{PRODUCTCODE}-{SEQ}-{OPTIONS}) needs ~48 mm of label, so
+    // it cannot print on small or jewellery stock at any resolution. Minting a
+    // 6-digit code here means a product is labellable the moment it exists,
+    // with no separate step to remember.
+    //
+    // Ordering matters: this runs BEFORE the Shopify push is enqueued, so the
+    // pushed payload reflects the final row rather than racing it. Whether the
+    // code actually reaches Shopify is a separate decision —
+    // inventorySettings.pushGeneratedBarcodes, default off.
+    //
+    // Best-effort: a product that exists without a barcode is recoverable (the
+    // bulk action fills it in); failing the create is not.
+    try {
+      await this.skuGenerator.generateBarcodes(orgId, {
+        variantIds: product.variants.map((v) => v.id),
+        format: 'short',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Barcode generation failed for new product ${product.id}: ${(err as Error).message}`,
+      );
+    }
+
     // Auto-push to Shopify (gated on org settings).
     let shopifyPushQueued = false;
     try {
@@ -619,6 +645,10 @@ export class ProductService {
       title,
       sku: v.sku ?? null,
       barcode: v.barcode ?? null,
+      // A barcode supplied at create time was typed or imported by a person.
+      // Variants left without one are minted a GENERATED code after the
+      // transaction — see create().
+      barcodeSource: v.barcode ? 'MANUAL' : null,
       price: v.price ?? 0,
       compareAtPrice: v.compareAtPrice ?? null,
       cost: v.cost ?? null,
@@ -931,6 +961,7 @@ export class ProductService {
         title,
         sku: dto.sku ?? null,
         barcode: dto.barcode ?? null,
+        barcodeSource: dto.barcode ? 'MANUAL' : null,
         price,
         compareAtPrice: dto.compareAtPrice ?? null,
         cost: dto.cost ?? null,
@@ -964,6 +995,20 @@ export class ProductService {
       return row;
     });
 
+    // Same reasoning as create(): a variant without a barcode cannot be
+    // labelled on small stock, and the SKU is too long to stand in for one.
+    // No-ops when the caller supplied a barcode (the generator only fills gaps).
+    try {
+      await this.skuGenerator.generateBarcodes(orgId, {
+        variantIds: [created.id],
+        format: 'short',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Barcode generation failed for new variant ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     await this.markOutOfSyncIfNeeded(product.id);
     return created;
   }
@@ -984,7 +1029,13 @@ export class ProductService {
     const patch: Prisma.ProductVariantUpdateInput = {};
     if (dto.price !== undefined) patch.price = dto.price;
     if (dto.sku !== undefined) patch.sku = dto.sku;
-    if (dto.barcode !== undefined) patch.barcode = dto.barcode;
+    if (dto.barcode !== undefined) {
+      patch.barcode = dto.barcode;
+      // A person editing the field takes ownership of it: the value stops being
+      // ours to regenerate, and stops being suppressed from Shopify pushes.
+      // Clearing the field clears the provenance with it.
+      patch.barcodeSource = dto.barcode ? 'MANUAL' : null;
+    }
     if (dto.compareAtPrice !== undefined)
       patch.compareAtPrice = dto.compareAtPrice;
     if (dto.cost !== undefined) patch.cost = dto.cost;
@@ -2014,7 +2065,14 @@ export class ProductService {
             externalId: `manual_${randomUUID()}`,
             title: v.title,
             sku: v.sku,
-            barcode: v.barcode,
+            // Never clone a barcode we minted — that guarantees a duplicate,
+            // and with no DB unique constraint the scan resolver (findFirst)
+            // would silently pick whichever row Postgres returned. The copy is
+            // left without one and gets a fresh code below; a real GTIN or a
+            // hand-entered code is deliberately carried over, because a
+            // duplicated product legitimately shares the manufacturer's code.
+            barcode: v.barcodeSource === 'GENERATED' ? null : v.barcode,
+            barcodeSource: v.barcodeSource === 'GENERATED' ? null : v.barcodeSource,
             price: v.price,
             compareAtPrice: v.compareAtPrice,
             cost: v.cost,
@@ -2061,6 +2119,21 @@ export class ProductService {
       'product_duplicate',
       created.id,
     );
+
+    // Replace the generated barcodes deliberately dropped above with fresh
+    // ones, so the copy is labellable immediately instead of inheriting the
+    // original's code.
+    try {
+      await this.skuGenerator.generateBarcodes(orgId, {
+        variantIds: created.variants.map((v) => v.id),
+        format: 'short',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Barcode generation failed for duplicated product ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     return created;
   }
 

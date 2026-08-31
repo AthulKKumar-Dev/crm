@@ -16,6 +16,7 @@ import { UpdateDraftOrderDto } from './dto/update-draft-order.dto';
 import { CompleteDraftDto } from './dto/complete-draft.dto';
 import { SendDraftInvoiceDto } from './dto/send-invoice.dto';
 import { QueryDraftOrdersDto } from './dto/query-drafts.dto';
+import { QueryDraftStatsDto } from './dto/query-draft-stats.dto';
 import { ORG_OPERATORS, Roles } from '../auth/decorators/roles.decorator';
 
 @Controller('draft-orders')
@@ -26,6 +27,14 @@ export class DraftOrderController {
   @Get()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryDraftOrdersDto) {
     return this.service.findAll(user.orgId!, query);
+  }
+
+  // GET /api/v1/draft-orders/stats — KPI aggregates and filter-chip counts.
+  // MUST stay above `@Get(':id')`: Nest matches in declaration order, so with
+  // the routes the other way round "stats" is read as a draft id.
+  @Get('stats')
+  getStats(@CurrentUser() user: JwtPayload, @Query() query: QueryDraftStatsDto) {
+    return this.service.getStats(user.orgId!, query);
   }
 
   // POST /api/v1/draft-orders

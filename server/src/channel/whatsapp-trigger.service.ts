@@ -69,7 +69,6 @@ export class WhatsAppTriggerService {
         //    the customer object doesn't have one (guest checkout cases).
         const customer = order.customer;
         const rawPhone = customer?.phone ?? order.phone ?? null;
-        console.log('rawPhone', rawPhone);
         if (!customer || !rawPhone) return;
         if (customer.accepts_marketing !== true) return;
 

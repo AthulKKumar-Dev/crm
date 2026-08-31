@@ -17,61 +17,121 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { cn, formatCurrency } from "~/lib/utils";
 import { useSyncOrderMutation } from "~/hooks/use-order-mutations";
-import type { Order, FinancialStatus, FulfillmentStatus } from "~/types/api";
+import {
+  FINANCIAL_CLASSES,
+  FULFILLMENT_CLASSES,
+  FINANCIAL_LABELS,
+  FULFILLMENT_LABELS,
+} from "~/lib/order-status";
+import { ChannelBadge } from "~/components/app/channel-badge";
+import { useCurrentRole } from "~/hooks/use-current-role";
+import type { Order, ChannelPlatform } from "~/types/api";
 
-const FINANCIAL_CLASSES: Record<FinancialStatus, string> = {
-  PAID: "bg-[#CEF17B]/30 text-[#084734]",
-  PARTIALLY_PAID: "bg-blue-100 text-blue-700",
-  PENDING: "bg-orange-100 text-orange-600",
-  AUTHORIZED: "bg-blue-100 text-blue-700",
-  PARTIALLY_REFUNDED: "bg-yellow-100 text-yellow-700",
-  REFUNDED: "bg-gray-100 text-gray-600",
-  VOIDED: "bg-red-100 text-red-600",
-};
 
-const FINANCIAL_LABELS: Record<FinancialStatus, string> = {
-  PAID: "Paid",
-  PARTIALLY_PAID: "Partial",
-  PENDING: "Pending",
-  AUTHORIZED: "Authorized",
-  PARTIALLY_REFUNDED: "Partial Refund",
-  REFUNDED: "Refunded",
-  VOIDED: "Voided",
-};
-
-const FULFILLMENT_CLASSES: Record<FulfillmentStatus, string> = {
-  FULFILLED: "bg-[#CEF17B]/30 text-[#084734]",
-  PARTIAL: "bg-blue-100 text-blue-700",
-  UNFULFILLED: "bg-orange-100 text-orange-600",
-  RESTOCKED: "bg-gray-100 text-gray-600",
-};
-
-const FULFILLMENT_LABELS: Record<FulfillmentStatus, string> = {
-  FULFILLED: "Fulfilled",
-  PARTIAL: "Partial",
-  UNFULFILLED: "Unfulfilled",
-  RESTOCKED: "Restocked",
-};
 
 type OrderRow = Pick<
   Order,
-  "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer" | "channel" | "metadata"
->;
+  "id" | "name" | "financialStatus" | "fulfillmentStatus" | "currency" | "totalPrice" | "itemCount" | "createdAt" | "customer"
+> &
+  // The dashboard's `DashboardRecentOrder` carries neither of these, so they are
+  // optional here rather than required — the compact variant degrades to no
+  // channel line, and the sync menu item simply does not render.
+  Partial<Pick<Order, "channel" | "metadata">>;
+
+
+function customerOf(order: OrderRow) {
+  const first = order.customer?.firstName?.trim() ?? "";
+  const last = order.customer?.lastName?.trim() ?? "";
+  const name = `${first} ${last}`.trim();
+  const initials = `${first.charAt(0)}${last.charAt(0)}`.toUpperCase();
+  return { name: name || "Guest", initials: initials || "G" };
+}
 
 interface OrdersTableProps {
   orders: OrderRow[];
   currency: string;
   showCustomerName?: boolean;
   onViewDetail?: (orderId: string) => void;
-  onGenerateInvoice?: (orderId: string) => void;
   gstEnabled?: boolean;
+  variant?: "compact" | "default";
 }
 
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions.
  *  Row click navigates to /orders/:id. Cells with their own click handlers
  *  (checkbox, dropdown menu) stop propagation. */
-export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, onGenerateInvoice, gstEnabled = false }: OrdersTableProps) {
+export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, gstEnabled = false, variant = "default" }: OrdersTableProps) {
+  // Mirrors ORG_MANAGERS — the tier that may issue a GST invoice.
+  const { role } = useCurrentRole();
+  const canManage = role === "OWNER" || role === "ADMIN" || role === "MANAGER";
   const navigate = useNavigate();
+
+  if (variant === "compact") {
+    return (
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead>Order</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead className="text-right">Amount</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {orders.map((order) => {
+            const platform = order.channel?.platform as ChannelPlatform | undefined;
+            const { name, initials } = customerOf(order);
+
+            return (
+              <TableRow
+                key={order.id}
+                className="cursor-pointer"
+                onClick={() =>
+                  onViewDetail ? onViewDetail(order.id) : navigate(`/orders/${order.id}`)
+                }
+              >
+                <TableCell>
+                  <div className="flex items-center gap-3">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand text-caption font-semibold text-brand-foreground">
+                      {initials}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="truncate text-caption font-semibold text-foreground">
+                        {name}
+                        <span className="font-normal text-muted-foreground"> · {order.name}</span>
+                      </p>
+                      <p className="flex items-center gap-1 text-micro text-muted-foreground">
+                        <ChannelBadge platform={platform} /> · {order.itemCount} item
+                        {order.itemCount !== 1 ? "s" : ""} ·{" "}
+                        {new Date(order.createdAt).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                </TableCell>
+
+                <TableCell>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-micro font-medium", FINANCIAL_CLASSES[order.financialStatus])}>
+                      {FINANCIAL_LABELS[order.financialStatus]}
+                    </span>
+                    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-micro font-medium", FULFILLMENT_CLASSES[order.fulfillmentStatus])}>
+                      {FULFILLMENT_LABELS[order.fulfillmentStatus]}
+                    </span>
+                  </div>
+                </TableCell>
+
+                <TableCell className="text-right text-caption font-semibold tabular-nums text-foreground">
+                  {formatCurrency(order.totalPrice, currency)}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    );
+  }
+
   return (
     // NOTE: the row-level Sync-to-Shopify dropdown item is wired per-row
     // below via `OrderRowSyncItem` (so each row can own its own mutation
@@ -161,15 +221,15 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                     View details
                   </DropdownMenuItem>
                   <OrderRowSyncItem order={order} />
-                  {gstEnabled && (
+                  {/* Issuing an invoice is ORG_MANAGERS-only server-side, so
+                      this item only ever led somewhere useful for a manager.
+                      It navigates to the order, where the gated Generate button
+                      lives — there is no standalone create route. */}
+                  {gstEnabled && canManage && (
                     <>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
-                        onClick={() =>
-                          onGenerateInvoice
-                            ? onGenerateInvoice(order.id)
-                            : navigate(`/orders/${order.id}`)
-                        }
+                        onClick={() => navigate(`/orders/${order.id}`)}
                       >
                         <Receipt className="mr-1.5 size-3.5" />
                         Generate GST Invoice

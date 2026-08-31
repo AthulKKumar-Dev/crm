@@ -1,29 +1,231 @@
-@import url('https://fonts.googleapis.com/css2?family=Baumans&family=Ubuntu:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400;1,500;1,700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Baumans&display=swap');
 @import "tailwindcss";
+@source "./**/*.{ts,tsx,js,jsx}";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
 
-@theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif,
-    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+/* Theme is driven by a .dark class on <html> (stores/theme.store.ts), NOT by the
+   OS query — keying color-scheme off prefers-color-scheme made native form
+   controls render dark for a light-mode user on a dark OS. */
+html { color-scheme: light; }
+html.dark { color-scheme: dark; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DESIGN TOKENS — the single source of truth. Components never see raw values.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Font families ──────────────────────────────────────────────────────── */
+  --font-family-sans:    'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-family-heading: var(--font-family-sans);
+  --font-family-display: 'Baumans', cursive;   /* "collabo" wordmark only */
+  --font-family-mono:    ui-monospace, 'Courier New', Courier, monospace;
+
+  /* ── Type scale ─────────────────────────────────────────────────────────── */
+  --font-size-2xs:  10px;   --line-height-2xs:  14px;
+  --font-size-xs:   12px;   --line-height-xs:   16px;
+  --font-size-sm:   13px;   --line-height-sm:   18px;
+  --font-size-md:   14px;   --line-height-md:   20px;
+  --font-size-lg:   16px;   --line-height-lg:   24px;
+  --font-size-xl:   20px;   --line-height-xl:   28px;
+  --font-size-2xl:  24px;   --line-height-2xl:  32px;
+  --font-size-stat: 28px;   --line-height-stat: 36px;
+
+  /* ── Brand ─ canonical values. Collapses 5 limes and 5 greens. ──────────── */
+  --brand:              #CEF17B;                    /* was also #cdff8c, #b8e87a */
+  --brand-hover:        #BADE6F;                    /* was also #b8e67d */
+  --brand-foreground:   oklch(0.21 0.034 264.665);  /* gray-900 — text on lime */
+  --brand-strong:       #084734;                    /* accent TEXT — theme-aware */
+  --brand-strong-hover: #3d6000;                    /* was also #4d7a00 */
+  --brand-forest:       #084734;                    /* FIXED in both themes — graphics */
+  --brand-deep:         #042a20;
+  --brand-mid:          #0a5c45;
+
+  /* ── Surfaces ───────────────────────────────────────────────────────────── */
+  --surface-sunken: #f1f7fa;   /* app shell background */
+  --ink: #000000;
+  --ink-hover: #1a1a1a;
+  /* Fixed white, to pair with the fixed-black `ink` in both themes. */
+  --ink-foreground: #ffffff;
+
+  /* ── Status ─────────────────────────────────────────────────────────────── */
+  --success:               oklch(0.627 0.194 149.214);  /* green-600  */
+  --success-subtle:        oklch(0.962 0.044 156.743);  /* green-100  */
+  --warning:               oklch(0.666 0.179 58.318);   /* amber-600  */
+  --warning-subtle:        oklch(0.987 0.022 95.277);   /* amber-50   */
+  --warning-strong:        oklch(0.646 0.222 41.116);   /* orange-600 */
+  --warning-strong-subtle: oklch(0.98 0.016 73.684);    /* orange-50  */
+  --danger:                oklch(0.577 0.245 27.325);   /* red-600    */
+  --danger-subtle:         oklch(0.936 0.032 17.717);   /* red-100    */
+  --info:                  oklch(0.546 0.245 262.881);  /* blue-600   */
+  --info-subtle:           oklch(0.97 0.014 254.604);   /* blue-50    */
+
+  /* ── shadcn base (unchanged) ────────────────────────────────────────────── */
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: var(--danger);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
 }
 
-html,
-body {
-  @apply bg-white dark:bg-gray-950;
+.dark {
+  /* ── Brand ─ forest is ~1.6:1 on a dark card, so accent TEXT flips to lime.
+        --brand-forest stays fixed for gradients that need forest regardless. ── */
+  --brand-strong:       #CEF17B;
+  --brand-strong-hover: #BADE6F;
 
-  @media (prefers-color-scheme: dark) {
-    color-scheme: dark;
-  }
+  --surface-sunken: oklch(0.13 0.028 261.692);   /* gray-950 */
+
+  /* ── Status ─ /30% alpha reproduces today's dark:bg-*-950/30 exactly ────── */
+  --success:               oklch(0.792 0.209 151.711);        /* green-400     */
+  --success-subtle:        oklch(0.266 0.065 152.934 / 30%);  /* green-950/30  */
+  --warning:               oklch(0.828 0.189 84.429);         /* amber-400     */
+  --warning-subtle:        oklch(0.279 0.077 45.635 / 30%);   /* amber-950/30  */
+  --warning-strong:        oklch(0.75 0.183 55.934);          /* orange-400    */
+  --warning-strong-subtle: oklch(0.266 0.079 36.259 / 30%);   /* orange-950/30 */
+  --danger:                oklch(0.704 0.191 22.216);         /* red-400       */
+  --danger-subtle:         oklch(0.258 0.092 26.042 / 30%);   /* red-950/30    */
+  --info:                  oklch(0.707 0.165 254.624);        /* blue-400      */
+  --info-subtle:           oklch(0.282 0.091 267.935 / 30%);  /* blue-950/30   */
+
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  /* Aligned to gray-900 so the ~40 hand-written `dark:bg-gray-900` cards stay
+     pixel-identical when they convert to bg-card. */
+  --card: oklch(0.21 0.034 264.665);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.21 0.034 264.665);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: var(--danger);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   TAILWIND LAYER — exposes tokens as utilities. Roles, not raw numbers.
+   ═══════════════════════════════════════════════════════════════════════════ */
 
 @theme inline {
-  --font-heading: var(--font-sans);
-  --font-sans: 'Geist Variable', sans-serif;
-  --font-baumans: 'Baumans', sans-serif;
+  /* ── Fonts ── */
+  --font-sans:    var(--font-family-sans);
+  --font-heading: var(--font-family-heading);
+  --font-display: var(--font-family-display);
+  --font-mono:    var(--font-family-mono);
+
+  /* ── Type roles. Size + leading + weight travel together, so a rogue
+        font-weight isn't reachable either. Tailwind's own xs/sm/base/lg/xl/2xl
+        are deliberately NOT overridden — they still render 12/14/16/18/20/24
+        for the ~70 files not yet migrated. ── */
+  --text-micro:      var(--font-size-2xs);    /* 10px — badge / dot labels */
+  --text-micro--line-height: var(--line-height-2xs);
+
+  --text-caption:    var(--font-size-xs);     /* 12px — helper / meta text */
+  --text-caption--line-height: var(--line-height-xs);
+
+  --text-label:      var(--font-size-sm);     /* 13px — form labels */
+  --text-label--line-height: var(--line-height-sm);
+  --text-label--font-weight: 500;
+
+  --text-body:       var(--font-size-md);     /* 14px — body, table cells */
+  --text-body--line-height: var(--line-height-md);
+
+  --text-section:    var(--font-size-lg);     /* 16px — section titles */
+  --text-section--line-height: var(--line-height-lg);
+  --text-section--font-weight: 600;
+
+  --text-subhead:    var(--font-size-xl);     /* 20px */
+  --text-subhead--line-height: var(--line-height-xl);
+  --text-subhead--font-weight: 600;
+
+  --text-page-title: var(--font-size-2xl);    /* 24px — page H1 */
+  --text-page-title--line-height: var(--line-height-2xl);
+  --text-page-title--font-weight: 600;
+
+  --text-stat:       var(--font-size-stat);   /* 30px — KPI numerals */
+  --text-stat--line-height: var(--line-height-stat);
+  --text-stat--font-weight: 600;
+
+  /* ── Brand ── */
+  --color-brand:              var(--brand);
+  --color-brand-hover:        var(--brand-hover);
+  --color-brand-foreground:   var(--brand-foreground);
+  --color-brand-strong:       var(--brand-strong);
+  --color-brand-strong-hover: var(--brand-strong-hover);
+  --color-brand-forest:       var(--brand-forest);
+  --color-brand-deep:         var(--brand-deep);
+  --color-brand-mid:          var(--brand-mid);
+
+  /* ── Surfaces ── */
+   --color-surface-sunken: var(--surface-sunken);
+  --color-ink: var(--ink);
+  --color-ink-hover: var(--ink-hover);
+  --color-ink-foreground: var(--ink-foreground);
+
+  /* ── Status ── */
+  --color-success:               var(--success);
+  --color-success-subtle:        var(--success-subtle);
+  --color-warning:               var(--warning);
+  --color-warning-subtle:        var(--warning-subtle);
+  --color-warning-strong:        var(--warning-strong);
+  --color-warning-strong-subtle: var(--warning-strong-subtle);
+  --color-danger:                var(--danger);
+  --color-danger-subtle:         var(--danger-subtle);
+  --color-info:                  var(--info);
+  --color-info-subtle:           var(--info-subtle);
+
+  /* ── shadcn mappings (unchanged) ── */
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -55,6 +257,8 @@ body {
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+
+  /* ── Radius — approved set. Do NOT change --radius; it shifts every corner. ── */
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -62,75 +266,6 @@ body {
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
-}
-
-:root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
 }
 
 @layer base {
@@ -146,83 +281,41 @@ body {
 }
 
 /* ── Custom scrollbar ─────────────────────────────────────────────────────── */
+/* Tokenized — the four .dark overrides are gone; the tokens flip on their own. */
 
-/* Firefox */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #d1d5db #f1f7fa;
+  scrollbar-color: var(--border) var(--surface-sunken);
 }
 
-.dark * {
-  scrollbar-color: #374151 #0a0a0a;
-}
-
-/* Chrome, Edge, Safari */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f1f7fa;
+  background: var(--surface-sunken);
   border-radius: 999px;
-}
-
-.dark ::-webkit-scrollbar-track {
-  background: #0a0a0a;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: var(--border);
   border-radius: 999px;
-  border: 1px solid #f1f7fa;
-}
-
-.dark ::-webkit-scrollbar-thumb {
-  background: #374151;
-  border: 1px solid #0a0a0a;
+  border: 1px solid var(--surface-sunken);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #CEF17B;
+  background: var(--brand);
 }
 
 ::-webkit-scrollbar-corner {
-  background: #f1f7fa;
-}
-
-.dark ::-webkit-scrollbar-corner {
-  background: #0a0a0a;
+  background: var(--surface-sunken);
 }
 
 /* ── Native select/option dark-mode fix ─────────────────────────────────── */
 /* Native <option> elements ignore most CSS — background + color are the
    only reliable properties across browsers. */
 .dark select option {
-  background-color: #111827;  /* gray-900 */
-  color: #f3f4f6;            /* gray-100 */
-}
-
-/* ── Quill rich text editor ─────────────────────────────────────────────── */
-.ql-toolbar.ql-snow {
-  border-color: var(--border);
-  border-radius: 0.5rem 0.5rem 0 0;
-  background: transparent;
-  padding: 6px 8px;
-}
-
-.ql-toolbar.ql-snow .ql-formats {
-  margin-right: 8px;
-}
-
-.ql-container.ql-snow {
-  border-color: var(--border);
-  border-radius: 0 0 0.5rem 0.5rem;
-  font-size: 0.875rem;
-  min-height: 120px;
-}
-
-.ql-editor.ql-blank::before {
-  color: var(--muted-foreground);
-  font-style: normal;
+  background-color: var(--popover);
+  color: var(--popover-foreground);
 }
