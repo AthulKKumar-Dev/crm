@@ -6,6 +6,7 @@ import {
 import {
   useUpdateProductSettingsMutation,
   useUpdateOrderSettingsMutation,
+  useUpdateInventorySettingsMutation,
 } from "~/hooks/use-settings-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useUpdateOrganizationMutation } from "~/hooks/use-org-mutations";
@@ -68,6 +69,7 @@ export function ProductSettingsTab() {
         <LowStockThresholdRow />
         <VendorMetafieldRow settings={settings} mutation={mutation} />
       </SettingsCard>
+      <BarcodePushCard />
     </div>
   );
 }
@@ -275,6 +277,37 @@ export function OrderSettingsTab() {
         />
       </SettingsCard>
     </div>
+  );
+}
+
+/**
+ * Whether barcodes the CRM generated ride along on Shopify product pushes.
+ *
+ * Lives on the Products tab rather than an Inventory one because it is about
+ * what leaves the CRM for Shopify, which is what every other toggle on this
+ * tab governs. It reads `inventorySettings` because that is where the server
+ * keeps it (alongside the SKU sequence that mints the codes).
+ *
+ * Default OFF is the safe direction: a generated barcode is an internal number,
+ * not a GTIN, and the Shopify push serialises the whole variant row — so
+ * without the gate it would quietly occupy the field a real GTIN belongs in.
+ */
+function BarcodePushCard() {
+  const { data } = useOrganizationSettings();
+  const mutation = useUpdateInventorySettingsMutation();
+  const settings = data?.inventorySettings;
+  if (!settings) return null;
+
+  return (
+    <SettingsCard>
+      <SettingsToggleRow
+        label="Send generated barcodes to Shopify"
+        help="The CRM gives products a short numeric barcode so they can be printed on small and jewellery label stock, where a full SKU is too long to scan. When ON, that code is included when a product is pushed to Shopify, so Shopify POS can scan the same labels. When OFF (default), it stays in the CRM and your Shopify barcode field is left untouched — the right choice if you may assign real GTINs later. Barcodes that came from Shopify or that you typed yourself are always sent, either way."
+        checked={settings.pushGeneratedBarcodes}
+        disabled={isFieldSaving(mutation, "pushGeneratedBarcodes")}
+        onChange={(checked) => mutation.mutate({ pushGeneratedBarcodes: checked })}
+      />
+    </SettingsCard>
   );
 }
 

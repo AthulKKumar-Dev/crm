@@ -173,6 +173,19 @@ enum InvoiceStatus {
   CREDIT_NOTE
 }
 
+/// Where a ProductVariant.barcode came from. See the field comment on
+/// ProductVariant.barcodeSource — this drives regeneration, pull-overwrite and
+/// Shopify-push decisions, so classify honestly.
+enum BarcodeSource {
+  /// Minted by SkuGeneratorService. Ours to replace; must survive a Shopify
+  /// pull that carries no barcode; never pushed unless the org opts in.
+  GENERATED
+  /// Typed by a person, or imported from CSV. Left alone.
+  MANUAL
+  /// Came down from Shopify — usually a real GTIN. Shopify stays authoritative.
+  SHOPIFY
+}
+
 enum VipLevel {
   NONE
   BRONZE
@@ -563,6 +576,13 @@ model ProductVariant {
   title             String // "Small / Red"
   sku               String? // "BTS-SM-RD"
   barcode           String?
+  // Provenance of `barcode`. Answers three questions no other field can:
+  // which barcodes may we regenerate (GENERATED only), which may a Shopify
+  // pull overwrite (anything but GENERATED — see shopify-sync upsert), and
+  // which may be pushed to Shopify (GENERATED gated behind
+  // inventorySettings.pushGeneratedBarcodes). NULL on legacy rows the backfill
+  // could not classify; treat NULL as MANUAL.
+  barcodeSource     BarcodeSource? @map("barcode_source")
   price             Decimal  @db.Decimal(12, 2) // $29.99
   compareAtPrice    Decimal? @map("compare_at_price") @db.Decimal(12, 2) // $39.99 (original price)
   cost              Decimal? @db.Decimal(12, 2) // Cost per item (COGS) — drives margin display
@@ -780,6 +800,11 @@ model OrderLineItem {
   quantity          Int
   price             Decimal  @db.Decimal(12, 2) // Per unit
   totalDiscount     Decimal  @default(0) @map("total_discount") @db.Decimal(12, 2)
+  /// Units shipped so far, 0..quantity. `fulfillmentStatus` alone cannot express
+  /// a partial shipment: Shopify accepts a per-line quantity on fulfillmentCreate,
+  /// so fulfilling 2 of 5 used to flip the whole line to 'fulfilled' and report
+  /// the order complete while 3 units were still unshipped.
+  fulfilledQuantity Int      @default(0) @map("fulfilled_quantity")
   fulfillmentStatus String?  @map("fulfillment_status")
   requiresShipping  Boolean  @default(true) @map("requires_shipping")
   taxable           Boolean  @default(true)
@@ -1228,7 +1253,12 @@ model OrganizationGstin {
   tradeName      String?  @map("trade_name") // Trade/brand name
   stateCode      String   @map("state_code") // 2-digit Indian state code e.g. "27"
   stateName      String   @map("state_name") // Full name e.g. "Maharashtra"
-  address        Json?    @db.JsonB // { line1, line2, city, pincode }
+  // Canonical address keys — the same shape every other address blob in the
+  // system uses, so `client/app/lib/address.ts readAddress()` can render it:
+  // { address1, address2, city, zip, province }. Snapshotted onto
+  // Invoice.sellerAddress at issue time; a GST tax invoice must carry the
+  // supplier's address.
+  address        Json?    @db.JsonB
   isDefault      Boolean  @default(false) @map("is_default")
   isActive       Boolean  @default(true) @map("is_active")
   createdAt      DateTime @default(now()) @map("created_at")
@@ -1280,6 +1310,14 @@ model Invoice {
   totalIgst     Decimal @default(0) @map("total_igst") @db.Decimal(12, 2)
   totalTax      Decimal @default(0) @map("total_tax") @db.Decimal(12, 2)
   totalDiscount Decimal @default(0) @map("total_discount") @db.Decimal(12, 2)
+  // Shipping charged on the order, carried onto the invoice so grandTotal can
+  // agree with Order.totalPrice. NOT taxed — treating shipping as a composite
+  // supply would change the tax charged and is a deliberate decision, not an
+  // oversight (see GstCalculatorService.calculateInvoiceTotals). It IS part of
+  // grandTotal, which is why it has to be stored: without it the printed
+  // invoice's total exceeds subtotal + tax by an amount nothing on the document
+  // explains.
+  shippingCharge Decimal @default(0) @map("shipping_charge") @db.Decimal(12, 2)
   grandTotal    Decimal @map("grand_total") @db.Decimal(12, 2)
   currency      String  @default("INR")
 

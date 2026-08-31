@@ -9,6 +9,8 @@ export const invoiceKeys = {
     [...invoiceKeys.all, "list", params] as const,
   detail: (id: string) =>
     [...invoiceKeys.all, "detail", id] as const,
+  stats: (params?: { financialYear?: string }) =>
+    [...invoiceKeys.all, "stats", params] as const,
   gstReturn: (params: GstReturnParams) =>
     [...invoiceKeys.all, "gst-return", params] as const,
 };
@@ -36,5 +38,13 @@ export function useGstReturn(params: GstReturnParams | null) {
     queryKey: invoiceKeys.gstReturn(params!),
     queryFn: () => invoiceService.getGstReturn(params!),
     enabled: !!params?.financialYear && !!params?.period,
+  });
+}
+
+/** Aggregates for the KPI row and the filter-chip counts. */
+export function useInvoiceStats(params?: { financialYear?: string }) {
+  return useQuery({
+    queryKey: invoiceKeys.stats(params),
+    queryFn: () => invoiceService.stats(params),
   });
 }

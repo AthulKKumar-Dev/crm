@@ -9,6 +9,7 @@ export const orderKeys = {
   detail: (id: string) => [...orderKeys.all, "detail", id] as const,
   stats: (params?: DashboardQueryParams) => [...orderKeys.all, "stats", params] as const,
   fulfillable: (id: string) => [...orderKeys.all, "fulfillable", id] as const,
+  adjacent: (id: string) => [...orderKeys.all, "adjacent", id] as const,
 };
 
 /** Fetch a paginated list of orders with optional filters. */
@@ -32,6 +33,20 @@ export function useOrder(id?: string | null) {
   return useQuery({
     queryKey: orderKeys.detail(id!),
     queryFn: () => orderService.get(id!),
+    enabled: !!id,
+  });
+}
+
+/**
+ * Neighbours of an order for the detail page's Previous / Next rail.
+ *
+ * Replaces searching a client-side page of orders, which only fetched
+ * UNFULFILLED ones — so on a fulfilled order both buttons were dead.
+ */
+export function useAdjacentOrders(id?: string | null) {
+  return useQuery({
+    queryKey: orderKeys.adjacent(id!),
+    queryFn: () => orderService.adjacent(id!),
     enabled: !!id,
   });
 }

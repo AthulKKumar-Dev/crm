@@ -6,6 +6,7 @@ import type {
   OrderFulfillment,
   OrderListParams,
   OrderStatsResponse,
+  AdjacentOrders,
   DashboardQueryParams,
   CreateOfflineOrderRequest,
   CreateOfflineOrderResponse,
@@ -30,6 +31,9 @@ export const orderService = {
 
   get: (id: string) =>
     apiClient.get<OrderDetail>(`/orders/${id}`).then((response) => response.data),
+
+  adjacent: (id: string) =>
+    apiClient.get<AdjacentOrders>(`/orders/${id}/adjacent`).then((response) => response.data),
 
   stats: (params?: DashboardQueryParams) =>
     apiClient.get<OrderStatsResponse>("/orders/stats", { params }).then((response) => response.data),
@@ -105,6 +109,15 @@ export const orderService = {
   updateTracking: (id: string, fid: string, data: UpdateTrackingRequest) =>
     apiClient
       .patch<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/tracking`, data)
+      .then((response) => response.data),
+
+  // Mark a whole shipment delivered. The endpoint has existed and been
+  // vendor-scoped since fulfilments shipped, but had no client method at all,
+  // so shipment-level delivery was unreachable from the UI — only the per-line
+  // `markItemDelivered` above was wired.
+  markFulfillmentDelivered: (id: string, fid: string) =>
+    apiClient
+      .post<OrderFulfillment>(`/orders/${id}/fulfillments/${fid}/delivered`)
       .then((response) => response.data),
 
   cancelFulfillment: (id: string, fid: string) =>

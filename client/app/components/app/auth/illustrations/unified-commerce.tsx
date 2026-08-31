@@ -122,7 +122,7 @@ export function UnifiedCommerceIllustration() {
                 variants={hubPop}
                 className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1.5 rounded-full bg-[#CEF17B] px-3 py-1.5 shadow-lg shadow-[#CEF17B]/30 ring-2 ring-white/20"
             >
-                <span className=" font-baumans text-[11px] font-bold text-[#084734]">collabo</span>
+                <span className=" font-display text-caption font-bold text-brand-forest">collabo</span>
             </motion.div>
         </motion.div>
     );

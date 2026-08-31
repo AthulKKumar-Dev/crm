@@ -72,8 +72,8 @@ export class ChannelController {
         : null;
     return res.redirect(
       validShop
-        ? `${frontendUrl}/channel?install_shop=${validShop}`
-        : `${frontendUrl}/channel`,
+        ? `${frontendUrl}/settings/channels?install_shop=${validShop}`
+        : `${frontendUrl}/settings/channels`,
     );
   }
 
@@ -128,7 +128,7 @@ export class ChannelController {
               : message.includes('HMAC') ? 'invalid_hmac'
                 : 'connect_failed';
       this.logger.warn(`Shopify OAuth callback failed (${reason}): ${message}`);
-      return res.redirect(`${frontendUrl}/channel?error=shopify_connect_failed&reason=${reason}`);
+      return res.redirect(`${frontendUrl}/settings/channels?error=shopify_connect_failed&reason=${reason}`);
     }
   }
 

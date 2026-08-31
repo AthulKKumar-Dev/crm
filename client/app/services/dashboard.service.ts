@@ -1,10 +1,27 @@
 import { apiClient } from "~/lib/api-client";
-import type { DashboardOverview, DashboardQueryParams } from "~/types/api";
+import type { DashboardOverview, DashboardQueryParams, StatMetric } from "~/types/api";
+
+/** One month of the rolling 12-month series behind the profit chart. */
+export interface MonthlySalesPoint {
+  month: string;
+  revenue: number;
+  profit: number;
+  /** Orders placed that month — the Total Orders sparkline. */
+  orders: number;
+  /** Customers first seen that month — the Total Customers sparkline. */
+  newCustomers: number;
+}
 
 export interface MonthlySalesData {
-  data: Array<{ month: string; revenue: number; profit: number }>;
+  data: MonthlySalesPoint[];
   totalRevenue: number;
   totalProfit: number;
+  /**
+   * Profit over the last 30 days against the 30 before it. Distinct from the
+   * 12-month `totalProfit` above, so anything rendering it needs to say which
+   * period it covers. `previous: 0` means there is no comparison period yet.
+   */
+  profitTrend: StatMetric;
 }
 
 export interface SalesByCategoryData {

@@ -1,0 +1,887 @@
+import { useState } from "react";
+import { Link, useSearchParams } from "react-router";
+import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X } from "lucide-react";
+
+import {
+  PageHeader,
+  PageHeaderContent,
+  PageHeaderTitle,
+  PageHeaderDescription,
+  PageHeaderActions,
+} from "~/components/ui/page-header";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import { Button } from "~/components/ui/button";
+import { Separator } from "~/components/ui/separator";
+import { Skeleton } from "~/components/ui/skeleton";
+import { SectionCard } from "~/components/app/section-card";
+import { StatCard } from "~/components/app/stat-card";
+import { SegmentedTabs } from "~/components/app/segmented-tabs";
+import { InvoicesTable } from "~/components/app/invoices-table";
+import { InvoiceDetailDialog } from "~/components/app/invoice-detail-dialog";
+import { CancelInvoiceDialog } from "~/components/app/cancel-invoice-dialog";
+import {
+  Gstr1B2bPanel,
+  Gstr1B2cPanel,
+  Gstr1HsnPanel,
+} from "~/components/app/gstr1-panels";
+import {
+  Gstr3bOutwardPanel,
+  Gstr3bInterStatePanel,
+} from "~/components/app/gstr3b-panels";
+import {
+  GstFilingSidebar,
+  type ReturnType,
+} from "~/components/app/gst-filing-sidebar";
+import { EmptyState } from "~/components/app/empty-state";
+import { TableSkeleton } from "~/components/app/table-skeleton";
+import { QueryErrorState } from "~/components/app/query-error-state";
+import { useInvoices, useInvoiceStats, useGstReturn } from "~/hooks/use-invoice-queries";
+import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useGstins } from "~/hooks/use-gst-queries";
+import { useDebounced } from "~/hooks/use-debounced";
+import { invoiceService } from "~/services/invoice.service";
+import { downloadBlob } from "~/lib/download-blob";
+import { formatCurrency } from "~/lib/utils";
+import {
+  MONTHS,
+  b2bSectionTotals,
+  daysUntil,
+  financialYearOptions,
+  formatPeriodLabel,
+  getCurrentFinancialYear,
+  getCurrentPeriod,
+  outwardSupplyTotals,
+  returnDueDate,
+} from "~/lib/gst-return";
+import type {
+  GstReturnGstr1,
+  GstReturnGstr3B,
+  Invoice,
+  InvoiceListParams,
+  InvoiceSortField,
+  InvoiceStats,
+  OrganizationGstin,
+} from "~/types/api";
+
+export function meta() {
+  return [
+    { title: "Invoices | Collabo CRM" },
+    { name: "description", content: "GST invoices and tax return summaries" },
+  ];
+}
+
+const PAGE_SIZE = 15;
+
+type Tab = "invoices" | "filing";
+type Chip = "all" | "unpaid" | "b2b" | "cancelled";
+
+/**
+ * Chip → the list filter it applies. `all` deliberately carries none.
+ *
+ * There is no `drafts` chip: `InvoiceStatus.DRAFT` exists in the enum but no
+ * code path ever writes it, so the chip could only ever show zero and match
+ * nothing. It comes back with a real draft-invoice lifecycle.
+ */
+const CHIP_FILTERS: Record<Chip, Partial<InvoiceListParams>> = {
+  all: {},
+  unpaid: { paymentState: "UNPAID" },
+  b2b: { buyerType: "B2B" },
+  cancelled: { status: "CANCELLED" },
+};
+
+const CHIPS: ReadonlyArray<Chip> = ["all", "unpaid", "b2b", "cancelled"];
+const FY_OPTIONS = financialYearOptions();
+const SORT_FIELDS: ReadonlyArray<InvoiceSortField> = [
+  "invoiceDate",
+  "invoiceNumber",
+  "buyerName",
+  "subtotal",
+  "totalTax",
+  "grandTotal",
+];
+
+/** "1 – 24 Aug 2026" — the window the month-to-date figures cover. */
+function formatStatsWindow(stats: InvoiceStats): string {
+  const start = new Date(stats.periodStart);
+  const end = new Date(stats.periodEnd);
+  const endLabel = end.toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+  return `${start.getDate()} – ${endLabel}`;
+}
+
+export default function InvoicesPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Tab, return type, period, financial year, filters, page and the open
+  // invoice all live in the URL. The design links across them — the due banner
+  // jumps to the filing view and the sidebar crosses between GSTR-1 and
+  // GSTR-3B — and local state cannot express those as real links. It also means
+  // a filtered list, a chosen year and an open invoice all survive a reload and
+  // can be pasted to a colleague, and the back button behaves.
+  const tab = (searchParams.get("tab") as Tab) ?? "invoices";
+  const returnType = (searchParams.get("return") as ReturnType) ?? "GSTR1";
+  const period = searchParams.get("period") ?? getCurrentPeriod();
+
+  const fyParam = searchParams.get("fy");
+  const financialYear =
+    fyParam && FY_OPTIONS.includes(fyParam) ? fyParam : getCurrentFinancialYear();
+
+  const chipParam = searchParams.get("chip") as Chip | null;
+  const chip: Chip = chipParam && CHIPS.includes(chipParam) ? chipParam : "all";
+
+  const pageParam = Number(searchParams.get("page"));
+  const currentPage = Number.isInteger(pageParam) && pageParam > 0 ? pageParam : 1;
+
+  const sortParam = searchParams.get("sort") as InvoiceSortField | null;
+  const sortBy: InvoiceSortField =
+    sortParam && SORT_FIELDS.includes(sortParam) ? sortParam : "invoiceDate";
+  const sortOrder = searchParams.get("order") === "asc" ? "asc" : "desc";
+
+  const dateFrom = searchParams.get("from") ?? "";
+  const dateTo = searchParams.get("to") ?? "";
+  const sellerGstinId = searchParams.get("gstin") ?? "";
+  const selectedInvoiceId = searchParams.get("invoice");
+
+  // Search stays local so typing is instant; only the debounced value reaches
+  // the query key and the URL.
+  const [searchQuery, setSearchQuery] = useState(
+    () => searchParams.get("q") ?? "",
+  );
+  const debouncedSearch = useDebounced(searchQuery, 350);
+
+  const [invoiceToCancel, setInvoiceToCancel] = useState<{
+    id: string;
+    invoiceNumber: string;
+  } | null>(null);
+  const [downloading, setDownloading] = useState<"list" | "return" | null>(null);
+
+  const { data: org } = useCurrentOrg();
+  const currency = org?.currency ?? "INR";
+  const { canIssue, canCancel } = useInvoiceActionGates();
+
+  // Only used to decide whether a GSTIN filter is worth showing at all — a
+  // single-registration org has nothing to filter by.
+  const { data: gstins = [] } = useGstins();
+  const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  /**
+   * Patch the URL. `null` deletes a key so it stops appearing in the address
+   * bar once cleared, and any change other than paging itself resets to page 1
+   * — otherwise narrowing a filter while on page 4 lands on an empty page.
+   */
+  function patchParams(patch: Record<string, string | null>) {
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        for (const [key, value] of Object.entries(patch)) {
+          if (value === null || value === "") next.delete(key);
+          else next.set(key, value);
+        }
+        if (!("page" in patch)) next.delete("page");
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  const listParams: InvoiceListParams = {
+    page: currentPage,
+    limit: PAGE_SIZE,
+    financialYear,
+    search: debouncedSearch || undefined,
+    dateFrom: dateFrom || undefined,
+    dateTo: dateTo || undefined,
+    sellerGstinId: sellerGstinId || undefined,
+    sortBy,
+    sortOrder,
+    ...CHIP_FILTERS[chip],
+  };
+
+  const {
+    data: invoiceData,
+    isLoading,
+    isError,
+    refetch,
+  } = useInvoices(listParams);
+  const { data: stats, isLoading: statsLoading } = useInvoiceStats({
+    financialYear,
+  });
+
+  const invoices = invoiceData?.data ?? [];
+  const meta = invoiceData?.meta;
+  const totalPages = meta?.totalPages ?? 1;
+
+  const { data: returnData, isLoading: returnLoading } = useGstReturn(
+    tab === "filing" ? { financialYear, period, returnType } : null,
+  );
+
+  const periodLabel = formatPeriodLabel(financialYear, period) ?? period;
+  const gstr1DueDate = returnDueDate(financialYear, period, "GSTR1");
+  const gstr1DaysLeft = gstr1DueDate ? daysUntil(gstr1DueDate) : null;
+
+  const hasFilters =
+    chip !== "all" ||
+    !!searchQuery ||
+    !!dateFrom ||
+    !!dateTo ||
+    !!sellerGstinId;
+
+  function handleSearch(event: React.ChangeEvent<HTMLInputElement>) {
+    const value = event.target.value;
+    setSearchQuery(value);
+    patchParams({ q: value || null });
+  }
+
+  /** Clicking the active column flips direction; a new column starts descending. */
+  function handleSort(field: InvoiceSortField) {
+    if (field === sortBy) {
+      patchParams({ order: sortOrder === "asc" ? "desc" : "asc" });
+      return;
+    }
+    patchParams({ sort: field, order: "desc" });
+  }
+
+  function clearFilters() {
+    setSearchQuery("");
+    patchParams({
+      chip: null,
+      q: null,
+      from: null,
+      to: null,
+      gstin: null,
+    });
+  }
+
+  async function download(
+    kind: "list" | "return",
+    fetcher: () => Promise<Blob>,
+    filename: string,
+    errorMessage: string,
+  ) {
+    // Tracked per button. A single shared flag disabled the GST-return download
+    // while an invoice CSV was in flight, and vice versa.
+    setDownloading(kind);
+    try {
+      await downloadBlob(fetcher, filename, errorMessage);
+    } finally {
+      setDownloading(null);
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <PageHeader>
+        <PageHeaderContent>
+          <PageHeaderTitle>Invoices</PageHeaderTitle>
+          <PageHeaderDescription>
+            GST invoices and tax return summaries for your business.
+          </PageHeaderDescription>
+        </PageHeaderContent>
+        <PageHeaderActions>
+          <Button
+            variant="outline"
+            size="action"
+            disabled={downloading !== null}
+            onClick={() =>
+              download(
+                "list",
+                // Exports exactly what the table is showing: the server shares
+                // one `where` builder between the list and the export, so the
+                // search box, date range and chips all reach the file.
+                () => invoiceService.exportCsv(listParams),
+                `invoices-${financialYear}.csv`,
+                "Could not export invoices. Please try again.",
+              )
+            }
+          >
+            <Download className="size-3.5" />
+            Export CSV
+          </Button>
+          {/* Invoices are raised against an order, so this goes to the order
+              list rather than to a standalone create form — there isn't one.
+              Hidden for roles the server would reject at POST /invoices. */}
+          {canIssue && (
+            <Button variant="brand" size="action" asChild>
+              <Link to="/orders" title="Pick an order to raise an invoice against">
+                <Plus className="size-3.5" />
+                New invoice
+              </Link>
+            </Button>
+          )}
+        </PageHeaderActions>
+      </PageHeader>
+
+      {/* View switch */}
+      <div className="flex flex-wrap items-center gap-3">
+        <SegmentedTabs
+          items={[
+            { value: "invoices", label: "Invoices" },
+            { value: "filing", label: "GST filing" },
+          ]}
+          value={tab}
+          onChange={(next) => patchParams({ tab: next })}
+          ariaLabel="Invoice views"
+          idPrefix="view"
+        />
+        {/* The financial year was pinned at mount with no setter, so no prior
+            year — or prior year's return — was reachable from the UI. */}
+        <Select
+          value={financialYear}
+          onValueChange={(next) => patchParams({ fy: next })}
+        >
+          <SelectTrigger className="h-8 w-30 text-caption" aria-label="Financial year">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FY_OPTIONS.map((year) => (
+              <SelectItem key={year} value={year} className="text-caption">
+                FY {year}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {tab === "invoices" ? (
+        <div
+          role="tabpanel"
+          id="view-panel-invoices"
+          aria-labelledby="view-tab-invoices"
+          className="space-y-6"
+        >
+          {/* KPI row */}
+          <div className="grid grid-cols-1 gap-5 rounded-xl bg-card p-3 sm:grid-cols-2 lg:grid-cols-4">
+            {statsLoading || !stats ? (
+              Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className="p-5">
+                  <Skeleton className="mb-4 h-3 w-24" />
+                  <Skeleton className="h-7 w-20" />
+                </div>
+              ))
+            ) : (
+              [
+                {
+                  key: "invoiced",
+                  label: "Invoiced this month",
+                  value: formatCurrency(stats.invoicedThisMonth.amount, currency, {
+                    maximumFractionDigits: 0,
+                  }),
+                  change: stats.invoicedThisMonth.changePct ?? undefined,
+                  changeLabel: formatStatsWindow(stats),
+                },
+                {
+                  key: "tax",
+                  label: "Tax collected",
+                  value: formatCurrency(stats.taxCollected.amount, currency, {
+                    maximumFractionDigits: 0,
+                  }),
+                  change: stats.taxCollected.changePct ?? undefined,
+                  changeLabel: "CGST + SGST + IGST",
+                },
+                {
+                  key: "outstanding",
+                  label: "Outstanding",
+                  value: formatCurrency(stats.outstanding.amount, currency, {
+                    maximumFractionDigits: 0,
+                  }),
+                  changeLabel: `${stats.outstanding.invoiceCount} invoices unpaid`,
+                },
+                {
+                  key: "issued",
+                  label: "Issued",
+                  value: stats.counts.issued.toLocaleString("en-IN"),
+                  changeLabel: `of ${stats.counts.all} in FY ${financialYear}`,
+                },
+              ].map((card, index, all) => (
+                <div key={card.key} className="flex items-center gap-4">
+                  <StatCard
+                    variant="inline"
+                    label={card.label}
+                    value={card.value}
+                    change={card.change}
+                    changeLabel={card.changeLabel}
+                    className="flex-1"
+                  />
+                  {index < all.length - 1 && (
+                    <Separator orientation="vertical" className="hidden h-15 md:block" />
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Filing reminder */}
+          {gstr1DueDate && gstr1DaysLeft !== null && gstr1DaysLeft >= 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-brand px-5 py-3">
+              <p className="flex items-center gap-2 text-caption text-brand-foreground">
+                <Clock className="size-4 shrink-0" />
+                <span>
+                  <strong className="font-semibold">
+                    GSTR-1 for {periodLabel} is due in {gstr1DaysLeft}{" "}
+                    {gstr1DaysLeft === 1 ? "day" : "days"}.
+                  </strong>{" "}
+                  {stats
+                    ? `${stats.counts.issued} issued invoices in FY ${financialYear}.`
+                    : null}
+                </span>
+              </p>
+              <Button
+                variant="brand"
+                size="sm"
+                onClick={() => patchParams({ tab: "filing", return: "GSTR1" })}
+              >
+                Review filing
+              </Button>
+            </div>
+          )}
+
+          {/* Filters */}
+          <div className="flex flex-wrap items-center gap-3">
+            <SegmentedTabs
+              items={[
+                { value: "all", label: "All", count: stats?.counts.all },
+                { value: "unpaid", label: "Unpaid", count: stats?.counts.unpaid },
+                { value: "b2b", label: "B2B", count: stats?.counts.b2b },
+                {
+                  value: "cancelled",
+                  label: "Cancelled",
+                  count: stats?.counts.cancelled,
+                },
+              ]}
+              value={chip}
+              onChange={(next) => patchParams({ chip: next === "all" ? null : next })}
+              ariaLabel="Filter invoices"
+              behaviour="filter"
+            />
+
+            {/* Date range. The server reads these as calendar days in the
+                merchant's timezone, so they agree with the GST return. */}
+            <div className="flex items-center gap-1.5">
+              <label className="text-micro text-muted-foreground" htmlFor="invoice-from">
+                From
+              </label>
+              <input
+                id="invoice-from"
+                type="date"
+                value={dateFrom}
+                max={dateTo || undefined}
+                onChange={(event) => patchParams({ from: event.target.value || null })}
+                className="h-8 rounded-lg border border-input bg-transparent px-2 text-caption focus:outline-none focus:ring-2 focus:ring-brand/50"
+              />
+              <label className="text-micro text-muted-foreground" htmlFor="invoice-to">
+                to
+              </label>
+              <input
+                id="invoice-to"
+                type="date"
+                value={dateTo}
+                min={dateFrom || undefined}
+                onChange={(event) => patchParams({ to: event.target.value || null })}
+                className="h-8 rounded-lg border border-input bg-transparent px-2 text-caption focus:outline-none focus:ring-2 focus:ring-brand/50"
+              />
+            </div>
+
+            {/* Only meaningful for a multi-registration org. */}
+            {activeGstins.length > 1 && (
+              <Select
+                value={sellerGstinId || "all"}
+                onValueChange={(next) =>
+                  patchParams({ gstin: next === "all" ? null : next })
+                }
+              >
+                <SelectTrigger className="h-8 w-45 text-caption" aria-label="Seller GSTIN">
+                  <SelectValue placeholder="All GSTINs" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all" className="text-caption">
+                    All GSTINs
+                  </SelectItem>
+                  {activeGstins.map((gstin: OrganizationGstin) => (
+                    <SelectItem key={gstin.id} value={gstin.id} className="text-caption">
+                      {gstin.gstin} — {gstin.stateName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            {hasFilters && (
+              <Button variant="ghost" size="sm" onClick={clearFilters}>
+                <X className="size-3.5" />
+                Clear
+              </Button>
+            )}
+          </div>
+
+          <SectionCard
+            title="All invoices"
+            description={`Every GST invoice raised against an order in FY ${financialYear}.`}
+            action={
+              <div className="relative min-w-50 max-w-xs flex-1">
+                <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="search"
+                  placeholder="Invoice #, buyer or GSTIN…"
+                  value={searchQuery}
+                  onChange={handleSearch}
+                  aria-label="Search invoices"
+                  className="h-8 w-full rounded-lg border border-input bg-transparent pl-8 pr-3 text-caption placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand/50"
+                />
+              </div>
+            }
+          >
+            {/* Error MUST precede loading and empty: a failed request leaves
+                isLoading false and data undefined, so the empty branch was
+                reached and the user was told no invoices existed. `!invoiceData`
+                keeps a failed background refetch from blanking a live table. */}
+            {isError && !invoiceData ? (
+              <div className="p-8">
+                <QueryErrorState resource="invoices" onRetry={() => refetch()} />
+              </div>
+            ) : isLoading ? (
+              <div className="p-4">
+                <TableSkeleton rows={PAGE_SIZE} columns={9} />
+              </div>
+            ) : invoices.length === 0 ? (
+              <div className="p-8">
+                <EmptyState
+                  title="No invoices found"
+                  description={
+                    hasFilters
+                      ? "Try adjusting your search or filters."
+                      : `No GST invoices were raised in FY ${financialYear}. Generate one from an order to see it here.`
+                  }
+                />
+              </div>
+            ) : (
+              <InvoicesTable
+                invoices={invoices}
+                currency={currency}
+                canCancel={canCancel}
+                sortBy={sortBy}
+                sortOrder={sortOrder}
+                onSortChange={handleSort}
+                onSelect={(id) => patchParams({ invoice: id, page: String(currentPage) })}
+                onCancel={(invoice: Invoice) =>
+                  setInvoiceToCancel({
+                    id: invoice.id,
+                    invoiceNumber: invoice.invoiceNumber,
+                  })
+                }
+              />
+            )}
+
+            {!isLoading && invoices.length > 0 && (
+              <div className="flex items-center justify-between border-t px-5 py-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    patchParams({ page: String(Math.max(1, currentPage - 1)) })
+                  }
+                  disabled={currentPage === 1}
+                >
+                  <ChevronLeft className="size-3.5" />
+                  Previous
+                </Button>
+                <p className="text-caption text-muted-foreground">
+                  Page {meta?.page ?? 1} of {totalPages} ({meta?.total ?? 0} total)
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    patchParams({
+                      page: String(Math.min(totalPages, currentPage + 1)),
+                    })
+                  }
+                  disabled={currentPage >= totalPages}
+                >
+                  Next
+                  <ChevronRight className="size-3.5" />
+                </Button>
+              </div>
+            )}
+          </SectionCard>
+        </div>
+      ) : (
+        <div
+          role="tabpanel"
+          id="view-panel-filing"
+          aria-labelledby="view-tab-filing"
+          className="space-y-6"
+        >
+          {/* Return switch and period */}
+          <div className="flex flex-wrap items-center gap-3">
+            <SegmentedTabs
+              items={[
+                { value: "GSTR1", label: "GSTR-1" },
+                { value: "GSTR3B", label: "GSTR-3B" },
+              ]}
+              value={returnType}
+              onChange={(next) => patchParams({ return: next })}
+              ariaLabel="GST return type"
+              idPrefix="return"
+            />
+            <span className="text-caption text-muted-foreground">
+              {returnType === "GSTR1"
+                ? "Outward supplies · invoice-wise"
+                : "Summary return · tax payable"}
+            </span>
+            <Select value={period} onValueChange={(next) => patchParams({ period: next })}>
+              <SelectTrigger className="h-8 w-35 text-caption" aria-label="Return period">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MONTHS.map((month) => (
+                  <SelectItem
+                    key={month.value}
+                    value={month.value}
+                    className="text-caption"
+                  >
+                    {month.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+            <div className="space-y-6 lg:col-span-2">
+              {returnLoading ? (
+                <>
+                  <Skeleton className="h-24 w-full rounded-xl" />
+                  <Skeleton className="h-64 w-full rounded-xl" />
+                </>
+              ) : !returnData ? (
+                <div className="rounded-xl bg-card p-8 shadow-sm ring-1 ring-border">
+                  <EmptyState
+                    title="No return data"
+                    description={`No issued invoices for ${periodLabel}.`}
+                  />
+                </div>
+              ) : returnType === "GSTR1" ? (
+                <Gstr1View
+                  data={returnData as GstReturnGstr1}
+                  currency={currency}
+                />
+              ) : (
+                <Gstr3bView
+                  data={returnData as GstReturnGstr3B}
+                  currency={currency}
+                />
+              )}
+            </div>
+
+            <GstFilingSidebar
+              financialYear={financialYear}
+              period={period}
+              returnType={returnType}
+              periodLabel={periodLabel}
+              facts={
+                returnData
+                  ? returnType === "GSTR1"
+                    ? gstr1Facts(returnData as GstReturnGstr1, currency)
+                    : gstr3bFacts(returnData as GstReturnGstr3B, currency)
+                  : []
+              }
+              onSwitchReturn={(next) => patchParams({ return: next })}
+              isDownloading={downloading === "return"}
+              onDownloadCsv={() =>
+                download(
+                  "return",
+                  () =>
+                    invoiceService.exportGstReturnCsv({
+                      financialYear,
+                      period,
+                      returnType,
+                    }),
+                  `${returnType}-${financialYear}-${period}.csv`,
+                  "Could not download the return. Please try again.",
+                )
+              }
+            />
+          </div>
+        </div>
+      )}
+
+      <InvoiceDetailDialog
+        invoiceId={selectedInvoiceId}
+        currency={currency}
+        canCancel={canCancel}
+        onClose={() => patchParams({ invoice: null, page: String(currentPage) })}
+        onRequestCancel={setInvoiceToCancel}
+      />
+
+      <CancelInvoiceDialog
+        invoice={invoiceToCancel}
+        onClose={() => setInvoiceToCancel(null)}
+        // Close the detail dialog too — it would otherwise sit there showing an
+        // invoice whose status has just changed underneath it.
+        onCancelled={() => patchParams({ invoice: null, page: String(currentPage) })}
+      />
+    </div>
+  );
+}
+
+// ── Return views ────────────────────────────────────────────────────────────
+
+/** Compact KPI strip above the return tables. */
+function ReturnStats({
+  cards,
+}: {
+  cards: ReadonlyArray<{
+    key: string;
+    label: string;
+    value: string;
+    inverted?: boolean;
+  }>;
+}) {
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {cards.map((card) => (
+        <StatCard
+          key={card.key}
+          label={card.label}
+          value={card.value}
+          tone={card.inverted ? "inverted" : "default"}
+          className="rounded-xl"
+        />
+      ))}
+    </div>
+  );
+}
+
+function Gstr1View({
+  data,
+  currency,
+}: {
+  data: GstReturnGstr1;
+  currency: string;
+}) {
+  const money = (amount: number) =>
+    formatCurrency(amount, currency, { maximumFractionDigits: 0 });
+
+  return (
+    <>
+      <ReturnStats
+        cards={[
+          {
+            key: "invoices",
+            label: "Invoices",
+            value: data.totals.totalInvoices.toLocaleString("en-IN"),
+          },
+          {
+            key: "taxable",
+            label: "Taxable value",
+            value: money(data.totals.totalTaxable),
+          },
+          {
+            key: "cgst-sgst",
+            label: "CGST + SGST",
+            value: money(data.totals.totalCgst + data.totals.totalSgst),
+          },
+          { key: "igst", label: "IGST", value: money(data.totals.totalIgst) },
+        ]}
+      />
+      <Gstr1B2bPanel data={data} currency={currency} />
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        <Gstr1B2cPanel data={data} currency={currency} />
+        <Gstr1HsnPanel data={data} currency={currency} />
+      </div>
+    </>
+  );
+}
+
+function Gstr3bView({
+  data,
+  currency,
+}: {
+  data: GstReturnGstr3B;
+  currency: string;
+}) {
+  const money = (amount: number) =>
+    formatCurrency(amount, currency, { maximumFractionDigits: 0 });
+  const totals = outwardSupplyTotals(data.outwardSupplies);
+
+  return (
+    <>
+      <ReturnStats
+        cards={[
+          {
+            key: "outward",
+            label: "Outward taxable value",
+            value: money(totals.taxableValue),
+          },
+          { key: "igst", label: "IGST", value: money(data.taxPayable.igst) },
+          {
+            key: "cgst-sgst",
+            label: "CGST + SGST",
+            value: money(data.taxPayable.cgst + data.taxPayable.sgst),
+          },
+          {
+            key: "payable",
+            label: "Tax payable",
+            value: money(data.taxPayable.total),
+            // With no ITC ledger in the system, tax payable *is* the net
+            // payable in cash — nothing can be set off against it.
+            inverted: true,
+          },
+        ]}
+      />
+      <Gstr3bOutwardPanel data={data} currency={currency} />
+      <Gstr3bInterStatePanel data={data} currency={currency} />
+    </>
+  );
+}
+
+// ── Sidebar facts ───────────────────────────────────────────────────────────
+
+function gstr1Facts(data: GstReturnGstr1, currency: string) {
+  const b2b = b2bSectionTotals(data.b2b);
+  const b2cInvoices = data.b2cSummary.reduce(
+    (sum, entry) => sum + entry.invoiceCount,
+    0,
+  );
+
+  return [
+    { label: "Invoices in period", value: String(data.totals.totalInvoices) },
+    { label: "B2B / B2C", value: `${b2b.invoiceCount} / ${b2cInvoices}` },
+    {
+      label: "Total tax",
+      value: formatCurrency(data.totals.totalTax, currency, {
+        maximumFractionDigits: 0,
+      }),
+    },
+  ];
+}
+
+function gstr3bFacts(data: GstReturnGstr3B, currency: string) {
+  const totals = outwardSupplyTotals(data.outwardSupplies);
+
+  return [
+    {
+      label: "Taxable value",
+      value: formatCurrency(totals.taxableValue, currency, {
+        maximumFractionDigits: 0,
+      }),
+    },
+    { label: "Rate slabs", value: String(data.outwardSupplies.length) },
+    {
+      label: "Tax payable",
+      value: formatCurrency(data.taxPayable.total, currency, {
+        maximumFractionDigits: 0,
+      }),
+    },
+  ];
+}

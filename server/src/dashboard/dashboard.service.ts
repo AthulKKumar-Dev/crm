@@ -83,6 +83,7 @@ export class DashboardService {
           customer: {
             select: { id: true, firstName: true, lastName: true, email: true },
           },
+          channel: { select: { id: true, platform: true, name: true } },
           _count: { select: { lineItems: true } },
         },
         orderBy: { externalCreatedAt: 'desc' },
@@ -142,6 +143,7 @@ export class DashboardService {
         financialStatus: order.financialStatus,
         fulfillmentStatus: order.fulfillmentStatus,
         customer: order.customer,
+        channel: order.channel,
         itemCount: order._count.lineItems,
         createdAt: order.externalCreatedAt || order.createdAt,
       })),
@@ -204,57 +206,129 @@ export class DashboardService {
   }
 
   // ─── MONTHLY REVENUE & PROFIT (for bar chart) ───
+  // Also carries the per-month `orders` / `newCustomers` counts the dashboard's
+  // KPI sparklines plot, and a real last-30-days profit comparison for the trend
+  // badge. Those extras sit a little oddly under a route named "monthly-sales",
+  // but they all come off the 12-month window this method already scans — a
+  // separate endpoint would cost an extra round trip for one sparkline.
   async getMonthlySales(orgId: string, query: QueryDashboardDto) {
     const now = new Date();
     const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
 
-    const orders = await this.prisma.order.findMany({
-      where: {
-        organizationId: orgId,
-        deletedAt: null,
-        financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
-        externalCreatedAt: { gte: twelveMonthsAgo },
-        ...(query.channelId && { channelId: query.channelId }),
-      },
-      select: {
-        totalPrice: true,
-        totalDiscounts: true,
-        totalShippingPrice: true,
-        externalCreatedAt: true,
-        createdAt: true,
-      },
-    });
+    const [orders, customers] = await Promise.all([
+      this.prisma.order.findMany({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
+          externalCreatedAt: { gte: twelveMonthsAgo },
+          ...(query.channelId && { channelId: query.channelId }),
+        },
+        select: {
+          totalPrice: true,
+          totalDiscounts: true,
+          totalShippingPrice: true,
+          externalCreatedAt: true,
+          createdAt: true,
+        },
+      }),
+
+      // Customers synced from a storefront carry that storefront's own signup
+      // date; ones created in the CRM only have `createdAt`. Either one landing
+      // in the window counts, hence the OR rather than a single filter.
+      this.prisma.customer.findMany({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          ...(query.channelId && { channelId: query.channelId }),
+          OR: [
+            { externalCreatedAt: { gte: twelveMonthsAgo } },
+            { externalCreatedAt: null, createdAt: { gte: twelveMonthsAgo } },
+          ],
+        },
+        select: { externalCreatedAt: true, createdAt: true },
+      }),
+    ]);
 
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const monthMap = new Map<string, { revenue: number; profit: number }>();
+    const monthMap = new Map<
+      string,
+      { revenue: number; profit: number; orders: number; newCustomers: number }
+    >();
 
     for (let i = 0; i < 12; i++) {
       const d = new Date(now.getFullYear(), now.getMonth() - 11 + i, 1);
-      monthMap.set(monthNames[d.getMonth()], { revenue: 0, profit: 0 });
+      monthMap.set(monthNames[d.getMonth()], { revenue: 0, profit: 0, orders: 0, newCustomers: 0 });
     }
+
+    // Both 30-day windows sit inside the 12-month fetch above, so the trend
+    // costs no extra query — just a running total over the same rows.
+    let profitLast30 = 0;
+    let profitPrev30 = 0;
 
     for (const order of orders) {
       const date = order.externalCreatedAt || order.createdAt;
-      const key = monthNames[date.getMonth()];
-      const existing = monthMap.get(key);
+      const revenue = parseFloat(order.totalPrice.toString());
+      const costs = parseFloat(order.totalShippingPrice.toString()) + parseFloat(order.totalDiscounts.toString());
+      const profit = revenue - costs;
+
+      const existing = monthMap.get(monthNames[date.getMonth()]);
       if (existing) {
-        const revenue = parseFloat(order.totalPrice.toString());
-        const costs = parseFloat(order.totalShippingPrice.toString()) + parseFloat(order.totalDiscounts.toString());
         existing.revenue += revenue;
-        existing.profit += revenue - costs;
+        existing.profit += profit;
+        existing.orders += 1;
       }
+
+      if (date >= thirtyDaysAgo) profitLast30 += profit;
+      else if (date >= sixtyDaysAgo) profitPrev30 += profit;
+    }
+
+    for (const customer of customers) {
+      const date = customer.externalCreatedAt || customer.createdAt;
+      const existing = monthMap.get(monthNames[date.getMonth()]);
+      if (existing) existing.newCustomers += 1;
     }
 
     const data = Array.from(monthMap.entries()).map(([month, values]) => ({
       month,
       revenue: Math.round(values.revenue * 100) / 100,
       profit: Math.round(values.profit * 100) / 100,
+      orders: values.orders,
+      newCustomers: values.newCustomers,
     }));
 
     const totalRevenue = data.reduce((s, d) => s + d.revenue, 0);
     const totalProfit = data.reduce((s, d) => s + d.profit, 0);
 
-    return { data, totalRevenue: Math.round(totalRevenue * 100) / 100, totalProfit: Math.round(totalProfit * 100) / 100 };
+    const current = Math.round(profitLast30 * 100) / 100;
+    const previous = Math.round(profitPrev30 * 100) / 100;
+
+    return {
+      data,
+      totalRevenue: Math.round(totalRevenue * 100) / 100,
+      totalProfit: Math.round(totalProfit * 100) / 100,
+      profitTrend: { current, previous, change: this.calcChange(current, previous) },
+    };
+  }
+
+  /**
+   * Period-over-period change, matching `OrderService.calcChange` so both
+   * endpoints report a delta the same way. Copied rather than shared because
+   * that one is private — worth lifting into `common/` if a third caller lands.
+   *
+   * A `previous` of 0 yields a nominal 100% "up"; callers should hide the badge
+   * in that case rather than present growth-from-nothing as a trend.
+   */
+  private calcChange(current: number, previous: number): { percentage: number; direction: 'up' | 'down' | 'same' } {
+    if (previous === 0 && current === 0) return { percentage: 0, direction: 'same' };
+    if (previous === 0) return { percentage: 100, direction: 'up' };
+    const percentage = Math.round(((current - previous) / previous) * 100);
+    return {
+      percentage: Math.abs(percentage),
+      direction: percentage > 0 ? 'up' : percentage < 0 ? 'down' : 'same',
+    };
   }
 
   // ─── SALES BY PRODUCT TYPE (for donut chart) ───
@@ -310,17 +384,20 @@ export class DashboardService {
   }
 
   private async getTopSellingProducts(orgId: string, query: QueryDashboardDto, limit: number) {
-    // Group line items by externalProductId to get total quantity sold per product
-    const dateFilter: any = {};
-    if (query.dateFrom || query.dateTo) {
-      dateFilter.order = {
-        externalCreatedAt: {
+    // The dashboard panel this feeds is captioned "Last 30 days", so an absent
+    // range means the last 30 days — not all time. Deliberately scoped to this
+    // method: `getOverview` threads its date filter through `baseOrderWhere`, so
+    // defaulting there would silently re-scope Total Sales, Total Orders and
+    // Recent Orders too, and those should stay all-time.
+    const dateRange =
+      query.dateFrom || query.dateTo
+        ? {
           ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
           ...(query.dateTo && { lte: new Date(query.dateTo) }),
-        },
-      };
-    }
+        }
+        : { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) };
 
+    // Group line items by externalProductId to get total quantity sold per product
     const topItems = await this.prisma.orderLineItem.groupBy({
       by: ['externalProductId'],
       where: {
@@ -328,12 +405,7 @@ export class DashboardService {
           organizationId: orgId,
           deletedAt: null,
           ...(query.channelId && { channelId: query.channelId }),
-          ...(query.dateFrom || query.dateTo ? {
-            externalCreatedAt: {
-              ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-              ...(query.dateTo && { lte: new Date(query.dateTo) }),
-            },
-          } : {}),
+          externalCreatedAt: dateRange,
         },
         externalProductId: { not: null },
       },

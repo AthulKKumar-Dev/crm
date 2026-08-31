@@ -90,7 +90,20 @@ export class SkuGeneratorService {
     return { generated, skipped: variants.length - generated, conflicts };
   }
 
+  /**
+   * Barcodes. Defaults to SHORT numeric codes.
+   *
+   * The default flipped because copying the SKU into `barcode` was the root
+   * defect behind "doesn't fit 30 × 20 mm": the SKU shape
+   * ({PREFIX}-{PRODUCTCODE}-{SEQ}-{OPTIONS}, 18 chars) needs ~48 mm of label at
+   * a scannable module width, so it cannot print on small or jewellery stock at
+   * any printer resolution. A SKU is built to be read by people and should stay
+   * long; a barcode is read only by a scanner and should be short. `format:
+   * 'sku'` keeps the old behaviour for merchants who want the SKU scannable.
+   */
   async generateBarcodes(orgId: string, dto: GenerateCodesDto) {
+    if ((dto.format ?? 'short') === 'short') return this.generateShortBarcodes(orgId, dto);
+
     const variants = await this.loadTargets(orgId, dto, 'barcode');
     let generated = 0;
     const conflicts: Array<{ variantId: string; reason: string }> = [];
@@ -102,11 +115,115 @@ export class SkuGeneratorService {
       }
       await this.prisma.productVariant.update({
         where: { id: v.id },
-        data: { barcode: v.sku },
+        data: { barcode: v.sku, barcodeSource: 'GENERATED' },
       });
       generated++;
     }
     return { generated, skipped: conflicts.length, conflicts };
+  }
+
+  /**
+   * 6-digit numeric barcodes, for label stock the SKU cannot fit.
+   *
+   * WHY EXACTLY SIX DIGITS — this is load-bearing, do not "improve" it to 8:
+   *
+   * 1. The label renderer auto-detects retail symbologies by GTIN check digit
+   *    (client/app/lib/barcode.ts `detectSymbology`). An 8-digit numeric code
+   *    with a valid check digit renders as **EAN-8**, and 12/13 digits as
+   *    UPC-A/EAN-13 — an internal code would then masquerade as a GS1-assigned
+   *    retail barcode. Six digits is not a GTIN length, so it always renders as
+   *    Code 128 and can never be mistaken for one. This is the same
+   *    never-invent-a-GTIN rule that governs the rest of this file.
+   * 2. Code 128 subset C packs two digits per symbol, but only in pairs: six
+   *    digits encode as start-C + 3 data + check + stop = 68 modules, while
+   *    seven costs 90 because the odd digit forces a subset switch. Even
+   *    lengths are strictly better, and six is the smallest that gives a
+   *    sensible range.
+   *
+   * Six digits = 1,000,000 codes per org, and ~17 mm of printed width, which
+   * fits every preset down to 25 × 15 mm.
+   *
+   * Shares the org sequence with SKU generation (`claimSequence`), so numbers
+   * are never reused across the two. Sequence gaps are harmless.
+   */
+  private async generateShortBarcodes(orgId: string, dto: GenerateCodesDto) {
+    const variants = await this.loadTargets(orgId, dto, 'barcode');
+    if (variants.length === 0) return { generated: 0, skipped: 0, conflicts: [] };
+
+    const startSeq = await this.claimSequence(orgId, variants.length);
+
+    // Probe against BOTH columns: a 6-digit string could already exist as
+    // someone's hand-typed SKU, and assertCodeFree treats the two as one
+    // namespace.
+    const existing = new Set<string>();
+    for (const v of await this.prisma.productVariant.findMany({
+      where: { organizationId: orgId },
+      select: { sku: true, barcode: true },
+    })) {
+      if (v.sku) existing.add(v.sku);
+      if (v.barcode) existing.add(v.barcode);
+    }
+
+    let seq = startSeq;
+    let generated = 0;
+    const conflicts: Array<{ variantId: string; reason: string }> = [];
+
+    for (const v of variants) {
+      // Skip-and-increment, same as generateSkus.
+      let candidate: string;
+      do {
+        candidate = String(seq).padStart(6, '0');
+        seq++;
+      } while (existing.has(candidate));
+
+      // Past 999999 the code would gain a seventh digit — still valid Code 128,
+      // but it silently breaks the width guarantee the whole feature rests on.
+      // Refuse rather than print something that no longer fits the stock.
+      if (candidate.length > 6) {
+        conflicts.push({
+          variantId: v.id,
+          reason: 'Short-code range exhausted (999999). Reset the sequence or use SKU barcodes.',
+        });
+        continue;
+      }
+
+      existing.add(candidate);
+
+      // Re-check at write time, not just against the batch-start snapshot.
+      // `existing` is built once and held in memory, so two concurrent runs —
+      // or a run racing a CSV import or a product duplicate — could otherwise
+      // mint the same code. There is deliberately no DB unique constraint
+      // (Shopify legally syncs duplicate barcodes in), and the scan resolver
+      // uses findFirst, so a duplicate would silently resolve to whichever row
+      // Postgres returned. Losing a code to a race is recoverable; an
+      // ambiguous scan is not.
+      const taken = await this.prisma.productVariant.findFirst({
+        where: {
+          organizationId: orgId,
+          OR: [{ sku: candidate }, { barcode: candidate }],
+          id: { not: v.id },
+        },
+        select: { id: true },
+      });
+      if (taken) {
+        conflicts.push({
+          variantId: v.id,
+          reason: `Code ${candidate} was claimed concurrently — re-run to assign a fresh one.`,
+        });
+        continue;
+      }
+
+      await this.prisma.productVariant.update({
+        where: { id: v.id },
+        data: { barcode: candidate, barcodeSource: 'GENERATED' },
+      });
+      generated++;
+    }
+
+    const overrun = seq - startSeq - variants.length;
+    if (overrun > 0) await this.claimSequence(orgId, overrun);
+
+    return { generated, skipped: variants.length - generated, conflicts };
   }
 
   /** Duplicate SKU/barcode report — surfaces imported collisions for cleanup. */
@@ -168,7 +285,14 @@ export class SkuGeneratorService {
     if (!dto.overwrite) {
       if (filter === 'missing-sku') where.OR = [{ sku: null }, { sku: '' }];
       else if (filter === 'missing-barcode') where.OR = [{ barcode: null }, { barcode: '' }];
-      else {
+      else if (filter === 'missing-or-generated') {
+        // Gaps plus our own codes. A GENERATED barcode is one this service
+        // minted, so replacing it is safe; SHOPIFY (a real GTIN) and MANUAL (a
+        // human typed it) are never in scope. NULL barcodeSource means a legacy
+        // row the backfill could not classify — deliberately excluded, because
+        // "unsure" must not mean "overwrite".
+        where.OR = [{ barcode: null }, { barcode: '' }, { barcodeSource: 'GENERATED' }];
+      } else {
         // 'all' without overwrite still only fills gaps in the target column.
         where.OR =
           target === 'sku'

@@ -57,8 +57,9 @@ export function BulkActionBar({
   // state its scope up front and disable itself when there is nothing to do.
   //
   // Deliberately NOT gated on warehousing: the generate endpoints never were,
-  // and the equivalent buttons on /inventory live inside the stock table, so
-  // this bar is the only route to them for an org that has not enabled it.
+  // and the equivalent buttons on /products/inventory live inside the stock
+  // table, so this bar is the only route to them for an org that has not
+  // enabled it.
   const selectedVariants = selectedProducts.flatMap((p) => p.variants);
   const variantIds = selectedVariants.map((v) => v.id);
   const missingSkuCount = selectedVariants.filter((v) => !v.sku).length;

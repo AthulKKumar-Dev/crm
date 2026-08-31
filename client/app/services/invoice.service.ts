@@ -5,6 +5,7 @@ import type {
   InvoiceDetail,
   CreateInvoiceRequest,
   InvoiceListParams,
+  InvoiceStats,
   GstReturnParams,
   GstReturnGstr1,
   GstReturnGstr3B,
@@ -24,6 +25,12 @@ export const invoiceService = {
   list: (params?: InvoiceListParams) =>
     apiClient
       .get<PaginatedResponse<Invoice>>("/invoices", { params })
+      .then((res) => res.data),
+
+  /** Aggregates for the KPI row and filter-chip counts. */
+  stats: (params?: { financialYear?: string }) =>
+    apiClient
+      .get<InvoiceStats>("/invoices/stats", { params })
       .then((res) => res.data),
 
   /** Get full invoice detail. */
@@ -53,12 +60,6 @@ export const invoiceService = {
         params,
         responseType: "blob",
       })
-      .then((res) => res.data),
-
-  /** Export invoices as JSON. */
-  exportJson: (params?: InvoiceListParams) =>
-    apiClient
-      .get("/invoices/export/json", { params })
       .then((res) => res.data),
 
   /** Download GST return (GSTR-1 or GSTR-3B) as CSV blob. */

@@ -95,6 +95,37 @@ import {
   ORDER_UPDATE_MUTATION,
 } from '../channel/shopify-graphql.types';
 
+/**
+ * Fulfilment-order states Shopify will not accept a fulfilment against.
+ *
+ * A DENY-list on purpose. An allow-list would silently drop any status Shopify
+ * adds later, breaking fulfilment with no error; with a deny-list an unknown
+ * status is still attempted and Shopify tells us if it can't be done.
+ */
+const UNFULFILLABLE_FO_STATUSES: ReadonlySet<string> = new Set([
+  'CLOSED',
+  'CANCELLED',
+  'INCOMPLETE',
+]);
+
+export const isUnfulfillableFo = (status: string): boolean =>
+  UNFULFILLABLE_FO_STATUSES.has(status);
+
+/**
+ * The fulfilment orders a fulfilment may actually be created against, OPEN first.
+ *
+ * Exported and pure so the selection can be asserted directly — this is the
+ * exact logic that let a CLOSED fulfilment order reach `fulfillmentCreate`.
+ */
+export function selectFulfillableFos<T extends { status: string }>(fos: T[]): T[] {
+  return fos
+    .filter((fo) => !isUnfulfillableFo(fo.status))
+    .sort((a, b) => Number(b.status === 'OPEN') - Number(a.status === 'OPEN'));
+}
+
+/** Matches `fulfillmentOrders(first: 25)` in both FO queries — neither paginates. */
+const FULFILLMENT_ORDER_PAGE_SIZE = 25;
+
 @Injectable()
 export class OrderService {
   private readonly logger = new Logger(OrderService.name);
@@ -289,6 +320,10 @@ export class OrderService {
                 title: true,
                 sku: true,
                 price: true,
+                // Order line items never snapshot weight, so the detail page's
+                // shipping-weight total has to come off the live variant.
+                weight: true,
+                weightUnit: true,
                 image: { select: { src: true } },
                 product: {
                   select: {
@@ -301,7 +336,10 @@ export class OrderService {
         },
         fulfillments: true,
         refunds: true,
-        timeline: { orderBy: { createdAt: 'desc' } },
+        // Capped: the feed is rendered in full, and a long-lived order that has
+        // been re-synced, held, released and re-tracked can accumulate hundreds
+        // of rows. Newest 100 is far more than the UI meaningfully shows.
+        timeline: { orderBy: { createdAt: 'desc' }, take: 100 },
         // The order's live GST invoice (at most one — enforced by the partial
         // unique index invoices_order_id_active_key). Lets the client show the
         // invoice card / gate the Generate button without scanning the
@@ -996,7 +1034,72 @@ export class OrderService {
   // Push a single MANUAL offline order to the connected Shopify store on
   // demand. Idempotent — already-synced orders return early; already-queued
   // ones don't re-enqueue; failed pushes are retried.
-  async syncToShopify(id: string, orgId: string) {
+  /**
+   * The orders immediately either side of this one, for the detail page's
+   * Previous / Next rail.
+   *
+   * Replaces a client-side approach that fetched the first 100 UNFULFILLED
+   * orders and searched them: opening a FULFILLED order found nothing, so both
+   * buttons were dead (16 of 48 orders on the dev data), and past 100 orders
+   * even open ones fell off the end. It also pulled 100 fully-hydrated orders on
+   * every detail page view to compute two ids.
+   *
+   * Ordering is `COALESCE(external_created_at, created_at) DESC, id DESC` —
+   * newest first, matching the orders list. The COALESCE matters because
+   * `externalCreatedAt` is null for CRM-native orders, and the list's raw
+   * `externalCreatedAt` sort would clump them; `id` breaks ties so the sequence
+   * is total and stable (two orders can share a timestamp).
+   *
+   * Row-value comparison `(a, b) < (c, d)` gives the neighbour in one indexed
+   * seek per direction rather than a scan.
+   */
+  async findAdjacent(id: string, orgId: string, vendorScope?: string) {
+    const order = await this.prisma.order.findFirst({
+      where: { id, organizationId: orgId, deletedAt: null },
+      select: { id: true, externalCreatedAt: true, createdAt: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    const anchor = order.externalCreatedAt ?? order.createdAt;
+    // A vendor navigates only orders containing their own items — the same rule
+    // the list applies via `where.lineItems.some.vendor`.
+    const vendorFilter = vendorScope
+      ? Prisma.sql`AND EXISTS (
+          SELECT 1 FROM "order_line_items" li
+          WHERE li."order_id" = o."id" AND li."vendor" = ${vendorScope}
+        )`
+      : Prisma.empty;
+    const scope = Prisma.sql`
+      o."organization_id" = ${orgId} AND o."deleted_at" IS NULL ${vendorFilter}`;
+
+    const [older, newer, before, total] = await Promise.all([
+      // "Next order" — the row after this one in a newest-first list.
+      this.prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT o."id" FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") < (${anchor}, ${order.id})
+        ORDER BY COALESCE(o."external_created_at", o."created_at") DESC, o."id" DESC LIMIT 1`,
+      // "Previous" — the row before it.
+      this.prisma.$queryRaw<Array<{ id: string }>>`
+        SELECT o."id" FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") > (${anchor}, ${order.id})
+        ORDER BY COALESCE(o."external_created_at", o."created_at") ASC, o."id" ASC LIMIT 1`,
+      // How many sort ahead of it — gives an exact "N of M" with no window.
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count FROM "orders" o WHERE ${scope}
+          AND (COALESCE(o."external_created_at", o."created_at"), o."id") > (${anchor}, ${order.id})`,
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count FROM "orders" o WHERE ${scope}`,
+    ]);
+
+    return {
+      previousId: newer[0]?.id ?? null,
+      nextId: older[0]?.id ?? null,
+      position: Number(before[0]?.count ?? 0) + 1,
+      total: Number(total[0]?.count ?? 0),
+    };
+  }
+
+  async syncToShopify(id: string, orgId: string, userId?: string) {
     const order = await this.loadOrderWithChannel(id, orgId);
 
     if (order.channel.platform !== ChannelPlatform.MANUAL) {
@@ -1032,6 +1135,18 @@ export class OrderService {
     if (!claimed) {
       return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
     }
+
+    // Recorded only once the claim is won, so the timeline shows one entry per
+    // push actually enqueued rather than one per button press. The push's own
+    // success/failure lands in metadata.shopifySync, not here.
+    await this.prisma.orderTimelineEvent.create({
+      data: {
+        orderId: order.id,
+        actorId: userId ?? null,
+        action: 'sync_queued',
+        message: 'Queued for sync to Shopify',
+      },
+    });
 
     await this.shopifyPushEnqueuer.enqueueOrderPush({
       type: 'order',
@@ -1648,10 +1763,19 @@ export class OrderService {
       };
     }
 
-    const lineItems = await this.prisma.orderLineItem.findMany({
-      where: { orderId, fulfillmentStatus: { not: 'fulfilled' } },
+    // Every line, filtered in JS on what is actually left to ship.
+    //
+    // This used to be `where: { fulfillmentStatus: { not: 'fulfilled' } }`,
+    // which Prisma compiles to `status <> 'fulfilled'` — SQL three-valued logic
+    // drops NULL rows, and NULL is precisely how an unfulfilled line is stored.
+    // On the dev DB that filter matched 1 of 80 lines while 76 were NULL, so the
+    // Fulfil dialog on a manual order came up empty and offline orders could not
+    // be fulfilled at all.
+    const allLines = await this.prisma.orderLineItem.findMany({
+      where: { orderId },
       orderBy: { createdAt: 'asc' },
     });
+    const lineItems = allLines.filter((li) => li.quantity - li.fulfilledQuantity > 0);
     return {
       source: 'manual' as const,
       fulfillmentOrders: [
@@ -1664,7 +1788,7 @@ export class OrderService {
             title: li.title,
             variantTitle: li.variantTitle,
             sku: li.sku,
-            remainingQuantity: li.quantity,
+            remainingQuantity: li.quantity - li.fulfilledQuantity,
             totalQuantity: li.quantity,
           })),
         },
@@ -1711,6 +1835,7 @@ export class OrderService {
             variantTitle: true,
             sku: true,
             quantity: true,
+            fulfilledQuantity: true,
             price: true,
             fulfillmentStatus: true,
             variant: {
@@ -1749,6 +1874,7 @@ export class OrderService {
         variantTitle: li.variantTitle,
         sku: li.sku,
         quantity: li.quantity,
+        fulfilledQuantity: li.fulfilledQuantity,
         price: li.price,
         lineTotal: unitPrice * li.quantity,
         imageUrl: li.variant?.image?.src ?? li.variant?.product?.images?.[0]?.src ?? null,
@@ -1808,7 +1934,7 @@ export class OrderService {
   async setVendorItemsStatus(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     status: 'in_progress' | 'on_hold' | 'released',
     lineItemIds: string[],
     vendorScope?: string,
@@ -1821,9 +1947,56 @@ export class OrderService {
       await this.assertLineItemsOwnedByVendor(orderId, lineItemIds, vendorScope);
     }
     // 'released' clears the hold → the items go back to unfulfilled locally.
-    await this.prisma.orderLineItem.updateMany({
-      where: { id: { in: lineItemIds }, orderId },
-      data: { fulfillmentStatus: status === 'released' ? null : status },
+    // Paired with its timeline entry in one transaction: holds are the action a
+    // merchant is most likely to need to account for later, and this endpoint
+    // recorded nothing at all.
+    const STATUS_MESSAGE: Record<typeof status, string> = {
+      in_progress: 'Items marked in progress',
+      on_hold: 'Items put on hold',
+      released: 'Hold released on items',
+    };
+    await this.prisma.$transaction(async (tx) => {
+      if (status === 'released') {
+        // Releasing a hold returns the line to whatever its shipped quantity
+        // says it is — NOT unconditionally to unfulfilled. A line that was
+        // half-shipped and then held used to come back reading "unfulfilled",
+        // hiding units that had already gone out.
+        const held = await tx.orderLineItem.findMany({
+          where: { id: { in: lineItemIds }, orderId },
+          select: { id: true, quantity: true, fulfilledQuantity: true },
+        });
+        for (const li of held) {
+          await tx.orderLineItem.update({
+            where: { id: li.id },
+            data: {
+              fulfillmentStatus: this.statusForFulfilledQuantity(
+                li.fulfilledQuantity,
+                li.quantity,
+                null,
+              ),
+            },
+          });
+        }
+      } else {
+        await tx.orderLineItem.updateMany({
+          where: { id: { in: lineItemIds }, orderId },
+          data: { fulfillmentStatus: status },
+        });
+      }
+      // The header was never re-derived here, so holding an item left the order
+      // still reading FULFILLED.
+      await this.refreshOrderFulfillmentStatus(tx, orderId);
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'items_status_changed',
+          message:
+            `${STATUS_MESSAGE[status]} (${lineItemIds.length})` +
+            (reason ? `: ${reason}` : ''),
+          metadata: { status, lineItemIds, reason } as Prisma.InputJsonValue,
+        },
+      });
     });
 
     if (order.channel.platform === ChannelPlatform.SHOPIFY) {
@@ -1880,7 +2053,11 @@ export class OrderService {
           .filter((foli) => externalIds.has(ShopifyGraphqlClient.extractId(foli.lineItem.id)))
           .map((foli) => ({ id: foli.id, quantity: foli.remainingQuantity })),
       }))
-      .filter((t) => t.lineItems.length > 0);
+      // Same guard as createFulfillment: a CLOSED / CANCELLED fulfilment order
+      // falls through every status branch below and would still get a hold or
+      // open mutation fired at it. Holds split fulfilment orders, so these
+      // closed remnants are exactly what this method leaves behind.
+      .filter((t) => t.lineItems.length > 0 && !isUnfulfillableFo(t.foStatus));
 
     for (const t of targets) {
       if (status === 'on_hold') {
@@ -2082,7 +2259,7 @@ export class OrderService {
   async markFulfillmentDelivered(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     fulfillmentId: string,
     vendorScope?: string,
   ) {
@@ -2095,19 +2272,42 @@ export class OrderService {
       await this.assertFulfillmentOwnedByVendor(orderId, fulfillmentId, vendorScope);
     }
 
-    await this.prisma.orderFulfillment.update({
-      where: { id: fulfillmentId },
-      data: { status: 'delivered', deliveredAt: new Date() },
-    });
-
     // Reflect delivery on the line items so the per-product UI shows "delivered".
     const deliveredLineIds = this.fulfillmentLineItemIds(fulfillment.metadata);
-    if (deliveredLineIds.length > 0) {
-      await this.prisma.orderLineItem.updateMany({
-        where: { id: { in: deliveredLineIds }, orderId },
-        data: { fulfillmentStatus: 'delivered' },
+
+    // One transaction: the shipment, its line items and the timeline entry were
+    // three independent commits, so a failure between them left a delivered
+    // shipment whose lines still read "fulfilled" and no record of who did it.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderFulfillment.update({
+        where: { id: fulfillmentId },
+        data: { status: 'delivered', deliveredAt: new Date() },
       });
-    }
+
+      if (deliveredLineIds.length > 0) {
+        await tx.orderLineItem.updateMany({
+          where: { id: { in: deliveredLineIds }, orderId },
+          data: { fulfillmentStatus: 'delivered' },
+        });
+        await this.refreshOrderFulfillmentStatus(tx, orderId);
+      }
+
+      // `userId` was accepted and discarded, so this action left no trace at all.
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'delivered',
+          message: fulfillment.trackingNumber
+            ? `Shipment delivered (${fulfillment.trackingNumber})`
+            : 'Shipment delivered',
+          metadata: {
+            fulfillmentId,
+            lineItemIds: deliveredLineIds,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    });
 
     if (order.channel.platform === ChannelPlatform.SHOPIFY && fulfillment.externalId) {
       await this.markDeliveredOnShopify(order, fulfillment.externalId).catch((e) =>
@@ -2219,7 +2419,7 @@ export class OrderService {
   async markVendorItemDelivered(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     lineId: string,
     vendorScope?: string,
   ) {
@@ -2235,15 +2435,33 @@ export class OrderService {
 
     const fulfillment = await this.resolveFulfillmentForLine(order, line);
 
-    await this.prisma.orderLineItem.update({
-      where: { id: lineId },
-      data: { fulfillmentStatus: 'delivered' },
-    });
-    if (fulfillment) {
-      await this.prisma.orderFulfillment.update({
-        where: { id: fulfillment.id },
-        data: { status: 'delivered', deliveredAt: new Date() },
+    await this.prisma.$transaction(async (tx) => {
+      await tx.orderLineItem.update({
+        where: { id: lineId },
+        data: { fulfillmentStatus: 'delivered' },
       });
+      if (fulfillment) {
+        await tx.orderFulfillment.update({
+          where: { id: fulfillment.id },
+          data: { status: 'delivered', deliveredAt: new Date() },
+        });
+      }
+      await this.refreshOrderFulfillmentStatus(tx, orderId);
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'item_delivered',
+          message: 'Item marked as delivered',
+          metadata: {
+            lineItemId: lineId,
+            fulfillmentId: fulfillment?.id ?? null,
+          } as Prisma.InputJsonValue,
+        },
+      });
+    });
+
+    if (fulfillment) {
       if (order.channel.platform === ChannelPlatform.SHOPIFY && fulfillment.externalId) {
         await this.markDeliveredOnShopify(order, fulfillment.externalId).catch((e) =>
           this.logger.warn(
@@ -2263,7 +2481,7 @@ export class OrderService {
   async unfulfillVendorItem(
     orderId: string,
     orgId: string,
-    _userId: string,
+    userId: string,
     lineId: string,
     vendorScope?: string,
   ) {
@@ -2293,20 +2511,40 @@ export class OrderService {
     // Cancelling a fulfilment reverts ALL of its lines to unfulfilled.
     const revertIds = fulfillment ? this.fulfillmentLineItemIds(fulfillment.metadata) : [];
     const ids = revertIds.length ? revertIds : [lineId];
-    await this.prisma.orderLineItem.updateMany({
-      where: { id: { in: ids }, orderId },
-      data: { fulfillmentStatus: null },
-    });
-    if (fulfillment) {
-      await this.prisma.orderFulfillment.update({
-        where: { id: fulfillment.id },
-        data: { status: 'cancelled' },
+    // One transaction: reverting the lines, cancelling the shipment and
+    // recomputing the order's status are a single logical change, and a partial
+    // apply leaves the order header disagreeing with its own line items.
+    await this.prisma.$transaction(async (tx) => {
+      // Cancelling the shipment un-ships its units, so the count has to go back
+      // to zero as well — leaving it set would keep the order reading PARTIAL
+      // (or FULFILLED) for a shipment that no longer exists.
+      await tx.orderLineItem.updateMany({
+        where: { id: { in: ids }, orderId },
+        data: { fulfillmentStatus: null, fulfilledQuantity: 0 },
       });
-    }
-    const allItems = await this.prisma.orderLineItem.findMany({ where: { orderId } });
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { fulfillmentStatus: this.computeFulfillmentStatus(allItems) },
+      if (fulfillment) {
+        await tx.orderFulfillment.update({
+          where: { id: fulfillment.id },
+          data: { status: 'cancelled' },
+        });
+      }
+      await this.refreshOrderFulfillmentStatus(tx, orderId);
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId,
+          actorId: userId,
+          action: 'item_unfulfilled',
+          message:
+            ids.length > 1
+              ? `Item switched back to unfulfilled (${ids.length} lines on the shipment)`
+              : 'Item switched back to unfulfilled',
+          metadata: {
+            lineItemId: lineId,
+            lineItemIds: ids,
+            fulfillmentId: fulfillment?.id ?? null,
+          } as Prisma.InputJsonValue,
+        },
+      });
     });
     return { id: lineId, status: 'unfulfilled' };
   }
@@ -2359,33 +2597,89 @@ export class OrderService {
         return resp.order?.fulfillmentOrders.nodes ?? [];
       };
       let fos = await readFulfillmentOrders();
+      if (fos.length >= FULFILLMENT_ORDER_PAGE_SIZE) {
+        // Neither FO query paginates. Silently dropping fulfilment orders would
+        // make the first-match selection below arbitrary, so make it visible.
+        this.logger.warn(
+          `Order ${orderId} returned ${fos.length} fulfilment orders — the query caps at ` +
+          `${FULFILLMENT_ORDER_PAGE_SIZE}, so some may be missing and fulfilment may pick the wrong one.`,
+        );
+      }
       let reopened = false;
       for (const fo of fos) {
+        // Only repair fulfilment orders that can still be fulfilled. A CLOSED or
+        // CANCELLED one is terminal — firing a release/open at it achieves
+        // nothing and muddies the log.
+        if (isUnfulfillableFo(fo.status)) continue;
         const hasRequested = fo.lineItems.nodes.some((foli) =>
           requestedExternalIds.has(ShopifyGraphqlClient.extractId(foli.lineItem.id)),
         );
         if (!hasRequested) continue;
+        // A failed repair used to be swallowed whole: `.catch(() => undefined)`
+        // with no userErrors check, so the fulfilment order stayed held and the
+        // only symptom was a baffling error from fulfillmentCreate further down.
+        // Still non-fatal — one stuck fulfilment order must not block shipping
+        // from another.
+        const repair = async (
+          label: string,
+          run: () => Promise<{ userErrors?: Array<{ message: string }> } | undefined>,
+        ) => {
+          try {
+            const res = await run();
+            const errs = res?.userErrors ?? [];
+            if (errs.length > 0) {
+              this.logger.warn(
+                `${label} on fulfilment order ${fo.id} (order ${orderId}) reported: ` +
+                errs.map((e) => e.message).join('; '),
+              );
+            }
+          } catch (e) {
+            this.logger.warn(
+              `${label} on fulfilment order ${fo.id} (order ${orderId}) failed: ` +
+              (e instanceof Error ? e.message : String(e)),
+            );
+          }
+          reopened = true;
+        };
+
         if (fo.status === 'ON_HOLD') {
-          await this.graphql
-            .request<FulfillmentOrderReleaseHoldResponse, FulfillmentOrderReleaseHoldVariables>(
-              auth,
-              FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION,
-              { id: fo.id },
-            )
-            .catch(() => undefined);
-          reopened = true;
-        } else if (fo.status === 'IN_PROGRESS') {
-          await this.graphql
-            .request<FulfillmentOrderOpenResponse, FulfillmentOrderOpenVariables>(
-              auth,
-              FULFILLMENT_ORDER_OPEN_MUTATION,
-              { id: fo.id },
-            )
-            .catch(() => undefined);
-          reopened = true;
+          await repair('releaseHold', async () => {
+            const r = await this.graphql.request<
+              FulfillmentOrderReleaseHoldResponse,
+              FulfillmentOrderReleaseHoldVariables
+            >(auth, FULFILLMENT_ORDER_RELEASE_HOLD_MUTATION, { id: fo.id });
+            return r.fulfillmentOrderReleaseHold;
+          });
+        } else if (fo.status === 'IN_PROGRESS' || fo.status === 'SCHEDULED') {
+          // SCHEDULED was missing: a scheduled fulfilment order also has to be
+          // opened before Shopify will accept a fulfilment against it.
+          await repair('open', async () => {
+            const r = await this.graphql.request<
+              FulfillmentOrderOpenResponse,
+              FulfillmentOrderOpenVariables
+            >(auth, FULFILLMENT_ORDER_OPEN_MUTATION, { id: fo.id });
+            return r.fulfillmentOrderOpen;
+          });
         }
       }
       if (reopened) fos = await readFulfillmentOrders();
+
+      // Only fulfilment orders that can actually accept a fulfilment, OPEN ones
+      // first.
+      //
+      // This filter is the fix for "Fulfillment order N has an unfulfillable
+      // status = closed". Cancelling a fulfilment makes Shopify CLOSE its
+      // fulfilment order and create a replacement OPEN one carrying the same
+      // items — and the closed one KEEPS its `remainingQuantity`, because those
+      // units were never actually shipped. The loop below had no status check
+      // and leaned on `qty <= 0` as an accidental one, which only holds for a
+      // fulfilment order closed by being fulfilled. Shopify returns them
+      // oldest-first, so the dead one was matched first, consumed the line via
+      // the `delete` below, and the live replacement was never reached.
+      //
+      // Sorting OPEN first also makes the greedy first-match deterministic
+      // instead of dependent on Shopify's ordering.
+      const fulfillable = selectFulfillableFos(fos);
 
       // Group the requested line items by which FulfillmentOrder owns them.
       // If a single OrderLineItem spans multiple FOs (multi-location), we
@@ -2393,7 +2687,12 @@ export class OrderService {
       // fulfillment is Phase 2b. The remainingQuantity ceiling protects
       // against over-fulfilling.
       const grouped = new Map<string, Array<{ id: string; quantity: number }>>();
-      for (const fo of fos) {
+      // How many units each line is actually shipping on this call, keyed by
+      // Shopify line-item id. The local write below needs this: it used to flip
+      // every requested line to 'fulfilled' outright, so a 2-of-5 shipment read
+      // as a complete line locally while Shopify correctly held 3 in reserve.
+      const shippedByExternalId = new Map<string, number>();
+      for (const fo of fulfillable) {
         for (const foli of fo.lineItems.nodes) {
           const orderLineItemId = ShopifyGraphqlClient.extractId(foli.lineItem.id);
           const req = requestedByLineItem.get(orderLineItemId);
@@ -2406,12 +2705,21 @@ export class OrderService {
           const list = grouped.get(fo.id) ?? [];
           list.push({ id: foli.id, quantity: qty });
           grouped.set(fo.id, list);
+          shippedByExternalId.set(
+            orderLineItemId,
+            (shippedByExternalId.get(orderLineItemId) ?? 0) + qty,
+          );
           requestedByLineItem.delete(orderLineItemId);
         }
       }
       if (grouped.size === 0) {
+        // Name what was actually seen — "not fulfillable" with no reason sent
+        // people hunting through Shopify admin.
+        const seen = fos.map((fo) => `${ShopifyGraphqlClient.extractId(fo.id)}=${fo.status}`);
         throw new BadRequestException(
-          'None of the requested line items are currently fulfillable.',
+          'None of the requested line items are currently fulfillable — they may already ' +
+          'be fulfilled, or their fulfilment orders are closed or cancelled. ' +
+          `Fulfilment orders on this order: ${seen.length ? seen.join(', ') : 'none'}.`,
         );
       }
 
@@ -2438,85 +2746,114 @@ export class OrderService {
             : null,
         },
       });
-      ShopifyGraphqlClient.throwIfUserErrors(
-        result.fulfillmentCreate.userErrors,
-        'fulfillmentCreate',
-      );
+      // A rejected fulfilment is the merchant's problem to act on, not a server
+      // fault — it escaped as an unhandled 500 while the "nothing fulfillable"
+      // path above returned a clean 400 for the same class of problem.
+      try {
+        ShopifyGraphqlClient.throwIfUserErrors(
+          result.fulfillmentCreate.userErrors,
+          'fulfillmentCreate',
+        );
+      } catch (e) {
+        const detail = e instanceof Error ? e.message.replace(/^fulfillmentCreate: /, '') : String(e);
+        this.logger.warn(`fulfillmentCreate rejected for order ${orderId}: ${detail}`);
+        throw new BadRequestException(`Shopify rejected this fulfilment: ${detail}`);
+      }
 
-      // Local OrderFulfillment row is created when fulfillments/create
-      // webhook fires (via upsertOrder), so just record the action in our
-      // timeline here for immediate UI feedback.
-      await this.prisma.orderTimelineEvent.create({
-        data: {
-          orderId,
-          actorId: userId,
-          action: 'fulfilled',
-          message: dto.tracking?.number
-            ? `Fulfillment initiated (tracking ${dto.tracking.number}${dto.tracking.company ? ` via ${dto.tracking.company}` : ''
-            })`
-            : 'Fulfillment initiated',
-          metadata: {
-            shopifyFulfillmentId: result.fulfillmentCreate.fulfillment?.id ?? null,
-            tracking: dto.tracking ?? null,
-            notifyCustomer: dto.notifyCustomer ?? true,
-          } as Prisma.InputJsonValue,
-        },
-      });
-
-      // Optimistically reflect the fulfilment locally so the UI updates
-      // immediately; the fulfillments/create webhook reconciles authoritatively
-      // (idempotent). requestedIds may be local OR Shopify line-item ids.
-      const fulfilledRequestedIds = dto.lineItems.map((li) => li.lineItemId);
-      await this.prisma.orderLineItem.updateMany({
-        where: {
-          orderId,
-          OR: [
-            { id: { in: fulfilledRequestedIds } },
-            { externalId: { in: fulfilledRequestedIds } },
-          ],
-        },
-        data: { fulfillmentStatus: 'fulfilled' },
-      });
-      const itemsAfter = await this.prisma.orderLineItem.findMany({ where: { orderId } });
-      await this.prisma.order.update({
-        where: { id: orderId },
-        data: { fulfillmentStatus: this.computeFulfillmentStatus(itemsAfter) },
-      });
-
-      // Record a local OrderFulfillment so it appears in the vendor's shipments
-      // and can be marked delivered. Upsert by Shopify's fulfillment id (the
-      // webhook reconciles the same row); lineItemIds attributes it to the vendor.
+      // Reflect the shipment locally.
+      //
+      // There is NO inbound reconciliation to fall back on: `fulfillments/create`
+      // is not a valid Shopify webhook topic (see WEBHOOK_TOPICS in
+      // shopify-oauth.service.ts) and the GraphQL order pull deliberately omits
+      // per-line fulfilment status, so whatever is written here is what the CRM
+      // believes until someone acts on the line again. The comments that used to
+      // sit here claiming "the webhook reconciles authoritatively" were wrong.
+      //
+      // One transaction: the timeline entry, the line quantities, the order
+      // header and the shipment row were four independent commits following an
+      // already-committed remote side effect, so any failure between them left
+      // the CRM disagreeing with Shopify with no record of why.
       const shopifyFulfillmentId = ShopifyGraphqlClient.extractId(
         result.fulfillmentCreate.fulfillment?.id ?? '',
       );
-      if (shopifyFulfillmentId) {
-        const fulfilledLocalIds = (
-          await this.prisma.orderLineItem.findMany({
-            where: {
-              orderId,
-              OR: [
-                { id: { in: fulfilledRequestedIds } },
-                { externalId: { in: fulfilledRequestedIds } },
-              ],
-            },
-            select: { id: true },
-          })
-        ).map((l) => l.id);
-        await this.prisma.orderFulfillment.upsert({
-          where: { orderId_externalId: { orderId, externalId: shopifyFulfillmentId } },
-          create: {
+      const requestedIds = dto.lineItems.map((li) => li.lineItemId);
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.orderTimelineEvent.create({
+          data: {
             orderId,
-            externalId: shopifyFulfillmentId,
-            status: 'fulfilled',
-            trackingNumber: dto.tracking?.number ?? null,
-            trackingUrl: dto.tracking?.url ?? null,
-            trackingCompany: dto.tracking?.company ?? null,
-            shippedAt: new Date(),
-            metadata: { lineItemIds: fulfilledLocalIds } as Prisma.InputJsonValue,
+            actorId: userId,
+            action: 'fulfilled',
+            message: dto.tracking?.number
+              ? `Fulfillment initiated (tracking ${dto.tracking.number}${dto.tracking.company ? ` via ${dto.tracking.company}` : ''
+              })`
+              : 'Fulfillment initiated',
+            metadata: {
+              shopifyFulfillmentId: result.fulfillmentCreate.fulfillment?.id ?? null,
+              tracking: dto.tracking ?? null,
+              notifyCustomer: dto.notifyCustomer ?? true,
+            } as Prisma.InputJsonValue,
           },
-          update: { metadata: { lineItemIds: fulfilledLocalIds } as Prisma.InputJsonValue },
         });
-      }
+
+        // Requested ids may be local cuids (vendor flow) or Shopify line-item
+        // ids (merchant flow), so match on either.
+        const affected = await tx.orderLineItem.findMany({
+          where: {
+            orderId,
+            OR: [{ id: { in: requestedIds } }, { externalId: { in: requestedIds } }],
+          },
+          select: {
+            id: true,
+            externalId: true,
+            quantity: true,
+            fulfilledQuantity: true,
+            fulfillmentStatus: true,
+          },
+        });
+
+        for (const li of affected) {
+          // Fall back to the whole remaining line when Shopify gave us no
+          // per-line figure (it always should, but a silent 0 would make a real
+          // shipment invisible locally).
+          const shipped =
+            shippedByExternalId.get(li.externalId) ?? li.quantity - li.fulfilledQuantity;
+          const total = Math.min(li.fulfilledQuantity + Math.max(shipped, 0), li.quantity);
+          await tx.orderLineItem.update({
+            where: { id: li.id },
+            data: {
+              fulfilledQuantity: total,
+              fulfillmentStatus: this.statusForFulfilledQuantity(
+                total,
+                li.quantity,
+                li.fulfillmentStatus,
+              ),
+            },
+          });
+        }
+
+        await this.refreshOrderFulfillmentStatus(tx, orderId);
+
+        // Record a local OrderFulfillment so it appears in the vendor's
+        // shipments and can be marked delivered; lineItemIds attributes it.
+        if (shopifyFulfillmentId) {
+          const lineItemIds = affected.map((l) => l.id);
+          await tx.orderFulfillment.upsert({
+            where: { orderId_externalId: { orderId, externalId: shopifyFulfillmentId } },
+            create: {
+              orderId,
+              externalId: shopifyFulfillmentId,
+              status: 'fulfilled',
+              trackingNumber: dto.tracking?.number ?? null,
+              trackingUrl: dto.tracking?.url ?? null,
+              trackingCompany: dto.tracking?.company ?? null,
+              shippedAt: new Date(),
+              metadata: { lineItemIds } as Prisma.InputJsonValue,
+            },
+            update: { metadata: { lineItemIds } as Prisma.InputJsonValue },
+          });
+        }
+      });
 
       return this.prisma.order.findUnique({ where: { id: orderId } });
     }
@@ -2531,6 +2868,22 @@ export class OrderService {
         throw new BadRequestException(
           'One or more line items were not found on this order.',
         );
+      }
+
+      // Reject a request for more than is left to ship before writing anything.
+      // The DB CHECK would catch it, but as an opaque 500 rather than a message.
+      const requestedQty = new Map(dto.lineItems.map((li) => [li.lineItemId, li.quantity]));
+      for (const li of lineItems) {
+        const remaining = li.quantity - li.fulfilledQuantity;
+        const want = requestedQty.get(li.id) ?? remaining;
+        if (want > remaining) {
+          throw new BadRequestException(
+            `Cannot fulfil ${want} of "${li.title}" — only ${remaining} of ${li.quantity} remain.`,
+          );
+        }
+        if (remaining <= 0) {
+          throw new BadRequestException(`"${li.title}" is already fully fulfilled.`);
+        }
       }
 
       const fulfillment = await tx.orderFulfillment.create({
@@ -2548,17 +2901,26 @@ export class OrderService {
         },
       });
 
-      await tx.orderLineItem.updateMany({
-        where: { id: { in: lineItems.map((li) => li.id) } },
-        data: { fulfillmentStatus: 'fulfilled' },
-      });
+      // Per line, not `updateMany` — a partial shipment advances the count and
+      // leaves the line 'partial', so the remainder stays fulfillable.
+      for (const li of lineItems) {
+        const remaining = li.quantity - li.fulfilledQuantity;
+        const shipped = requestedQty.get(li.id) ?? remaining;
+        const total = li.fulfilledQuantity + shipped;
+        await tx.orderLineItem.update({
+          where: { id: li.id },
+          data: {
+            fulfilledQuantity: total,
+            fulfillmentStatus: this.statusForFulfilledQuantity(
+              total,
+              li.quantity,
+              li.fulfillmentStatus,
+            ),
+          },
+        });
+      }
 
-      const allItems = await tx.orderLineItem.findMany({ where: { orderId } });
-      const newStatus = this.computeFulfillmentStatus(allItems);
-      await tx.order.update({
-        where: { id: orderId },
-        data: { fulfillmentStatus: newStatus },
-      });
+      await this.refreshOrderFulfillmentStatus(tx, orderId);
 
       await tx.orderTimelineEvent.create({
         data: {
@@ -2756,16 +3118,14 @@ export class OrderService {
           : [];
         if (lineItemIds.length > 0) {
           await tx.orderLineItem.updateMany({
-            where: { id: { in: lineItemIds } },
-            data: { fulfillmentStatus: null },
+            // `orderId` was missing here: the ids come from a JSON blob, so
+            // without it a stale or hand-edited metadata array could revert a
+            // line belonging to a different order.
+            where: { id: { in: lineItemIds }, orderId },
+            data: { fulfillmentStatus: null, fulfilledQuantity: 0 },
           });
         }
-        const allItems = await tx.orderLineItem.findMany({ where: { orderId } });
-        const newStatus = this.computeFulfillmentStatus(allItems);
-        await tx.order.update({
-          where: { id: orderId },
-          data: { fulfillmentStatus: newStatus },
-        });
+        await this.refreshOrderFulfillmentStatus(tx, orderId);
       }
 
       await tx.orderTimelineEvent.create({
@@ -2781,16 +3141,78 @@ export class OrderService {
     });
   }
 
-  /** Compute order-level fulfillment status from the per-line-item state. */
+  /**
+   * Compute order-level fulfillment status from the per-line-item state.
+   *
+   * Counts UNITS, not lines. The old version counted lines whose status read
+   * 'fulfilled'/'delivered', which reported a 5-unit order FULFILLED as soon as
+   * its single line was touched — even by a 1-unit shipment. Shopify's own
+   * PARTIAL is quantity-aware, so a line-count rule also guaranteed the two
+   * systems disagreed on exactly the orders that matter.
+   *
+   * `fulfilledQuantity` is authoritative; the status string is only consulted
+   * for rows that predate the column and were never re-fulfilled (backfilled by
+   * migration 20260828120000, so this is belt-and-braces).
+   */
   private computeFulfillmentStatus(
-    items: { fulfillmentStatus: string | null }[],
+    items: { fulfillmentStatus: string | null; quantity: number; fulfilledQuantity?: number }[],
   ): OrderFulfillmentStatus {
-    const fulfilled = items.filter(
-      (li) => li.fulfillmentStatus === 'fulfilled' || li.fulfillmentStatus === 'delivered',
-    ).length;
-    if (fulfilled === 0) return OrderFulfillmentStatus.UNFULFILLED;
-    if (fulfilled === items.length) return OrderFulfillmentStatus.FULFILLED;
+    let ordered = 0;
+    let shipped = 0;
+    for (const li of items) {
+      const done =
+        li.fulfilledQuantity ??
+        (li.fulfillmentStatus === 'fulfilled' || li.fulfillmentStatus === 'delivered'
+          ? li.quantity
+          : 0);
+      ordered += li.quantity;
+      shipped += Math.min(done, li.quantity);
+    }
+    if (shipped === 0) return OrderFulfillmentStatus.UNFULFILLED;
+    if (shipped >= ordered) return OrderFulfillmentStatus.FULFILLED;
     return OrderFulfillmentStatus.PARTIAL;
+  }
+
+  /**
+   * Re-derive and persist `Order.fulfillmentStatus` from its lines, inside the
+   * caller's transaction.
+   *
+   * Three mutation paths (`setVendorItemsStatus`, `markFulfillmentDelivered`,
+   * `markVendorItemDelivered`) changed line state and never recomputed the
+   * header, so putting an item on hold left the order still reading FULFILLED.
+   * Measured on the dev DB before this fix: 15 of 51 orders had a header that
+   * disagreed with their own lines.
+   */
+  private async refreshOrderFulfillmentStatus(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    const items = await tx.orderLineItem.findMany({
+      where: { orderId },
+      select: { fulfillmentStatus: true, quantity: true, fulfilledQuantity: true },
+    });
+    if (items.length === 0) return;
+    await tx.order.update({
+      where: { id: orderId },
+      data: { fulfillmentStatus: this.computeFulfillmentStatus(items) },
+    });
+  }
+
+  /**
+   * The line-item status implied by how much of it has shipped. Keeps the
+   * status string and `fulfilledQuantity` from drifting apart.
+   */
+  private statusForFulfilledQuantity(
+    fulfilled: number,
+    ordered: number,
+    previous: string | null,
+  ): string | null {
+    if (fulfilled <= 0) return null;
+    if (fulfilled >= ordered) {
+      // Never downgrade a delivered line back to merely fulfilled.
+      return previous === 'delivered' ? 'delivered' : 'fulfilled';
+    }
+    return 'partial';
   }
 
   // ─── PHASE 1 HELPERS ──────────────────────────────────────────────────────
