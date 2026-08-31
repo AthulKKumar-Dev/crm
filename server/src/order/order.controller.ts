@@ -162,6 +162,15 @@ export class OrderController {
   // GET /api/v1/orders/:id/fulfillable-line-items
   // Returns the line items still eligible for fulfillment, grouped by
   // FulfillmentOrder (Shopify) or as a single bucket (manual orders).
+  // GET /api/v1/orders/:id/adjacent
+  // The ids either side of this order, plus its position, for the detail
+  // page's Previous / Next rail.
+  @Get(':id/adjacent')
+  @AllowVendor()
+  adjacent(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
+    return this.orderService.findAdjacent(id, user.orgId!, vendorScopeFor(user));
+  }
+
   @Get(':id/fulfillable-line-items')
   fulfillableLineItems(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.listFulfillableLineItems(id, user.orgId!);
@@ -306,6 +315,6 @@ export class OrderController {
   @Post(':id/sync')
   @Roles(...ORG_OPERATORS)
   syncToShopify(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.orderService.syncToShopify(id, user.orgId!);
+    return this.orderService.syncToShopify(id, user.orgId!, user.sub);
   }
 }

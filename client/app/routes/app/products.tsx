@@ -233,30 +233,33 @@ export default function ProductsPage() {
         </div>
         {!isVendor && (
           <div className="flex items-center gap-2">
-            <button
+            <Button
+              variant="outline"
+              size="action"
               onClick={handleExport}
               disabled={exporting}
               title="Export products as Shopify-format CSV"
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 disabled:opacity-50"
             >
               {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
               Export
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="outline"
+              size="action"
               onClick={() => setImportOpen(true)}
               title="Import products from a Shopify-format CSV"
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60"
             >
               <Upload className="size-3.5" />
               Import
-            </button>
-            <button
+            </Button>
+            <Button
+              variant="brand"
+              size="action"
               onClick={() => setCreatingProduct(true)}
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 shadow-sm hover:bg-[#BADE6F]"
             >
-              <Plus size={15} absoluteStrokeWidth={true} />
+              <Plus className="size-3.5" />
               Add Product
-            </button>
+            </Button>
           </div>
         )}
       </div>

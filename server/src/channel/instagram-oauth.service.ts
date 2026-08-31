@@ -176,7 +176,7 @@ export class InstagramOAuthService {
         this.logger.log(`Instagram connected: @${profileData.username} → org ${stateData.orgId}`);
 
         const frontendUrl = this.config.get<string>('frontendUrl');
-        const redirectUrl = `${frontendUrl}/channel?connected=instagram&channelId=${channel.id}`;
+        const redirectUrl = `${frontendUrl}/settings/channels?connected=instagram&channelId=${channel.id}`;
 
         return { channelId: channel.id, redirectUrl };
     }

@@ -54,6 +54,83 @@ type DialogKind =
   | null;
 
 /**
+ * Which order actions the current user may see, given their role and the
+ * order's state.
+ *
+ * Financial actions (cancel / capture / mark-paid) are manager-only on the
+ * server. Mirror that here so a VIEWER or AGENT isn't shown buttons that can
+ * only answer 403 — the server remains the actual boundary.
+ *
+ * Exported because the order detail page's right rail offers Capture payment,
+ * Cancel order and Fulfil items as well. Those buttons used to carry no gate
+ * at all, so they handed a VIEWER exactly the 403-only button this logic
+ * exists to prevent. One copy, two consumers — don't inline these again.
+ */
+export function useOrderActionGates(order: OrderDetail | undefined) {
+  const { role } = useCurrentRole();
+  // These three tiers mirror the server's role groups verbatim
+  // (server/src/auth/decorators/roles.decorator.ts). Keep them in step — a tier
+  // that drifts wider than the server's shows a button that can only 403, and
+  // one that drifts narrower silently removes an action the user is allowed.
+  const canManage = role === "OWNER" || role === "ADMIN" || role === "MANAGER"; // ORG_MANAGERS
+  const canOperate = canManage || role === "AGENT"; //                            ORG_OPERATORS
+  const canOperateOrVendor = canOperate || role === "VENDOR"; //  ORG_OPERATORS_AND_VENDORS
+
+  // `order` is optional because the detail page must call this above its
+  // vendor / error / loading early-returns to keep the hook order stable.
+  // Everything is false until the order lands, so nothing renders early.
+  const isShopify = order?.channel.platform === "SHOPIFY";
+  const isManual = order?.channel.platform === "MANUAL";
+  const isCancelled = !!order?.cancelledAt;
+  const isClosed = !!order?.closedAt;
+  const canMarkPaid =
+    !!order &&
+    canManage &&
+    order.financialStatus !== "PAID" &&
+    order.financialStatus !== "REFUNDED" &&
+    order.financialStatus !== "VOIDED";
+  const canCapture =
+    !!order &&
+    canManage &&
+    isShopify &&
+    (order.financialStatus === "AUTHORIZED" ||
+      order.financialStatus === "PARTIALLY_PAID");
+  // POST /orders/:id/fulfillments is ORG_OPERATORS_AND_VENDORS. This carried no
+  // role gate at all, so a VIEWER was shown "Fulfil items" at four separate
+  // entry points — every one of them a guaranteed 403.
+  const canFulfill =
+    !!order &&
+    canOperateOrVendor &&
+    !isCancelled &&
+    order.fulfillmentStatus !== "FULFILLED" &&
+    order.fulfillmentStatus !== "RESTOCKED";
+  const canCancel = canManage && !isCancelled && !!order;
+  // PATCH /orders/:id is ORG_OPERATORS — covers Edit details, the note field and
+  // the tag editor, all three of which hit that one endpoint.
+  const canEdit = !!order && canOperate;
+
+  // Manual sync to Shopify: only meaningful for MANUAL orders that haven't
+  // been pushed yet (or where the previous push failed).
+  const syncMeta = (order?.metadata as { shopifySync?: { status?: string } } | undefined)
+    ?.shopifySync;
+  const canSyncToShopify = isManual && (!syncMeta || syncMeta.status === "FAILED");
+
+  return {
+    canManage,
+    canOperate,
+    isShopify,
+    isCancelled,
+    isClosed,
+    canMarkPaid,
+    canCapture,
+    canFulfill,
+    canCancel,
+    canEdit,
+    canSyncToShopify,
+  };
+}
+
+/**
  * Actions menu shown next to the order header. Renders a dropdown of
  * lifecycle/metadata actions and the matching dialog when one is selected.
  *
@@ -75,38 +152,17 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
   const openMutation = useOpenOrderMutation(order.id);
   const syncMutation = useSyncOrderMutation(order.id);
 
-  // Financial actions (cancel / capture / mark-paid) are manager-only on the
-  // server. Mirror that here so a VIEWER or AGENT isn't shown buttons that can
-  // only answer 403 — the server remains the actual boundary.
-  const { role } = useCurrentRole();
-  const canManage =
-    role === "OWNER" || role === "ADMIN" || role === "MANAGER";
-
-  const isShopify = order.channel.platform === "SHOPIFY";
-  const isManual = order.channel.platform === "MANUAL";
-  const isCancelled = !!order.cancelledAt;
-  const isClosed = !!order.closedAt;
-  const canMarkPaid =
-    canManage &&
-    order.financialStatus !== "PAID" &&
-    order.financialStatus !== "REFUNDED" &&
-    order.financialStatus !== "VOIDED";
-  const canCapture =
-    canManage &&
-    isShopify &&
-    (order.financialStatus === "AUTHORIZED" ||
-      order.financialStatus === "PARTIALLY_PAID");
-  const canFulfill =
-    !isCancelled &&
-    order.fulfillmentStatus !== "FULFILLED" &&
-    order.fulfillmentStatus !== "RESTOCKED";
-
-  // Manual sync to Shopify: only meaningful for MANUAL orders that haven't
-  // been pushed yet (or where the previous push failed).
-  const syncMeta = (order.metadata as { shopifySync?: { status?: string } } | undefined)
-    ?.shopifySync;
-  const canSyncToShopify =
-    isManual && (!syncMeta || syncMeta.status === "FAILED");
+  const {
+    isShopify,
+    isCancelled,
+    isClosed,
+    canMarkPaid,
+    canCapture,
+    canFulfill,
+    canCancel,
+    canEdit,
+    canSyncToShopify,
+  } = useOrderActionGates(order);
 
   return (
     <>
@@ -118,10 +174,12 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
-          <DropdownMenuItem onSelect={() => setDialog("edit")}>
-            <Pencil className="size-3.5" />
-            Edit details
-          </DropdownMenuItem>
+          {canEdit && (
+            <DropdownMenuItem onSelect={() => setDialog("edit")}>
+              <Pencil className="size-3.5" />
+              Edit details
+            </DropdownMenuItem>
+          )}
 
           {canSyncToShopify && (
             <DropdownMenuItem
@@ -136,7 +194,7 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
           {canFulfill && (
             <DropdownMenuItem onSelect={() => setDialog("fulfill")}>
               <Truck className="size-3.5" />
-              Fulfill items
+              Fulfil items
             </DropdownMenuItem>
           )}
 
@@ -170,7 +228,7 @@ export function OrderActionsMenu({ order }: { order: OrderDetail }) {
             </DropdownMenuItem>
           )}
 
-          {canManage && !isCancelled && (
+          {canCancel && (
             <DropdownMenuItem
               variant="destructive"
               onSelect={() => setDialog("cancel")}
@@ -270,17 +328,29 @@ function EditOrderDialog({
           />
         </div>
 
+        {/* Deliberately NOT labelled "internal" or "visible to staff only":
+            for a Shopify order `update()` pushes `note` straight to Shopify
+            (order.service.ts — `input.note = dto.note` before the local write)
+            and `upsertOrder` reads it back, so this is the customer-facing
+            order note. A genuinely private field needs its own column —
+            `Customer.internalNotes` is the precedent. Same wording as the
+            order detail rail; keep the two in step. */}
         <div>
           <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
-            Internal note
+            Order note
           </label>
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={3}
-            placeholder="Visible to staff only"
+            placeholder="Add a note to this order"
             className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
           />
+          <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+            {order.channel?.platform === "SHOPIFY"
+              ? "Synced to Shopify — not staff-only."
+              : "Stored on the order."}
+          </p>
         </div>
       </div>
 
@@ -304,7 +374,7 @@ const CANCEL_REASONS: { value: OrderCancelReason; label: string }[] = [
   { value: "OTHER", label: "Other" },
 ];
 
-function CancelOrderDialog({
+export function CancelOrderDialog({
   order,
   onClose,
 }: {
@@ -359,7 +429,11 @@ function CancelOrderDialog({
             checked={refund}
             onChange={setRefund}
             label="Issue refund"
-            help="Marks the order as refunded. (Refund processing comes in Phase 3.)"
+            help={
+            isShopify
+              ? "Asks Shopify to refund the payment as part of the cancellation."
+              : "Marks the order as refunded. No money moves — manual orders have no payment to reverse."
+          }
           />
           <CheckboxRow
             checked={restock}
@@ -410,7 +484,7 @@ function CancelOrderDialog({
 
 // ─── Capture Payment Dialog (Shopify only) ─────────────────────────────────
 
-function CapturePaymentDialog({
+export function CapturePaymentDialog({
   order,
   onClose,
 }: {

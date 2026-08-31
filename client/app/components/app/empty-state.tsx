@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
-import { Inbox } from "lucide-react";
+
+import CartIcon from "~/assests/icon/cartIcon";
 
 interface EmptyStateProps {
   icon?: LucideIcon;
@@ -9,9 +10,9 @@ interface EmptyStateProps {
 }
 
 /** Centered empty-state placeholder for pages or tables with no data. */
-export function EmptyState({ icon: Icon = Inbox, title, description, action }: EmptyStateProps) {
+export function EmptyState({ icon: Icon = CartIcon, title, description, action }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl bg-white dark:bg-gray-900 px-6 py-16 text-center shadow-sm ring-1 ring-border">
+    <div className="flex flex-col items-center justify-center text-center">
       <div className="flex size-12 items-center justify-center rounded-full bg-gray-100 dark:bg-gray-800">
         <Icon className="size-6 text-gray-400 dark:text-gray-500" />
       </div>

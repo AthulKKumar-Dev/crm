@@ -218,7 +218,9 @@ export class ShopifyWebhookController {
                     // potentially duplicate work).
                     if (topic === 'orders/create') {
                         try {
-                            console.log('body whatsapp trigger', body);
+                            // NB: never log `body` here. It is the full Shopify
+                            // order payload — name, email, phone, both addresses —
+                            // and this runs on every single orders/create.
                             await this.whatsappTrigger.onOrderPlaced(
                                 channel.organizationId,
                                 channel.id,

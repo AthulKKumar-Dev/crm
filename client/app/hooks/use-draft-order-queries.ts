@@ -8,6 +8,8 @@ export const draftOrderKeys = {
   list: (params?: DraftOrderListParams) =>
     [...draftOrderKeys.all, "list", params] as const,
   detail: (id: string) => [...draftOrderKeys.all, "detail", id] as const,
+  stats: (params?: { channelId?: string }) =>
+    [...draftOrderKeys.all, "stats", params] as const,
 };
 
 export function useDraftOrders(params?: DraftOrderListParams) {
@@ -22,5 +24,18 @@ export function useDraftOrder(id?: string | null) {
     queryKey: draftOrderKeys.detail(id!),
     queryFn: () => draftOrderService.get(id!),
     enabled: !!id,
+  });
+}
+
+/**
+ * Aggregates for the KPI row and the filter-chip counts.
+ *
+ * Nests under `draftOrderKeys.all`, so every existing draft mutation already
+ * invalidates it — no change needed in `use-draft-order-mutations`.
+ */
+export function useDraftOrderStats(params?: { channelId?: string }) {
+  return useQuery({
+    queryKey: draftOrderKeys.stats(params),
+    queryFn: () => draftOrderService.stats(params),
   });
 }

@@ -43,6 +43,22 @@ export const InventorySettingsSchema = z.object({
 
   /** When TRUE, a receipt line's unitCost updates the variant's cost field. */
   updateCostOnReceipt: z.boolean().default(false),
+
+  /**
+   * When TRUE, barcodes this CRM generated (`barcodeSource = GENERATED`) are
+   * included in Shopify product pushes.
+   *
+   * Default FALSE, and the default matters: the push serialises the whole
+   * variant row, so without this gate an internal 6-digit code would land in
+   * the merchant's Shopify `barcode` field on the next unrelated push —
+   * detached from the action that caused it, and occupying the field a real
+   * GTIN would later go in. Turning it on is a legitimate choice (Shopify POS
+   * can then scan the same labels); it is just not one to make silently.
+   *
+   * Barcodes sourced from Shopify or typed by a person are always pushed —
+   * this gate covers generated codes only.
+   */
+  pushGeneratedBarcodes: z.boolean().default(false),
 });
 
 export type InventorySettings = z.infer<typeof InventorySettingsSchema>;
@@ -60,6 +76,7 @@ export const UpdateInventorySettingsSchema = z.object({
   requireScanToPick: z.boolean().optional(),
   skuPrefix: z.string().max(10).optional(),
   updateCostOnReceipt: z.boolean().optional(),
+  pushGeneratedBarcodes: z.boolean().optional(),
 });
 export type UpdateInventorySettingsInput = z.infer<typeof UpdateInventorySettingsSchema>;
 

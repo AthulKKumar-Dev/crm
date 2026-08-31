@@ -47,7 +47,7 @@ export default function LoginPage() {
       {/* Heading */}
       <div className="mb-7">
 
-        <span className="font-baumans text-[28px] font-bold text-[#084734]">collabo</span>
+        <span className="font-display text-page-title text-brand-forest">collabo</span>
         <p className="text-[38px] font-bold text-gray-900">Welcome back</p>
         <p className="mt-1.5 text-[14px] text-sm text-gray-500">
           Sign in to your Collabo account to continue.

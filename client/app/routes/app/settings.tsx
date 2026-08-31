@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -9,7 +9,7 @@ import { toast } from "sonner";
 import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
-  Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag,
+  Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag, Layers,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -42,6 +42,7 @@ import {
   ProductSettingsTab,
   OrderSettingsTab,
 } from "~/components/app/settings/sync-settings-tab";
+import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-tab";
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
@@ -56,6 +57,7 @@ const TABS = [
   { id: "general", label: "General", icon: Building2 },
   { id: "products", label: "Products", icon: Package },
   { id: "orders", label: "Orders", icon: ShoppingBag },
+  { id: "channels", label: "Channels", icon: Layers },
   { id: "tax-gst", label: "Tax & GST", icon: Receipt },
   { id: "loyalty", label: "Loyalty Tiers", icon: Star },
   { id: "security", label: "Security", icon: Lock },
@@ -486,9 +488,15 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
   const updateGstin = useUpdateGstinMutation();
 
   // Form state for adding GSTIN
-  const [form, setForm] = useState<CreateGstinRequest>({
+  const EMPTY_GSTIN_FORM: CreateGstinRequest = {
     gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false,
-  });
+    address: {},
+  };
+  const [form, setForm] = useState<CreateGstinRequest>(EMPTY_GSTIN_FORM);
+
+  function patchAddress(patch: Partial<NonNullable<CreateGstinRequest["address"]>>) {
+    setForm((prev) => ({ ...prev, address: { ...prev.address, ...patch } }));
+  }
 
   function handleGstToggle() {
     const newValue = !gstEnabled;
@@ -501,12 +509,26 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
       toast.error("Please fill in GSTIN, legal name, and state.");
       return;
     }
-    createGstin.mutate(form, {
-      onSuccess: () => {
-        setShowAddForm(false);
-        setForm({ gstin: "", legalName: "", tradeName: "", stateCode: "", stateName: "", isDefault: false });
+    // Drop blank address keys, and send `undefined` rather than `{}` when the
+    // address was left untouched — an empty object would still be stored, and
+    // `readAddress` reports `hasAddress: false` either way, so the record would
+    // just carry noise. `province` comes from the state picker, so the printed
+    // address names the state without needing a second input. The `> 1` check
+    // means "something beyond the auto-filled province was actually typed".
+    const address = Object.fromEntries(
+      Object.entries({ ...form.address, province: form.stateName })
+        .filter(([, value]) => typeof value === "string" && value.trim() !== ""),
+    );
+
+    createGstin.mutate(
+      { ...form, address: Object.keys(address).length > 1 ? address : undefined },
+      {
+        onSuccess: () => {
+          setShowAddForm(false);
+          setForm(EMPTY_GSTIN_FORM);
+        },
       },
-    });
+    );
   }
 
   function handleStateChange(code: string) {
@@ -657,6 +679,53 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
                     value={form.tradeName || ""}
                     onChange={(e) => setForm((prev) => ({ ...prev, tradeName: e.target.value }))}
                     placeholder="Brand/trade name (optional)"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+              </div>
+
+              {/* Registered address. A GST tax invoice must carry the
+                  supplier's address, and this form was the missing link: the
+                  DTO and the Prisma column already accepted one, so every
+                  invoice snapshotted a null sellerAddress and printed without
+                  it. Keys match the canonical shape lib/address.ts reads. */}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <p className="sm:col-span-2 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                  Registered address — printed on every invoice issued under this GSTIN
+                </p>
+                <div className="sm:col-span-2">
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Address line 1</label>
+                  <input
+                    value={form.address?.address1 ?? ""}
+                    onChange={(e) => patchAddress({ address1: e.target.value })}
+                    placeholder="Building, street"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">Address line 2</label>
+                  <input
+                    value={form.address?.address2 ?? ""}
+                    onChange={(e) => patchAddress({ address2: e.target.value })}
+                    placeholder="Area, landmark (optional)"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">City</label>
+                  <input
+                    value={form.address?.city ?? ""}
+                    onChange={(e) => patchAddress({ city: e.target.value })}
+                    placeholder="City"
+                    className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-medium text-gray-600 dark:text-gray-400">PIN code</label>
+                  <input
+                    value={form.address?.zip ?? ""}
+                    onChange={(e) => patchAddress({ zip: e.target.value })}
+                    placeholder="6-digit PIN"
                     className="mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]"
                   />
                 </div>
@@ -1098,7 +1167,8 @@ function AppearanceTab() {
 /** Main settings page with tabbed navigation for workspace, security, and preferences. */
 export default function SettingsPage() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("general");
+  const { tab } = useParams();
+  const activeTab = TABS.some((t) => t.id === tab) ? tab! : "general";
   const [showInvite, setShowInvite] = useState(false);
   /**
    * Drives the org-setup sheet:
@@ -1207,9 +1277,10 @@ export default function SettingsPage() {
         <aside className="hidden w-52 shrink-0 md:block">
           <div className="rounded-xl bg-white dark:bg-gray-900 p-2 shadow-sm ring-1 ring-border">
             {TABS.map(({ id, label, icon: Icon }) => (
-              <button
+              <Link
                 key={id}
-                onClick={() => setActiveTab(id)}
+                to={`/settings/${id}`}
+                aria-current={activeTab === id ? "page" : undefined}
                 className={cn(
                   "flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors text-left",
                   activeTab === id
@@ -1220,7 +1291,7 @@ export default function SettingsPage() {
                 <Icon className="size-4 shrink-0" />
                 {label}
                 {activeTab === id && <ChevronRight className="ml-auto size-3.5" />}
-              </button>
+              </Link>
             ))}
           </div>
         </aside>
@@ -1228,9 +1299,10 @@ export default function SettingsPage() {
         {/* Mobile tabs */}
         <div className="flex gap-1 overflow-x-auto md:hidden">
           {TABS.map(({ id, label }) => (
-            <button
+            <Link
               key={id}
-              onClick={() => setActiveTab(id)}
+              to={`/settings/${id}`}
+              aria-current={activeTab === id ? "page" : undefined}
               className={cn(
                 "shrink-0 rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
                 activeTab === id
@@ -1239,7 +1311,7 @@ export default function SettingsPage() {
               )}
             >
               {label}
-            </button>
+            </Link>
           ))}
         </div>
 
@@ -1696,6 +1768,9 @@ export default function SettingsPage() {
 
           {/* ─── ORDER SETTINGS ─── */}
           {activeTab === "orders" && <OrderSettingsTab />}
+
+          {/* ── Channels ─────────────────────────────────────────── */}
+          {activeTab === "channels" && <ChannelSettingsTab />}
 
           {/* ─── TAX & GST ─── */}
           {activeTab === "tax-gst" && org && (

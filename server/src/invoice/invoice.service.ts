@@ -5,7 +5,12 @@ import {
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
-import { GstType, InvoiceStatus, Prisma } from '@prisma/client';
+import {
+  GstType,
+  InvoiceStatus,
+  OrderFinancialStatus,
+  Prisma,
+} from '@prisma/client';
 import {
   retryOnNumberingConflict,
   uniqueViolationTargets,
@@ -22,11 +27,13 @@ import {
   resolvePlaceOfSupply,
 } from '../gst/place-of-supply.util';
 import {
+  getFinancialYear,
   gstPeriodRange,
   INDIA_TZ,
   resolveGstTimeZone,
   zonedDayEndExclusive,
   zonedDayStart,
+  zonedParts,
 } from '../common/utils/zoned-date.util';
 
 /**
@@ -42,11 +49,27 @@ const EXPORT_ROW_CAP = 10_000;
  * the point is to surface the misconfiguration once, not once per invoice.
  */
 const gstTimeZoneFallbackWarned = new Set<string>();
+
+/**
+ * Order payment states that leave money outstanding on an issued invoice.
+ * `REFUNDED` and `VOIDED` are deliberately absent — nothing is owed on either,
+ * so neither should count towards "Outstanding".
+ */
+const OUTSTANDING_FINANCIAL_STATES: OrderFinancialStatus[] = [
+  OrderFinancialStatus.PENDING,
+  OrderFinancialStatus.AUTHORIZED,
+  OrderFinancialStatus.PARTIALLY_PAID,
+];
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceNumberService } from './invoice-number.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
-import { QueryInvoicesDto } from './dto/query-invoices.dto';
+import {
+  InvoiceSortField,
+  InvoiceSortOrder,
+  QueryInvoicesDto,
+} from './dto/query-invoices.dto';
 import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
+import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 
 @Injectable()
 export class InvoiceService {
@@ -134,8 +157,16 @@ export class InvoiceService {
     // where two requests pass this check simultaneously (loser gets P2002 →
     // 409 via the global filter). Cancelled invoices don't count — cancel-
     // then-reissue is the statutory correction flow.
+    // `organizationId` is redundant today — the order was verified org-owned at
+    // the read above — but the 409 below quotes the invoice NUMBER back to the
+    // caller, so an unscoped read here is one deleted line away from leaking a
+    // different tenant's invoice number.
     const existingInvoice = await tx.invoice.findFirst({
-      where: { orderId, status: { not: InvoiceStatus.CANCELLED } },
+      where: {
+        orderId,
+        organizationId: orgId,
+        status: { not: InvoiceStatus.CANCELLED },
+      },
       select: { invoiceNumber: true },
     });
     if (existingInvoice) {
@@ -313,6 +344,11 @@ export class InvoiceService {
         totalIgst: totals.totalIgst,
         totalTax: totals.totalTax,
         totalDiscount: totals.totalDiscount,
+        // Persisted, not just folded into grandTotal. `calculateInvoiceTotals`
+        // adds shipping to the grand total; storing the addend is what lets the
+        // detail dialog, the printed invoice and the CSV show a totals ladder
+        // that actually sums to `grandTotal`.
+        shippingCharge: this.calculator.toNumber(order.totalShippingPrice),
         grandTotal: totals.grandTotal,
         currency: order.currency,
         notes: dto.notes,
@@ -352,31 +388,38 @@ export class InvoiceService {
     return invoice;
   }
 
-  // ─── LIST INVOICES ───
-  async findAll(orgId: string, query: QueryInvoicesDto) {
-    const page = query.page || 1;
-    const limit = query.limit || 20;
-    const skip = (page - 1) * limit;
-
-    // Date filters name calendar days in the merchant's timezone, so resolve it
-    // the same way the statutory date math does — otherwise the list disagrees
-    // with the GST return sitting next to it.
-    const timeZone =
-      query.dateFrom || query.dateTo
-        ? this.gstTimeZone(
-            orgId,
-            await this.prisma.organization.findUnique({
-              where: { id: orgId },
-              select: { timezone: true, gstEnabled: true },
-            }),
-          )
-        : 'UTC';
-
-    const where: any = {
+  /**
+   * The list `where`, shared by `findAll` and `getExportData`.
+   *
+   * Extracted because the export used to build its own, much narrower filter —
+   * it honoured only financialYear / status / sellerGstinId and silently dropped
+   * search, the date range, buyerType and paymentState. The Export CSV button
+   * sits directly beside the filtered table and hands it exactly those params,
+   * so the downloaded file was a different set of invoices from the one on
+   * screen. One builder, one meaning.
+   */
+  private buildInvoiceWhere(
+    orgId: string,
+    query: QueryInvoicesDto,
+    timeZone: string,
+  ): Prisma.InvoiceWhereInput {
+    return {
       organizationId: orgId,
       ...(query.financialYear && { financialYear: query.financialYear }),
       ...(query.status && { status: query.status }),
       ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+      // B2B/B2C is not a stored column — a buyer is registered exactly when the
+      // invoice captured a GSTIN for them.
+      ...(query.buyerType === 'B2B' && { buyerGstin: { not: null } }),
+      ...(query.buyerType === 'B2C' && { buyerGstin: null }),
+      // "Unpaid" means issued AND the order still owes. The status is pinned
+      // here rather than left to `query.status` so the filter cannot be
+      // combined into something self-contradictory (a cancelled-but-unpaid
+      // invoice is not a thing the UI should be able to ask for).
+      ...(query.paymentState === 'UNPAID' && {
+        status: InvoiceStatus.ISSUED,
+        order: { financialStatus: { in: OUTSTANDING_FINANCIAL_STATES } },
+      }),
       ...(query.search && {
         OR: [
           { invoiceNumber: { contains: query.search, mode: 'insensitive' } },
@@ -400,15 +443,76 @@ export class InvoiceService {
           }
         : {}),
     };
+  }
+
+  /**
+   * Timezone for the list/export date filters.
+   *
+   * Date filters name calendar days in the merchant's timezone, so they resolve
+   * it the same way the statutory date math does — otherwise the list disagrees
+   * with the GST return sitting next to it. Skipped entirely when no date
+   * filter is present, so an ordinary page load does not pay for an extra
+   * organization read.
+   */
+  private async listTimeZone(
+    orgId: string,
+    query: QueryInvoicesDto,
+  ): Promise<string> {
+    if (!query.dateFrom && !query.dateTo) return 'UTC';
+
+    return this.gstTimeZone(
+      orgId,
+      await this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { timezone: true, gstEnabled: true },
+      }),
+    );
+  }
+
+  /**
+   * Sort order for the list and the export.
+   *
+   * `sortBy` is an enum on the DTO, so an unknown column cannot reach Prisma
+   * here — see the note on `InvoiceSortField`.
+   */
+  private buildInvoiceOrderBy(
+    query: QueryInvoicesDto,
+  ): Prisma.InvoiceOrderByWithRelationInput {
+    const field = query.sortBy ?? InvoiceSortField.invoiceDate;
+    const direction = query.sortOrder ?? InvoiceSortOrder.desc;
+    return { [field]: direction };
+  }
+
+  // ─── LIST INVOICES ───
+  async findAll(orgId: string, query: QueryInvoicesDto) {
+    const page = query.page || 1;
+    const limit = query.limit || 20;
+    const skip = (page - 1) * limit;
+
+    const where = this.buildInvoiceWhere(
+      orgId,
+      query,
+      await this.listTimeZone(orgId, query),
+    );
 
     const [data, total] = await Promise.all([
       this.prisma.invoice.findMany({
         where,
         skip,
         take: limit,
-        orderBy: { invoiceDate: 'desc' },
+        orderBy: this.buildInvoiceOrderBy(query),
         include: {
-          order: { select: { name: true, orderNumber: true } },
+          // `financialStatus` backs the derived "Unpaid" pill in the list — the
+          // invoice itself has no payment state. `id` lets the row link through
+          // to the order the invoice was raised against.
+          order: {
+            select: {
+              id: true,
+              name: true,
+              orderNumber: true,
+              financialStatus: true,
+            },
+          },
         },
       }),
       this.prisma.invoice.count({ where }),
@@ -431,8 +535,16 @@ export class InvoiceService {
       where: { id, organizationId: orgId },
       include: {
         lineItems: true,
+        // `id` is required: the detail dialog links through to the order.
+        // Keep this select in step with `findAll`'s — the client shares one
+        // `Invoice.order` type across the list row and the detail view.
         order: {
-          select: { name: true, orderNumber: true, financialStatus: true },
+          select: {
+            id: true,
+            name: true,
+            orderNumber: true,
+            financialStatus: true,
+          },
         },
       },
     });
@@ -445,20 +557,43 @@ export class InvoiceService {
   }
 
   // ─── CANCEL INVOICE ───
+  /**
+   * Cancel an issued invoice, as an atomic org-scoped claim.
+   *
+   * This was read-then-write: `findOne(id, orgId)` for the guard, then
+   * `update({ where: { id } })` — a bare-id write whose tenant safety rested
+   * entirely on the line above it, plus a check-then-act window in which two
+   * concurrent cancels both passed the guard and the loser overwrote
+   * `cancelledAt` with a later timestamp than the one that actually cancelled
+   * it. Same shape of fix as `OrderService.cancel`: let the WHERE clause carry
+   * the precondition, then interpret a zero count.
+   */
   async cancel(id: string, orgId: string) {
-    const invoice = await this.findOne(id, orgId);
-
-    if (invoice.status === InvoiceStatus.CANCELLED) {
-      throw new ConflictException('Invoice is already cancelled');
-    }
-
-    return this.prisma.invoice.update({
-      where: { id },
+    const claimed = await this.prisma.invoice.updateMany({
+      where: {
+        id,
+        organizationId: orgId,
+        status: { not: InvoiceStatus.CANCELLED },
+      },
       data: {
         status: InvoiceStatus.CANCELLED,
         cancelledAt: new Date(),
       },
     });
+
+    if (claimed.count === 0) {
+      // Zero rows means one of two very different things. Distinguish them so
+      // a cross-tenant id still 404s rather than reporting the invoice as
+      // already cancelled (which would confirm that it exists).
+      const existing = await this.prisma.invoice.findFirst({
+        where: { id, organizationId: orgId },
+        select: { id: true },
+      });
+      if (!existing) throw new NotFoundException('Invoice not found');
+      throw new ConflictException('Invoice is already cancelled');
+    }
+
+    return this.findOne(id, orgId);
   }
 
   // ─── GST RETURN SUMMARY ───
@@ -506,6 +641,143 @@ export class InvoiceService {
     return this.generateGstr1(invoices);
   }
 
+  /**
+   * Aggregates for the invoice KPI row and the filter-chip counts.
+   *
+   * The chips must count the whole set rather than the current page, so this
+   * cannot be derived from `findAll`'s response.
+   *
+   * Month boundaries go through `gstPeriodRange` in the merchant's timezone for
+   * the reason documented on `getGstReturn`: naive local-time month maths on a
+   * UTC server shifts every edge by the offset, which for IST silently moved
+   * the first 5.5 hours of each month into the wrong one.
+   */
+  async getStats(orgId: string, query: QueryInvoiceStatsDto) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true, currency: true },
+    });
+
+    const timeZone = this.gstTimeZone(orgId, org);
+    const now = new Date();
+
+    const currentMonth = gstPeriodRange(
+      getFinancialYear(now, timeZone),
+      String(zonedParts(now, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    // One millisecond before this month began is always inside the previous
+    // month, so this needs no special case for January.
+    const lastInstantOfPrevMonth = new Date(currentMonth.from.getTime() - 1);
+    const previousMonth = gstPeriodRange(
+      getFinancialYear(lastInstantOfPrevMonth, timeZone),
+      String(zonedParts(lastInstantOfPrevMonth, timeZone).month).padStart(2, '0'),
+      timeZone,
+    );
+
+    // Counts are scoped to the financial year the list is showing; the
+    // month-to-date money figures are not, since they are always "this month".
+    const scope: Prisma.InvoiceWhereInput = {
+      organizationId: orgId,
+      ...(query.financialYear && { financialYear: query.financialYear }),
+      ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+    };
+
+    const issuedInMonth = (range: { from: Date; toExclusive: Date }) => ({
+      organizationId: orgId,
+      ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+      status: InvoiceStatus.ISSUED,
+      invoiceDate: { gte: range.from, lt: range.toExclusive },
+    });
+
+    const outstandingWhere: Prisma.InvoiceWhereInput = {
+      ...scope,
+      status: InvoiceStatus.ISSUED,
+      order: { financialStatus: { in: OUTSTANDING_FINANCIAL_STATES } },
+    };
+
+    const [
+      thisMonth,
+      lastMonth,
+      outstanding,
+      all,
+      issued,
+      cancelled,
+      b2b,
+      unpaid,
+    ] = await Promise.all([
+      this.prisma.invoice.aggregate({
+        where: issuedInMonth(currentMonth),
+        _sum: { grandTotal: true, totalTax: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where: issuedInMonth(previousMonth),
+        _sum: { grandTotal: true, totalTax: true },
+      }),
+      this.prisma.invoice.aggregate({
+        where: outstandingWhere,
+        _sum: { grandTotal: true },
+      }),
+      this.prisma.invoice.count({ where: scope }),
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.ISSUED },
+      }),
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.CANCELLED },
+      }),
+      this.prisma.invoice.count({
+        where: { ...scope, buyerGstin: { not: null } },
+      }),
+      this.prisma.invoice.count({ where: outstandingWhere }),
+    ]);
+
+    const decimal = (value: Prisma.Decimal | null | undefined) =>
+      value ? Math.round(parseFloat(value.toString()) * 100) / 100 : 0;
+
+    const invoicedNow = decimal(thisMonth._sum.grandTotal);
+    const invoicedPrev = decimal(lastMonth._sum.grandTotal);
+    const taxNow = decimal(thisMonth._sum.totalTax);
+    const taxPrev = decimal(lastMonth._sum.totalTax);
+
+    return {
+      invoicedThisMonth: {
+        amount: invoicedNow,
+        changePct: this.percentChange(invoicedNow, invoicedPrev),
+      },
+      taxCollected: {
+        amount: taxNow,
+        changePct: this.percentChange(taxNow, taxPrev),
+      },
+      outstanding: {
+        amount: decimal(outstanding._sum.grandTotal),
+        invoiceCount: unpaid,
+        // Outstanding is a running balance, not a monthly flow. Reporting a
+        // month-over-month delta would need a historical snapshot of what was
+        // owed at the end of last month, which nothing records — so this is
+        // null and the card omits its trend badge rather than inventing one.
+        changePct: null,
+      },
+      periodStart: currentMonth.from.toISOString(),
+      periodEnd: now.toISOString(),
+      // No `draft`: InvoiceStatus.DRAFT is in the enum but no code path ever
+      // writes it, so the count was structurally always 0 — it drove a filter
+      // chip that could never match and a KPI sub-label that always read
+      // "· 0 drafts". Reinstate it alongside a real draft-invoice lifecycle.
+      counts: { all, issued, unpaid, b2b, cancelled },
+      currency: org?.currency ?? 'INR',
+    };
+  }
+
+  /**
+   * Percentage change, rounded. Null when there is no prior basis: a jump from
+   * zero is not "100% up", and passing 0 would render a green up-trend badge.
+   */
+  private percentChange(current: number, previous: number): number | null {
+    if (!previous) return null;
+    return Math.round(((current - previous) / previous) * 100);
+  }
+
   // ─── GSTR-1: DETAILED SALES RETURN ───
   private generateGstr1(invoices: any[]) {
     // B2B: Invoices where buyerGstin is present
@@ -527,6 +799,13 @@ export class InvoiceService {
       invoices: invs.map((inv) => ({
         invoiceNumber: inv.invoiceNumber,
         invoiceDate: inv.invoiceDate,
+        // Carried through so the GSTR-1 CSV can fill its placeOfSupply column.
+        // The B2B section is grouped by buyer GSTIN, but place of supply varies
+        // per invoice within a buyer, so it has to travel on the invoice — the
+        // exporter emitted an empty string for every B2B row without it, and
+        // place of supply is a mandatory GSTR-1 field.
+        placeOfSupply: inv.placeOfSupply,
+        placeOfSupplyName: inv.placeOfSupplyName,
         gstType: inv.gstType,
         subtotal: inv.subtotal,
         cgst: inv.totalCgst,
@@ -636,10 +915,46 @@ export class InvoiceService {
     const interStateInvoices = invoices.filter(
       (inv) => inv.gstType === GstType.IGST,
     );
+    // Table 3.2 is inter-state supplies to *unregistered* persons, so it is
+    // narrower than the aggregate above (which spans every IGST invoice, B2B
+    // included). The aggregate keeps its existing meaning because the CSV
+    // exporter reads it.
+    const byStateMap = new Map<
+      string,
+      { name: string; invoiceCount: number; taxable: number; igst: number }
+    >();
+
+    for (const inv of interStateInvoices) {
+      if (inv.buyerGstin) continue; // registered buyer — not a 3.2 row
+
+      const code = inv.placeOfSupply;
+      const existing = byStateMap.get(code) || {
+        name: inv.placeOfSupplyName || getStateName(code) || code,
+        invoiceCount: 0,
+        taxable: 0,
+        igst: 0,
+      };
+      existing.invoiceCount += 1;
+      existing.taxable += parseFloat(inv.subtotal.toString());
+      existing.igst += parseFloat(inv.totalIgst.toString());
+      byStateMap.set(code, existing);
+    }
+
+    const byState = Array.from(byStateMap.entries())
+      .map(([placeOfSupply, data]) => ({
+        placeOfSupply,
+        placeOfSupplyName: data.name,
+        invoiceCount: data.invoiceCount,
+        totalTaxable: Math.round(data.taxable * 100) / 100,
+        totalIgst: Math.round(data.igst * 100) / 100,
+      }))
+      .sort((a, b) => b.totalTaxable - a.totalTaxable);
+
     const interState = {
       invoiceCount: interStateInvoices.length,
       totalTaxable: this.sumField(interStateInvoices, 'subtotal'),
       totalIgst: this.sumField(interStateInvoices, 'totalIgst'),
+      byState,
     };
 
     // Tax payable
@@ -654,13 +969,22 @@ export class InvoiceService {
   }
 
   // ─── EXPORT INVOICES AS CSV ───
+  /**
+   * Rows for the CSV / JSON export.
+   *
+   * Shares `buildInvoiceWhere` and `buildInvoiceOrderBy` with `findAll` on
+   * purpose: this used to hand-roll a filter honouring only financialYear /
+   * status / sellerGstinId, so the Export CSV button sitting beside a searched,
+   * date-filtered, B2B-chipped table produced a file containing rows the user
+   * could not see and omitting none of the ones they could. The export now
+   * means exactly "what is on screen", bounded by EXPORT_ROW_CAP.
+   */
   async getExportData(orgId: string, query: QueryInvoicesDto) {
-    const where: any = {
-      organizationId: orgId,
-      ...(query.financialYear && { financialYear: query.financialYear }),
-      ...(query.status && { status: query.status }),
-      ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
-    };
+    const where = this.buildInvoiceWhere(
+      orgId,
+      query,
+      await this.listTimeZone(orgId, query),
+    );
 
     const invoices = await this.prisma.invoice.findMany({
       where,
@@ -668,7 +992,7 @@ export class InvoiceService {
       // could hydrate the whole table into memory and OOM the process for
       // every tenant. See EXPORT_ROW_CAP.
       take: EXPORT_ROW_CAP,
-      orderBy: { invoiceDate: 'desc' },
+      orderBy: this.buildInvoiceOrderBy(query),
       include: {
         order: { select: { name: true } },
       },
@@ -684,10 +1008,14 @@ export class InvoiceService {
       placeOfSupply: `${inv.placeOfSupply} - ${inv.placeOfSupplyName}`,
       gstType: inv.gstType,
       subtotal: inv.subtotal.toString(),
+      discount: inv.totalDiscount.toString(),
       cgst: inv.totalCgst.toString(),
       sgst: inv.totalSgst.toString(),
       igst: inv.totalIgst.toString(),
       totalTax: inv.totalTax.toString(),
+      // Included so a reader can reconcile the row: subtotal + totalTax +
+      // shipping = grandTotal. Without it the last two columns look wrong.
+      shipping: inv.shippingCharge.toString(),
       grandTotal: inv.grandTotal.toString(),
       status: inv.status,
     }));
@@ -752,7 +1080,9 @@ export class InvoiceService {
           buyerName: b2b.buyerName,
           invoiceNumber: inv.invoiceNumber,
           invoiceDate: new Date(inv.invoiceDate).toISOString().split('T')[0],
-          placeOfSupply: '',
+          placeOfSupply: inv.placeOfSupply
+            ? `${inv.placeOfSupply} - ${inv.placeOfSupplyName}`
+            : '',
           taxableValue: inv.subtotal,
           cgst: inv.cgst,
           sgst: inv.sgst,
