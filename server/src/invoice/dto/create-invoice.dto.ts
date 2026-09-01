@@ -1,4 +1,5 @@
 import {
+  IsBoolean,
   IsOptional,
   IsString,
   Length,
@@ -29,4 +30,16 @@ export class CreateInvoiceDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  /**
+   * Whether tax on this supply is payable by the RECIPIENT under reverse charge.
+   *
+   * Rule 46(p) requires a tax invoice to state this on its face, and the column
+   * has existed since the GST tables were created — but nothing ever wrote it,
+   * so every invoice carried the column default and printing it would have
+   * shown a permanent, unchangeable "No".
+   */
+  @IsOptional()
+  @IsBoolean()
+  reverseCharge?: boolean;
 }

@@ -1,4 +1,4 @@
-import { Ban, Printer, ShoppingBag } from "lucide-react";
+import { Ban, Undo2, Printer, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import {
@@ -30,6 +30,13 @@ interface InvoiceDetailDialogProps {
   canCancel: boolean;
   /** Hands the invoice to the shared confirmation dialog. */
   onRequestCancel: (invoice: { id: string; invoiceNumber: string }) => void;
+  /**
+   * Raise a credit note instead of cancelling.
+   *
+   * Cancelling makes an invoice VANISH from a regenerated return, which
+   * silently contradicts an already-filed period. A credit note is additive.
+   */
+  onRequestCreditNote: (invoice: InvoiceDetail) => void;
 }
 
 /** Label above a value in the seller/buyer block. */
@@ -100,6 +107,7 @@ export function InvoiceDetailDialog({
   onClose,
   canCancel,
   onRequestCancel,
+  onRequestCreditNote,
 }: InvoiceDetailDialogProps) {
   const { data: invoice, isLoading, isError, refetch } = useInvoice(invoiceId);
 
@@ -131,6 +139,7 @@ export function InvoiceDetailDialog({
             num={num}
             canCancel={canCancel}
             onRequestCancel={onRequestCancel}
+            onRequestCreditNote={onRequestCreditNote}
           />
         )}
       </DialogContent>
@@ -145,6 +154,7 @@ function InvoiceBody({
   num,
   canCancel,
   onRequestCancel,
+  onRequestCreditNote,
 }: {
   invoice: InvoiceDetail;
   isIntra: boolean;
@@ -152,6 +162,7 @@ function InvoiceBody({
   num: (value: number | string | null | undefined) => number;
   canCancel: boolean;
   onRequestCancel: (invoice: { id: string; invoiceNumber: string }) => void;
+  onRequestCreditNote: (invoice: InvoiceDetail) => void;
 }) {
   const discount = num(invoice.totalDiscount);
   const shipping = num(invoice.shippingCharge);
@@ -250,6 +261,12 @@ function InvoiceBody({
         </span>
         <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground">
           {GST_TYPE_LABELS[invoice.gstType]}-state
+        </span>
+        {/* A characterization, not an amount — so it sits in this chip row and
+            not in the totals ladder, whose stated invariant is that every row
+            is an addend of grandTotal. */}
+        <span className="rounded-full bg-muted px-2 py-0.5 font-medium text-muted-foreground">
+          {invoice.reverseCharge ? "Reverse charge" : "Forward charge"}
         </span>
         <span className="text-muted-foreground">
           Order{" "}
@@ -404,6 +421,18 @@ function InvoiceBody({
             </Link>
           </Button>
         </div>
+
+        {canCancel && invoice.status === "ISSUED" && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onRequestCreditNote(invoice)}
+            title="Reverses this invoice without deleting it — the correction to use once a period is filed"
+          >
+            <Undo2 />
+            Credit note
+          </Button>
+        )}
 
         {canCancel && invoice.status === "ISSUED" && (
           <Button

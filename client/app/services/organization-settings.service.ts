@@ -3,6 +3,8 @@ import type {
   OrganizationSettingsResponse,
   ProductSettings,
   OrderSettings,
+  TaxSettings,
+  UpdateTaxSettingsRequest,
   InventorySettings,
   UpdateProductSettingsRequest,
   UpdateOrderSettingsRequest,
@@ -27,6 +29,11 @@ export const organizationSettingsService = {
     apiClient
       .patch<ProductSettings>("/organization/settings/products", data)
       .then((response) => response.data),
+
+  updateTaxSettings: (data: UpdateTaxSettingsRequest) =>
+    apiClient
+      .patch<TaxSettings>("/organization/settings/tax", data)
+      .then((res) => res.data),
 
   updateOrderSettings: (data: UpdateOrderSettingsRequest) =>
     apiClient

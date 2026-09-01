@@ -27,6 +27,7 @@ import { DRAFT_MIRROR_QUEUE } from '../draft-order/draft-mirror.queue';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
 import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
 import { InventoryModule } from '../inventory/inventory.module';
+import { InvoiceModule } from '../invoice/invoice.module';
 
 @Module({
   imports: [
@@ -45,6 +46,10 @@ import { InventoryModule } from '../inventory/inventory.module';
     // (inventory → Shopify pushes) rides the shopify-push queue directly, so
     // no module cycle exists.
     InventoryModule,
+    // InvoiceService — auto-issuing a GST invoice when a Shopify order becomes
+    // paid. No cycle: InvoiceModule imports only GstModule, and nothing in the
+    // invoice module reaches back into channels.
+    InvoiceModule,
   ],
   controllers: [ChannelController, ShopifyWebhookController, InstagramWebhookController],
   providers: [

@@ -184,6 +184,14 @@ export default function InvoicePrintPage() {
           <span className="font-medium">
             {isIntra ? "Intra-state (CGST + SGST)" : "Inter-state (IGST)"}
           </span>
+          {/* Rule 46(p) requires a tax invoice to state whether tax is payable
+              on reverse charge. It belongs here rather than in the totals
+              ladder below, which is arithmetic only — this is a declaration,
+              not an addend. */}
+          <span className="ml-3 text-gray-600">Reverse charge: </span>
+          <span className="font-medium">
+            {invoice.reverseCharge ? "Yes" : "No"}
+          </span>
         </div>
 
         {/* Line items */}

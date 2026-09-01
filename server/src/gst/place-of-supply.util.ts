@@ -1,4 +1,7 @@
-import { isValidStateCode } from './constants/indian-states';
+import {
+  EXPORT_PLACE_OF_SUPPLY,
+  isValidStateCode,
+} from './constants/indian-states';
 import { extractStateCodeFromGstin } from './constants/gst-rates';
 
 /**
@@ -71,6 +74,39 @@ export function extractStateFromAddress(address: unknown): string | null {
   return null;
 }
 
+/**
+ * True when an address is outside India.
+ *
+ * WHY THIS EXISTS. `extractStateFromAddress` reads only `province_code`,
+ * `provinceCode` and `stateCode`, so a US or UAE delivery address yields null,
+ * falls through every step of the resolution chain, and lands on the SELLER'S
+ * OWN STATE — meaning an export was invoiced as a local CGST+SGST supply.
+ *
+ * The data to detect this has been there all along and had no reader:
+ * `transformAddress` in shopify-sync.service.ts already persists `country` and
+ * `country_code` (ISO-2) on every synced order.
+ *
+ * ABSENT COUNTRY MEANS DOMESTIC, deliberately. Offline orders type the address
+ * as a bare object with no guaranteed country key, and treating "unknown" as an
+ * export would zero-rate ordinary counter sales.
+ */
+const INDIA_COUNTRY_VALUES = new Set(['IN', 'IND', 'INDIA']);
+
+export function isForeignAddress(address: unknown): boolean {
+  if (!address || typeof address !== 'object') return false;
+
+  const a = address as Record<string, unknown>;
+  const raw =
+    a.country_code ?? a.countryCode ?? a.countryCodeV2 ?? a.country;
+
+  if (typeof raw !== 'string') return false;
+
+  const normalized = raw.trim().toUpperCase();
+  if (!normalized) return false;
+
+  return !INDIA_COUNTRY_VALUES.has(normalized);
+}
+
 export interface PlaceOfSupplyInput {
   /** Caller-supplied override; only honoured when it is a real state code. */
   explicitCode?: string | null;
@@ -89,6 +125,17 @@ export interface PlaceOfSupplyInput {
 export function resolvePlaceOfSupply(input: PlaceOfSupplyInput): string {
   if (input.explicitCode && isValidStateCode(input.explicitCode)) {
     return input.explicitCode;
+  }
+
+  // Export: destination outside India. Checked BEFORE the state chain, because
+  // a foreign address carries no Indian state and would otherwise fall all the
+  // way through to the seller's own state.
+  //
+  // Shipping first — for goods, place of supply is where the movement
+  // terminates (s.10(1)(a)) — then billing when there is no ship-to at all.
+  if (isForeignAddress(input.shippingAddress)) return EXPORT_PLACE_OF_SUPPLY;
+  if (!input.shippingAddress && isForeignAddress(input.billingAddress)) {
+    return EXPORT_PLACE_OF_SUPPLY;
   }
 
   const shippingState = extractStateFromAddress(input.shippingAddress);

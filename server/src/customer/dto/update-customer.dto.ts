@@ -1,4 +1,7 @@
 import { IsArray, IsEnum, IsOptional, IsString, Length, Matches } from 'class-validator';
+// The single source of truth for GSTIN shape — this file inlined a copy,
+// so a correction to one would silently not reach the other.
+import { GSTIN_REGEX } from '../../gst/constants/gst-rates';
 import { VipLevel } from '@prisma/client';
 
 export class UpdateCustomerDto {
@@ -10,7 +13,7 @@ export class UpdateCustomerDto {
     // GST fields — customer's GSTIN for B2B invoicing
     @IsOptional()
     @IsString()
-    @Matches(/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/, {
+    @Matches(GSTIN_REGEX, {
         message: 'GSTIN must be a valid 15-character GST Identification Number',
     })
     gstin?: string;

@@ -57,6 +57,13 @@ export interface OrderCustomerNode {
   lastName: string | null;
 }
 
+export interface TaxLineNode {
+  title: string | null;
+  /** Fractional rate as Shopify reports it — 0.18 for 18%, not 18. */
+  rate: number | null;
+  priceSet: MoneyBag;
+}
+
 export interface OrderLineItemNode {
   id: string;
   title: string;
@@ -67,6 +74,9 @@ export interface OrderLineItemNode {
   totalDiscountSet: MoneyBag;
   requiresShipping: boolean;
   taxable: boolean;
+  /** What Shopify actually charged in tax on this line. The CRM computes its
+   *  own figure for the invoice; this is stored to reconcile the two. */
+  taxLines?: TaxLineNode[];
   variant: { id: string; product: { id: string } | null } | null;
   customAttributes: Array<{ key: string; value: string | null }>;
 }
@@ -83,6 +93,15 @@ export interface OrderRefundLineItemNode {
   id: string;
   quantity: number;
   restockType: string | null;
+  /**
+   * Tax actually returned on this line.
+   *
+   * A MoneyBag, NOT a `taxLines` connection: `refundLineItems(first: 50)` is
+   * already nested inside `refunds(first: 50)`, and adding a third connection
+   * level would push this query past the cost ceiling it is already close to.
+   * A scalar money field costs nothing extra.
+   */
+  totalTaxSet: MoneyBag;
   lineItem: { id: string };
 }
 
@@ -117,6 +136,11 @@ export interface OrderNode {
   currentSubtotalPriceSet: MoneyBag;
   totalPriceSet: MoneyBag;
   totalTaxSet: MoneyBag;
+  /** True when line prices already contain tax. The CRM treats prices as
+   *  tax-EXCLUSIVE, so this being true is a systematic reconciliation
+   *  difference rather than a configuration drift. */
+  taxesIncluded?: boolean;
+  shippingLine?: { title: string | null; taxLines: TaxLineNode[] } | null;
   totalDiscountsSet: MoneyBag;
   totalShippingPriceSet: MoneyBag;
   shippingAddress: MailingAddress | null;
@@ -158,6 +182,7 @@ export const ORDER_LINE_ITEMS_PAGE_QUERY = /* GraphQL */ `
           totalDiscountSet { shopMoney { amount currencyCode } }
           requiresShipping
           taxable
+          taxLines { title rate priceSet { shopMoney { amount currencyCode } } }
           variant {
             id
             product { id }
@@ -227,6 +252,8 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
         currentSubtotalPriceSet { shopMoney { amount currencyCode } }
         totalPriceSet { shopMoney { amount currencyCode } }
         totalTaxSet { shopMoney { amount currencyCode } }
+        taxesIncluded
+        shippingLine { title taxLines { title rate priceSet { shopMoney { amount currencyCode } } } }
         totalDiscountsSet { shopMoney { amount currencyCode } }
         totalShippingPriceSet { shopMoney { amount currencyCode } }
         shippingAddress {
@@ -252,6 +279,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
             totalDiscountSet { shopMoney { amount currencyCode } }
             requiresShipping
             taxable
+            taxLines { title rate priceSet { shopMoney { amount currencyCode } } }
             variant {
               id
               product { id }
@@ -300,6 +328,7 @@ export const ORDER_REFUNDS_QUERY = /* GraphQL */ `
             id
             quantity
             restockType
+            totalTaxSet { shopMoney { amount currencyCode } }
             lineItem { id }
           }
         }

@@ -1371,6 +1371,46 @@ export interface ProductSettings {
 export interface OrderSettings {
   /** When true, offline orders created in the CRM are auto-pushed to Shopify. Default false. */
   autoSyncToShopify: boolean;
+  /**
+   * When true, a GST invoice is issued automatically for a Shopify order the
+   * moment it becomes PAID. Default false.
+   *
+   * Shopify orders only, and live webhooks only — a bulk backfill never
+   * auto-invoices, or a first connect would issue invoices for up to 60 days
+   * of history all dated today. Offline orders are unaffected: they already
+   * invoice inline at creation and are written PAID.
+   *
+   * Requires GST enabled with a registered GSTIN; without them the attempt
+   * soft-fails server-side and the order still syncs.
+   */
+  autoInvoiceOnPayment: boolean;
+}
+
+/** Per-org GST/tax settings. Both values change STATUTORY OUTPUT. */
+export interface TaxSettings {
+  /**
+   * Invoice value at or below which an inter-State B2C supply is summarised in
+   * GSTR-1 table 7 rather than reported invoice-wise in table 5.
+   *
+   * A setting, not a constant: the statutory figure dropped from Rs 2,50,000 to
+   * Rs 1,00,000 in November 2024, and an accountant may still be filing a prior
+   * period against the older limit.
+   */
+  b2cLargeThreshold: number;
+  /**
+   * Unit quantity code used for GSTR-1 table 12 rows when a product does not
+   * specify one. Table 12 requires a unit on every row.
+   */
+  defaultUnitOfMeasure: string;
+  /**
+   * Tax delivery as a composite supply, at the principal supply's rate.
+   *
+   * ⚠️ DEFAULT OFF — the only setting here that changes tax charged on a real
+   * transaction. For a Shopify order the customer was already charged at
+   * checkout, so enabling this before the store's own shipping-tax setting
+   * matches makes the invoice declare more than was collected.
+   */
+  taxShipping: boolean;
 }
 
 /** Response from GET /organization/settings — every domain returned together. */
@@ -1378,6 +1418,7 @@ export interface OrganizationSettingsResponse {
   productSettings: ProductSettings;
   orderSettings: OrderSettings;
   inventorySettings: InventorySettings;
+  taxSettings: TaxSettings;
 }
 
 /** Patch payload for PATCH /organization/settings/products. */
@@ -1385,6 +1426,9 @@ export type UpdateProductSettingsRequest = Partial<ProductSettings>;
 
 /** Patch payload for PATCH /organization/settings/orders. */
 export type UpdateOrderSettingsRequest = Partial<OrderSettings>;
+
+/** Patch payload for PATCH /organization/settings/tax. */
+export type UpdateTaxSettingsRequest = Partial<TaxSettings>;
 
 // ─── Manual sync endpoints ──────────────────────────────────────────────────
 
@@ -1966,6 +2010,86 @@ export interface CreateInvoiceRequest {
   buyerGstin?: string;
   placeOfSupplyCode?: string;
   notes?: string;
+  /**
+   * Whether tax is payable by the RECIPIENT under reverse charge.
+   *
+   * Rule 46(p) requires the invoice to declare this. The column existed since
+   * the GST tables were created but nothing wrote it, so every invoice showed
+   * the default and the declaration could only ever say "No".
+   */
+  reverseCharge?: boolean;
+}
+
+/** A refunded order whose invoice still needs a credit note. */
+export interface RefundPendingCredit {
+  orderId: string;
+  orderName: string;
+  currency: string;
+  invoiceId: string;
+  invoiceNumber: string;
+  invoiceTotal: string;
+  refundedAmount: string;
+  /**
+   * NULL when the sales channel never reported the tax.
+   *
+   * Must be shown as unknown, never as zero — a credit note raised for the
+   * refunded amount with no tax would reverse the sale value while leaving all
+   * of its output tax declared.
+   */
+  refundedTax: string | null;
+  /**
+   * Already credited against this order, as POSITIVE amounts — credit notes
+   * store the magnitudes printed on the paper document, not negatives.
+   */
+  creditedAmount: string;
+  creditedTax: string;
+  /**
+   * Refunded minus already credited: what a note raised NOW should be for.
+   *
+   * Always > 0 (an order is dropped from this list once fully credited). Use
+   * this for the prefill, never `refundedAmount` — an order that was already
+   * part-credited would otherwise prefill an amount the server refuses as
+   * over-crediting.
+   */
+  pendingAmount: string;
+  /** Null for the same reason as `refundedTax`: unknown, not zero. */
+  pendingTax: string | null;
+  refundCount: number;
+  lastRefundAt: string | null;
+  reason: string | null;
+}
+
+/** Payload for POST /invoices/:id/credit-note. */
+export interface CreateCreditNoteRequest {
+  /** Printed on the note and reported with it in GSTR-1 table 9B. */
+  reason: string;
+  /**
+   * Amount to credit, inclusive of tax. Omit for a FULL reversal of whatever
+   * remains uncredited. A partial credit is apportioned pro-rata across the
+   * original lines, so each keeps its own GST rate.
+   */
+  amount?: number;
+  notes?: string;
+}
+
+/** A period recorded as filed, which locks it against edits. */
+export interface GstFiling {
+  id: string;
+  financialYear: string;
+  period: string;
+  returnType: "GSTR1" | "GSTR3B";
+  sellerGstinId: string | null;
+  filedAt: string;
+  arn: string | null;
+}
+
+/** Payload for POST /invoices/gst-return/filings. */
+export interface MarkFiledRequest {
+  financialYear: string;
+  period: string;
+  returnType: "GSTR1" | "GSTR3B";
+  sellerGstinId?: string;
+  arn?: string;
 }
 
 /** Query parameters for the invoice list endpoint. */
@@ -2035,6 +2159,30 @@ export interface InvoiceStats {
     b2b: number;
     cancelled: number;
   };
+  /**
+   * Paid orders whose invoice could not be issued (GST disabled, no GSTIN, an
+   * invoice already live). Deliberately NOT financial-year scoped: an org
+   * accruing these needs to know regardless of the year being viewed.
+   *
+   * A sibling of `counts`, not a member — `counts` counts INVOICES and drives
+   * the filter chips; this counts ORDERS and drives a warning.
+   */
+  uninvoicedPaidOrders: number;
+  /** Invoices whose declared tax diverged from what the sales channel charged. */
+  taxMismatches: number;
+  /**
+   * Issued invoices carrying a line with no HSN code. GSTR-1 Table 12 cannot be
+   * filed until this is zero — it is a catalogue task, not a bug.
+   */
+  invoicesMissingHsn: number;
+  /**
+   * Refunded orders whose invoice has not been credited.
+   *
+   * Credit notes existed but nothing surfaced the need, so a refunded sale sat
+   * at full value in the return until somebody remembered — the exact problem
+   * credit notes were built to solve.
+   */
+  refundsNeedingCreditNote: number;
   currency: string;
 }
 
@@ -2056,6 +2204,11 @@ export interface Gstr1B2bEntry {
   invoices: Array<{
     invoiceNumber: string;
     invoiceDate: string;
+    /** Mandatory in GSTR-1 and varies per invoice within one buyer, so it
+     *  travels on the invoice rather than the buyer group. The server always
+     *  sent these; the type omitted them. */
+    placeOfSupply: string | null;
+    placeOfSupplyName: string | null;
     gstType: GstType;
     subtotal: number;
     cgst: number;
@@ -2080,19 +2233,92 @@ export interface Gstr1B2cSummary {
   totalTax: number;
 }
 
-/** HSN-wise summary in GSTR-1. */
+/** One GSTR-1 Table 12 row — keyed by HSN AND rate, with a UQC. */
 export interface Gstr1HsnSummary {
-  hsnCode: string;
+  /** Null when the product carries no HSN. Rendered as a warning, never a code. */
+  hsnCode: string | null;
+  description: string;
+  /** Unit quantity code (NOS, PCS, KGS...). Table 12 requires one per row. */
+  uqc: string;
+  gstRate: number;
   quantity: number;
-  taxable: number;
-  tax: number;
+  totalValue: number;
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+}
+
+/** Table 5 — an inter-State B2C invoice above the threshold, reported invoice-wise. */
+export interface Gstr1B2clRow {
+  invoiceNumber: string;
+  invoiceDate: string;
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  gstRate: number;
+  taxableValue: number;
+  igst: number;
+  invoiceValue: number;
+}
+
+/** Table 7 — other B2C supplies, by place of supply AND rate. */
+export interface Gstr1B2csRow {
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  gstRate: number;
+  supplyType: "INTER" | "INTRA";
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+}
+
+/** One GSTR-1 Table 9B row — a credit note against an earlier invoice. */
+export interface Gstr1CreditNoteRow {
+  /** CDNR when the buyer is registered, CDNUR when they are not. */
+  section: "CDNR" | "CDNUR";
+  noteNumber: string;
+  noteDate: string;
+  buyerGstin: string | null;
+  buyerName: string;
+  originalInvoiceNumber: string | null;
+  placeOfSupply: string;
+  placeOfSupplyName: string;
+  reason: string | null;
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  noteValue: number;
+}
+
+/** Table 8 — supplies attracting no tax, split three ways. */
+export interface Gstr1NilRatedRow {
+  /** 8A / 8B / 8C / 8D. */
+  section: string;
+  description: string;
+  nilRated: number;
+  exempted: number;
+  nonGst: number;
 }
 
 /** Full GSTR-1 return data. */
 export interface GstReturnGstr1 {
   b2b: Gstr1B2bEntry[];
+  /** Table 5 — invoice-wise, above the B2C large-invoice threshold. */
+  b2cl: Gstr1B2clRow[];
+  /** Table 7 — rate-wise. This is the filable B2C shape. */
+  b2cs: Gstr1B2csRow[];
+  /**
+   * Per-state roll-up, retained for the summary panel. NOT filable on its own —
+   * it mixes every rate into one row per state, which is what b2cl/b2cs fix.
+   */
   b2cSummary: Gstr1B2cSummary[];
   hsnSummary: Gstr1HsnSummary[];
+  /** Table 8 — nil-rated, exempted and non-GST outward supplies. */
+  nilRated: Gstr1NilRatedRow[];
+  /** Table 9B — credit notes against earlier invoices (CDNR / CDNUR). */
+  creditNotes: Gstr1CreditNoteRow[];
   totals: {
     totalTaxable: number;
     totalCgst: number;
@@ -2100,6 +2326,17 @@ export interface GstReturnGstr1 {
     totalIgst: number;
     totalTax: number;
     totalInvoices: number;
+    /** Lines with no HSN. Must reach zero before Table 12 can be filed. */
+    linesMissingHsn: number;
+    /**
+     * The tax figures above are NET of credit notes — that is what gets filed.
+     * These keep the deduction visible rather than implied, and give table 12
+     * (which reports invoice lines, not notes) something to reconcile against.
+     */
+    grossTaxable: number;
+    creditNoteCount: number;
+    creditNoteTaxable: number;
+    creditNoteTax: number;
   };
 }
 
@@ -2125,6 +2362,16 @@ export interface Gstr3bInterStateRow {
 /** Full GSTR-3B return data. */
 export interface GstReturnGstr3B {
   outwardSupplies: Gstr3bOutwardSupply[];
+  /**
+   * 3.1(b), (c) and (e) — taxable value only, since none carries tax.
+   * Before supplies were classified, every line landed in 3.1(a) and these
+   * three were permanently empty.
+   */
+  otherSupplies: {
+    zeroRated: number;
+    nilRatedExempt: number;
+    nonGst: number;
+  };
   interState: {
     invoiceCount: number;
     totalTaxable: number;

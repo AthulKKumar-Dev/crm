@@ -12,6 +12,33 @@ export const OrderSettingsSchema = z.object({
    * local until pushed manually or via the channels-page bulk Sync.
    */
   autoSyncToShopify: z.boolean().default(false),
+
+  /**
+   * When TRUE, a GST invoice is issued automatically for a Shopify order the
+   * moment it reaches `financialStatus = PAID`.
+   *
+   * Governs the SHOPIFY path only. Offline orders already invoice inline in
+   * `OrderService.createOfflineOrder` via the per-request `generateInvoice`
+   * flag (which defaults to on), and they are written `PAID` at creation — so
+   * they already behave as "invoice on payment". Gating them behind this
+   * setting would silently stop invoices orgs get today.
+   *
+   * Default FALSE is the safe direction for three reasons:
+   *   1. Invoice numbers are statutory and gapless. Turning this on starts
+   *      consuming serials automatically, and an org that is not ready for
+   *      that should have to opt in.
+   *   2. It only takes effect on LIVE webhooks — never on the bulk backfill,
+   *      which on first connect would otherwise invoice up to
+   *      SHOPIFY_INITIAL_ORDER_WINDOW_DAYS of historical orders in one burst,
+   *      all dated today.
+   *   3. `Organization.gstEnabled` and a registered GSTIN are still required;
+   *      without them the attempt soft-fails and only logs.
+   *
+   * Payment, not placement, is the trigger: invoicing at placement means every
+   * abandoned or cancelled order burns a serial and leaves a CANCELLED invoice
+   * in the sequence that gets filed.
+   */
+  autoInvoiceOnPayment: z.boolean().default(false),
 });
 
 export type OrderSettings = z.infer<typeof OrderSettingsSchema>;
@@ -27,6 +54,7 @@ export type OrderSettings = z.infer<typeof OrderSettingsSchema>;
  */
 export const UpdateOrderSettingsSchema = z.object({
   autoSyncToShopify: z.boolean().optional(),
+  autoInvoiceOnPayment: z.boolean().optional(),
 });
 export type UpdateOrderSettingsInput = z.infer<typeof UpdateOrderSettingsSchema>;
 

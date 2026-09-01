@@ -58,14 +58,30 @@ const DASH = "—";
 /** Statutory GST rates. Used to decide whether an effective rate is a real slab. */
 const GST_SLABS = [0, 0.25, 3, 5, 12, 18, 28];
 
+/**
+ * Role router. The vendor branch has to happen on a component boundary rather
+ * than as an early return inside the owner view: `GET /orders/:id` answers a
+ * vendor with a vendor-scoped projection carrying no `channel`, no
+ * `financialStatus` and no `metadata` (server-side `findOneForVendor`), so
+ * every owner hook below would be reading a shape that does not exist —
+ * `useOrderActionGates` crashed on exactly that. Two components means two
+ * independent hook orders, so neither role has to run the other's hooks.
+ */
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { isVendor } = useCurrentRole();
+
+  // Vendors get a deliberately narrow, vendor-scoped view (their items only).
+  if (isVendor) {
+    return <VendorOrderDetail orderId={id!} />;
+  }
+  return <OwnerOrderDetail id={id!} />;
+}
+
+function OwnerOrderDetail({ id }: { id: string }) {
   const { data: order, isLoading, isError, refetch } = useOrder(id);
   const { data: org } = useCurrentOrg();
 
-  // Every hook must run before the vendor early-return below, or the hook order
-  // changes between renders.
   const { data: adjacent } = useAdjacentOrders(id);
   const {
     data: customer,
@@ -78,8 +94,7 @@ export default function OrderDetailPage() {
   const [showInvoiceDialog, setShowInvoiceDialog] = useState(false);
   const [dialog, setDialog] = useState<"fulfill" | "capture" | "cancel" | null>(null);
   // Same gates the Actions menu uses, so the rail below can't offer a button
-  // the menu deliberately hides. Called here, above the early-returns, for the
-  // hook-order reason noted above.
+  // the menu deliberately hides.
   const { canManage, canCapture, canCancel, canFulfill, canEdit } =
     useOrderActionGates(order);
 
@@ -90,11 +105,6 @@ export default function OrderDetailPage() {
   // one — enforced server-side). No list-scan: correct at any invoice count,
   // and vendors never trigger a forbidden /invoices request.
   const invoice = order?.invoices?.[0] ?? null;
-
-  // Vendors get a deliberately narrow, vendor-scoped view (their items only).
-  if (isVendor) {
-    return <VendorOrderDetail orderId={id!} />;
-  }
 
   // Must precede the spinner below: on failure `isLoading` is false and
   // `order` undefined, so `isLoading || !order` held the spinner on screen

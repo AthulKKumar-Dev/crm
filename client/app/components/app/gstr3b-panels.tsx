@@ -29,22 +29,23 @@ function Amount({ value, currency }: { value: number; currency: string }) {
 }
 
 /**
- * 3.1 — outward supplies, broken down by GST rate.
+ * 3.1(a) — outward taxable supplies, broken down by GST rate.
  *
- * The statutory form splits this into rows (a)–(e) by supply nature (taxable,
- * zero-rated, nil/exempt, reverse-charge inward, non-GST). Nothing in the
- * schema classifies a line that way, so every invoice here is row (a) and the
- * other four would be permanently empty. Showing the rate breakdown instead
- * keeps the table informative without implying classifications the data does
- * not carry.
+ * This used to be the WHOLE of 3.1, with a note admitting that supply-nature
+ * classification was not tracked: every line landed in row (a) and (b), (c) and
+ * (e) were permanently empty. Products now carry a supply type, so those rows
+ * are real and live in Gstr3bOtherSuppliesPanel below.
+ *
+ * Row (d), inward supplies liable to reverse charge, is still absent — this
+ * module reports outward supplies only, and nothing records inward ones.
  */
 export function Gstr3bOutwardPanel({ data, currency }: PanelProps) {
   const totals = outwardSupplyTotals(data.outwardSupplies);
 
   return (
     <SectionCard
-      title="3.1 · Outward taxable supplies"
-      description="By GST rate — supply-nature classification is not tracked"
+      title="3.1(a) · Outward taxable supplies"
+      description="By GST rate"
     >
       {data.outwardSupplies.length === 0 ? (
         <div className="p-8">
@@ -159,6 +160,66 @@ export function Gstr3bInterStatePanel({ data, currency }: PanelProps) {
           ))}
         </ul>
       )}
+    </SectionCard>
+  );
+}
+
+/**
+ * 3.1(b), (c) and (e) — supplies that carry no tax.
+ *
+ * Taxable value only, by design: none of these three attracts tax, so a tax
+ * column would be a column of zeros. They were impossible to report before
+ * products carried a supply type, because nil-rated, exempted and non-GST all
+ * resolve to a 0% rate and could not be told apart from each other.
+ */
+export function Gstr3bOtherSuppliesPanel({ data, currency }: PanelProps) {
+  const rows = [
+    {
+      key: "zero",
+      label: "(b) Zero-rated supplies (exports, SEZ)",
+      value: data.otherSupplies?.zeroRated ?? 0,
+    },
+    {
+      key: "nil",
+      label: "(c) Nil-rated and exempted supplies",
+      value: data.otherSupplies?.nilRatedExempt ?? 0,
+    },
+    {
+      key: "nongst",
+      label: "(e) Non-GST outward supplies",
+      value: data.otherSupplies?.nonGst ?? 0,
+    },
+  ];
+
+  // Nothing to report is worth saying once, rather than as three zero rows that
+  // read like filed figures.
+  if (rows.every((r) => !r.value)) return null;
+
+  return (
+    <SectionCard
+      title="3.1(b)(c)(e) · Other outward supplies"
+      description="Zero-rated, nil-rated/exempt and non-GST"
+    >
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Nature of supply</TableHead>
+              <TableHead className="text-right">Taxable value</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.key}>
+                <TableCell>{row.label}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <Amount value={row.value} currency={currency} />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </SectionCard>
   );
 }

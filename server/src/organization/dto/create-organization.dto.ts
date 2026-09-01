@@ -1,5 +1,6 @@
 import { BillingInterval, BillingPlan } from '@prisma/client';
 import { IsEnum, IsOptional, IsString, IsUrl, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsIanaTimeZone } from '../../common/validators/is-iana-timezone.validator';
 
 // Used for creating an ORGANIZATION type org.
 // Personal workspace creation uses POST /organizations/personal (see CreatePersonalDto).
@@ -25,7 +26,7 @@ export class CreateOrganizationDto {
     // IANA timezone (e.g., "America/New_York", "Asia/Kolkata")
     // Used for displaying dates/times across the CRM
     @IsOptional()
-    @IsString()
+    @IsIanaTimeZone()
     timezone?: string;
 
     // ISO 4217 currency code (e.g., "USD", "INR", "EUR")

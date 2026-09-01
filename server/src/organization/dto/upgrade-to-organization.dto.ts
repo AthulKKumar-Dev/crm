@@ -5,6 +5,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { IsIanaTimeZone } from '../../common/validators/is-iana-timezone.validator';
 
 /**
  * Upgrade a PERSONAL workspace to an ORGANIZATION type. Same shape as the
@@ -31,6 +32,6 @@ export class UpgradeToOrganizationDto {
   website?: string;
 
   @IsOptional()
-  @IsString()
+  @IsIanaTimeZone()
   timezone?: string;
 }

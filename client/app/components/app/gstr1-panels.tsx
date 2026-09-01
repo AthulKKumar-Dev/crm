@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
+import { ChevronDown, ChevronRight, TriangleAlert } from "lucide-react";
 
 import {
   Table,
@@ -31,6 +32,17 @@ function SectionTotal({ amount, currency }: { amount: number; currency: string }
   );
 }
 
+/**
+ * A zero rendered as an em dash.
+ *
+ * A column of "₹0.00" reads like a filed figure; a dash reads like "nothing
+ * here", which is what it means. Mirrors the helper in gstr3b-panels.
+ */
+function Amount({ value, currency }: { value: number; currency: string }) {
+  if (!value) return <span className="text-muted-foreground">—</span>;
+  return <>{formatCurrency(value, currency, { maximumFractionDigits: 0 })}</>;
+}
+
 function ShowAllButton({
   expanded,
   hiddenCount,
@@ -55,9 +67,18 @@ function ShowAllButton({
   );
 }
 
-/** 4A — invoice-wise outward supplies to registered buyers, grouped by GSTIN. */
+/**
+ * 4A — invoice-wise outward supplies to registered buyers, grouped by GSTIN.
+ *
+ * The per-invoice rows were fetched and thrown away: this panel rendered only
+ * buyer-level counts and totals while the page subtitle, this comment and the
+ * card description all claimed "invoice-wise". Expanding a buyer now shows the
+ * invoices that were already on the wire.
+ */
 export function Gstr1B2bPanel({ data, currency }: PanelProps) {
   const [expanded, setExpanded] = useState(false);
+  const [openBuyer, setOpenBuyer] = useState<string | null>(null);
+
   const totals = b2bSectionTotals(data.b2b);
   const rows = expanded ? data.b2b : data.b2b.slice(0, COLLAPSED_ROWS);
 
@@ -71,7 +92,7 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
         <div className="p-8">
           <EmptyState
             title="No B2B invoices"
-            description="Invoices to buyers with a GSTIN will appear here."
+            description="No invoices in this period carry a buyer GSTIN."
           />
         </div>
       ) : (
@@ -79,7 +100,7 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
-                <TableRow className="hover:bg-transparent">
+                <TableRow>
                   <TableHead>Buyer GSTIN</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead className="text-right">Invoices</TableHead>
@@ -88,26 +109,220 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((entry) => (
-                  <TableRow key={entry.buyerGstin} className="hover:bg-transparent">
-                    <TableCell className="font-mono text-caption text-muted-foreground">
-                      {entry.buyerGstin}
+                {rows.map((entry) => {
+                  const isOpen = openBuyer === entry.buyerGstin;
+                  return (
+                    <Fragment key={entry.buyerGstin}>
+                      <TableRow
+                        className="cursor-pointer"
+                        onClick={() =>
+                          setOpenBuyer(isOpen ? null : entry.buyerGstin)
+                        }
+                      >
+                        <TableCell className="font-mono text-caption">
+                          <span className="inline-flex items-center gap-1.5">
+                            {isOpen ? (
+                              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                            )}
+                            {entry.buyerGstin}
+                          </span>
+                        </TableCell>
+                        <TableCell>{entry.buyerName}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {entry.invoiceCount}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatCurrency(entry.totalTaxable, currency, {
+                            maximumFractionDigits: 0,
+                          })}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatCurrency(entry.totalTax, currency, {
+                            maximumFractionDigits: 0,
+                          })}
+                        </TableCell>
+                      </TableRow>
+
+                      {isOpen &&
+                        entry.invoices.map((inv) => (
+                          <TableRow
+                            key={inv.invoiceNumber}
+                            className="bg-muted/40"
+                          >
+                            <TableCell className="pl-9 font-mono text-micro">
+                              {inv.invoiceNumber}
+                            </TableCell>
+                            <TableCell className="text-micro text-muted-foreground">
+                              {new Date(inv.invoiceDate).toLocaleDateString(
+                                "en-IN",
+                              )}
+                              {inv.placeOfSupply ? (
+                                <>
+                                  {" · "}
+                                  {inv.placeOfSupply} {inv.placeOfSupplyName}
+                                </>
+                              ) : null}
+                            </TableCell>
+                            <TableCell className="text-right text-micro text-muted-foreground">
+                              {inv.gstType === "IGST" ? "Inter" : "Intra"}
+                            </TableCell>
+                            <TableCell className="text-right text-micro tabular-nums">
+                              {formatCurrency(inv.subtotal, currency, {
+                                maximumFractionDigits: 0,
+                              })}
+                            </TableCell>
+                            <TableCell className="text-right text-micro tabular-nums">
+                              {formatCurrency(inv.totalTax, currency, {
+                                maximumFractionDigits: 0,
+                              })}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+          <ShowAllButton
+            expanded={expanded}
+            hiddenCount={data.b2b.length - COLLAPSED_ROWS}
+            noun="buyers"
+            onToggle={() => setExpanded((v) => !v)}
+          />
+        </>
+      )}
+    </SectionCard>
+  );
+}
+
+/**
+ * 5 — B2CL. Inter-State supplies to unregistered persons above the invoice-value
+ * threshold, reported INVOICE-WISE rather than summarised.
+ */
+export function Gstr1B2clPanel({ data, currency }: PanelProps) {
+  const total = data.b2cl.reduce((sum, r) => sum + r.taxableValue, 0);
+
+  return (
+    <SectionCard
+      title="5 · B2CL"
+      description="Large inter-State B2C invoices"
+      action={<SectionTotal amount={total} currency={currency} />}
+    >
+      {data.b2cl.length === 0 ? (
+        <div className="p-8">
+          <EmptyState
+            title="No large B2C invoices"
+            description="No inter-State consumer invoice in this period exceeds the threshold."
+          />
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Invoice</TableHead>
+                <TableHead>Place of supply</TableHead>
+                <TableHead className="text-right">Rate</TableHead>
+                <TableHead className="text-right">Taxable</TableHead>
+                <TableHead className="text-right">IGST</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.b2cl.map((row, i) => (
+                <TableRow key={`${row.invoiceNumber}-${row.gstRate}-${i}`}>
+                  <TableCell className="font-mono text-caption">
+                    {row.invoiceNumber}
+                  </TableCell>
+                  <TableCell>
+                    {row.placeOfSupplyName}{" "}
+                    <span className="text-muted-foreground">
+                      ({row.placeOfSupply})
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.gstRate}%
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatCurrency(row.taxableValue, currency, {
+                      maximumFractionDigits: 0,
+                    })}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    <Amount value={row.igst} currency={currency} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
+/**
+ * 7 — B2CS, by place of supply AND rate.
+ *
+ * Replaces a single row per state that mixed every rate together. That row was
+ * unfilable: GSTR-1 has no place to report "₹57,700 in Maharashtra" without
+ * saying at what rate.
+ */
+export function Gstr1B2csPanel({ data, currency }: PanelProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  const total = data.b2cs.reduce((sum, r) => sum + r.taxableValue, 0);
+  const rows = expanded ? data.b2cs : data.b2cs.slice(0, COLLAPSED_ROWS);
+
+  return (
+    <SectionCard
+      title="7 · B2CS"
+      description="By place of supply and rate"
+      action={<SectionTotal amount={total} currency={currency} />}
+    >
+      {data.b2cs.length === 0 ? (
+        <div className="p-8">
+          <EmptyState
+            title="No B2C supplies"
+            description="No consumer invoices in this period."
+          />
+        </div>
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Place of supply</TableHead>
+                  <TableHead className="text-right">Rate</TableHead>
+                  <TableHead className="text-right">Taxable</TableHead>
+                  <TableHead className="text-right">Tax</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row) => (
+                  <TableRow key={`${row.placeOfSupply}-${row.gstRate}`}>
+                    <TableCell>
+                      {row.placeOfSupplyName}{" "}
+                      <span className="text-muted-foreground">
+                        ({row.placeOfSupply})
+                      </span>
                     </TableCell>
-                    <TableCell className="text-caption font-medium text-foreground">
-                      {entry.buyerName}
+                    <TableCell className="text-right tabular-nums">
+                      {row.gstRate}%
                     </TableCell>
-                    <TableCell className="text-right text-caption tabular-nums text-muted-foreground">
-                      {entry.invoiceCount}
-                    </TableCell>
-                    <TableCell className="text-right text-caption tabular-nums text-foreground">
-                      {formatCurrency(entry.totalTaxable, currency, {
+                    <TableCell className="text-right tabular-nums">
+                      {formatCurrency(row.taxableValue, currency, {
                         maximumFractionDigits: 0,
                       })}
                     </TableCell>
-                    <TableCell className="text-right text-caption font-medium tabular-nums text-foreground">
-                      {formatCurrency(entry.totalTax, currency, {
-                        maximumFractionDigits: 0,
-                      })}
+                    <TableCell className="text-right tabular-nums">
+                      <Amount
+                        value={row.cgst + row.sgst + row.igst}
+                        currency={currency}
+                      />
                     </TableCell>
                   </TableRow>
                 ))}
@@ -116,9 +331,9 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
           </div>
           <ShowAllButton
             expanded={expanded}
-            hiddenCount={data.b2b.length - COLLAPSED_ROWS}
-            noun="buyers"
-            onToggle={() => setExpanded((previous) => !previous)}
+            hiddenCount={data.b2cs.length - COLLAPSED_ROWS}
+            noun="rows"
+            onToggle={() => setExpanded((v) => !v)}
           />
         </>
       )}
@@ -126,74 +341,247 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
   );
 }
 
-/** 7 — consolidated B2C supplies, grouped by place of supply. */
-export function Gstr1B2cPanel({ data, currency }: PanelProps) {
+/**
+ * 8 — supplies attracting no tax.
+ *
+ * Nil-rated, exempted and non-GST are three legally distinct statuses that all
+ * resolve to zero tax, so they are classified on the product rather than
+ * inferred from the rate. Nothing tracked them before, so this table did not
+ * exist.
+ */
+export function Gstr1NilRatedPanel({ data, currency }: PanelProps) {
+  if (!data.nilRated?.length) return null;
+
   return (
-    <SectionCard title="7 · B2C summary" description="By place of supply">
-      {data.b2cSummary.length === 0 ? (
+    <SectionCard
+      title="8 · Nil-rated, exempt and non-GST"
+      description="Supplies attracting no tax"
+    >
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Section</TableHead>
+              <TableHead>Description</TableHead>
+              <TableHead className="text-right">Nil rated</TableHead>
+              <TableHead className="text-right">Exempted</TableHead>
+              <TableHead className="text-right">Non-GST</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {data.nilRated.map((row) => (
+              <TableRow key={row.section}>
+                <TableCell className="font-mono text-caption">
+                  {row.section}
+                </TableCell>
+                <TableCell className="text-caption text-muted-foreground">
+                  {row.description}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <Amount value={row.nilRated} currency={currency} />
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <Amount value={row.exempted} currency={currency} />
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <Amount value={row.nonGst} currency={currency} />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </SectionCard>
+  );
+}
+
+/**
+ * 12 — HSN summary, by HSN AND rate, with a unit quantity code.
+ *
+ * Was a three-field list (code, quantity, tax) grouped by HSN alone. Table 12
+ * requires the rate, the UQC, the total value and the tax split, and one code
+ * sold at two rates is two statutory rows.
+ */
+export function Gstr1HsnPanel({ data, currency }: PanelProps) {
+  const [expanded, setExpanded] = useState(false);
+
+  const missing = data.totals?.linesMissingHsn ?? 0;
+  const total = data.hsnSummary.reduce((sum, r) => sum + r.taxableValue, 0);
+  const rows = expanded
+    ? data.hsnSummary
+    : data.hsnSummary.slice(0, COLLAPSED_ROWS);
+
+  return (
+    <SectionCard
+      title="12 · HSN summary"
+      description="By HSN code and rate"
+      action={<SectionTotal amount={total} currency={currency} />}
+    >
+      {missing > 0 && (
+        // Named, not hidden. The old code invented the HSN '0000' here, which
+        // is not a valid code and went onto a statutory document.
+        <div className="flex items-start gap-2 border-b bg-warning-subtle px-5 py-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+          <p className="text-caption">
+            <strong className="font-semibold">
+              {missing} {missing === 1 ? "line has" : "lines have"} no HSN code.
+            </strong>{" "}
+            Table 12 cannot be filed until every product is classified. Add HSN
+            codes on the products, then reissue those invoices.
+          </p>
+        </div>
+      )}
+
+      {data.hsnSummary.length === 0 ? (
         <div className="p-8">
           <EmptyState
-            title="No B2C invoices"
-            description="Invoices to unregistered buyers will appear here."
+            title="No line items"
+            description="No invoices in this period."
           />
         </div>
       ) : (
-        <ul className="divide-y">
-          {data.b2cSummary.map((entry) => (
-            <li
-              key={entry.placeOfSupply}
-              className="flex items-center justify-between gap-4 px-5 py-3"
-            >
-              <span className="truncate text-caption font-medium text-foreground">
-                {entry.placeOfSupplyName} ({entry.placeOfSupply})
-              </span>
-              <span className="shrink-0 text-caption tabular-nums text-muted-foreground">
-                {entry.invoiceCount}
-              </span>
-              <span className="shrink-0 text-caption font-medium tabular-nums text-foreground">
-                {formatCurrency(entry.totalTaxable, currency, {
-                  maximumFractionDigits: 0,
-                })}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>HSN</TableHead>
+                  <TableHead>UQC</TableHead>
+                  <TableHead className="text-right">Rate</TableHead>
+                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Taxable</TableHead>
+                  <TableHead className="text-right">Tax</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((row, i) => (
+                  <TableRow key={`${row.hsnCode ?? "none"}-${row.gstRate}-${i}`}>
+                    <TableCell className="font-mono text-caption">
+                      {row.hsnCode ?? (
+                        <span className="font-sans text-warning">Missing</span>
+                      )}
+                      {/* The description goes onto the filed return but was
+                          shown nowhere, so a wrong one could only be caught by
+                          opening the downloaded CSV. Beneath the code rather
+                          than in its own column — this table is already the
+                          widest in the view. */}
+                      {row.description && (
+                        <span
+                          className="mt-0.5 block truncate font-sans text-[10px] font-normal text-muted-foreground"
+                          title={row.description}
+                        >
+                          {row.description}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-caption text-muted-foreground">
+                      {row.uqc}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.gstRate}%
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.quantity.toLocaleString("en-IN")}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {formatCurrency(row.taxableValue, currency, {
+                        maximumFractionDigits: 0,
+                      })}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      <Amount
+                        value={row.cgst + row.sgst + row.igst}
+                        currency={currency}
+                      />
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <ShowAllButton
+            expanded={expanded}
+            hiddenCount={data.hsnSummary.length - COLLAPSED_ROWS}
+            noun="rows"
+            onToggle={() => setExpanded((v) => !v)}
+          />
+        </>
       )}
     </SectionCard>
   );
 }
 
-/** 12 — HSN-wise summary of quantity and tax. */
-export function Gstr1HsnPanel({ data, currency }: PanelProps) {
+/**
+ * 9B — credit notes against earlier invoices.
+ *
+ * The table that did not exist. Refunds carried no tax at all, so a refunded
+ * sale stayed 100% in declared output liability for ever — any merchant who
+ * accepts returns had been over-declaring every month.
+ *
+ * CDNR (registered buyer) and CDNUR (unregistered) are separate tables on the
+ * form and are labelled per row rather than split into two cards, because most
+ * periods have only a handful of notes.
+ */
+export function Gstr1CreditNotePanel({ data, currency }: PanelProps) {
+  const notes = data.creditNotes ?? [];
+  const total = notes.reduce((sum, n) => sum + n.taxableValue, 0);
+
+  if (notes.length === 0) return null;
+
   return (
-    <SectionCard title="12 · HSN summary" description="Quantity and tax by code">
-      {data.hsnSummary.length === 0 ? (
-        <div className="p-8">
-          <EmptyState
-            title="No HSN data"
-            description="HSN codes are taken from the invoice line items in this period."
-          />
-        </div>
-      ) : (
-        <ul className="divide-y">
-          {data.hsnSummary.map((entry) => (
-            <li
-              key={entry.hsnCode}
-              className="flex items-center justify-between gap-4 px-5 py-3"
-            >
-              <span className="font-mono text-caption text-foreground">
-                {entry.hsnCode}
-              </span>
-              <span className="shrink-0 text-caption tabular-nums text-muted-foreground">
-                {entry.quantity.toLocaleString("en-IN")}
-              </span>
-              <span className="shrink-0 text-caption font-medium tabular-nums text-foreground">
-                {formatCurrency(entry.tax, currency, { maximumFractionDigits: 0 })}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+    <SectionCard
+      title="9B · Credit notes"
+      description={`Reversing ${notes.length} ${notes.length === 1 ? "invoice" : "invoices"}`}
+      action={<SectionTotal amount={total} currency={currency} />}
+    >
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Note</TableHead>
+              <TableHead>Against</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Reason</TableHead>
+              <TableHead className="text-right">Taxable</TableHead>
+              <TableHead className="text-right">Tax</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {notes.map((n) => (
+              <TableRow key={n.noteNumber}>
+                <TableCell className="font-mono text-caption">
+                  {n.noteNumber}
+                </TableCell>
+                <TableCell className="font-mono text-micro text-muted-foreground">
+                  {n.originalInvoiceNumber ?? "—"}
+                </TableCell>
+                <TableCell>
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-micro font-medium text-muted-foreground">
+                    {n.section}
+                  </span>
+                </TableCell>
+                <TableCell className="text-caption text-muted-foreground">
+                  {n.reason ?? "—"}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {/* Shown positive, as on the paper document. The return
+                      subtracts them; a minus sign here would read as a second
+                      negation. */}
+                  {formatCurrency(n.taxableValue, currency, {
+                    maximumFractionDigits: 0,
+                  })}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  <Amount
+                    value={n.cgst + n.sgst + n.igst}
+                    currency={currency}
+                  />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
     </SectionCard>
   );
 }

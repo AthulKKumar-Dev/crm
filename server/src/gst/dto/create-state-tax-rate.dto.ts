@@ -1,5 +1,6 @@
 import { IsNumber, IsString, Length, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
+import { IsGstRateSlab } from '../validators/is-gst-rate-slab.validator';
 
 export class CreateStateTaxRateDto {
   @IsString()
@@ -9,6 +10,6 @@ export class CreateStateTaxRateDto {
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  @Max(28)
+  @IsGstRateSlab()
   gstRate: number;
 }

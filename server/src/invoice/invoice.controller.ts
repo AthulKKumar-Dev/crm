@@ -1,5 +1,6 @@
 import {
   Controller,
+  Delete,
   Get,
   Post,
   Body,
@@ -14,7 +15,13 @@ import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
+import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
+import { MarkFiledDto } from './dto/mark-filed.dto';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
+import { attachmentDisposition } from '../common/utils/content-disposition.util';
+import { renderCsvSections } from './gst-return-rows';
 
 @Controller('invoices')
 export class InvoiceController {
@@ -51,20 +58,29 @@ export class InvoiceController {
     @Query() query: QueryGstReturnDto,
     @Res() res: Response,
   ) {
-    const data = await this.invoiceService.getGstReturnExportData(orgId, query);
-    const { Parser } = await import('json2csv');
-
-    const isGstr3b = query.returnType === 'GSTR3B';
-    const fields = isGstr3b
-      ? ['section', 'gstRate', 'taxableValue', 'cgst', 'sgst', 'igst', 'totalTax']
-      : ['section', 'buyerGstin', 'buyerName', 'invoiceNumber', 'invoiceDate', 'placeOfSupply', 'taxableValue', 'cgst', 'sgst', 'igst', 'totalTax', 'grandTotal'];
-
-    const parser = new Parser({ fields });
-    const csv = parser.parse(data);
+    // Sectioned, not one flat table.
+    //
+    // Every statutory table used to share a single 12-column row shape, which
+    // forced the HSN summary to put its code in the `invoiceNumber` column and
+    // a quantity string in `grandTotal`. Beyond being unreadable, it left no
+    // free column — Table 12 needs a UQC and a rate, and neither could be added
+    // without changing the column count of every other section. Each table now
+    // carries its own header block and exactly the columns the statute asks for.
+    //
+    // json2csv is not used here: it emits one header for one row shape, which
+    // is the constraint being removed.
+    const sections = await this.invoiceService.getGstReturnExportData(
+      orgId,
+      query,
+    );
+    const csv = renderCsvSections(sections);
 
     const filename = `${query.returnType || 'GSTR1'}-${query.financialYear}-${query.period}.csv`;
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename=${filename}`);
+    // charset matters: buyer and state names are free text and routinely
+    // non-ASCII. Without it Excel decodes UTF-8 as cp1252 and mojibakes every
+    // such name. product.controller.ts already sets it — this was the outlier.
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', attachmentDisposition(filename, 'gst-return.csv'));
     res.send(csv);
   }
 
@@ -104,10 +120,13 @@ export class InvoiceController {
     });
     const csv = parser.parse(data);
 
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename=invoices${query.financialYear ? `-${query.financialYear}` : ''}.csv`,
+      attachmentDisposition(
+        `invoices${query.financialYear ? `-${query.financialYear}` : ''}.csv`,
+        'invoices.csv',
+      ),
     );
     res.send(csv);
   }
@@ -121,6 +140,13 @@ export class InvoiceController {
     return this.invoiceService.getExportData(orgId, query);
   }
 
+  // GET /api/v1/invoices/refunds-pending-credit — refunded orders not yet credited
+  // IMPORTANT: static routes BEFORE :id param route
+  @Get('refunds-pending-credit')
+  listRefundsNeedingCreditNote(@OrgId() orgId: string) {
+    return this.invoiceService.listRefundsNeedingCreditNote(orgId);
+  }
+
   // GET /api/v1/invoices — list invoices (paginated)
   @Get()
   findAll(@OrgId() orgId: string, @Query() query: QueryInvoicesDto) {
@@ -131,6 +157,54 @@ export class InvoiceController {
   @Get(':id')
   findOne(@Param('id') id: string, @OrgId() orgId: string) {
     return this.invoiceService.findOne(id, orgId);
+  }
+
+  // GET /api/v1/invoices/filings — which periods are locked
+  // IMPORTANT: static routes BEFORE :id param route
+  @Get('gst-return/filings')
+  listFilings(
+    @OrgId() orgId: string,
+    @Query('financialYear') financialYear?: string,
+  ) {
+    return this.invoiceService.listFilings(orgId, financialYear);
+  }
+
+  // POST /api/v1/invoices/gst-return/filings — mark a period filed, locking it
+  //
+  // Role-gated: locking a period stops anyone issuing or cancelling an invoice
+  // inside it, which is squarely a statutory action.
+  @Post('gst-return/filings')
+  @Roles(...ORG_MANAGERS)
+  markFiled(
+    @OrgId() orgId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: MarkFiledDto,
+  ) {
+    return this.invoiceService.markFiled(orgId, dto, user.sub);
+  }
+
+  // DELETE /api/v1/invoices/gst-return/filings/:id — reopen a period filed in error
+  //
+  // A lock with no key turns a mistaken click into a permanently unusable month.
+  @Delete('gst-return/filings/:id')
+  @Roles(...ORG_MANAGERS)
+  unfile(@OrgId() orgId: string, @Param('id') id: string) {
+    return this.invoiceService.unfile(orgId, id);
+  }
+
+  // POST /api/v1/invoices/:id/credit-note — reverse an issued invoice
+  //
+  // The statutory correction for a filed period. Unlike cancelling, it is
+  // additive and leaves a trail: the original invoice stays in the return and
+  // the credit note nets against it.
+  @Post(':id/credit-note')
+  @Roles(...ORG_MANAGERS)
+  createCreditNote(
+    @Param('id') id: string,
+    @OrgId() orgId: string,
+    @Body() dto: CreateCreditNoteDto,
+  ) {
+    return this.invoiceService.createCreditNote(orgId, id, dto);
   }
 
   // POST /api/v1/invoices/:id/cancel — cancel an issued invoice

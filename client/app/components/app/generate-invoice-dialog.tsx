@@ -74,6 +74,7 @@ export function GenerateInvoiceDialog({
   const [buyerGstin, setBuyerGstin] = useState("");
   const [placeOfSupplyCode, setPlaceOfSupplyCode] = useState("");
   const [notes, setNotes] = useState("");
+  const [reverseCharge, setReverseCharge] = useState(false);
 
   const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
 
@@ -98,6 +99,7 @@ export function GenerateInvoiceDialog({
         buyerGstin: buyerGstin || undefined,
         placeOfSupplyCode: placeOfSupplyCode || undefined,
         notes: notes.trim() || undefined,
+        reverseCharge: reverseCharge || undefined,
       },
       { onSuccess: () => onClose() },
     );
@@ -233,6 +235,26 @@ export function GenerateInvoiceDialog({
               </SelectContent>
             </Select>
           </div>
+
+          {/* Rule 46(p) requires every tax invoice to declare whether tax is
+              payable on reverse charge. The column existed and nothing wrote
+              it, so the printed declaration could only ever read "No". */}
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={reverseCharge}
+              onChange={(e) => setReverseCharge(e.target.checked)}
+              className="mt-0.5 size-3.5 rounded border-input"
+            />
+            <span className="text-micro text-muted-foreground">
+              <span className="font-medium text-foreground">
+                Tax payable on reverse charge
+              </span>
+              <br />
+              Tick only when the RECIPIENT is liable for the tax. Printed on the
+              invoice either way.
+            </span>
+          </label>
 
           {/* The API has always accepted `notes` and both the detail dialog and
               the printed invoice render them — no UI ever sent them. */}

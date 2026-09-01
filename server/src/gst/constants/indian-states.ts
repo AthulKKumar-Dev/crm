@@ -42,6 +42,7 @@ export const INDIAN_STATES: IndianState[] = [
   { code: '36', name: 'Telangana', unionTerritory: false },
   { code: '37', name: 'Andhra Pradesh', unionTerritory: false },
   { code: '38', name: 'Ladakh', unionTerritory: true },
+  { code: '96', name: 'Other Country', unionTerritory: false },
   { code: '97', name: 'Other Territory', unionTerritory: false },
 ];
 
@@ -61,4 +62,38 @@ export function isValidStateCode(code: string): boolean {
  */
 export function getStateName(code: string): string | undefined {
   return INDIAN_STATES_MAP.get(code)?.name;
+}
+
+/** Place-of-supply code used when nothing could be resolved. */
+/**
+ * Place of supply for an export.
+ *
+ * '96' (Other Country) is the code the GST portal expects for a supply whose
+ * destination is outside India. It is a real code on the statutory list, but it
+ * was absent from INDIAN_STATES, so `isValidStateCode` rejected it and every
+ * step of `resolvePlaceOfSupply` that guards on validity silently skipped it.
+ */
+export const EXPORT_PLACE_OF_SUPPLY = '96';
+
+export const UNSPECIFIED_PLACE_OF_SUPPLY = '00';
+
+/**
+ * Render a place of supply as `"27 - Maharashtra"` for display and CSV export.
+ *
+ * Null-safe by design: the GSTR-1 B2C section groups by `Invoice.placeOfSupply`,
+ * and the exporter used to interpolate the code and name directly — so a row
+ * that had neither rendered as the literal string `"null - null"` in a return a
+ * merchant was about to file.
+ */
+export function formatPlaceOfSupply(
+  code: string | null | undefined,
+  name?: string | null,
+): string {
+  const resolvedCode = code?.trim() || UNSPECIFIED_PLACE_OF_SUPPLY;
+  const resolvedName =
+    name?.trim() ||
+    getStateName(resolvedCode) ||
+    (resolvedCode === UNSPECIFIED_PLACE_OF_SUPPLY ? 'Unspecified' : 'Unknown');
+
+  return `${resolvedCode} - ${resolvedName}`;
 }
