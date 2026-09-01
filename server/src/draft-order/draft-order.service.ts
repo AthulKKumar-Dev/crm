@@ -11,6 +11,7 @@ import {
   DraftOrderStatus,
   Prisma,
 } from '@prisma/client';
+import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -406,12 +407,21 @@ export class DraftOrderService {
         sellerState = sellerGstin?.stateCode ?? null;
       }
 
-      const placeOfSupplyCode =
-        dto.placeOfSupplyCode ||
-        dto.customer?.billingStateCode ||
-        customer?.billingStateCode ||
-        sellerState ||
-        '00';
+      // Shared resolver, not a hand-rolled chain. The previous chain skipped
+      // shipping and billing addresses entirely, so a draft shipping interstate
+      // was quoted CGST+SGST and then completed into an order that the offline
+      // path (which DOES consult the address, via this same resolver) taxed as
+      // IGST — a different tax head and a different amount on the same sale.
+      // It also bottomed out at '00', which matches no StateTaxRate row.
+      const placeOfSupplyCode = resolvePlaceOfSupply({
+        explicitCode: dto.placeOfSupplyCode,
+        shippingAddress: dto.shippingAddress,
+        billingAddress: dto.billingAddress ?? dto.shippingAddress,
+        customerBillingStateCode:
+          dto.customer?.billingStateCode ?? customer?.billingStateCode,
+        buyerGstin: dto.customer?.gstin ?? customer?.gstin,
+        sellerStateCode: sellerState,
+      });
 
       const isIntraState = sellerState
         ? this.calculator.isIntraState(sellerState, placeOfSupplyCode)
@@ -425,12 +435,36 @@ export class DraftOrderService {
         quantity: number;
         unitPrice: number;
         totalDiscount: number;
+        taxable: boolean;
       }> = [];
 
       let subtotal = 0;
       let totalTax = 0;
 
-      for (const li of dto.lineItems) {
+        // Every rate for the draft in at most four queries, on THIS transaction.
+        // This was one `resolveLineGstRate` call per line, each issuing up to
+        // four queries on `this.prisma` rather than `tx` — a second pooled
+        // connection per line while this transaction held the first.
+        const lineGstRates = sellerState
+          ? await this.taxResolver.resolveLineGstRates(
+            orgId,
+            placeOfSupplyCode,
+            dto.lineItems.map((li) => {
+              const v = variantById.get(li.productVariantId)!;
+              return {
+                productId: v.product.id,
+                // Preserve null (unset) vs 0 (explicitly exempt).
+                productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
+                // ProductVariant.taxable was stored and never read by any tax
+                // path; a variant marked non-taxable was quoted with tax.
+                variantTaxable: v.taxable,
+              };
+            }),
+            tx,
+          )
+          : dto.lineItems.map(() => 0);
+
+      for (const [lineIndex, li] of dto.lineItems.entries()) {
         const v = variantById.get(li.productVariantId)!;
         const unitPrice = li.unitPriceOverride ?? this.calculator.toNumber(v.price);
         const discount = li.discount ?? 0;
@@ -444,18 +478,8 @@ export class DraftOrderService {
           );
         }
 
-        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
-        const productGstRate = this.calculator.toNullableNumber(
-          v.product.gstRate,
-        );
-        const gstRate = sellerState
-          ? await this.taxResolver.resolveGstRate(
-              orgId,
-              v.product.id,
-              productGstRate,
-              placeOfSupplyCode,
-            )
-          : 0;
+        // Resolved above, in one batch.
+        const gstRate = lineGstRates[lineIndex];
 
         const calc = this.calculator.calculateLineItem(
           { unitPrice, quantity: li.quantity, discount, gstRate },
@@ -473,6 +497,7 @@ export class DraftOrderService {
           quantity: li.quantity,
           unitPrice,
           totalDiscount: discount,
+          taxable: v.taxable !== false,
         });
       }
 
@@ -527,7 +552,7 @@ export class DraftOrderService {
               quantity: r.quantity,
               price: r.unitPrice,
               totalDiscount: r.totalDiscount,
-              taxable: true,
+              taxable: r.taxable,
               requiresShipping: false,
             })),
           },
@@ -580,12 +605,15 @@ export class DraftOrderService {
     // If line items are present in the patch, recompute totals by rebuilding
     // the line-item list. Otherwise just patch top-level fields.
     if (dto.lineItems && dto.lineItems.length > 0) {
-      // Reuse the create() math via a small detour: delete existing line
-      // items, then run the create-style pricing pass. Easier than diffing.
-      await this.prisma.draftOrderLineItem.deleteMany({
-        where: { draftOrderId: id },
-      });
-      // Re-pricing happens inside a separate transaction below.
+      // Reuse the create() math via a small detour: clear the line items, then
+      // run the create-style pricing pass. Easier than diffing.
+      //
+      // The delete now happens INSIDE `recomputeLineItemsAndTotals`'s own
+      // transaction, not here. It used to run on `this.prisma` first, so if the
+      // re-pricing transaction then threw — a variant that no longer exists, a
+      // discount exceeding its line total, any serialization abort — the delete
+      // was already committed and the draft was left with ZERO line items and
+      // stale subtotal and tax. Deleting and recreating are one atomic step.
       const reCreated = await this.recomputeLineItemsAndTotals(
         id,
         orgId,
@@ -661,7 +689,18 @@ export class DraftOrderService {
   ) {
     const draftMeta = await this.prisma.draftOrder.findUniqueOrThrow({
       where: { id },
-      select: { channelId: true, customerId: true },
+      // Addresses and the customer's GST fields are selected so the update
+      // path resolves place of supply from what the draft ALREADY holds. A
+      // patch that changes only quantities carries no address, and resolving
+      // from the patch alone would silently fall back to the seller state —
+      // resolving worse than the create did.
+      select: {
+        channelId: true,
+        customerId: true,
+        shippingAddress: true,
+        billingAddress: true,
+        customer: { select: { billingStateCode: true, gstin: true } },
+      },
     });
 
     // Reuse create() shape — build a CreateDraftOrderDto from the patch +
@@ -699,8 +738,22 @@ export class DraftOrderService {
         sellerState = sellerGstin?.stateCode ?? null;
       }
 
-      const placeOfSupplyCode =
-        dto.placeOfSupplyCode || sellerState || '00';
+      // Same shared resolver as create() and the offline order path. Falls
+      // back to the STORED addresses when the patch does not carry them.
+      const placeOfSupplyCode = resolvePlaceOfSupply({
+        explicitCode: dto.placeOfSupplyCode,
+        shippingAddress: dto.shippingAddress ?? draftMeta.shippingAddress,
+        billingAddress:
+          dto.billingAddress ??
+          draftMeta.billingAddress ??
+          dto.shippingAddress ??
+          draftMeta.shippingAddress,
+        customerBillingStateCode:
+          dto.customer?.billingStateCode ??
+          draftMeta.customer?.billingStateCode,
+        buyerGstin: dto.customer?.gstin ?? draftMeta.customer?.gstin,
+        sellerStateCode: sellerState,
+      });
       const isIntraState = sellerState
         ? this.calculator.isIntraState(sellerState, placeOfSupplyCode)
         : true;
@@ -715,9 +768,33 @@ export class DraftOrderService {
         quantity: number;
         unitPrice: number;
         totalDiscount: number;
+        taxable: boolean;
       }> = [];
 
-      for (const li of dto.lineItems ?? []) {
+        // Every rate for the draft in at most four queries, on THIS transaction.
+        // This was one `resolveLineGstRate` call per line, each issuing up to
+        // four queries on `this.prisma` rather than `tx` — a second pooled
+        // connection per line while this transaction held the first.
+        const lineGstRates = sellerState
+          ? await this.taxResolver.resolveLineGstRates(
+            orgId,
+            placeOfSupplyCode,
+            (dto.lineItems ?? []).map((li) => {
+              const v = variantById.get(li.productVariantId)!;
+              return {
+                productId: v.product.id,
+                // Preserve null (unset) vs 0 (explicitly exempt).
+                productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
+                // ProductVariant.taxable was stored and never read by any tax
+                // path; a variant marked non-taxable was quoted with tax.
+                variantTaxable: v.taxable,
+              };
+            }),
+            tx,
+          )
+          : (dto.lineItems ?? []).map(() => 0);
+
+      for (const [lineIndex, li] of (dto.lineItems ?? []).entries()) {
         const v = variantById.get(li.productVariantId)!;
         const unitPrice =
           li.unitPriceOverride ?? this.calculator.toNumber(v.price);
@@ -732,18 +809,8 @@ export class DraftOrderService {
           );
         }
 
-        // Preserve null (unset) vs 0 (explicitly exempt) for the resolver.
-        const productGstRate = this.calculator.toNullableNumber(
-          v.product.gstRate,
-        );
-        const gstRate = sellerState
-          ? await this.taxResolver.resolveGstRate(
-              orgId,
-              v.product.id,
-              productGstRate,
-              placeOfSupplyCode,
-            )
-          : 0;
+        // Resolved above, in one batch.
+        const gstRate = lineGstRates[lineIndex];
 
         const calc = this.calculator.calculateLineItem(
           { unitPrice, quantity: li.quantity, discount, gstRate },
@@ -760,6 +827,7 @@ export class DraftOrderService {
           quantity: li.quantity,
           unitPrice,
           totalDiscount: discount,
+          taxable: v.taxable !== false,
         });
       }
 
@@ -767,6 +835,10 @@ export class DraftOrderService {
       subtotal = round(subtotal);
       totalTax = round(totalTax);
       const grandTotal = round(subtotal + totalTax);
+
+      // Atomic with the recreate below — see the note at the call site. Doing
+      // this outside the transaction is what could empty a draft on any failure.
+      await tx.draftOrderLineItem.deleteMany({ where: { draftOrderId: id } });
 
       await tx.draftOrderLineItem.createMany({
         data: lineRows.map((r) => ({
@@ -779,7 +851,7 @@ export class DraftOrderService {
           quantity: r.quantity,
           price: r.unitPrice,
           totalDiscount: r.totalDiscount,
-          taxable: true,
+          taxable: r.taxable,
           requiresShipping: false,
         })),
       });

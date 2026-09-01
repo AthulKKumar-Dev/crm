@@ -1,13 +1,16 @@
 import { IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsString, IsUrl, MaxLength, Min, MinLength } from 'class-validator';
 import { LoyaltyMetric } from '@prisma/client';
 import { LoyaltyConsistent } from '../validators/loyalty-consistent.validator';
+import { IsIanaTimeZone } from '../../common/validators/is-iana-timezone.validator';
 
 // Same fields as create, but all optional (partial update)
 // Plus settings fields (lowStockThreshold, gstEnabled, loyalty*) that don't belong at creation time.
 export class UpdateOrganizationDto {
     @IsOptional() @IsString() @MinLength(2) @MaxLength(100) name?: string;
     @IsOptional() @IsUrl() logo?: string;
-    @IsOptional() @IsString() timezone?: string;
+    // Must resolve in Intl: an unparseable zone reaches `zonedParts` and throws
+    // RangeError from every GST date path, not just this endpoint.
+    @IsOptional() @IsIanaTimeZone() timezone?: string;
     @IsOptional() @IsString() currency?: string;
     @IsOptional() @IsString() industry?: string;
     @IsOptional() @IsUrl() website?: string;

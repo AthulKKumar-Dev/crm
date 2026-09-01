@@ -207,10 +207,15 @@ export class ShopifyWebhookController {
                     // by going through the same code path. Optimistic local
                     // updates from the service actions run before this webhook
                     // arrives — this is the authoritative reconcile.
+                    // `live: true` marks this as a real-time webhook rather than
+                    // a backfill page, which is what lets `upsertOrder`
+                    // auto-issue a GST invoice when the order becomes paid. The
+                    // bulk sync deliberately omits it — see the flag's docblock.
                     await this.syncService.upsertOrder(
                         channel.id,
                         channel.organizationId,
                         body,
+                        { live: true },
                     );
                     // Fire WhatsApp trigger only on NEW orders. Wrapped in
                     // try/catch so a messaging failure never bubbles up as a 5xx

@@ -31,7 +31,7 @@ import { apiClient } from "~/lib/api-client";
 import { useGstins, useIndianStates, useStateTaxRates, useProductTypeTaxRates, useCollections, useCollectionOverrides } from "~/hooks/use-gst-queries";
 import {
   useCreateGstinMutation, useUpdateGstinMutation, useDeleteGstinMutation,
-  useCreateStateTaxRateMutation, useDeleteStateTaxRateMutation,
+  useCreateStateTaxRateMutation, useDeleteStateTaxRateMutation, useUpdateStateTaxRateMutation,
   useCreateProductTypeTaxRateMutation, useDeleteProductTypeTaxRateMutation,
   useCreateCollectionOverrideMutation, useDeleteCollectionOverrideMutation,
 } from "~/hooks/use-gst-mutations";
@@ -46,6 +46,7 @@ import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-t
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
+import { GstReturnSettings } from "~/components/app/settings/gst-return-settings";
 
 export function meta() {
   return [{ title: "Settings | Collabo CRM" }];
@@ -475,7 +476,11 @@ const THEME_OPTIONS = [
 /** Appearance settings tab with theme selection, accent color, and layout options. */
 // ── Tax & GST Tab ───────────────────────────────────────────────────────────
 
-const GST_RATE_OPTIONS = ["0", "5", "12", "18", "28"];
+// Must stay in step with GST_RATE_SLABS on the server, which now ENFORCES this
+// set. 0.25% (rough diamonds) and 3% (gold, silver, jewellery) are real slabs
+// that were missing here — without them a jewellery merchant cannot select the
+// rate the server would accept.
+const GST_RATE_OPTIONS = ["0", "0.25", "3", "5", "12", "18", "28"];
 
 function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gstEnabled: boolean }) {
   const [gstEnabled, setGstEnabled] = useState(initialGstEnabled);
@@ -776,6 +781,9 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
       {gstEnabled && (
         <CollectionOverridesSection />
       )}
+
+      {/* GST return settings — B2CL threshold and default UQC. */}
+      {gstEnabled && <GstReturnSettings />}
     </>
   );
 }
@@ -790,6 +798,7 @@ function StateTaxRatesSection() {
   const { data: states = [] } = useIndianStates();
   const createRate = useCreateStateTaxRateMutation();
   const deleteRate = useDeleteStateTaxRateMutation();
+  const updateRate = useUpdateStateTaxRateMutation();
 
   function handleAdd() {
     if (!stateCode || !gstRate) { toast.error("Select a state and GST rate."); return; }
@@ -823,7 +832,25 @@ function StateTaxRatesSection() {
                   <p className="text-[10px] text-muted-foreground">State Code: {rate.stateCode}</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <span className="rounded-full bg-[#cdff8c]/20 px-2 py-0.5 text-xs font-semibold text-[#4d7a00]">{Number(rate.gstRate)}%</span>
+                  {/* Editable in place. The update mutation existed and was
+                      never imported, so changing a rate meant delete-then-
+                      recreate — which loses the row id and reads as a deletion
+                      in any audit of who changed what. */}
+                  <Select
+                    value={String(Number(rate.gstRate))}
+                    onValueChange={(next) =>
+                      updateRate.mutate({ id: rate.id, data: { gstRate: Number(next) } })
+                    }
+                  >
+                    <SelectTrigger className="h-7 w-20 text-xs" aria-label={`GST rate for ${rate.stateName}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {GST_RATE_OPTIONS.map((r) => (
+                        <SelectItem key={r} value={r} className="text-xs">{r}%</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <button onClick={() => deleteRate.mutate(rate.id)} className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors">
                     <Trash2 className="size-3.5" />
                   </button>

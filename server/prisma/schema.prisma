@@ -149,9 +149,9 @@ enum OrderCancelReason {
 }
 
 enum DraftOrderStatus {
-  OPEN          // Draft is editable
-  INVOICE_SENT  // Shopify invoice email sent; customer can pay via the hosted link
-  COMPLETED     // Draft was converted into a real Order
+  OPEN // Draft is editable
+  INVOICE_SENT // Shopify invoice email sent; customer can pay via the hosted link
+  COMPLETED // Draft was converted into a real Order
 }
 
 enum CustomerState {
@@ -164,6 +164,23 @@ enum CustomerState {
 enum GstType {
   CGST_SGST // Intra-state: Central GST + State GST
   IGST // Inter-state: Integrated GST
+}
+
+/// How a supply is classified for GST reporting.
+///
+/// NIL_RATED, EXEMPT and NON_GST all attract zero tax but are reported in
+/// different places (GSTR-1 Table 8, GSTR-3B 3.1(c) vs 3.1(e)), so they cannot
+/// be inferred from a 0% rate — they are a property of the goods and must be
+/// classified on the Product. ZERO_RATED is the exception: it is DERIVED from
+/// an export place of supply, never configured.
+enum GstSupplyType {
+  TAXABLE
+  EXEMPT
+  NIL_RATED
+  NON_GST
+  ZERO_RATED
+
+  @@map("GstSupplyType")
 }
 
 enum InvoiceStatus {
@@ -200,21 +217,21 @@ enum LoyaltyMetric {
 }
 
 model User {
-  id                 String    @id @default(cuid())
-  email              String    @unique
-  password           String // bcrypt hash
-  firstName          String    @map("first_name") // Required at signup
-  lastName           String    @map("last_name") // Required at signup
-  avatarUrl          String?   @map("avatar_url") // Optional profile picture
-  emailVerified      Boolean   @default(false) @map("email_verified")
-  emailVerifiedAt    DateTime? @map("email_verified_at")
-  emailVerifyCode    String?   @map("email_verify_code")
-  emailVerifyExpires DateTime? @map("email_verify_expires")
-  twoFactorEnabled   Boolean   @default(false) @map("two_factor_enabled")
-  twoFactorSecret    String?   @map("two_factor_secret") // TOTP secret, encrypted
-  lastLoginAt        DateTime? @map("last_login_at")
-  deletedAt          DateTime? @map("deleted_at")
-  isSuperAdmin       Boolean   @default(false) @map("is_super_admin") // Collabo-team-only global flag
+  id                            String              @id @default(cuid())
+  email                         String              @unique
+  password                      String // bcrypt hash
+  firstName                     String              @map("first_name") // Required at signup
+  lastName                      String              @map("last_name") // Required at signup
+  avatarUrl                     String?             @map("avatar_url") // Optional profile picture
+  emailVerified                 Boolean             @default(false) @map("email_verified")
+  emailVerifiedAt               DateTime?           @map("email_verified_at")
+  emailVerifyCode               String?             @map("email_verify_code")
+  emailVerifyExpires            DateTime?           @map("email_verify_expires")
+  twoFactorEnabled              Boolean             @default(false) @map("two_factor_enabled")
+  twoFactorSecret               String?             @map("two_factor_secret") // TOTP secret, encrypted
+  lastLoginAt                   DateTime?           @map("last_login_at")
+  deletedAt                     DateTime?           @map("deleted_at")
+  isSuperAdmin                  Boolean             @default(false) @map("is_super_admin") // Collabo-team-only global flag
   // ─── Pending subscription captured at onboarding's choose-plan step ───
   // Held here because the Organization (which owns the live billing fields)
   // doesn't exist yet. Copied to Organization on org creation and cleared.
@@ -224,8 +241,8 @@ model User {
   pendingExternalSubscriptionId String?             @map("pending_external_subscription_id")
   pendingSubscriptionStatus     SubscriptionStatus? @map("pending_subscription_status")
   pendingCurrentPeriodEnd       DateTime?           @map("pending_current_period_end")
-  createdAt          DateTime  @default(now()) @map("created_at")
-  updatedAt          DateTime  @updatedAt @map("updated_at")
+  createdAt                     DateTime            @default(now()) @map("created_at")
+  updatedAt                     DateTime            @updatedAt @map("updated_at")
 
   memberships         OrganizationMember[]
   refreshTokens       RefreshToken[]
@@ -259,15 +276,15 @@ model ImpersonationLog {
 }
 
 model Organization {
-  id                   String           @id @default(cuid())
-  name                 String // "Acme Store" or "John's Workspace"
-  slug                 String           @unique // URL-safe: "acme-store"
-  type                 OrganizationType @default(PERSONAL) // PERSONAL or ORGANIZATION
-  logo                 String? // Upload URL
-  timezone             String           @default("UTC")
-  currency             String           @default("USD")
-  industry             String? // e.g., "Fashion", "Electronics"
-  website              String? // Business website URL
+  id                     String              @id @default(cuid())
+  name                   String // "Acme Store" or "John's Workspace"
+  slug                   String              @unique // URL-safe: "acme-store"
+  type                   OrganizationType    @default(PERSONAL) // PERSONAL or ORGANIZATION
+  logo                   String? // Upload URL
+  timezone               String              @default("UTC")
+  currency               String              @default("USD")
+  industry               String? // e.g., "Fashion", "Electronics"
+  website                String? // Business website URL
   billingPlan            BillingPlan         @default(BASIC) @map("billing_plan")
   billingInterval        BillingInterval?    @map("billing_interval")
   externalCustomerId     String?             @map("external_customer_id")
@@ -275,19 +292,19 @@ model Organization {
   billingProvider        BillingProvider?    @map("billing_provider")
   subscriptionStatus     SubscriptionStatus? @map("subscription_status")
   currentPeriodEnd       DateTime?           @map("current_period_end")
-  lowStockThreshold    Int              @default(10) @map("low_stock_threshold")
-  gstEnabled           Boolean          @default(false) @map("gst_enabled")
-  loyaltyMetric        LoyaltyMetric    @default(ORDERS) @map("loyalty_metric")
-  loyaltyBronzeMin     Decimal          @default(1) @db.Decimal(12, 2) @map("loyalty_bronze_min")
-  loyaltySilverMin     Decimal          @default(5) @db.Decimal(12, 2) @map("loyalty_silver_min")
-  loyaltyGoldMin       Decimal          @default(15) @db.Decimal(12, 2) @map("loyalty_gold_min")
-  loyaltyPlatinumMin   Decimal          @default(30) @db.Decimal(12, 2) @map("loyalty_platinum_min")
-  onboardingStatus     OnboardingStatus @default(PENDING) @map("onboarding_status")
-  onboardingData       Json?            @map("onboarding_data") @db.JsonB
-  metadata             Json?            @db.JsonB
-  deletedAt            DateTime?        @map("deleted_at")
-  createdAt            DateTime         @default(now()) @map("created_at")
-  updatedAt            DateTime         @updatedAt @map("updated_at")
+  lowStockThreshold      Int                 @default(10) @map("low_stock_threshold")
+  gstEnabled             Boolean             @default(false) @map("gst_enabled")
+  loyaltyMetric          LoyaltyMetric       @default(ORDERS) @map("loyalty_metric")
+  loyaltyBronzeMin       Decimal             @default(1) @map("loyalty_bronze_min") @db.Decimal(12, 2)
+  loyaltySilverMin       Decimal             @default(5) @map("loyalty_silver_min") @db.Decimal(12, 2)
+  loyaltyGoldMin         Decimal             @default(15) @map("loyalty_gold_min") @db.Decimal(12, 2)
+  loyaltyPlatinumMin     Decimal             @default(30) @map("loyalty_platinum_min") @db.Decimal(12, 2)
+  onboardingStatus       OnboardingStatus    @default(PENDING) @map("onboarding_status")
+  onboardingData         Json?               @map("onboarding_data") @db.JsonB
+  metadata               Json?               @db.JsonB
+  deletedAt              DateTime?           @map("deleted_at")
+  createdAt              DateTime            @default(now()) @map("created_at")
+  updatedAt              DateTime            @updatedAt @map("updated_at")
 
   members                OrganizationMember[]
   invites                TeamInvite[]
@@ -314,6 +331,7 @@ model Organization {
   stockReservations      StockReservation[]
   stockReceipts          StockReceipt[]
   pickTasks              PickTask[]
+  gstFilings        GstFiling[]
 
   @@map("organizations")
 }
@@ -323,13 +341,14 @@ model Organization {
 /// domain (e.g. customerSettings) = one column on this table. Adding a setting
 /// within an existing domain = zero migrations — only the schema file changes.
 model OrganizationSettings {
-  id               String   @id @default(cuid())
-  organizationId   String   @unique @map("organization_id")
-  productSettings   Json?   @map("product_settings") @db.JsonB
-  orderSettings     Json?   @map("order_settings") @db.JsonB
-  inventorySettings Json?   @map("inventory_settings") @db.JsonB
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  id                String   @id @default(cuid())
+  organizationId    String   @unique @map("organization_id")
+  productSettings   Json?    @map("product_settings") @db.JsonB
+  orderSettings     Json?    @map("order_settings") @db.JsonB
+  inventorySettings Json?    @map("inventory_settings") @db.JsonB
+  taxSettings       Json?    @map("tax_settings") @db.JsonB
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -424,7 +443,7 @@ model Channel {
   lastSyncedAt     DateTime?       @map("last_synced_at")
   syncStatus       SyncStatus      @default(IDLE) @map("sync_status")
   metadata         Json?           @db.JsonB
-  pixelIngestToken String? @unique @map("pixel_ingest_token")
+  pixelIngestToken String?         @unique @map("pixel_ingest_token")
   createdAt        DateTime        @default(now()) @map("created_at")
   updatedAt        DateTime        @updatedAt @map("updated_at")
 
@@ -536,6 +555,14 @@ model Product {
   status            ProductStatus @default(ACTIVE)
   tags              String[]      @default([]) // ["summer", "sale"]
   hsnCode           String?       @map("hsn_code") // HSN/SAC code for GST (e.g. "6109")
+  /// GSTR-1 Table 12 requires a unit of quantity code (NOS, PCS, KGS, MTR...).
+  /// Null falls back to the org default in taxSettings. NOT ProductVariant.weightUnit,
+  /// which is a Shopify shipping weight and a different vocabulary entirely.
+  unitOfMeasure     String?       @map("unit_of_measure")
+  /// Nil-rated / exempt / non-GST cannot be inferred from a 0% rate, so they are
+  /// classified here. ZERO_RATED is never set here — it is derived from an export
+  /// place of supply at invoice time.
+  supplyType        GstSupplyType @default(TAXABLE) @map("supply_type")
   gstRate           Decimal?      @map("gst_rate") @db.Decimal(5, 2) // Default GST rate (e.g. 18.00)
   options           Json?         @db.JsonB // [{name:"Size", values:["S","M","L"]}]
   publishedAt       DateTime?     @map("published_at")
@@ -564,46 +591,46 @@ model Product {
 }
 
 model ProductVariant {
-  id                String   @id @default(cuid())
-  productId         String   @map("product_id")
+  id                            String         @id @default(cuid())
+  productId                     String         @map("product_id")
   // Denormalized from product.organizationId (scalar only, no relation — org
   // scoping stays transitive via product). Exists for the inventory hot paths:
   // barcode/SKU scan lookup and org-scoped duplicate detection. Nullable until
   // the NOT NULL flip migration lands after all writers are verified; app code
   // must set it on every variant create.
-  organizationId    String?  @map("organization_id")
-  externalId        String   @map("external_id") // Shopify variant ID
-  title             String // "Small / Red"
-  sku               String? // "BTS-SM-RD"
-  barcode           String?
+  organizationId                String?        @map("organization_id")
+  externalId                    String         @map("external_id") // Shopify variant ID
+  title                         String // "Small / Red"
+  sku                           String? // "BTS-SM-RD"
+  barcode                       String?
   // Provenance of `barcode`. Answers three questions no other field can:
   // which barcodes may we regenerate (GENERATED only), which may a Shopify
   // pull overwrite (anything but GENERATED — see shopify-sync upsert), and
   // which may be pushed to Shopify (GENERATED gated behind
   // inventorySettings.pushGeneratedBarcodes). NULL on legacy rows the backfill
   // could not classify; treat NULL as MANUAL.
-  barcodeSource     BarcodeSource? @map("barcode_source")
-  price             Decimal  @db.Decimal(12, 2) // $29.99
-  compareAtPrice    Decimal? @map("compare_at_price") @db.Decimal(12, 2) // $39.99 (original price)
-  cost              Decimal? @db.Decimal(12, 2) // Cost per item (COGS) — drives margin display
-  inventoryItemId String? @map("inventory_item_id")
-  inventoryQuantity Int      @default(0) @map("inventory_quantity")
-  weight            Decimal? @db.Decimal(10, 4)
-  weightUnit        String?  @map("weight_unit") // "kg", "lb"
-  option1           String? // "Small"
-  option2           String? // "Red"
-  option3           String?
-  position          Int      @default(1)
-  requiresShipping  Boolean  @default(true) @map("requires_shipping")
-  taxable           Boolean  @default(true)
+  barcodeSource                 BarcodeSource? @map("barcode_source")
+  price                         Decimal        @db.Decimal(12, 2) // $29.99
+  compareAtPrice                Decimal?       @map("compare_at_price") @db.Decimal(12, 2) // $39.99 (original price)
+  cost                          Decimal?       @db.Decimal(12, 2) // Cost per item (COGS) — drives margin display
+  inventoryItemId               String?        @map("inventory_item_id")
+  inventoryQuantity             Int            @default(0) @map("inventory_quantity")
+  weight                        Decimal?       @db.Decimal(10, 4)
+  weightUnit                    String?        @map("weight_unit") // "kg", "lb"
+  option1                       String? // "Small"
+  option2                       String? // "Red"
+  option3                       String?
+  position                      Int            @default(1)
+  requiresShipping              Boolean        @default(true) @map("requires_shipping")
+  taxable                       Boolean        @default(true)
   // Phase 2 inventory + customs fields
-  trackQuantity                 Boolean @default(true)  @map("track_quantity")
-  continueSellingWhenOutOfStock Boolean @default(false) @map("continue_selling_when_out_of_stock")
-  hsCode                        String? @map("hs_code") // Customs HS code, e.g. "6109.10"
-  countryOfOrigin               String? @map("country_of_origin") // ISO-3166 alpha-2
-  imageId           String?  @map("image_id") // Variant-specific image (FK → ProductImage)
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  trackQuantity                 Boolean        @default(true) @map("track_quantity")
+  continueSellingWhenOutOfStock Boolean        @default(false) @map("continue_selling_when_out_of_stock")
+  hsCode                        String?        @map("hs_code") // Customs HS code, e.g. "6109.10"
+  countryOfOrigin               String?        @map("country_of_origin") // ISO-3166 alpha-2
+  imageId                       String?        @map("image_id") // Variant-specific image (FK → ProductImage)
+  createdAt                     DateTime       @default(now()) @map("created_at")
+  updatedAt                     DateTime       @updatedAt @map("updated_at")
 
   product             Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
   image               ProductImage?        @relation("VariantImage", fields: [imageId], references: [id], onDelete: SetNull)
@@ -744,12 +771,28 @@ model Order {
   /// orders created before this was introduced, and for non-GST orgs.
   placeOfSupplyCode  String?                @map("place_of_supply_code")
   gstType            GstType?               @map("gst_type")
-  metadata           Json?                  @db.JsonB
-  deletedAt          DateTime?              @map("deleted_at")
-  createdAt          DateTime               @default(now()) @map("created_at")
-  updatedAt          DateTime               @updatedAt @map("updated_at")
-  externalCreatedAt  DateTime?              @map("external_created_at")
-  externalUpdatedAt  DateTime?              @map("external_updated_at")
+
+  /// What the SALES CHANNEL says it charged in tax, as opposed to what the CRM
+  /// computes. Nullable with no default on purpose: NULL means "never told"
+  /// (offline orders, and every order predating this), while 0 means "the
+  /// channel told us zero". The invoice reconciliation depends on that
+  /// distinction, so do not give these a default.
+  taxesIncluded            Boolean? @map("taxes_included")
+  channelShippingTaxAmount Decimal? @map("channel_shipping_tax_amount") @db.Decimal(12, 2)
+  channelShippingTaxLines  Json?    @map("channel_shipping_tax_lines") @db.JsonB
+
+  /// Last auto-invoicing failure for this order. `maybeAutoInvoice` swallows
+  /// errors by design (a failed invoice must not fail the webhook), so without
+  /// these an org with GST off or no GSTIN accrued paid, uninvoiced orders
+  /// with no signal. Cleared on any successful issue.
+  invoiceError      String?   @map("invoice_error")
+  invoiceErrorAt    DateTime? @map("invoice_error_at")
+  metadata          Json?     @db.JsonB
+  deletedAt         DateTime? @map("deleted_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+  externalCreatedAt DateTime? @map("external_created_at")
+  externalUpdatedAt DateTime? @map("external_updated_at")
 
   organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   channel          Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
@@ -808,6 +851,10 @@ model OrderLineItem {
   fulfillmentStatus String?  @map("fulfillment_status")
   requiresShipping  Boolean  @default(true) @map("requires_shipping")
   taxable           Boolean  @default(true)
+  /// Per-line tax as reported by the sales channel. NULL when the channel did
+  /// not tell us (see Order.taxesIncluded) — NOT the same as zero.
+  channelTaxAmount  Decimal? @map("channel_tax_amount") @db.Decimal(12, 2)
+  channelTaxLines   Json?    @map("channel_tax_lines") @db.JsonB
   properties        Json?    @db.JsonB
   createdAt         DateTime @default(now()) @map("created_at")
 
@@ -851,6 +898,15 @@ model OrderRefund {
   reason      String?
   note        String?
   lineItems   Json?     @map("line_items") @db.JsonB
+  /// Tax actually refunded, as the channel reported it. NULL means the payload
+  /// never told us — NOT the same as a tax-free refund. Without these a
+  /// refunded sale stayed 100% in declared liability for ever.
+  totalTax    Decimal?  @map("total_tax") @db.Decimal(12, 2)
+  shippingTax Decimal?  @map("shipping_tax") @db.Decimal(12, 2)
+  taxLines    Json?     @map("tax_lines") @db.JsonB
+  /// Shopify order_adjustments — discounts and shipping written off after the
+  /// fact. Ignoring them understates the credit note.
+  adjustments Json?     @db.JsonB
   processedAt DateTime? @map("processed_at")
   createdAt   DateTime  @default(now()) @map("created_at")
 
@@ -1053,11 +1109,11 @@ model WarehouseLocation {
   isActive    Boolean      @default(true) @map("is_active")
   createdAt   DateTime     @default(now()) @map("created_at")
 
-  warehouse         Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
-  parent            WarehouseLocation?  @relation("LocationTree", fields: [parentId], references: [id], onDelete: Cascade)
-  children          WarehouseLocation[] @relation("LocationTree")
-  stockLevels       StockLevel[]        @relation("StockLevelLocation")
-  defaultForLevels  StockLevel[]        @relation("StockLevelDefaultLocation")
+  warehouse        Warehouse           @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  parent           WarehouseLocation?  @relation("LocationTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children         WarehouseLocation[] @relation("LocationTree")
+  stockLevels      StockLevel[]        @relation("StockLevelLocation")
+  defaultForLevels StockLevel[]        @relation("StockLevelDefaultLocation")
 
   @@unique([warehouseId, fullCode])
   @@index([warehouseId, type])
@@ -1132,19 +1188,19 @@ model StockReservation {
 // Goods Received Note. vendorName reuses the existing vendor-string convention
 // (no Supplier model in V1); refNumber is a free-text vendor invoice / PO ref.
 model StockReceipt {
-  id            String    @id @default(cuid())
-  organizationId String   @map("organization_id")
-  warehouseId   String    @map("warehouse_id")
-  receiptNumber String    @map("receipt_number") // "GRN-000042", org-scoped sequence
-  vendorName    String?   @map("vendor_name")
-  refNumber     String?   @map("ref_number")
-  status        String // DRAFT | RECEIVED | COMPLETED
-  notes         String?
-  receivedById  String?   @map("received_by_id")
-  receivedAt    DateTime? @map("received_at")
-  completedAt   DateTime? @map("completed_at")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  warehouseId    String    @map("warehouse_id")
+  receiptNumber  String    @map("receipt_number") // "GRN-000042", org-scoped sequence
+  vendorName     String?   @map("vendor_name")
+  refNumber      String?   @map("ref_number")
+  status         String // DRAFT | RECEIVED | COMPLETED
+  notes          String?
+  receivedById   String?   @map("received_by_id")
+  receivedAt     DateTime? @map("received_at")
+  completedAt    DateTime? @map("completed_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   warehouse    Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Restrict)
@@ -1221,20 +1277,20 @@ model PickTaskLine {
 // previewRows holds the first ~10 parsed rows so the UI can confirm before
 // committing; errors holds row-level failures for the post-run report.
 model ProductImportJob {
-  id              String    @id @default(cuid())
-  organizationId  String    @map("organization_id")
-  userId          String?   @map("user_id")
-  status          String // PARSING | PREVIEW | RUNNING | COMPLETED | FAILED
-  filename        String
-  totalRows       Int       @default(0) @map("total_rows")
-  processedRows   Int       @default(0) @map("processed_rows")
-  createdCount    Int       @default(0) @map("created_count")
-  updatedCount    Int       @default(0) @map("updated_count")
-  errorCount      Int       @default(0) @map("error_count")
-  errors          Json?     @db.JsonB // [{ row, message }]
-  previewRows     Json?     @map("preview_rows") @db.JsonB
-  createdAt       DateTime  @default(now()) @map("created_at")
-  completedAt     DateTime? @map("completed_at")
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  userId         String?   @map("user_id")
+  status         String // PARSING | PREVIEW | RUNNING | COMPLETED | FAILED
+  filename       String
+  totalRows      Int       @default(0) @map("total_rows")
+  processedRows  Int       @default(0) @map("processed_rows")
+  createdCount   Int       @default(0) @map("created_count")
+  updatedCount   Int       @default(0) @map("updated_count")
+  errorCount     Int       @default(0) @map("error_count")
+  errors         Json?     @db.JsonB // [{ row, message }]
+  previewRows    Json?     @map("preview_rows") @db.JsonB
+  createdAt      DateTime  @default(now()) @map("created_at")
+  completedAt    DateTime? @map("completed_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -1304,12 +1360,12 @@ model Invoice {
   gstType           GstType @map("gst_type") // CGST_SGST or IGST
 
   // Tax totals
-  subtotal      Decimal @db.Decimal(12, 2)
-  totalCgst     Decimal @default(0) @map("total_cgst") @db.Decimal(12, 2)
-  totalSgst     Decimal @default(0) @map("total_sgst") @db.Decimal(12, 2)
-  totalIgst     Decimal @default(0) @map("total_igst") @db.Decimal(12, 2)
-  totalTax      Decimal @default(0) @map("total_tax") @db.Decimal(12, 2)
-  totalDiscount Decimal @default(0) @map("total_discount") @db.Decimal(12, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
+  totalCgst      Decimal @default(0) @map("total_cgst") @db.Decimal(12, 2)
+  totalSgst      Decimal @default(0) @map("total_sgst") @db.Decimal(12, 2)
+  totalIgst      Decimal @default(0) @map("total_igst") @db.Decimal(12, 2)
+  totalTax       Decimal @default(0) @map("total_tax") @db.Decimal(12, 2)
+  totalDiscount  Decimal @default(0) @map("total_discount") @db.Decimal(12, 2)
   // Shipping charged on the order, carried onto the invoice so grandTotal can
   // agree with Order.totalPrice. NOT taxed — treating shipping as a composite
   // supply would change the tax charged and is a deliberate decision, not an
@@ -1318,8 +1374,36 @@ model Invoice {
   // invoice's total exceeds subtotal + tax by an amount nothing on the document
   // explains.
   shippingCharge Decimal @default(0) @map("shipping_charge") @db.Decimal(12, 2)
-  grandTotal    Decimal @map("grand_total") @db.Decimal(12, 2)
-  currency      String  @default("INR")
+
+  /// Reconciliation against the tax the sales channel actually collected.
+  /// The CRM's own computation remains this invoice's value — these columns
+  /// only make a divergence visible before the return is filed.
+  /// `chargedTax` NULL = never compared (offline order, or issued before this
+  /// existed); it does not mean "compared and equal".
+  /// NOTE (not expressible in Prisma): partial index
+  ///   invoices_org_tax_mismatch_idx ON (organization_id) WHERE tax_mismatch
+  chargedTax       Decimal? @map("charged_tax") @db.Decimal(12, 2)
+  taxMismatchDelta Decimal? @map("tax_mismatch_delta") @db.Decimal(12, 2)
+  taxMismatch      Boolean  @default(false) @map("tax_mismatch")
+
+  /// Set on a CREDIT_NOTE row, pointing at the invoice it reverses.
+  /// A credit note reuses this table because it is shaped like an invoice and
+  /// must fold into the same return.
+  /// NOTE (not expressible in Prisma): the one-live-invoice partial index now
+  ///   reads WHERE status NOT IN ('CANCELLED', 'CREDIT_NOTE') — a credit note
+  ///   must not occupy the single live-invoice slot for its order.
+  creditNoteForId  String?  @map("credit_note_for_id")
+  creditNoteReason String?  @map("credit_note_reason")
+  creditNoteFor    Invoice? @relation("InvoiceCreditNotes", fields: [creditNoteForId], references: [id], onDelete: Restrict)
+  creditNotes      Invoice[] @relation("InvoiceCreditNotes")
+  /// Any line on this invoice has no HSN code. Derivable by joining line items,
+  /// but stored and partially indexed so the filing tab's warning is one index
+  /// scan. Counts both null and the legacy '0000' as missing.
+  /// NOTE (not expressible in Prisma): partial index
+  ///   invoices_org_hsn_missing_idx ON (organization_id) WHERE hsn_missing
+  hsnMissing       Boolean  @default(false) @map("hsn_missing")
+  grandTotal       Decimal  @map("grand_total") @db.Decimal(12, 2)
+  currency         String   @default("INR")
 
   // Status & metadata
   reverseCharge Boolean       @default(false) @map("reverse_charge")
@@ -1337,7 +1421,8 @@ model Invoice {
 
   @@unique([organizationId, invoiceNumber])
   // NOTE (not expressible in Prisma): a PARTIAL unique index
-  //   invoices_order_id_active_key ON (order_id) WHERE status <> 'CANCELLED'
+  //   invoices_order_id_active_key ON (order_id)
+  //     WHERE status NOT IN ('CANCELLED', 'CREDIT_NOTE')
   // enforces at most one LIVE invoice per order — see migration
   // 20260729130000_one_active_invoice_per_order. Cancelled invoices are exempt
   // so the statutory cancel-then-reissue flow keeps working.
@@ -1355,7 +1440,14 @@ model InvoiceLineItem {
   invoiceId       String   @map("invoice_id")
   orderLineItemId String?  @map("order_line_item_id") // Traceability to original line item
   description     String // Product name + variant title
-  hsnCode         String   @map("hsn_code") // HSN/SAC code
+  /// NULLABLE since Phase 2. It was NOT NULL, so a product without an HSN got the
+  /// invented literal '0000' written onto a statutory document. Readers must treat
+  /// BOTH null and '0000' as missing — the pre-existing '0000' rows sit on issued
+  /// invoices and are deliberately not rewritten.
+  hsnCode         String?  @map("hsn_code") // HSN/SAC code
+  /// Snapshotted at issue time, like every other statutory value here.
+  unitOfMeasure   String?       @map("unit_of_measure")
+  supplyType      GstSupplyType @default(TAXABLE) @map("supply_type")
   quantity        Int
   unitPrice       Decimal  @map("unit_price") @db.Decimal(12, 2)
   discount        Decimal  @default(0) @db.Decimal(12, 2)
@@ -1378,6 +1470,41 @@ model InvoiceLineItem {
 }
 
 // ─── State Tax Rates & Collections ───────────────────────────────────────────
+
+/// A period that has been FILED with the government.
+///
+/// Nothing recorded this before, so GSTR-1/3B were recomputed from `invoices`
+/// on every request and cancelling or issuing an invoice inside an
+/// already-filed month silently rewrote history with no amendment trail.
+///
+/// `totals` snapshots what was actually filed, so a later recomputation can be
+/// compared against what went to the government rather than merely replacing it.
+model GstFiling {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  financialYear  String   @map("financial_year")
+  period         String
+  /// Null means the filing covered ALL registrations — correct for a
+  /// single-GSTIN org, which files one return.
+  sellerGstinId  String?  @map("seller_gstin_id")
+  returnType     String   @map("return_type")
+  filedAt        DateTime @default(now()) @map("filed_at")
+  filedById      String?  @map("filed_by_id")
+  /// Acknowledgement Reference Number from the portal, when the merchant has it.
+  arn            String?
+  totals         Json?    @db.JsonB
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// NOTE (not expressible in Prisma): the unique index is declared NULLS NOT
+  /// DISTINCT, so a second all-registrations filing for the same period
+  /// collides rather than silently duplicating.
+  @@unique([organizationId, financialYear, period, returnType, sellerGstinId])
+  @@index([organizationId])
+  @@map("gst_filings")
+}
 
 model StateTaxRate {
   id             String   @id @default(cuid())
@@ -1554,21 +1681,21 @@ model AnalyticsSnapshot {
 ///   eventName: "page_viewed" | "product_viewed" | "product_added_to_cart"
 ///             | "checkout_started" | "checkout_completed" | ...
 model RawAnalyticsEvent {
-  id              String   @id @default(cuid())
-  organizationId  String   @map("organization_id")
-  channelId       String   @map("channel_id")
-  eventName       String   @map("event_name")
-  occurredAt      DateTime @map("occurred_at")
+  id                 String   @id @default(cuid())
+  organizationId     String   @map("organization_id")
+  channelId          String   @map("channel_id")
+  eventName          String   @map("event_name")
+  occurredAt         DateTime @map("occurred_at")
   /// Stable per-visitor id supplied by the pixel; null for non-instrumented
   /// surfaces (server-side webhooks etc.).
-  visitorId       String?  @map("visitor_id")
+  visitorId          String?  @map("visitor_id")
   /// Stable per-session id supplied by the pixel.
-  sessionId       String?  @map("session_id")
+  sessionId          String?  @map("session_id")
   /// Shopify customer id if the visitor is identified.
-  externalCustomerId String? @map("external_customer_id")
+  externalCustomerId String?  @map("external_customer_id")
   /// Free-form payload: product id, cart contents, referrer, utm, device, etc.
-  payload         Json     @db.JsonB
-  createdAt       DateTime @default(now()) @map("created_at")
+  payload            Json     @db.JsonB
+  createdAt          DateTime @default(now()) @map("created_at")
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)

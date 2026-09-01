@@ -16,6 +16,10 @@ import {
   Prisma,
 } from '@prisma/client';
 import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
+import {
+  sellerStateForSupply,
+  type SellerRegistrations,
+} from '../gst/seller-registration.util';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { QueryOrdersDto } from './dto/query-orders.dto';
@@ -669,6 +673,11 @@ export class OrderService {
         }
 
         let sellerGstin: { stateCode: string } | null = null;
+        let sellerRegistrations: SellerRegistrations = {
+          defaultStateCode: null,
+          stateCodes: [],
+        };
+
         if (generateInvoice && org.gstEnabled) {
           if (dto.sellerGstinId) {
             sellerGstin = await tx.organizationGstin.findFirst({
@@ -680,10 +689,51 @@ export class OrderService {
               select: { stateCode: true },
             });
           } else {
-            sellerGstin = await tx.organizationGstin.findFirst({
-              where: { organizationId: orgId, isDefault: true, isActive: true },
-              select: { stateCode: true },
+            // Load EVERY active registration, not just the default.
+            //
+            // This used to take the default GSTIN unconditionally, while
+            // `InvoiceService.createForOrderTx` auto-selects the registration
+            // MATCHING the place of supply and only then falls back to the
+            // default. For a multi-state org those two rules disagree: an order
+            // shipped into a state the merchant is registered in was taxed IGST
+            // here and then invoiced CGST+SGST — a different tax head on the
+            // same sale, one of them printed on a statutory document.
+            //
+            // Both sides now go through `sellerStateForSupply`, so they cannot
+            // drift apart again.
+            const gstins = await tx.organizationGstin.findMany({
+              where: { organizationId: orgId, isActive: true },
+              select: { stateCode: true, isDefault: true },
             });
+
+            sellerRegistrations = {
+              defaultStateCode:
+                gstins.find((g) => g.isDefault)?.stateCode ??
+                gstins[0]?.stateCode ??
+                null,
+              stateCodes: gstins.map((g) => g.stateCode),
+            };
+
+            // Two passes, matching the invoice: resolve a provisional place of
+            // supply against the default registration, pick the registration
+            // that actually supplies it, then re-resolve so an over-the-counter
+            // sale lands on THAT registration's state rather than the default's.
+            const provisionalPos = resolvePlaceOfSupply({
+              explicitCode: dto.placeOfSupplyCode,
+              shippingAddress: dto.shippingAddress ?? dto.customer.address,
+              billingAddress:
+                dto.billingAddress ?? dto.shippingAddress ?? dto.customer.address,
+              customerBillingStateCode:
+                dto.customer.billingStateCode ?? customer.billingStateCode,
+              buyerGstin: dto.customer.gstin ?? customer.gstin,
+              sellerStateCode: sellerRegistrations.defaultStateCode,
+            });
+
+            const stateCode = sellerStateForSupply(
+              sellerRegistrations,
+              provisionalPos,
+            );
+            sellerGstin = stateCode ? { stateCode } : null;
           }
         }
 
@@ -725,12 +775,37 @@ export class OrderService {
           totalDiscount: number;
           lineTotal: number;
           taxAmount: number;
+          taxable: boolean;
         }> = [];
 
         let subtotal = 0;
         let totalTax = 0;
 
-        for (const li of dto.lineItems) {
+        // Every rate for the whole order in at most four queries, on THIS
+        // transaction. This was one `resolveLineGstRate` call per line, each
+        // issuing up to four queries on `this.prisma` rather than `tx` — so it
+        // took a SECOND pooled connection per line while this transaction held
+        // the first, and read the rates outside the Serializable snapshot that
+        // prices the order.
+        const lineGstRates = sellerGstin
+          ? await this.taxResolver.resolveLineGstRates(
+            orgId,
+            placeOfSupplyCode,
+            dto.lineItems.map((li) => {
+              const v = variantById.get(li.productVariantId)!;
+              return {
+                productId: v.product.id,
+                // toNullableNumber, not toNumber: null (no rate configured) and
+                // 0 (explicitly exempt) must stay distinguishable.
+                productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
+                variantTaxable: v.taxable,
+              };
+            }),
+            tx,
+          )
+          : dto.lineItems.map(() => 0);
+
+        for (const [lineIndex, li] of dto.lineItems.entries()) {
           const v = variantById.get(li.productVariantId)!;
           const unitPrice =
             li.unitPriceOverride ?? this.calculator.toNumber(v.price);
@@ -748,19 +823,9 @@ export class OrderService {
             );
           }
 
-          // toNullableNumber, not toNumber: null (no rate configured) and 0
-          // (explicitly exempt) must stay distinguishable for the resolver.
-          const productGstRate = this.calculator.toNullableNumber(
-            v.product.gstRate,
-          );
-          const gstRate = sellerGstin
-            ? await this.taxResolver.resolveGstRate(
-              orgId,
-              v.product.id,
-              productGstRate,
-              placeOfSupplyCode,
-            )
-            : 0;
+          // Resolved above, in one batch. Still honours ProductVariant.taxable,
+          // which no tax path read before this remediation.
+          const gstRate = lineGstRates[lineIndex];
 
           const calc = this.calculator.calculateLineItem(
             { unitPrice, quantity: li.quantity, discount, gstRate },
@@ -781,6 +846,12 @@ export class OrderService {
             totalDiscount: discount,
             lineTotal: calc.totalAmount,
             taxAmount: calc.totalTax,
+            // Carried through so the persisted line records what it was
+            // actually taxed as. Hardcoding `taxable: true` on the write made
+            // ProductVariant.taxable unreachable — an order could never CARRY
+            // a non-taxable line, so honouring the flag at rate resolution
+            // would have changed nothing on this path.
+            taxable: v.taxable !== false,
           });
         }
 
@@ -858,7 +929,7 @@ export class OrderService {
                 quantity: li.quantity,
                 price: li.unitPrice,
                 totalDiscount: li.totalDiscount,
-                taxable: true,
+                taxable: li.taxable,
                 requiresShipping: false,
               })),
             },
@@ -962,6 +1033,21 @@ export class OrderService {
             'No GSTIN registration found. Add one in Settings → Tax & GST.';
         } else if (generateInvoice && !org.gstEnabled) {
           invoiceError = 'GST is not enabled for this organization.';
+        }
+
+        // Persist the soft-fail, not just return it. This value was handed to
+        // the caller once and then lost, so an offline sale that failed to
+        // invoice left no trace anywhere — the same blind spot the Shopify
+        // auto-invoice path had. Both now write the same two columns, and any
+        // later successful issue clears them (see `createForOrderTx`).
+        if (invoiceError) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              invoiceError: invoiceError.slice(0, 500),
+              invoiceErrorAt: new Date(),
+            },
+          });
         }
 
         return { order, invoice, invoiceError };

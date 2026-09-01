@@ -1,6 +1,7 @@
+import { isAxiosError } from "axios";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X } from "lucide-react";
+import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X, AlertTriangle } from "lucide-react";
 
 import {
   PageHeader,
@@ -24,14 +25,19 @@ import { StatCard } from "~/components/app/stat-card";
 import { SegmentedTabs } from "~/components/app/segmented-tabs";
 import { InvoicesTable } from "~/components/app/invoices-table";
 import { InvoiceDetailDialog } from "~/components/app/invoice-detail-dialog";
+import { CreditNoteDialog } from "~/components/app/credit-note-dialog";
 import { CancelInvoiceDialog } from "~/components/app/cancel-invoice-dialog";
 import {
   Gstr1B2bPanel,
-  Gstr1B2cPanel,
+  Gstr1B2clPanel,
+  Gstr1B2csPanel,
   Gstr1HsnPanel,
+  Gstr1NilRatedPanel,
+  Gstr1CreditNotePanel,
 } from "~/components/app/gstr1-panels";
 import {
   Gstr3bOutwardPanel,
+  Gstr3bOtherSuppliesPanel,
   Gstr3bInterStatePanel,
 } from "~/components/app/gstr3b-panels";
 import {
@@ -41,6 +47,8 @@ import {
 import { EmptyState } from "~/components/app/empty-state";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { QueryErrorState } from "~/components/app/query-error-state";
+import { useRefundsPendingCredit } from "~/hooks/use-invoice-queries";
+import { DismissibleWarning } from "~/components/app/dismissible-warning";
 import { useInvoices, useInvoiceStats, useGstReturn } from "~/hooks/use-invoice-queries";
 import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
@@ -61,6 +69,8 @@ import {
   returnDueDate,
 } from "~/lib/gst-return";
 import type {
+  RefundPendingCredit,
+  InvoiceDetail,
   GstReturnGstr1,
   GstReturnGstr3B,
   Invoice,
@@ -119,6 +129,22 @@ function formatStatsWindow(stats: InvoiceStats): string {
   return `${start.getDate()} – ${endLabel}`;
 }
 
+/**
+ * Message for a failed GST-return request.
+ *
+ * The server carries real remedies in its message — notably the 413 for a
+ * period with more invoices than the return builder will assemble, which names
+ * the actual count and tells the merchant to file per GSTIN or pick a single
+ * month. Showing a generic "something went wrong" would throw that away.
+ */
+function returnErrorMessage(error: unknown): string {
+  if (isAxiosError(error)) {
+    const data = error.response?.data as { message?: string } | undefined;
+    if (data?.message) return data.message;
+  }
+  return "Something went wrong building this return. Please try again.";
+}
+
 export default function InvoicesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -159,6 +185,13 @@ export default function InvoicesPage() {
   );
   const debouncedSearch = useDebounced(searchQuery, 350);
 
+  const [invoiceToCredit, setInvoiceToCredit] = useState<InvoiceDetail | null>(
+    null,
+  );
+  // A refunded order picked from the banner. Carries the refund figures so the
+  // dialog can pre-fill instead of making someone re-key an amount off Shopify.
+  const [pendingCreditTarget, setPendingCreditTarget] =
+    useState<RefundPendingCredit | null>(null);
   const [invoiceToCancel, setInvoiceToCancel] = useState<{
     id: string;
     invoiceNumber: string;
@@ -217,12 +250,31 @@ export default function InvoicesPage() {
     financialYear,
   });
 
+  // Driven BY the stats count, not the other way round: a healthy org never
+  // issues this query at all.
+  const { data: pendingCredits } = useRefundsPendingCredit(
+    (stats?.refundsNeedingCreditNote ?? 0) > 0,
+  );
+
   const invoices = invoiceData?.data ?? [];
   const meta = invoiceData?.meta;
   const totalPages = meta?.totalPages ?? 1;
 
-  const { data: returnData, isLoading: returnLoading } = useGstReturn(
-    tab === "filing" ? { financialYear, period, returnType } : null,
+  const {
+    data: returnData,
+    isLoading: returnLoading,
+    error: returnError,
+  } = useGstReturn(
+    tab === "filing"
+      ? {
+          financialYear,
+          period,
+          returnType,
+          // A multi-registration org files ONE RETURN PER GSTIN. Omitting this
+          // produced a merged return that matched no return they actually file.
+          sellerGstinId: sellerGstinId || undefined,
+        }
+      : null,
   );
 
   const periodLabel = formatPeriodLabel(financialYear, period) ?? period;
@@ -350,6 +402,33 @@ export default function InvoicesPage() {
             ))}
           </SelectContent>
         </Select>
+
+        {/* Hoisted out of the invoices-only filter bar. A GST return is filed
+            PER REGISTRATION, so this must scope the filing tab too — while it
+            lived under `tab === "invoices"` a multi-state business could only
+            ever see one merged return that matched nothing they file. */}
+        {activeGstins.length > 1 && (
+          <Select
+            value={sellerGstinId || "all"}
+            onValueChange={(next) =>
+              patchParams({ gstin: next === "all" ? null : next })
+            }
+          >
+            <SelectTrigger className="h-8 w-45 text-caption" aria-label="Seller GSTIN">
+              <SelectValue placeholder="All GSTINs" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all" className="text-caption">
+                All GSTINs
+              </SelectItem>
+              {activeGstins.map((gstin: OrganizationGstin) => (
+                <SelectItem key={gstin.id} value={gstin.id} className="text-caption">
+                  {gstin.gstin} — {gstin.stateName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
 
       {tab === "invoices" ? (
@@ -491,30 +570,6 @@ export default function InvoicesPage() {
               />
             </div>
 
-            {/* Only meaningful for a multi-registration org. */}
-            {activeGstins.length > 1 && (
-              <Select
-                value={sellerGstinId || "all"}
-                onValueChange={(next) =>
-                  patchParams({ gstin: next === "all" ? null : next })
-                }
-              >
-                <SelectTrigger className="h-8 w-45 text-caption" aria-label="Seller GSTIN">
-                  <SelectValue placeholder="All GSTINs" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all" className="text-caption">
-                    All GSTINs
-                  </SelectItem>
-                  {activeGstins.map((gstin: OrganizationGstin) => (
-                    <SelectItem key={gstin.id} value={gstin.id} className="text-caption">
-                      {gstin.gstin} — {gstin.stateName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            )}
-
             {hasFilters && (
               <Button variant="ghost" size="sm" onClick={clearFilters}>
                 <X className="size-3.5" />
@@ -621,6 +676,138 @@ export default function InvoicesPage() {
           aria-labelledby="view-tab-filing"
           className="space-y-6"
         >
+          {/* Data-integrity warnings. These sit ABOVE the return itself on purpose:
+              both describe reasons the figures below may not be what the merchant
+              should file, and both were previously invisible in the product.
+
+              Each is dismissible, but only for the count that raised it — see
+              DismissibleWarning. Some of these cannot be cleared quickly (no
+              product in the live catalogues carries an HSN code, and adding them
+              is hours of data entry), and a warning that can be neither quieted
+              nor acted on is one people learn to look past. */}
+          {stats && stats.uninvoicedPaidOrders > 0 && (
+            <DismissibleWarning
+              id="uninvoiced-orders"
+              scope={org?.id}
+              signature={stats.uninvoicedPaidOrders}
+              label="paid orders with no invoice"
+            >
+              <p>
+                <strong className="font-semibold">
+                  {stats.uninvoicedPaidOrders} paid{" "}
+                  {stats.uninvoicedPaidOrders === 1 ? "order has" : "orders have"} no
+                  invoice.
+                </strong>{" "}
+                Auto-invoicing failed for them, so their tax is missing from every
+                return below. Check Settings → Tax &amp; GST, then reissue from the order.
+              </p>
+            </DismissibleWarning>
+          )}
+          {stats && stats.refundsNeedingCreditNote > 0 && (
+            <DismissibleWarning
+              id="refunds-pending-credit"
+              scope={org?.id}
+              signature={stats.refundsNeedingCreditNote}
+              label="refunds without a credit note"
+            >
+              <>
+                <p>
+                  <strong className="font-semibold">
+                    {stats.refundsNeedingCreditNote} refunded{" "}
+                    {stats.refundsNeedingCreditNote === 1 ? "order is" : "orders are"}{" "}
+                    not fully credited.
+                  </strong>{" "}
+                  Until one is raised, the full sale value stays in your declared tax
+                  — a refund does not reduce it on its own.
+                </p>
+                {pendingCredits && pendingCredits.length > 0 && (
+                  <ul className="mt-2 space-y-1">
+                    {pendingCredits.slice(0, 5).map((r) => (
+                      <li key={r.invoiceId} className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-micro">{r.invoiceNumber}</span>
+                        <span className="text-micro text-muted-foreground">
+                          {r.orderName} ·{" "}
+                          {formatCurrency(Number(r.pendingAmount), r.currency)}{" "}
+                          uncredited
+                          {Number(r.creditedAmount) > 0 && (
+                            <>
+                              {" "}
+                              (of{" "}
+                              {formatCurrency(
+                                Number(r.refundedAmount),
+                                r.currency,
+                              )}{" "}
+                              refunded)
+                            </>
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setPendingCreditTarget(r)}
+                          className="text-micro font-medium text-brand-strong underline-offset-2 hover:underline"
+                        >
+                          Raise credit note
+                        </button>
+                      </li>
+                    ))}
+                    {pendingCredits.length > 5 && (
+                      <li className="text-micro text-muted-foreground">
+                        and {pendingCredits.length - 5} more
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </>
+            </DismissibleWarning>
+          )}
+          {stats && stats.invoicesMissingHsn > 0 && (
+            <DismissibleWarning
+              id="missing-hsn"
+              scope={org?.id}
+              signature={stats.invoicesMissingHsn}
+              label="invoices missing an HSN code"
+            >
+              <p>
+                <strong className="font-semibold">
+                  {stats.invoicesMissingHsn}{" "}
+                  {stats.invoicesMissingHsn === 1 ? "invoice has" : "invoices have"}{" "}
+                  a line with no HSN code.
+                </strong>{" "}
+                GSTR-1 table 12 cannot be filed until every product is classified.
+                Add HSN codes in Products, then reissue those invoices.
+              </p>
+            </DismissibleWarning>
+          )}
+          {stats && stats.taxMismatches > 0 && (
+            <DismissibleWarning
+              id="tax-mismatch"
+              scope={org?.id}
+              signature={stats.taxMismatches}
+              label="invoices whose declared tax differs from the tax charged"
+            >
+              <p>
+                <strong className="font-semibold">
+                  {stats.taxMismatches}{" "}
+                  {stats.taxMismatches === 1 ? "invoice declares" : "invoices declare"}{" "}
+                  a different tax than the sales channel charged.
+                </strong>{" "}
+                Your CRM tax configuration and your store’s may have drifted apart.
+                Reconcile before filing.
+              </p>
+            </DismissibleWarning>
+          )}
+          {activeGstins.length > 1 && !sellerGstinId && (
+            <div className="flex items-start gap-2 rounded-xl bg-warning-subtle px-5 py-3">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
+              <p className="text-caption">
+                <strong className="font-semibold">
+                  This return merges all {activeGstins.length} of your registrations.
+                </strong>{" "}
+                GST returns are filed per GSTIN — pick one above to see a return that
+                matches what you actually file.
+              </p>
+            </div>
+          )}
           {/* Return switch and period */}
           <div className="flex flex-wrap items-center gap-3">
             <SegmentedTabs
@@ -663,6 +850,17 @@ export default function InvoicesPage() {
                   <Skeleton className="h-24 w-full rounded-xl" />
                   <Skeleton className="h-64 w-full rounded-xl" />
                 </>
+              ) : returnError ? (
+                /* Error MUST precede the empty state, same as the invoice table above.
+                   A failed return request leaves isLoading false and data undefined, so
+                   this used to render "No issued invoices" — telling a merchant with a
+                   period too large to assemble that they had nothing to file. */
+                <div className="rounded-xl bg-card p-8 shadow-sm ring-1 ring-border">
+                  <EmptyState
+                    title="Could not build this return"
+                    description={returnErrorMessage(returnError)}
+                  />
+                </div>
               ) : !returnData ? (
                 <div className="rounded-xl bg-card p-8 shadow-sm ring-1 ring-border">
                   <EmptyState
@@ -705,6 +903,7 @@ export default function InvoicesPage() {
                       financialYear,
                       period,
                       returnType,
+                      sellerGstinId: sellerGstinId || undefined,
                     }),
                   `${returnType}-${financialYear}-${period}.csv`,
                   "Could not download the return. Please try again.",
@@ -721,6 +920,38 @@ export default function InvoicesPage() {
         canCancel={canCancel}
         onClose={() => patchParams({ invoice: null, page: String(currentPage) })}
         onRequestCancel={setInvoiceToCancel}
+        onRequestCreditNote={setInvoiceToCredit}
+      />
+
+      {/* One dialog, two entry points: the invoice detail view opens it blank,
+          the refunds banner opens it pre-filled from the refund. */}
+      <CreditNoteDialog
+        invoice={
+          pendingCreditTarget
+            ? {
+                id: pendingCreditTarget.invoiceId,
+                invoiceNumber: pendingCreditTarget.invoiceNumber,
+                grandTotal: pendingCreditTarget.invoiceTotal,
+              }
+            : invoiceToCredit
+        }
+        currency={pendingCreditTarget?.currency ?? currency}
+        prefill={
+          pendingCreditTarget
+            ? {
+                // The remaining balance, not the gross refund: an order
+                // already part-credited would otherwise prefill an amount the
+                // server refuses as over-crediting.
+                amount: pendingCreditTarget.pendingAmount,
+                tax: pendingCreditTarget.pendingTax,
+                reason: pendingCreditTarget.reason ?? "Refunded",
+              }
+            : null
+        }
+        onClose={() => {
+          setInvoiceToCredit(null);
+          setPendingCreditTarget(null);
+        }}
       />
 
       <CancelInvoiceDialog
@@ -795,10 +1026,16 @@ function Gstr1View({
         ]}
       />
       <Gstr1B2bPanel data={data} currency={currency} />
+      {/* B2CL and B2CS pair naturally; the HSN table is too wide to sit 2-up
+          now that it carries a UQC, rate and tax split, so it goes full width
+          like B2B. */}
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
-        <Gstr1B2cPanel data={data} currency={currency} />
-        <Gstr1HsnPanel data={data} currency={currency} />
+        <Gstr1B2clPanel data={data} currency={currency} />
+        <Gstr1B2csPanel data={data} currency={currency} />
       </div>
+      <Gstr1HsnPanel data={data} currency={currency} />
+      <Gstr1CreditNotePanel data={data} currency={currency} />
+      <Gstr1NilRatedPanel data={data} currency={currency} />
     </>
   );
 }
@@ -840,6 +1077,7 @@ function Gstr3bView({
         ]}
       />
       <Gstr3bOutwardPanel data={data} currency={currency} />
+      <Gstr3bOtherSuppliesPanel data={data} currency={currency} />
       <Gstr3bInterStatePanel data={data} currency={currency} />
     </>
   );

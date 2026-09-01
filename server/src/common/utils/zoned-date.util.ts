@@ -36,14 +36,37 @@ export interface ZonedParts {
  *
  * An explicitly-set non-UTC timezone always wins. Non-GST organizations are
  * untouched.
+ *
+ * TOTAL BY DESIGN: an unparseable stored timezone is ignored rather than
+ * propagated. `Organization.timezone` was a bare `@IsString()` until now, so
+ * rows holding garbage already exist; every one of them would otherwise throw
+ * `RangeError` out of `Intl` on EVERY GST path — returns, stats, invoice
+ * creation — and validating the DTO fixes only writes from here on, not the
+ * rows already stored. Falling through to the same IST/UTC choice an unset
+ * timezone gets keeps those organizations working while the warning makes the
+ * misconfiguration visible.
  */
+const badTimeZoneWarned = new Set<string>();
+
 export function resolveGstTimeZone(org: {
   timezone?: string | null;
   gstEnabled?: boolean | null;
 }): string {
   const configured = org.timezone?.trim();
 
-  if (configured && configured !== 'UTC') return configured;
+  if (configured && configured !== 'UTC') {
+    if (isValidTimeZone(configured)) return configured;
+
+    if (!badTimeZoneWarned.has(configured)) {
+      badTimeZoneWarned.add(configured);
+      console.warn(
+        `[gst] Ignoring unrecognised organization timezone "${configured}" — ` +
+          `falling back to ${org.gstEnabled ? INDIA_TZ : 'UTC'} for GST date math. ` +
+          `Set a valid IANA timezone in Settings.`,
+      );
+    }
+  }
+
   if (org.gstEnabled) return INDIA_TZ;
 
   return 'UTC';
@@ -231,4 +254,47 @@ export function gstPeriodRange(
     from: zonedTimeToUtc(start.year, start.month, 1, timeZone),
     toExclusive: zonedTimeToUtc(end.year, end.month, 1, timeZone),
   };
+}
+
+// ─── VALIDATION ───
+//
+// `gstPeriodRange` throws a bare `Error` for a malformed financial year or
+// period, which NestJS surfaces as a 500. These predicates let the DTO layer
+// reject the same values as a 400 before they ever reach the date math.
+
+/** `YYYY-YY`, e.g. "2025-26". */
+export const GST_FINANCIAL_YEAR_REGEX = /^\d{4}-\d{2}$/;
+
+/** A calendar month ("04") or an FY quarter ("Q1"). Lowercase `q` is accepted
+ *  because `gstPeriodRange` upper-cases before testing, so rejecting it here
+ *  would break URLs that already work. */
+export const GST_PERIOD_REGEX = /^(0[1-9]|1[0-2]|[Qq][1-4])$/;
+
+/**
+ * True for a well-formed Indian financial year.
+ *
+ * The regex alone is not enough: "2025-99" matches it. The second half must be
+ * the next year's last two digits, which is also what makes "2025-26" and
+ * "2099-00" both correct.
+ */
+export function isValidFinancialYear(value: string): boolean {
+  if (!GST_FINANCIAL_YEAR_REGEX.test(value)) return false;
+
+  const startYear = parseInt(value.slice(0, 4), 10);
+  const declaredEnd = value.slice(5);
+
+  return declaredEnd === String((startYear + 1) % 100).padStart(2, '0');
+}
+
+/** True when `timeZone` is an IANA zone this runtime knows. */
+export function isValidTimeZone(timeZone: string): boolean {
+  if (!timeZone?.trim()) return false;
+
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timeZone.trim() });
+    return true;
+  } catch {
+    // RangeError for an unknown zone. Any other throw is equally disqualifying.
+    return false;
+  }
 }

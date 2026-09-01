@@ -1,5 +1,9 @@
 import { apiClient } from "~/lib/api-client";
 import type {
+  RefundPendingCredit,
+  CreateCreditNoteRequest,
+  GstFiling,
+  MarkFiledRequest,
   PaginatedResponse,
   Invoice,
   InvoiceDetail,
@@ -15,6 +19,38 @@ import type {
  * Service layer for invoice and GST return endpoints.
  */
 export const invoiceService = {
+  /** POST /invoices/:id/credit-note — reverse an issued invoice. */
+  createCreditNote: (id: string, data: CreateCreditNoteRequest) =>
+    apiClient
+      .post<InvoiceDetail>(`/invoices/${id}/credit-note`, data)
+      .then((res) => res.data),
+
+  /** GET /invoices/refunds-pending-credit — refunded orders not yet credited. */
+  listRefundsPendingCredit: () =>
+    apiClient
+      .get<RefundPendingCredit[]>("/invoices/refunds-pending-credit")
+      .then((res) => res.data),
+
+  /** GET /invoices/gst-return/filings — which periods are locked. */
+  listFilings: (financialYear?: string) =>
+    apiClient
+      .get<GstFiling[]>("/invoices/gst-return/filings", {
+        params: financialYear ? { financialYear } : undefined,
+      })
+      .then((res) => res.data),
+
+  /** POST /invoices/gst-return/filings — record a filing, locking the period. */
+  markFiled: (data: MarkFiledRequest) =>
+    apiClient
+      .post<GstFiling>("/invoices/gst-return/filings", data)
+      .then((res) => res.data),
+
+  /** DELETE /invoices/gst-return/filings/:id — reopen a period filed in error. */
+  unfile: (id: string) =>
+    apiClient
+      .delete<{ id: string }>(`/invoices/gst-return/filings/${id}`)
+      .then((res) => res.data),
+
   /** Generate a GST invoice for an order. */
   create: (data: CreateInvoiceRequest) =>
     apiClient

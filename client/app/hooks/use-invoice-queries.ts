@@ -48,3 +48,17 @@ export function useInvoiceStats(params?: { financialYear?: string }) {
     queryFn: () => invoiceService.stats(params),
   });
 }
+
+/**
+ * Refunded orders whose invoice has not been credited.
+ *
+ * Only fetched when the stats count says there is something to fetch — the
+ * banner drives this, not the other way round, so a healthy org pays nothing.
+ */
+export function useRefundsPendingCredit(enabled: boolean) {
+  return useQuery({
+    queryKey: [...invoiceKeys.all, "refunds-pending-credit"] as const,
+    queryFn: () => invoiceService.listRefundsPendingCredit(),
+    enabled,
+  });
+}

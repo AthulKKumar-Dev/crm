@@ -19,6 +19,12 @@ import {
   parseInventorySettings,
   InventorySettingsSchema,
 } from './schemas/inventory-settings.schema';
+import {
+  TaxSettings,
+  UpdateTaxSettingsInput,
+  parseTaxSettings,
+  TaxSettingsSchema,
+} from './schemas/tax-settings.schema';
 
 /**
  * Resolves and persists per-org settings. Each domain (product, order, …)
@@ -42,6 +48,7 @@ export class OrganizationSettingsService {
     productSettings: ProductSettings;
     orderSettings: OrderSettings;
     inventorySettings: InventorySettings;
+    taxSettings: TaxSettings;
   }> {
     this.assertOrgId(orgId);
     const row = await this.prisma.organizationSettings.findUnique({
@@ -51,6 +58,7 @@ export class OrganizationSettingsService {
       productSettings: parseProductSettings(row?.productSettings ?? null),
       orderSettings: parseOrderSettings(row?.orderSettings ?? null),
       inventorySettings: parseInventorySettings(row?.inventorySettings ?? null),
+      taxSettings: parseTaxSettings(row?.taxSettings ?? null),
     };
   }
 
@@ -110,6 +118,36 @@ export class OrganizationSettingsService {
     const current = await this.getInventorySettings(orgId);
     const next = InventorySettingsSchema.parse({ ...current, warehousingEnabled: enabled });
     await this.upsert(orgId, { inventorySettings: next as Prisma.InputJsonValue });
+    return next;
+  }
+
+  /**
+   * Read just tax settings. Convenience for the GST return hot path, which
+   * needs the B2CL threshold and the default UQC on every request.
+   */
+  async getTaxSettings(orgId: string): Promise<TaxSettings> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { taxSettings: true },
+    });
+    return parseTaxSettings(row?.taxSettings ?? null);
+  }
+
+  /**
+   * Merge-patch tax settings; validate via Zod before write.
+   *
+   * Shallow spread, like its siblings — TaxSettings is deliberately flat so a
+   * partial patch cannot drop sibling keys.
+   */
+  async updateTaxSettings(
+    orgId: string,
+    patch: UpdateTaxSettingsInput,
+  ): Promise<TaxSettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getTaxSettings(orgId);
+    const next = TaxSettingsSchema.parse({ ...current, ...patch });
+    await this.upsert(orgId, { taxSettings: next as Prisma.InputJsonValue });
     return next;
   }
 

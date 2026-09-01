@@ -8,6 +8,8 @@ import type { UpdateProductSettingsInput } from './schemas/product-settings.sche
 import { UpdateOrderSettingsSchema } from './schemas/order-settings.schema';
 import type { UpdateOrderSettingsInput } from './schemas/order-settings.schema';
 import { UpdateInventorySettingsSchema } from './schemas/inventory-settings.schema';
+import { UpdateTaxSettingsSchema } from './schemas/tax-settings.schema';
+import type { UpdateTaxSettingsInput } from './schemas/tax-settings.schema';
 import type { UpdateInventorySettingsInput } from './schemas/inventory-settings.schema';
 import { Roles, ORG_MANAGERS } from '../auth/decorators/roles.decorator';
 
@@ -45,13 +47,40 @@ export class OrganizationSettingsController {
   }
 
   // PATCH /api/v1/organization/settings/orders
+  // Role-gated as of autoInvoiceOnPayment: flipping that on makes the system
+  // issue statutory GST invoices by itself, which is squarely what ORG_MANAGERS
+  // covers ("issuing or cancelling a GST invoice, editing tax setup") and what
+  // every invoice write route already requires. This also newly gates
+  // autoSyncToShopify on the same route — deliberate, since pushing orders into
+  // the merchant's real Shopify admin is not an AGENT/VIEWER-level action
+  // either, and a Shopify order cannot be un-created.
   @Patch('orders')
+  @Roles(...ORG_MANAGERS)
   updateOrders(
     @CurrentUser() user: JwtPayload,
     @Body(new ZodValidationPipe(UpdateOrderSettingsSchema))
     body: UpdateOrderSettingsInput,
   ) {
     return this.service.updateOrderSettings(user.orgId!, body);
+  }
+
+  // PATCH /api/v1/organization/settings/tax
+  // Role-gated for the same reason as the orders route: both values here change
+  // STATUTORY OUTPUT. The B2CL threshold moves invoices between GSTR-1 Table 5
+  // and Table 7, and the default UQC appears on every Table 12 row — neither is
+  // an AGENT/VIEWER-level change.
+  //
+  // Note the pipe is on the @Body() parameter, never @UsePipes: a
+  // controller-level Zod pipe runs against every argument and its strip mode
+  // would destroy @CurrentUser()'s orgId.
+  @Patch('tax')
+  @Roles(...ORG_MANAGERS)
+  updateTax(
+    @CurrentUser() user: JwtPayload,
+    @Body(new ZodValidationPipe(UpdateTaxSettingsSchema))
+    body: UpdateTaxSettingsInput,
+  ) {
+    return this.service.updateTaxSettings(user.orgId!, body);
   }
 
   // PATCH /api/v1/organization/settings/inventory

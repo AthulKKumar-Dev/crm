@@ -272,8 +272,20 @@ export function OrderSettingsTab() {
           label="Auto-sync new offline orders and drafts to Shopify"
           help="When ON, every offline order and draft order created in the CRM is pushed to your connected Shopify store immediately. When OFF (default), they stay local until you sync them manually or via the channels-page Sync button."
           checked={settings.autoSyncToShopify}
-          disabled={mutation.isPending}
+          disabled={isFieldSaving(mutation, "autoSyncToShopify")}
           onChange={(checked) => mutation.mutate({ autoSyncToShopify: checked })}
+        />
+      </SettingsCard>
+
+      <SettingsCard>
+        <SettingsToggleRow
+          label="Auto-generate GST invoices for paid Shopify orders"
+          help="When ON, a GST invoice is issued automatically as soon as a Shopify order is paid — not when it is placed, so abandoned and cancelled orders never consume an invoice number. Offline orders are unaffected; they are already invoiced when you create them. Requires GST enabled with a GSTIN registered under Tax & GST. Existing orders are not invoiced retroactively, and a bulk channel sync never triggers this."
+          checked={settings.autoInvoiceOnPayment}
+          disabled={isFieldSaving(mutation, "autoInvoiceOnPayment")}
+          onChange={(checked) =>
+            mutation.mutate({ autoInvoiceOnPayment: checked })
+          }
         />
       </SettingsCard>
     </div>

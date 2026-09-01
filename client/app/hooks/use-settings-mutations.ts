@@ -7,6 +7,7 @@ import type {
   OrganizationSettingsResponse,
   UpdateProductSettingsRequest,
   UpdateOrderSettingsRequest,
+  UpdateTaxSettingsRequest,
   UpdateInventorySettingsRequest,
 } from "~/types/api";
 
@@ -133,6 +134,47 @@ export function useUpdateInventorySettingsMutation() {
     },
     onSuccess: () => {
       toast.success("Inventory settings updated.");
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: settingsKeys.all });
+    },
+  });
+}
+
+/**
+ * PATCH /organization/settings/tax — merge-patch GST/tax settings.
+ *
+ * Same optimistic shape as its siblings. Worth noting what these two values do:
+ * the B2CL threshold moves invoices between GSTR-1 table 5 and table 7, and the
+ * default UQC appears on every table 12 row — both change statutory output, so
+ * the route is role-gated server-side.
+ */
+export function useUpdateTaxSettingsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: UpdateTaxSettingsRequest) =>
+      organizationSettingsService.updateTaxSettings(data),
+    onMutate: async (patch) => {
+      await queryClient.cancelQueries({ queryKey: settingsKeys.all });
+      const previous = queryClient.getQueryData<OrganizationSettingsResponse>(
+        settingsKeys.all,
+      );
+      if (previous) {
+        queryClient.setQueryData<OrganizationSettingsResponse>(
+          settingsKeys.all,
+          { ...previous, taxSettings: { ...previous.taxSettings, ...patch } },
+        );
+      }
+      return { previous };
+    },
+    onError: (error, _patch, context) => {
+      if (context?.previous) {
+        queryClient.setQueryData(settingsKeys.all, context.previous);
+      }
+      handleMutationError(error, "Failed to update tax settings.");
+    },
+    onSuccess: () => {
+      toast.success("Tax settings updated.");
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: settingsKeys.all });

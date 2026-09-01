@@ -14,6 +14,16 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
+import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
+import {
+    extractShippingTax,
+    sumTaxLines,
+} from './shopify-tax-lines.util';
+import { extractRefundTax } from './refund-tax.util';
+import {
+    gstTypeForSupply,
+    type SellerRegistrations,
+} from '../gst/seller-registration.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import {
@@ -24,6 +34,9 @@ import {
 import { ShopifyPushEnqueuer } from './shopify-push.enqueuer';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { ShopifyLocationSyncService } from './shopify-location-sync.service';
+import { InvoiceService } from '../invoice/invoice.service';
+import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
+import { becamePaid } from './order-paid-transition.util';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -72,7 +85,13 @@ const GRAPHQL_PAGE_SIZE = 50;
 /// query before running it against a fixed per-query ceiling. Halving the page
 /// size is the cheapest way to stay under it; `paginateOrdersGraphql` degrades
 /// further on its own if a particular shop still trips the limit.
-const ORDERS_PAGE_SIZE = 25;
+///
+/// Lowered 25 -> 15 when `taxLines` was added to the line-item and shipping-line
+/// selections (needed to reconcile declared tax against collected tax). Every
+/// line item now carries a nested connection of its own, so the estimated cost
+/// of an order node rose sharply; these two changes belong together and should
+/// be reverted together. `MAX_COST_EXCEEDED` degradation remains the backstop.
+const ORDERS_PAGE_SIZE = 15;
 
 /// Entity types this service knows how to pull, in the order `runSync` runs
 /// them. The order is load-bearing:
@@ -124,8 +143,38 @@ const WEIGHT_UNIT_MAP: Record<string, string> = {
     OUNCES: 'oz',
 };
 
+/**
+ * Channel-reported tax for one line, as a partial Prisma patch.
+ *
+ * CONDITIONAL, like `customerId` and the addresses in `upsertOrder`'s patch:
+ * when the payload carries no `tax_lines` key at all the returned object is
+ * empty, so the upsert leaves whatever is stored untouched rather than writing
+ * NULL over a figure an earlier, richer payload supplied.
+ */
+function channelTax(li: { tax_lines?: unknown }): {
+    channelTaxAmount?: Prisma.Decimal;
+    channelTaxLines?: Prisma.InputJsonValue;
+} {
+    const amount = sumTaxLines(li?.tax_lines);
+    if (amount === null) return {};
+
+    return {
+        channelTaxAmount: amount,
+        channelTaxLines: li.tax_lines as Prisma.InputJsonValue,
+    };
+}
+
+/** Short enough that a GSTIN edit mid-sync is picked up. */
+const GST_CONTEXT_TTL_MS = 60_000;
+
 @Injectable()
 export class ShopifySyncService {
+    /** Per-org GST posture, shared across every upsertOrder in a sync run. */
+    private static readonly gstContextCache = new Map<
+        string,
+        { value: { enabled: boolean; registrations: SellerRegistrations }; expiresAt: number }
+    >();
+
     private readonly logger = new Logger(ShopifySyncService.name);
 
     constructor(
@@ -137,6 +186,10 @@ export class ShopifySyncService {
         private readonly inventoryLedger: InventoryLedgerService,
         private readonly locationSync: ShopifyLocationSyncService,
         private readonly config: ConfigService,
+        // Auto-invoicing a Shopify order once it is paid. Both are read only
+        // on the live-webhook path — see `maybeAutoInvoice`.
+        private readonly invoiceService: InvoiceService,
+        private readonly orgSettings: OrganizationSettingsService,
         @InjectQueue(DRAFT_MIRROR_QUEUE)
         private readonly draftMirrorQueue: Queue<DraftMirrorJobData>,
     ) { }
@@ -798,6 +851,17 @@ export class ShopifySyncService {
             // preserves any prior value rather than overwriting with null.
             requires_shipping: li.requiresShipping,
             taxable: li.taxable,
+            // Emitted in REST shape so both ingestion paths converge: webhook
+            // payloads already carry `tax_lines`, so `writeOrderChildren` needs
+            // no branch. `undefined` (not `[]`) when GraphQL did not return the
+            // field, because "not told" and "told zero" are different facts.
+            tax_lines: li.taxLines
+                ? li.taxLines.map((t) => ({
+                    title: t.title,
+                    rate: t.rate,
+                    price: t.priceSet?.shopMoney?.amount ?? "0",
+                }))
+                : undefined,
             properties: li.customAttributes?.length
                 ? li.customAttributes.map((a) => ({ name: a.key, value: a.value }))
                 : null,
@@ -822,12 +886,17 @@ export class ShopifySyncService {
             id: ShopifyGraphqlClient.extractId(rf.id),
             note: rf.note,
             processed_at: rf.createdAt,
+            // `total_tax` is what makes the NULL-vs-ZERO contract hold on this
+            // path. Without it `extractRefundTax` walked a tax-less array and
+            // returned 0.00 — recording a taxed refund as a TAX-FREE one, which
+            // is the one thing the nullable columns exist to distinguish.
             refund_line_items: rf.refundLineItems?.nodes?.map((rli) => ({
                 id: ShopifyGraphqlClient.extractId(rli.id),
                 quantity: rli.quantity,
                 line_item_id: ShopifyGraphqlClient.extractId(rli.lineItem.id),
                 restock_type: rli.restockType,
-            })) ?? null,
+                total_tax: rli.totalTaxSet?.shopMoney?.amount,
+            })) ?? undefined,
             transactions: [{ amount: rf.totalRefundedSet?.shopMoney?.amount ?? '0' }],
         }));
 
@@ -844,6 +913,19 @@ export class ShopifySyncService {
             subtotal_price: node.currentSubtotalPriceSet?.shopMoney?.amount ?? '0',
             total_price: node.totalPriceSet?.shopMoney?.amount ?? '0',
             total_tax: node.totalTaxSet?.shopMoney?.amount ?? '0',
+            taxes_included: node.taxesIncluded,
+            // REST shape again — `extractShippingTax` reads shipping_lines[].tax_lines
+            // from both paths.
+            shipping_lines: node.shippingLine
+                ? [{
+                    title: node.shippingLine.title,
+                    tax_lines: (node.shippingLine.taxLines ?? []).map((t) => ({
+                        title: t.title,
+                        rate: t.rate,
+                        price: t.priceSet?.shopMoney?.amount ?? "0",
+                    })),
+                }]
+                : undefined,
             total_discounts: node.totalDiscountsSet?.shopMoney?.amount ?? '0',
             total_shipping_price_set: {
                 shop_money: {
@@ -1419,14 +1501,38 @@ export class ShopifySyncService {
         return events;
     }
 
-    async upsertOrder(channelId: string, orgId: string, so: any) {
+    /**
+     * @param opts.live TRUE only for a real-time Shopify webhook. Defaults to
+     * FALSE, which is what the bulk/backfill loop in `syncOrders` passes — and
+     * the reason auto-invoicing never fires on a backfill. On first connect
+     * that loop walks up to `initialOrderWindowDays()` of history; invoicing
+     * those would stamp every historical order with today's date and consume a
+     * block of statutory serial numbers in one burst. The guard defaults
+     * closed so any future caller is non-invoicing unless it opts in.
+     */
+    async upsertOrder(
+        channelId: string,
+        orgId: string,
+        so: any,
+        opts: { live?: boolean } = {},
+    ) {
         const externalId = String(so.id);
 
         let customerId: string | null = null;
+
+        // Read for place-of-supply resolution below; the customer row is already
+
+        // being loaded, so this costs nothing extra.
+
+        let customerBillingStateCode: string | null = null;
+
+        let customerGstin: string | null = null;
         if (so.customer?.id) {
             const customer = await this.prisma.customer.findFirst({ where: { channelId, externalId: String(so.customer.id) } });
             if (customer) {
                 customerId = customer.id;
+                customerBillingStateCode = customer.billingStateCode;
+                customerGstin = customer.gstin;
             } else {
                 try {
                     const stub = await this.prisma.customer.create({
@@ -1482,6 +1588,12 @@ export class ShopifySyncService {
             select: {
                 id: true, externalUpdatedAt: true, financialStatus: true,
                 fulfillmentStatus: true, cancelledAt: true, closedAt: true,
+                // Addresses feed place-of-supply resolution. The patch below keeps
+                // addresses STICKY (a payload carrying none must not null out what we
+                // hold), so resolving from `so.*` alone would let a fulfilment or tag
+                // webhook re-resolve a correctly-addressed order down to the seller
+                // state and silently flip it from IGST to CGST+SGST.
+                shippingAddress: true, billingAddress: true,
             },
         });
         if (
@@ -1499,6 +1611,7 @@ export class ShopifySyncService {
                     id: true, name: true, customerId: true, externalUpdatedAt: true,
                     financialStatus: true, fulfillmentStatus: true,
                     cancelledAt: true, closedAt: true,
+                    shippingAddress: true, billingAddress: true,
                 },
             });
             if (pushedLocally) {
@@ -1527,6 +1640,8 @@ export class ShopifySyncService {
                     fulfillmentStatus: pushedLocally.fulfillmentStatus,
                     cancelledAt: pushedLocally.cancelledAt,
                     closedAt: pushedLocally.closedAt,
+                    shippingAddress: pushedLocally.shippingAddress,
+                    billingAddress: pushedLocally.billingAddress,
                 };
                 this.logger.log(
                     `Rebadged locally-pushed order ${pushedLocally.name} (${pushedLocally.id}) ` +
@@ -1573,6 +1688,96 @@ export class ShopifySyncService {
 
         const incomingUpdatedAt = so.updated_at ? new Date(so.updated_at) : null;
 
+        
+
+        // GST place of supply and tax head, stamped on the ORDER.
+
+        //
+
+        // These two columns were written in exactly ONE place — the offline order
+
+        // path — so for every Shopify order they stayed null and the invoice fell
+
+        // through to re-deriving place of supply from the address at invoice time.
+
+        // That is precisely the divergence migration 20260731120000 was written to
+
+        // eliminate, and it never held for the majority of orders — including the
+
+        // ones auto-invoicing now targets.
+
+        //
+
+        // Resolved from the MERGED address: `so.*` when the payload carries one,
+
+        // otherwise what we already hold. See the sticky-address note on the
+
+        // `existing` select.
+
+        // Channel-reported tax, stored so the invoice can reconcile what it
+
+        // DECLARES against what was actually COLLECTED. Conditional spreads
+
+        // below: a payload that omits these must not null out a figure an
+
+        // earlier one supplied.
+
+        const shippingTax = extractShippingTax(so);
+
+        const channelTaxPatch = {
+
+            ...(so.taxes_included !== undefined ? { taxesIncluded: Boolean(so.taxes_included) } : {}),
+
+            ...(shippingTax
+
+                ? {
+
+                    channelShippingTaxAmount: shippingTax.amount,
+
+                    channelShippingTaxLines: shippingTax.lines as Prisma.InputJsonValue,
+
+                }
+
+                : {}),
+
+        };
+
+        
+
+        const gst = await this.gstContext(orgId);
+
+        const mergedShippingAddress = so.shipping_address ?? existing?.shippingAddress ?? null;
+
+        const mergedBillingAddress = so.billing_address ?? existing?.billingAddress ?? null;
+
+        const placeOfSupplyCode = gst.enabled
+
+            ? resolvePlaceOfSupply({
+
+                shippingAddress: mergedShippingAddress,
+
+                billingAddress: mergedBillingAddress,
+
+                customerBillingStateCode,
+
+                buyerGstin: customerGstin,
+
+                sellerStateCode: gst.registrations.defaultStateCode,
+
+            })
+
+            : null;
+
+        // Null when GST is off or the org holds no active registration — which is
+
+        // what these columns already mean for a non-GST org.
+
+        const resolvedGstType = gst.enabled
+
+            ? gstTypeForSupply(gst.registrations, placeOfSupplyCode)
+
+            : null;
+
         // What an UPDATE is allowed to touch.
         //
         // `customerId`, `shippingAddress` and `billingAddress` are conditional
@@ -1603,10 +1808,22 @@ export class ShopifySyncService {
             cancelledAt: so.cancelled_at ? new Date(so.cancelled_at) : null,
             closedAt: so.closed_at ? new Date(so.closed_at) : null,
             externalUpdatedAt: incomingUpdatedAt,
+            // UNCONDITIONAL, deliberately, unlike customerId and the addresses
+            // below: these are DERIVED from the merged address, so a corrected
+            // shipping address in Shopify must move the place of supply with it.
+            placeOfSupplyCode,
+            gstType: resolvedGstType,
+            ...channelTaxPatch,
             ...(customerId ? { customerId } : {}),
             ...(so.shipping_address ? { shippingAddress: so.shipping_address } : {}),
             ...(so.billing_address ? { billingAddress: so.billing_address } : {}),
         };
+
+        // Set inside the transaction, acted on only AFTER it commits — see the
+        // `maybeAutoInvoice` call below for why the invoice cannot be written
+        // in here. Holds the order id when this payload is the moment the order
+        // became PAID, and stays null on every other payload.
+        let becamePaidOrderId: string | null = null;
 
         // One transaction for the order and all of its children. Previously the
         // header, line items, fulfillments and refunds were four independent
@@ -1635,11 +1852,22 @@ export class ShopifySyncService {
                         closedAt: so.closed_at ? new Date(so.closed_at) : null,
                         externalCreatedAt: so.created_at ? new Date(so.created_at) : null,
                         externalUpdatedAt: incomingUpdatedAt,
+                        placeOfSupplyCode,
+                        gstType: resolvedGstType,
+                        ...channelTaxPatch,
                     },
                     update: patch,
                     select: { id: true },
                 });
                 orderId = created.id;
+
+                // No prior state to diff against, so an order that arrives
+                // already paid IS the transition — the common case for an
+                // online checkout that captured payment before the webhook
+                // reached us.
+                if (becamePaid(null, this.mapFinancialStatus(so.financial_status))) {
+                    becamePaidOrderId = orderId;
+                }
 
                 // First time we have seen this order. One 'created' entry, dated
                 // to Shopify's own created_at so a backfill of an existing store
@@ -1685,6 +1913,18 @@ export class ShopifySyncService {
                 }
                 orderId = existing.id;
 
+                // Sits after the `applied.count === 0` return above, so a stale
+                // payload that lost the compare-and-set never reaches here and
+                // cannot trigger an invoice out of order.
+                if (
+                    becamePaid(
+                        existing.financialStatus,
+                        patch.financialStatus as OrderFinancialStatus,
+                    )
+                ) {
+                    becamePaidOrderId = orderId;
+                }
+
                 // Only reached when the write actually applied, so a redelivered
                 // or stale payload can never produce a duplicate entry.
                 const timelineEvents = this.buildShopifyTimelineEvents(
@@ -1716,7 +1956,119 @@ export class ShopifySyncService {
                 productByExternalId,
             });
         }, { timeout: 20000 });
+
+        // AFTER the commit, never inside it. `InvoiceService.create` opens its
+        // OWN Serializable transaction wrapped in `retryOnNumberingConflict`;
+        // nesting that inside this Read Committed one would both defeat the
+        // numbering retry and let an invoice failure abort the order write. The
+        // order landing is the thing that must not be lost.
+        if (opts.live && becamePaidOrderId) {
+            await this.maybeAutoInvoice(orgId, becamePaidOrderId);
+        }
     }
+
+    /**
+     * Issue a GST invoice for an order that has just been paid, if the org has
+     * opted in via `orderSettings.autoInvoiceOnPayment` (default off).
+     *
+     * Never throws. Two reasons it must not:
+     *
+     *   1. The webhook controller already wraps every topic in a try/catch that
+     *      returns `{ received: true }`, so a throw here would be invisible to
+     *      Shopify — no retry, just a lost order ingestion if it propagated far
+     *      enough to skip later work.
+     *   2. A missing GSTIN or `gstEnabled: false` is a tax-configuration state,
+     *      not an ingestion failure. The offline path treats exactly these as a
+     *      soft-fail for the same reason (see the `invoiceError` handling in
+     *      `OrderService.createOfflineOrder`); breaking order sync over them
+     *      would be far worse than the missing document.
+     *
+     * Redelivery is safe without any extra bookkeeping: `createForOrderTx`
+     * rejects a second live invoice for the same order with a
+     * ConflictException, and the `invoices_order_id_active_key` partial index
+     * backstops the race between two concurrent webhooks.
+     */
+    private async maybeAutoInvoice(orgId: string, orderId: string): Promise<void> {
+        try {
+            const settings = await this.orgSettings.getOrderSettings(orgId);
+            if (!settings.autoInvoiceOnPayment) return;
+
+            const invoice = await this.invoiceService.create(orgId, { orderId });
+            this.logger.log(
+                `Auto-issued invoice ${invoice.invoiceNumber} for paid order ${orderId}`,
+            );
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.logger.warn(
+                `Auto-invoice skipped for paid order ${orderId}: ${message}`,
+            );
+
+            // RECORD it. Swallowing stays correct (see above), but swallowing
+            // SILENTLY meant an org with GST disabled or no default GSTIN
+            // accrued paid, uninvoiced orders that nothing in the product ever
+            // mentioned. The filing tab now counts these.
+            //
+            // Wrapped separately: bookkeeping must never be the thing that
+            // breaks order ingestion, which is the entire reason the outer
+            // catch exists.
+            try {
+                await this.prisma.order.updateMany({
+                    where: { id: orderId, organizationId: orgId },
+                    data: { invoiceError: message.slice(0, 500), invoiceErrorAt: new Date() },
+                });
+            } catch (bookkeepingErr) {
+                this.logger.error(
+                    `Could not record auto-invoice failure for order ${orderId}`,
+                    bookkeepingErr instanceof Error ? bookkeepingErr.stack : undefined,
+                );
+            }
+        }
+    }
+
+    /**
+     * The org's GST posture, memoised briefly.
+     *
+     * `upsertOrder` runs once per order, so without a cache a 60-day backfill
+     * would re-read the same registrations for every order on every page. The
+     * TTL is short so a GSTIN edit mid-sync is picked up rather than pinned for
+     * the life of the process.
+     */
+    private async gstContext(
+        orgId: string,
+    ): Promise<{ enabled: boolean; registrations: SellerRegistrations }> {
+        const cached = ShopifySyncService.gstContextCache.get(orgId);
+        if (cached && cached.expiresAt > Date.now()) return cached.value;
+    
+        const org = await this.prisma.organization.findUnique({
+            where: { id: orgId },
+            select: { gstEnabled: true },
+        });
+    
+        const gstins = org?.gstEnabled
+            ? await this.prisma.organizationGstin.findMany({
+                where: { organizationId: orgId, isActive: true },
+                select: { stateCode: true, isDefault: true },
+            })
+            : [];
+    
+        const value = {
+            enabled: Boolean(org?.gstEnabled),
+            registrations: {
+                defaultStateCode:
+                    gstins.find((g) => g.isDefault)?.stateCode ??
+                    gstins[0]?.stateCode ??
+                    null,
+                stateCodes: gstins.map((g) => g.stateCode),
+            },
+        };
+    
+        ShopifySyncService.gstContextCache.set(orgId, {
+            value,
+            expiresAt: Date.now() + GST_CONTEXT_TTL_MS,
+        });
+        return value;
+    }
+    
 
     /**
      * Write an order's line items, fulfillments and refunds. Split out of
@@ -1768,8 +2120,9 @@ export class ShopifySyncService {
                     quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0',
                     fulfillmentStatus: li.fulfillment_status, requiresShipping: li.requires_shipping ?? true,
                     taxable: li.taxable ?? true, properties: li.properties || null,
+                    ...channelTax(li),
                 },
-                update: { variantId, vendor, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', fulfillmentStatus: li.fulfillment_status },
+                update: { variantId, vendor, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', fulfillmentStatus: li.fulfillment_status, ...channelTax(li) },
             });
         }
 
@@ -1827,11 +2180,21 @@ export class ShopifySyncService {
         }
 
         for (const rf of so.refunds || []) {
-            const refundAmount = rf.transactions?.[0]?.amount || '0';
+            // Every transaction, not just the first: a split-tender refund
+            // (part card, part store credit) was silently understated by the
+            // whole second leg. Tax is captured too — without it a refunded
+            // sale stayed 100% in declared liability for ever.
+            const refund = extractRefundTax(rf);
+            const refundTaxPatch = {
+                totalTax: refund.totalTax,
+                shippingTax: refund.shippingTax,
+                taxLines: (refund.taxLines ?? undefined) as Prisma.InputJsonValue | undefined,
+                adjustments: (refund.adjustments ?? undefined) as Prisma.InputJsonValue | undefined,
+            };
             await tx.orderRefund.upsert({
                 where: { orderId_externalId: { orderId, externalId: String(rf.id) } },
-                create: { orderId, externalId: String(rf.id), amount: refundAmount, currency: so.currency || 'USD', reason: rf.note, note: rf.note, lineItems: rf.refund_line_items || null, processedAt: rf.processed_at ? new Date(rf.processed_at) : null },
-                update: { amount: refundAmount, note: rf.note, lineItems: rf.refund_line_items || null },
+                create: { orderId, externalId: String(rf.id), amount: refund.amount, currency: so.currency || 'USD', reason: rf.note, note: rf.note, lineItems: rf.refund_line_items || null, processedAt: rf.processed_at ? new Date(rf.processed_at) : null, ...refundTaxPatch },
+                update: { amount: refund.amount, note: rf.note, lineItems: rf.refund_line_items || null, ...refundTaxPatch },
             });
         }
     }
@@ -1868,7 +2231,16 @@ export class ShopifySyncService {
             return;
         }
 
-        const amount = refund.transactions?.[0]?.amount ?? '0';
+        // Same fix as the order-payload path: sum every settled transaction
+        // and carry the tax split.
+        const extracted = extractRefundTax(refund);
+        const amount = extracted.amount;
+        const refundTaxPatch = {
+            totalTax: extracted.totalTax,
+            shippingTax: extracted.shippingTax,
+            taxLines: (extracted.taxLines ?? undefined) as Prisma.InputJsonValue | undefined,
+            adjustments: (extracted.adjustments ?? undefined) as Prisma.InputJsonValue | undefined,
+        };
 
         // Is this refund new to us? Decides whether a timeline entry is written.
         // `refunds/create` is redelivered on failure, and the full sync re-reads
@@ -1887,8 +2259,9 @@ export class ShopifySyncService {
                     currency: order.currency, reason: refund.note, note: refund.note,
                     lineItems: refund.refund_line_items ?? null,
                     processedAt: refund.processed_at ? new Date(refund.processed_at) : null,
+                    ...refundTaxPatch,
                 },
-                update: { amount, note: refund.note, lineItems: refund.refund_line_items ?? null },
+                update: { amount, note: refund.note, lineItems: refund.refund_line_items ?? null, ...refundTaxPatch },
             });
 
             if (!alreadyRecorded) {

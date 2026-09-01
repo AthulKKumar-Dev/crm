@@ -1,5 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
+import { isLineTaxable } from './taxability.util';
+
+/** One sale line, as the batch resolver needs to see it. */
+export interface BatchLineInput {
+  productId: string | null;
+  /** `toNullableNumber(product.gstRate)` — null (unset) and 0 (exempt) differ. */
+  productGstRate: number | null;
+  lineTaxable?: boolean | null;
+  variantTaxable?: boolean | null;
+}
 
 /**
  * Resolves the effective GST rate for a product using the priority chain:
@@ -17,81 +28,217 @@ import { PrismaService } from '../prisma/prisma.service';
 export class TaxResolverService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * Effective GST rate for EVERY line of one order, in a fixed number of queries.
+   *
+   * WHY THIS REPLACES A LOOP OVER `resolveLineGstRate`. That loop issued up to
+   * FOUR queries per line, sequentially, and — worse — it issued them on
+   * `this.prisma` rather than the caller's transaction. Three consequences, in
+   * increasing severity:
+   *
+   *   1. A 20-line invoice made ~80 sequential round trips inside a 10-second
+   *      Serializable transaction, re-paid in full on every numbering retry.
+   *   2. Each of those reads took a SECOND pooled connection while the
+   *      transaction still held the first — N times per sale. Under concurrency
+   *      that is pool exhaustion, and it presents as an unexplained hang on
+   *      invoice creation rather than as a slow page.
+   *   3. The rates were read OUTSIDE the Serializable snapshot, so an invoice
+   *      could be priced with rates its own transaction could not see.
+   *
+   * This issues at most FOUR queries total regardless of line count, and runs
+   * them on `client` — pass the caller's `tx` and all three problems go away.
+   *
+   * The priority chain and its null-vs-zero semantics are unchanged; only the
+   * fetching is. `resolveGstRate` remains for the settings-side single lookup.
+   */
+  async resolveLineGstRates(
+    orgId: string,
+    placeOfSupplyCode: string,
+    lines: BatchLineInput[],
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<number[]> {
+    const rates = new Array<number>(lines.length).fill(0);
+
+    // Lines still needing a lookup after the two decisions that need no query:
+    // a non-taxable line is 0%, and an explicit product rate wins outright
+    // (`>= 0`, so a product configured at 0% is EXEMPT and stops here).
+    const pending: number[] = [];
+
+    lines.forEach((line, i) => {
+      if (!isLineTaxable(line)) {
+        rates[i] = 0;
+        return;
+      }
+      if (line.productGstRate !== null && line.productGstRate >= 0) {
+        rates[i] = line.productGstRate;
+        return;
+      }
+      pending.push(i);
+    });
+
+    if (pending.length === 0) return rates;
+
+    const productIds = [
+      ...new Set(
+        pending
+          .map((i) => lines[i].productId)
+          .filter((id): id is string => !!id),
+      ),
+    ];
+
+    // One query per rung of the chain, for ALL products at once. The state rate
+    // in particular used to be re-read per line with identical arguments.
+    const [collectionRows, productRows, stateTaxRate] = await Promise.all([
+      productIds.length
+        ? client.productCollection.findMany({
+            where: { productId: { in: productIds }, collection: { organizationId: orgId } },
+            select: {
+              productId: true,
+              collection: {
+                select: { taxOverride: { where: { organizationId: orgId }, select: { gstRate: true } } },
+              },
+            },
+          })
+        : Promise.resolve([]),
+      productIds.length
+        ? client.product.findMany({
+            where: { id: { in: productIds }, organizationId: orgId },
+            select: { id: true, productType: true },
+          })
+        : Promise.resolve([]),
+      client.stateTaxRate.findFirst({
+        where: { organizationId: orgId, stateCode: placeOfSupplyCode },
+        select: { gstRate: true },
+      }),
+    ]);
+
+    // Highest override wins when a product sits in several overridden
+    // collections — conservative, so we never under-charge.
+    const overrideByProduct = new Map<string, number>();
+    for (const row of collectionRows) {
+      const override = row.collection?.taxOverride;
+      if (!override) continue;
+      const rate = parseFloat(override.gstRate.toString());
+      const current = overrideByProduct.get(row.productId);
+      if (current === undefined || rate > current) {
+        overrideByProduct.set(row.productId, rate);
+      }
+    }
+
+    const typeByProduct = new Map<string, string | null>(
+      productRows.map((p) => [p.id, p.productType] as const),
+    );
+
+    const productTypes = [
+      ...new Set(
+        [...typeByProduct.values()].filter((t): t is string => !!t),
+      ),
+    ];
+
+    const typeRates = productTypes.length
+      ? await client.productTypeTaxRate.findMany({
+          where: { organizationId: orgId, productType: { in: productTypes } },
+          select: { productType: true, gstRate: true },
+        })
+      : [];
+
+    const rateByType = new Map<string, number>(
+      typeRates.map((r) => [r.productType, parseFloat(r.gstRate.toString())] as const),
+    );
+
+    const stateRate = stateTaxRate
+      ? parseFloat(stateTaxRate.gstRate.toString())
+      : null;
+
+    for (const i of pending) {
+      const productId = lines[i].productId;
+
+      if (productId) {
+        const override = overrideByProduct.get(productId);
+        if (override !== undefined) {
+          rates[i] = override;
+          continue;
+        }
+
+        const productType = typeByProduct.get(productId);
+        if (productType) {
+          const typeRate = rateByType.get(productType);
+          if (typeRate !== undefined) {
+            rates[i] = typeRate;
+            continue;
+          }
+        }
+      }
+
+      rates[i] = stateRate ?? 0;
+    }
+
+    return rates;
+  }
+
+  /**
+   * Effective GST rate for one SALE LINE, honouring its taxable flags.
+   *
+   * A single-line convenience over `resolveLineGstRates`, which is what every
+   * order, invoice and draft path now calls. It DELEGATES rather than keeping
+   * its own copy of the priority chain: two copies would drift, and — since no
+   * production caller reaches this one any more — the spec suite that pins the
+   * chain would have been pinning dead code while the batch resolver priced
+   * every real invoice unobserved.
+   *
+   * The exemption check stays in front of the chain so it cannot be forgotten:
+   * `OrderLineItem.taxable` and `ProductVariant.taxable` were both stored and
+   * ignored by every tax path until this remediation.
+   */
+  async resolveLineGstRate(
+    orgId: string,
+    input: {
+      productId: string | null;
+      productGstRate: number | null;
+      placeOfSupplyCode: string;
+      lineTaxable?: boolean | null;
+      variantTaxable?: boolean | null;
+    },
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
+  ): Promise<number> {
+    const [rate] = await this.resolveLineGstRates(
+      orgId,
+      input.placeOfSupplyCode,
+      [
+        {
+          productId: input.productId,
+          productGstRate: input.productGstRate,
+          lineTaxable: input.lineTaxable,
+          variantTaxable: input.variantTaxable,
+        },
+      ],
+      client,
+    );
+
+    return rate;
+  }
+
+  /**
+   * Rate for a product irrespective of any line's taxable flag.
+   *
+   * Kept public for the settings-side rate preview. Sale lines must go through
+   * `resolveLineGstRate`/`resolveLineGstRates` instead, or a non-taxable line
+   * gets taxed.
+   */
   async resolveGstRate(
     orgId: string,
     productId: string | null,
     productGstRate: number | null,
     placeOfSupplyCode: string,
+    client: Prisma.TransactionClient | PrismaService = this.prisma,
   ): Promise<number> {
-    // 1. Product-level override (highest priority).
-    //    `>= 0`, not `> 0`: a product explicitly configured at 0% is EXEMPT and
-    //    must stop here. Treating 0 as "unset" made exempt goods fall through
-    //    to the collection/product-type/state rates and get taxed. Callers must
-    //    pass `toNullableNumber(product.gstRate)` so null (unset) and 0
-    //    (exempt) stay distinguishable.
-    if (productGstRate !== null && productGstRate >= 0) {
-      return productGstRate;
-    }
+    const [rate] = await this.resolveLineGstRates(
+      orgId,
+      placeOfSupplyCode,
+      [{ productId, productGstRate }],
+      client,
+    );
 
-    // 2. Collection override
-    if (productId) {
-      const collectionOverride = await this.prisma.productCollection.findMany({
-        where: { productId },
-        include: {
-          collection: {
-            include: {
-              taxOverride: {
-                where: { organizationId: orgId },
-              },
-            },
-          },
-        },
-      });
-
-      const overrideRates = collectionOverride
-        .map((pc) => pc.collection.taxOverride)
-        .filter((override): override is NonNullable<typeof override> => override !== null)
-        .map((override) => parseFloat(override.gstRate.toString()));
-
-      if (overrideRates.length > 0) {
-        return Math.max(...overrideRates);
-      }
-    }
-
-    // 3. Product type tax rate
-    if (productId) {
-      const product = await this.prisma.product.findUnique({
-        where: { id: productId },
-        select: { productType: true },
-      });
-
-      if (product?.productType) {
-        const productTypeTaxRate = await this.prisma.productTypeTaxRate.findFirst({
-          where: {
-            organizationId: orgId,
-            productType: product.productType,
-          },
-        });
-
-        if (productTypeTaxRate) {
-          return parseFloat(productTypeTaxRate.gstRate.toString());
-        }
-      }
-    }
-
-    // 4. State base tax rate
-    const stateTaxRate = await this.prisma.stateTaxRate.findFirst({
-      where: {
-        organizationId: orgId,
-        stateCode: placeOfSupplyCode,
-      },
-    });
-
-    if (stateTaxRate) {
-      return parseFloat(stateTaxRate.gstRate.toString());
-    }
-
-    // 5. No rate configured — exempt
-    return 0;
+    return rate;
   }
 }

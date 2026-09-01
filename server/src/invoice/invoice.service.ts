@@ -4,8 +4,10 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import {
+  GstSupplyType,
   GstType,
   InvoiceStatus,
   OrderFinancialStatus,
@@ -21,7 +23,17 @@ import {
   GstCalculatorService,
   GstCalculationResult,
 } from '../gst/gst-calculator.service';
-import { getStateName, isValidStateCode } from '../gst/constants/indian-states';
+import { normalizeGstin } from '../gst/constants/gst-rates';
+import { normalizeUqc } from '../gst/constants/uqc';
+import { apportionShipping } from '../gst/shipping-apportionment.util';
+import { parseTaxSettings } from '../organization-settings/schemas/tax-settings.schema';
+import { compareTax } from '../gst/tax-reconciliation.util';
+import {
+  EXPORT_PLACE_OF_SUPPLY,
+  formatPlaceOfSupply,
+  getStateName,
+  isValidStateCode,
+} from '../gst/constants/indian-states';
 import {
   extractStateFromAddress,
   resolvePlaceOfSupply,
@@ -35,6 +47,18 @@ import {
   zonedDayStart,
   zonedParts,
 } from '../common/utils/zoned-date.util';
+import {
+  Gstr1Accumulator,
+  Gstr3bAccumulator,
+  type Gstr1Return,
+  type Gstr3bReturn,
+  type ReturnInvoice,
+} from './gst-return.accumulator';
+import {
+  buildGstr1Sections,
+  buildGstr3bSections,
+  type CsvSection,
+} from './gst-return-rows';
 
 /**
  * Hard ceiling on rows an export may materialise. Exports build the whole
@@ -42,6 +66,26 @@ import {
  * tenant is an out-of-memory risk for every tenant on the instance.
  */
 const EXPORT_ROW_CAP = 10_000;
+
+/**
+ * Page size and hard ceiling for a GST RETURN.
+ *
+ * Deliberately separate from EXPORT_ROW_CAP, which truncates a *convenience*
+ * export of the on-screen invoice list. A statutory return may never truncate:
+ * past the ceiling it throws, naming the real count, rather than quietly filing
+ * a subset.
+ */
+const GST_RETURN_PAGE_SIZE = 1_000;
+const GST_RETURN_INVOICE_CAP = 50_000;
+
+/**
+ * The HSN placeholder this codebase used to invent when a product had none.
+ *
+ * Not a valid HSN, and it was written onto issued invoices — which are
+ * statutory snapshots, so those rows are deliberately NOT rewritten. New lines
+ * store null instead; both forms must read as "missing".
+ */
+const LEGACY_PLACEHOLDER_HSN = '0000';
 
 /**
  * Organizations already warned about running GST on an untouched UTC timezone.
@@ -70,6 +114,8 @@ import {
 } from './dto/query-invoices.dto';
 import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
+import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
+import { MarkFiledDto } from './dto/mark-filed.dto';
 
 @Injectable()
 export class InvoiceService {
@@ -128,6 +174,7 @@ export class InvoiceService {
       buyerGstin?: string;
       placeOfSupplyCode?: string;
       notes?: string;
+      reverseCharge?: boolean;
     },
   ) {
     // 1. Fetch the order with line items and customer
@@ -140,7 +187,18 @@ export class InvoiceService {
         lineItems: {
           include: {
             variant: {
-              include: { product: { select: { id: true, hsnCode: true, gstRate: true } } },
+              include: {
+                product: {
+                  select: {
+                    id: true,
+                    hsnCode: true,
+                    gstRate: true,
+                    // Phase 2: statutory classification and unit of quantity.
+                    supplyType: true,
+                    unitOfMeasure: true,
+                  },
+                },
+              },
             },
           },
         },
@@ -184,6 +242,15 @@ export class InvoiceService {
       select: { gstEnabled: true, timezone: true },
     });
 
+    // B2CL threshold and the default UQC. Read in-transaction rather than via
+    // OrganizationSettingsService so this needs no new injection and cannot see
+    // a settings value the surrounding transaction did not.
+    const settingsRow = await tx.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { taxSettings: true },
+    });
+    const taxSettings = parseTaxSettings(settingsRow?.taxSettings ?? null);
+
     if (!org?.gstEnabled) {
       throw new BadRequestException(
         'GST is not enabled for this organization. Enable it in Settings → Tax & GST.',
@@ -225,6 +292,10 @@ export class InvoiceService {
     const placeOfSupplyName =
       getStateName(placeOfSupplyCode) || placeOfSupplyCode;
 
+    // An export is zero-rated by destination, so this is derived here rather
+    // than configured on the product.
+    const isExportSupply = placeOfSupplyCode === EXPORT_PLACE_OF_SUPPLY;
+
     // 5. Determine GST type (intra vs inter state)
     const isIntraState = this.calculator.isIntraState(
       sellerGstin.stateCode,
@@ -236,24 +307,56 @@ export class InvoiceService {
     const lineItemResults: Array<{
       orderLineItem: (typeof order.lineItems)[0];
       calculation: GstCalculationResult;
-      hsnCode: string;
+      hsnCode: string | null;
+      unitOfMeasure: string;
+      supplyType: GstSupplyType;
     }> = [];
 
-    for (const item of order.lineItems) {
-      // Use TaxResolver priority chain: Product > Collection > State > 0%
-      // toNullableNumber preserves the null (unset) vs 0 (explicitly exempt)
-      // distinction that the resolver's priority chain depends on.
-      const productGstRate = this.calculator.toNullableNumber(
-        item.variant?.product?.gstRate,
-      );
-      const productId = item.variant?.product?.id ?? null;
-      const gstRate = await this.taxResolver.resolveGstRate(
-        orgId,
-        productId,
-        productGstRate,
-        placeOfSupplyCode,
-      );
-      const hsnCode = item.variant?.product?.hsnCode || '0000';
+    // Rates for EVERY line in at most four queries, run on this transaction.
+    //
+    // This was a per-line `resolveLineGstRate` call issuing up to four queries
+    // each, on `this.prisma` rather than `tx` — so a 20-line invoice made ~80
+    // sequential round trips AND took a second pooled connection per line while
+    // this transaction held the first. The priority chain is unchanged;
+    // toNullableNumber still preserves null (unset) vs 0 (explicitly exempt),
+    // and the taxable flags still short-circuit to 0%.
+    const lineGstRates = await this.taxResolver.resolveLineGstRates(
+      orgId,
+      placeOfSupplyCode,
+      order.lineItems.map((item) => ({
+        productId: item.variant?.product?.id ?? null,
+        productGstRate: this.calculator.toNullableNumber(
+          item.variant?.product?.gstRate,
+        ),
+        lineTaxable: item.taxable,
+        variantTaxable: item.variant?.taxable,
+      })),
+      tx,
+    );
+
+    for (const [index, item] of order.lineItems.entries()) {
+      const gstRate = lineGstRates[index];
+      // NULL, not the invented '0000'.
+      //
+      // '0000' is not a valid HSN and it was being stamped onto a statutory
+      // document whenever a product had none — which, on this data, is every
+      // product in every real organization. Writing null makes "unclassified"
+      // representable, and `hsnMissing` below makes it visible before filing.
+      const hsnCode = item.variant?.product?.hsnCode?.trim() || null;
+
+      // Table 12 needs a unit on every row. Product override first, then the
+      // org default (NOS), so a merchant who has classified nothing still
+      // produces a valid table.
+      const unitOfMeasure =
+        normalizeUqc(item.variant?.product?.unitOfMeasure) ??
+        taxSettings.defaultUnitOfMeasure;
+
+      // ZERO_RATED is DERIVED — an export is zero-rated because of where it is
+      // going, not because of what it is. Everything else is a property of the
+      // goods and is classified on the product.
+      const supplyType = isExportSupply
+        ? GstSupplyType.ZERO_RATED
+        : (item.variant?.product?.supplyType ?? GstSupplyType.TAXABLE);
 
       const calculation = this.calculator.calculateLineItem(
         {
@@ -265,7 +368,53 @@ export class InvoiceService {
         isIntraState,
       );
 
-      lineItemResults.push({ orderLineItem: item, calculation, hsnCode });
+      lineItemResults.push({
+        orderLineItem: item,
+        calculation,
+        hsnCode,
+        unitOfMeasure,
+        supplyType,
+      });
+    }
+
+    // 6b. Shipping as a COMPOSITE SUPPLY, when the org has opted in.
+    //
+    // Delivery charged on a taxable supply normally takes the goods' rate under
+    // Indian GST. Until now shipping was added to the grand total untaxed, so
+    // every shipped order under-declared output tax and shipping revenue never
+    // reached GSTR-3B 3.1(a) at all.
+    //
+    // The charge is apportioned across TAXABLE lines only and folded into their
+    // taxable values, so it flows into the rate buckets, table 12 and the HSN
+    // summary automatically rather than needing a parallel code path.
+    const shippingAmount = this.calculator.toNumber(order.totalShippingPrice);
+    const taxShipping = taxSettings.taxShipping && shippingAmount > 0;
+
+    if (taxShipping) {
+      const shares = apportionShipping(
+        lineItemResults.map((r) => ({
+          taxableValue: r.calculation.taxableValue,
+          // A zero-RATE line is still a taxable supply; an exempt or non-GST one
+          // is not, and must not acquire tax through its share of delivery.
+          taxable: r.supplyType === GstSupplyType.TAXABLE,
+        })),
+        shippingAmount,
+      );
+
+      lineItemResults.forEach((r, i) => {
+        if (!shares[i]) return;
+        // Recompute from the augmented base so CGST/SGST/IGST all move together
+        // rather than being patched individually.
+        r.calculation = this.calculator.calculateLineItem(
+          {
+            unitPrice: r.calculation.taxableValue + shares[i],
+            quantity: 1,
+            discount: 0,
+            gstRate: r.calculation.gstRate,
+          },
+          isIntraState,
+        );
+      });
     }
 
     // 7. Calculate invoice totals.
@@ -286,8 +435,47 @@ export class InvoiceService {
     const totals = this.calculator.calculateInvoiceTotals(
       calculations,
       appliedDiscount,
-      this.calculator.toNumber(order.totalShippingPrice),
+      // Zero when shipping was apportioned: it is already inside the line
+      // taxable values, and adding it again would double-count it in the grand
+      // total. `shippingCharge` is still persisted for the totals ladder.
+      taxShipping ? 0 : shippingAmount,
     );
+
+    // 7b. Reconcile what the SALES CHANNEL charged against what this invoice
+
+    //     declares. The CRM recomputes tax independently of Shopify, and
+
+    //     nothing ever compared the two — so a merchant whose Shopify tax
+
+    //     config had drifted from their CRM config filed a number that did not
+
+    //     match the money they took, with no signal anywhere.
+
+    //
+
+    //     This changes NOTHING about the invoice's value. `totals` is still
+
+    //     authoritative; the comparison only records the divergence so the
+
+    //     filing tab can warn BEFORE the return goes out.
+
+    const taxComparison = compareTax(order.totalTax, totals.totalTax);
+
+    if (taxComparison.mismatch) {
+
+        this.logger.warn(
+
+            `Order ${order.id}: channel charged ${taxComparison.chargedTax?.toString()} tax ` +
+
+            `but invoice declares ${taxComparison.declaredTax.toString()} ` +
+
+            `(delta ${taxComparison.delta?.toString()}). Check the GST rate configuration.`,
+
+        );
+
+    }
+
+    
 
     // 8. Generate invoice number (passes the same tx so it's atomic with the create below)
     const invoiceDate = new Date();
@@ -295,14 +483,45 @@ export class InvoiceService {
       invoiceDate,
       this.gstTimeZone(orgId, org),
     );
+    // A filed period is closed. Issuing into it would change a return that has
+    // already gone to the government, with no amendment trail.
+    await this.assertPeriodOpen(
+      tx,
+      orgId,
+      invoiceDate,
+      this.gstTimeZone(orgId, org),
+      'Issuing an invoice',
+    );
+
     const invoiceNum = await this.invoiceNumber.getNextInvoiceNumber(
       orgId,
       financialYear,
       tx,
     );
 
-    // 9. Resolve buyer info
-    const buyerGstin = dto.buyerGstin || order.customer?.gstin || null;
+    // 9. Resolve buyer info.
+    //
+    // NORMALISED AT WRITE TIME, not validated at read time. B2B/B2C is decided
+    // by whether this column is null — and `buildInvoiceWhere` makes the same
+    // decision in Prisma with `buyerGstin: { not: null }`, which cannot run a
+    // regex. Validating only when generating the return would therefore make
+    // the invoice LIST and the RETURN classify the same invoice differently.
+    // Storing "a valid GSTIN or null" keeps both predicates equivalent.
+    //
+    // An explicit `dto.buyerGstin` is already @Matches(GSTIN_REGEX) in the DTO,
+    // so it is rejected rather than silently dropped. A junk GSTIN on the
+    // CUSTOMER record is different: it arrives from Shopify customer sync and
+    // CSV import, neither of which validates, and must not block a legitimate
+    // invoice — it just must not make the sale B2B.
+    const customerGstin = normalizeGstin(order.customer?.gstin);
+    if (order.customer?.gstin && !customerGstin) {
+      this.logger.warn(
+        `Customer ${order.customer.id} has an invalid GSTIN; invoicing order ` +
+          `${order.id} as B2C. Correct it on the customer record to file this as B2B.`,
+      );
+    }
+
+    const buyerGstin = normalizeGstin(dto.buyerGstin) || customerGstin || null;
     const buyerName = order.customer
       ? `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim()
       : 'Guest Customer';
@@ -349,9 +568,23 @@ export class InvoiceService {
         // detail dialog, the printed invoice and the CSV show a totals ladder
         // that actually sums to `grandTotal`.
         shippingCharge: this.calculator.toNumber(order.totalShippingPrice),
+        // Reconciliation snapshot. `chargedTax: null` reads as "never compared",
+        // which is not the same as "compared and equal".
+        // Counts BOTH a null and the legacy '0000' as missing, because issued
+        // invoices carrying '0000' were deliberately not rewritten.
+        hsnMissing: lineItemResults.some(
+          (r) => !r.hsnCode || r.hsnCode === LEGACY_PLACEHOLDER_HSN,
+        ),
+        chargedTax: taxComparison.chargedTax,
+        taxMismatchDelta: taxComparison.delta,
+        taxMismatch: taxComparison.mismatch,
         grandTotal: totals.grandTotal,
         currency: order.currency,
         notes: dto.notes,
+        // Rule 46(p): the invoice must declare this. False is the correct and
+        // required answer for an ordinary forward-charge supply — the point is
+        // that it can now also be true.
+        reverseCharge: dto.reverseCharge ?? false,
         // Line items
         lineItems: {
           create: lineItemResults.map((r) => ({
@@ -360,6 +593,8 @@ export class InvoiceService {
               ? `${r.orderLineItem.title} - ${r.orderLineItem.variantTitle}`
               : r.orderLineItem.title,
             hsnCode: r.hsnCode,
+            unitOfMeasure: r.unitOfMeasure,
+            supplyType: r.supplyType,
             quantity: r.orderLineItem.quantity,
             // The gross per-unit price. (This previously read as
             // `taxable/qty + taxable === 0 ? 0 : price` — `+` and `===` bind
@@ -383,6 +618,16 @@ export class InvoiceService {
         },
       },
       include: { lineItems: true },
+    });
+
+    // Any successful issue clears a recorded auto-invoicing failure, including
+    // a manual reissue after the merchant fixed their GST settings — so the
+    // "uninvoiced paid orders" count on the filing tab repairs itself rather
+    // than needing to be dismissed. Inside the same transaction as the invoice,
+    // so the flag can never survive the invoice that resolves it.
+    await tx.order.updateMany({
+      where: { id: order.id, organizationId: orgId, invoiceError: { not: null } },
+      data: { invoiceError: null, invoiceErrorAt: null },
     });
 
     return invoice;
@@ -569,6 +814,28 @@ export class InvoiceService {
    * the precondition, then interpret a zero count.
    */
   async cancel(id: string, orgId: string) {
+    // Cancelling makes an invoice VANISH from a regenerated return. That is an
+    // acceptable same-period correction, but once the period is filed it
+    // silently contradicts what was already declared — the statutory remedy is
+    // a credit note, which is additive and leaves a trail.
+    const target = await this.prisma.invoice.findFirst({
+      where: { id, organizationId: orgId },
+      select: { invoiceDate: true, status: true },
+    });
+    if (target && target.status !== InvoiceStatus.CANCELLED) {
+      const org = await this.prisma.organization.findUnique({
+        where: { id: orgId },
+        select: { timezone: true, gstEnabled: true },
+      });
+      await this.assertPeriodOpen(
+        this.prisma,
+        orgId,
+        target.invoiceDate,
+        this.gstTimeZone(orgId, org),
+        'Cancelling this invoice',
+      );
+    }
+
     const claimed = await this.prisma.invoice.updateMany({
       where: {
         id,
@@ -596,6 +863,418 @@ export class InvoiceService {
     return this.findOne(id, orgId);
   }
 
+
+  // ─── FILING STATE ───
+  /**
+   * Refuse to change a period that has already been filed.
+   *
+   * Nothing recorded a filing before, so GSTR-1/3B were recomputed from
+   * `invoices` on every request — issuing or cancelling an invoice inside an
+   * already-filed month silently rewrote history with no amendment trail. The
+   * statutory correction for a filed period is a credit note or an amendment,
+   * never an edit.
+   */
+  private async assertPeriodOpen(
+    client: Prisma.TransactionClient | PrismaService,
+    orgId: string,
+    invoiceDate: Date,
+    timeZone: string,
+    action: string,
+  ): Promise<void> {
+    const financialYear = getFinancialYear(invoiceDate, timeZone);
+    const month = String(zonedParts(invoiceDate, timeZone).month).padStart(2, '0');
+
+    const filing = await client.gstFiling.findFirst({
+      where: { organizationId: orgId, financialYear, period: month },
+      select: { returnType: true, filedAt: true, arn: true },
+    });
+
+    if (!filing) return;
+
+    throw new ConflictException(
+      `${action} is not allowed: ${filing.returnType} for ${month}/${financialYear} was ` +
+        `filed on ${filing.filedAt.toISOString().split('T')[0]}` +
+        `${filing.arn ? ` (ARN ${filing.arn})` : ''}. ` +
+        `Raise a credit note instead — a filed period cannot be edited.`,
+    );
+  }
+
+  /** Record that a period has been filed, locking it. */
+  async markFiled(orgId: string, dto: MarkFiledDto, userId?: string) {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true },
+    });
+
+    // Snapshot what was filed, so a later recomputation can be COMPARED with
+    // what actually went to the government rather than silently replacing it.
+    const totals = (await this.getGstReturn(orgId, {
+      financialYear: dto.financialYear,
+      period: dto.period,
+      returnType: dto.returnType,
+      sellerGstinId: dto.sellerGstinId,
+    })) as { totals?: unknown; taxPayable?: unknown };
+
+    // findFirst + create/update rather than upsert: `sellerGstinId` is
+    // nullable and Prisma's compound-unique `where` input will not accept null,
+    // even though the SQL index is declared NULLS NOT DISTINCT and does treat
+    // two nulls as the same row.
+    const existing = await this.prisma.gstFiling.findFirst({
+      where: {
+        organizationId: orgId,
+        financialYear: dto.financialYear,
+        period: dto.period,
+        returnType: dto.returnType,
+        sellerGstinId: dto.sellerGstinId ?? null,
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      return this.prisma.gstFiling.update({
+        where: { id: existing.id },
+        data: { arn: dto.arn ?? null },
+      });
+    }
+
+    return this.prisma.gstFiling.create({
+      data: {
+        organizationId: orgId,
+        financialYear: dto.financialYear,
+        period: dto.period,
+        returnType: dto.returnType,
+        sellerGstinId: dto.sellerGstinId ?? null,
+        filedById: userId ?? null,
+        arn: dto.arn ?? null,
+        totals: (totals.totals ?? totals.taxPayable ?? {}) as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  /** Filed periods for the year, so the UI can show which are locked. */
+  async listFilings(orgId: string, financialYear?: string) {
+    return this.prisma.gstFiling.findMany({
+      where: { organizationId: orgId, ...(financialYear && { financialYear }) },
+      orderBy: [{ financialYear: 'desc' }, { period: 'desc' }],
+    });
+  }
+
+  /**
+   * Reopen a period filed in error.
+   *
+   * Deliberately present: a lock with no key turns a mistaken click into a
+   * permanently unusable month. Role-gated like every other statutory action.
+   */
+  async unfile(orgId: string, id: string) {
+    const deleted = await this.prisma.gstFiling.deleteMany({
+      where: { id, organizationId: orgId },
+    });
+    if (deleted.count === 0) throw new NotFoundException('Filing not found');
+    return { id, reopened: true };
+  }
+
+  /**
+   * Refunded orders whose invoice has not been credited.
+   *
+   * Returns the ISSUED invoice alongside the refund totals, so the UI can
+   * pre-fill a credit note instead of making someone re-key the amount off a
+   * Shopify screen. `refundedTax` is NULL when the channel never told us —
+   * the caller must show that as unknown rather than as zero, or the note would
+   * reverse the sale value while reversing none of its tax.
+   */
+  async listRefundsNeedingCreditNote(orgId: string) {
+    const orders = await this.prisma.order.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        refunds: { some: {} },
+        invoices: { some: { status: InvoiceStatus.ISSUED } },
+        // Deliberately NOT "has no credit note". An order part-credited once
+        // is still under-credited if it is refunded again, and excluding it
+        // here would drop it out of the warning permanently with money still
+        // uncredited. Partial credits are netted in the fold below instead.
+      },
+      select: {
+        id: true,
+        name: true,
+        currency: true,
+        refunds: { select: { amount: true, totalTax: true, processedAt: true, reason: true } },
+        invoices: {
+          // Both statuses in ONE selection — a relation may appear only once —
+          // then partitioned in the fold. At most one invoice per order can be
+          // ISSUED (the active-invoice unique index guarantees it), so there is
+          // no ambiguity about which invoice the notes reverse.
+          where: { status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.CREDIT_NOTE] } },
+          select: { id: true, invoiceNumber: true, grandTotal: true, totalTax: true, status: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: EXPORT_ROW_CAP,
+    });
+
+    return orders.flatMap((order) => {
+      const invoice = order.invoices.find(
+        (i) => i.status === InvoiceStatus.ISSUED,
+      );
+      if (!invoice) return [];
+
+      const creditNotes = order.invoices.filter(
+        (i) => i.status === InvoiceStatus.CREDIT_NOTE,
+      );
+
+      const refundedAmount = order.refunds.reduce(
+        (sum, r) => sum.plus(new Prisma.Decimal(r.amount)),
+        new Prisma.Decimal(0),
+      );
+
+      // All-or-nothing, matching `extractRefundTax`: if any refund on the order
+      // has unknown tax, the order total is unknown rather than partial.
+      const anyUnknown = order.refunds.some((r) => r.totalTax === null);
+      const refundedTax = anyUnknown
+        ? null
+        : order.refunds.reduce(
+            (sum, r) => sum.plus(new Prisma.Decimal(r.totalTax!)),
+            new Prisma.Decimal(0),
+          );
+
+      // Credit notes store POSITIVE amounts, as on the paper document.
+      const creditedAmount = creditNotes.reduce(
+        (sum, cn) => sum.plus(new Prisma.Decimal(cn.grandTotal)),
+        new Prisma.Decimal(0),
+      );
+      const creditedTax = creditNotes.reduce(
+        (sum, cn) => sum.plus(new Prisma.Decimal(cn.totalTax)),
+        new Prisma.Decimal(0),
+      );
+
+      // Fully credited — nothing to warn about. Strictly less-than, so an exact
+      // match settles the order rather than leaving a zero-value row on screen.
+      if (!creditedAmount.lessThan(refundedAmount)) return [];
+
+      // What a credit note raised NOW should be for. Prefilling the gross
+      // refund instead would be refused by createCreditNote as over-crediting
+      // the moment any part of it had already been credited.
+      const pendingAmount = refundedAmount.minus(creditedAmount);
+      const pendingTax =
+        refundedTax === null ? null : refundedTax.minus(creditedTax);
+
+      return [
+        {
+          orderId: order.id,
+          orderName: order.name,
+          currency: order.currency,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          invoiceTotal: invoice.grandTotal,
+          refundedAmount,
+          refundedTax,
+          creditedAmount,
+          creditedTax,
+          pendingAmount,
+          pendingTax,
+          refundCount: order.refunds.length,
+          lastRefundAt:
+            order.refunds
+              .map((r) => r.processedAt)
+              .filter((d): d is Date => !!d)
+              .sort((a, b) => b.getTime() - a.getTime())[0] ?? null,
+          reason: order.refunds.find((r) => r.reason)?.reason ?? null,
+        },
+      ];
+    });
+  }
+
+  // ─── CREDIT NOTES ───
+  /**
+   * Raise a credit note against an issued invoice.
+   *
+   * WHY THIS EXISTS. Refunds had no GST treatment at all: a refunded sale
+   * stayed 100% in declared output liability for ever, `InvoiceStatus.CREDIT_NOTE`
+   * was dead code, and GSTR-1 had no Table 9B. Any merchant who accepts returns
+   * has been over-declaring tax every month.
+   *
+   * A credit note reuses the `invoices` table — it is shaped like an invoice and
+   * must fold into the same return — but carries its OWN number series
+   * (`CN-{FY}/{000001}`), because it is a distinct statutory document and mixing
+   * it into the gapless invoice run is indefensible in an audit.
+   *
+   * Amounts are stored POSITIVE, exactly as they are on the paper document. The
+   * return accumulator subtracts them; storing negatives would double-negate the
+   * moment anything else summed the column.
+   */
+  async createCreditNote(orgId: string, invoiceId: string, dto: CreateCreditNoteDto) {
+    return retryOnNumberingConflict(
+      () =>
+        this.prisma.$transaction(
+          (tx) => this.createCreditNoteTx(tx, orgId, invoiceId, dto),
+          {
+            isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+            timeout: 10000,
+          },
+        ),
+      {
+        isRetriableUniqueViolation: (e) =>
+          uniqueViolationTargets(e, 'invoiceNumber'),
+        onRetry: (attempt) =>
+          this.logger.warn(
+            `Credit note number collision on attempt ${attempt} — retrying`,
+          ),
+      },
+    );
+  }
+
+  private async createCreditNoteTx(
+    tx: Prisma.TransactionClient,
+    orgId: string,
+    invoiceId: string,
+    dto: CreateCreditNoteDto,
+  ) {
+    const original = await tx.invoice.findFirst({
+      where: { id: invoiceId, organizationId: orgId },
+      include: { lineItems: true },
+    });
+    if (!original) throw new NotFoundException('Invoice not found');
+
+    if (original.status !== InvoiceStatus.ISSUED) {
+      throw new BadRequestException(
+        `Only an issued invoice can be credited. This one is ${original.status}.`,
+      );
+    }
+
+    const org = await tx.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true },
+    });
+    const timeZone = this.gstTimeZone(orgId, org);
+
+    // The credit note itself is dated TODAY and lands in today's period, so the
+    // period being locked is the one it is issued into — not the one the
+    // original invoice sits in. Crediting a filed month is exactly the
+    // supported correction, which is why the ORIGINAL's period is not checked.
+    const noteDate = new Date();
+    await this.assertPeriodOpen(tx, orgId, noteDate, timeZone, 'Raising a credit note');
+
+    const alreadyCredited = await tx.invoice.aggregate({
+      where: {
+        organizationId: orgId,
+        creditNoteForId: invoiceId,
+        status: InvoiceStatus.CREDIT_NOTE,
+      },
+      _sum: { grandTotal: true },
+    });
+
+    const originalTotal = new Prisma.Decimal(original.grandTotal);
+    const credited = new Prisma.Decimal(alreadyCredited._sum.grandTotal ?? 0);
+    const remaining = originalTotal.minus(credited);
+
+    if (remaining.lessThanOrEqualTo(0)) {
+      throw new ConflictException(
+        `Invoice ${original.invoiceNumber} is already fully credited.`,
+      );
+    }
+
+    // Full reversal unless an amount is given. A partial credit is apportioned
+    // pro-rata across the original lines by taxable value, so every line keeps
+    // its own rate and the reversed tax stays proportional — the alternative,
+    // guessing which lines were returned, is not knowable from an amount.
+    const requested = dto.amount ? new Prisma.Decimal(dto.amount) : remaining;
+    if (requested.greaterThan(remaining)) {
+      throw new BadRequestException(
+        `Cannot credit ${requested.toFixed(2)}: only ${remaining.toFixed(2)} of ` +
+          `invoice ${original.invoiceNumber} remains uncredited.`,
+      );
+    }
+
+    const isFull = requested.equals(remaining) && credited.isZero();
+    const ratio = originalTotal.isZero()
+      ? new Prisma.Decimal(0)
+      : requested.dividedBy(originalTotal);
+
+    const scale = (value: Prisma.Decimal.Value) =>
+      isFull
+        ? new Prisma.Decimal(value)
+        : new Prisma.Decimal(value).times(ratio).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP);
+
+    const financialYear = this.calculator.getFinancialYear(noteDate, timeZone);
+    const noteNumber = await this.invoiceNumber.getNextCreditNoteNumber(
+      orgId,
+      financialYear,
+      tx,
+    );
+
+    const lines = original.lineItems.map((li) => ({
+      orderLineItemId: li.orderLineItemId,
+      description: li.description,
+      hsnCode: li.hsnCode,
+      unitOfMeasure: li.unitOfMeasure,
+      supplyType: li.supplyType,
+      quantity: isFull ? li.quantity : 0,
+      unitPrice: li.unitPrice,
+      discount: scale(li.discount),
+      taxableValue: scale(li.taxableValue),
+      gstRate: li.gstRate,
+      cgstRate: li.cgstRate,
+      cgstAmount: scale(li.cgstAmount),
+      sgstRate: li.sgstRate,
+      sgstAmount: scale(li.sgstAmount),
+      igstRate: li.igstRate,
+      igstAmount: scale(li.igstAmount),
+      totalTax: scale(li.totalTax),
+      totalAmount: scale(li.totalAmount),
+    }));
+
+    const note = await tx.invoice.create({
+      data: {
+        organizationId: orgId,
+        orderId: original.orderId,
+        sellerGstinId: original.sellerGstinId,
+        invoiceNumber: noteNumber,
+        invoiceDate: noteDate,
+        financialYear,
+        status: InvoiceStatus.CREDIT_NOTE,
+        creditNoteForId: original.id,
+        creditNoteReason: dto.reason,
+        // Seller and buyer are copied from the original: a credit note names the
+        // same two parties, and re-deriving them could disagree with the
+        // document it reverses.
+        sellerGstin: original.sellerGstin,
+        sellerLegalName: original.sellerLegalName,
+        sellerAddress: original.sellerAddress ?? undefined,
+        sellerStateCode: original.sellerStateCode,
+        sellerStateName: original.sellerStateName,
+        buyerName: original.buyerName,
+        buyerGstin: original.buyerGstin,
+        buyerAddress: original.buyerAddress ?? undefined,
+        buyerStateCode: original.buyerStateCode,
+        buyerStateName: original.buyerStateName,
+        placeOfSupply: original.placeOfSupply,
+        placeOfSupplyName: original.placeOfSupplyName,
+        gstType: original.gstType,
+        subtotal: scale(original.subtotal),
+        totalCgst: scale(original.totalCgst),
+        totalSgst: scale(original.totalSgst),
+        totalIgst: scale(original.totalIgst),
+        totalTax: scale(original.totalTax),
+        totalDiscount: scale(original.totalDiscount),
+        shippingCharge: scale(original.shippingCharge),
+        grandTotal: requested,
+        currency: original.currency,
+        reverseCharge: original.reverseCharge,
+        notes: dto.notes,
+        lineItems: { create: lines },
+      },
+      include: { lineItems: true },
+    });
+
+    this.logger.log(
+      `Credit note ${noteNumber} raised against ${original.invoiceNumber} ` +
+        `for ${requested.toFixed(2)} ${original.currency}` +
+        (isFull ? ' (full reversal)' : ' (partial, apportioned pro-rata)'),
+    );
+
+    return note;
+  }
+
   // ─── GST RETURN SUMMARY ───
   async getGstReturn(orgId: string, query: QueryGstReturnDto) {
     const org = await this.prisma.organization.findUnique({
@@ -614,10 +1293,25 @@ export class InvoiceService {
       this.gstTimeZone(orgId, org),
     );
 
-    const where: any = {
+    // Built ONCE and reused by both the count and every page. If the two ever
+    // used different predicates, the cap check would be policing a different
+    // set than the one actually assembled — the original truncation bug in a
+    // subtler form.
+    //
+    // NOTE: `financialYear` is deliberately NOT filtered here, unlike the list
+    // and stats queries where it is the user's own filter. It is stamped onto
+    // the invoice at issue time from the org's THEN-current timezone, while the
+    // window below is computed from the CURRENT one. A timezone change (or the
+    // IST fallback engaging) desynchronises them for invoices near 1 April, and
+    // AND-ing both silently drops those rows from a statutory return. The
+    // statute defines the period as dates, so the date window is authoritative.
+    const where: Prisma.InvoiceWhereInput = {
       organizationId: orgId,
-      financialYear: query.financialYear,
-      status: InvoiceStatus.ISSUED,
+      // Credit notes ride along with invoices: they are reported in GSTR-1
+      // table 9B and NETTED out of GSTR-3B 3.1(a), so the fold needs both in
+      // one pass. Excluding them is what left refunded sales in declared
+      // liability for ever.
+      status: { in: [InvoiceStatus.ISSUED, InvoiceStatus.CREDIT_NOTE] },
       invoiceDate: {
         gte: dateRange.from,
         // Half-open. The previous inclusive `23:59:59` bound carried no
@@ -627,18 +1321,88 @@ export class InvoiceService {
       ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
     };
 
-    const invoices = await this.prisma.invoice.findMany({
-      where,
-      include: { lineItems: true },
-      // Bounded — this hydrates every line item of every invoice in the period.
-      take: EXPORT_ROW_CAP,
+    const isGstr3b = query.returnType === GstReturnType.GSTR3B;
+    // The B2CL threshold decides whether an inter-state B2C invoice is
+    // reported invoice-wise (Table 5) or summarised (Table 7), so it has to
+    // reach the accumulator.
+    const settingsRow = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { taxSettings: true },
     });
+    const taxSettings = parseTaxSettings(settingsRow?.taxSettings ?? null);
 
-    if (query.returnType === GstReturnType.GSTR3B) {
-      return this.generateGstr3B(invoices);
+    const accumulator = isGstr3b
+      ? new Gstr3bAccumulator()
+      : new Gstr1Accumulator({
+          b2cLargeThreshold: taxSettings.b2cLargeThreshold,
+        });
+
+    await this.foldReturnInvoices(where, (invoice) =>
+      accumulator.addInvoice(invoice),
+    );
+
+    return accumulator.finish();
+  }
+
+  /**
+   * Streams every invoice matching `where` through `fold`, in bounded pages.
+   *
+   * Replaces a single `findMany({ take: 10_000 })` that had NO `orderBy`: past
+   * that many invoices a period returned a nondeterministic subset and reported
+   * it as the complete return, with nothing telling the caller rows had been
+   * dropped. Under-reporting a statutory filing in silence is worse than
+   * failing, so the cap now throws and names the real number.
+   *
+   * Ordering is by `id` because it is the primary key and the only field here
+   * guaranteed unique — `invoiceDate` is not, and cursoring on a non-unique
+   * column skips and duplicates rows at page boundaries.
+   *
+   * Each page is folded and then dropped. Collecting pages into one array first
+   * would keep exactly the memory footprint this exists to bound, since the
+   * expensive part is `include: { lineItems: true }`.
+   */
+  private async foldReturnInvoices(
+    where: Prisma.InvoiceWhereInput,
+    fold: (invoice: ReturnInvoice) => void,
+  ): Promise<number> {
+    const total = await this.prisma.invoice.count({ where });
+
+    if (total > GST_RETURN_INVOICE_CAP) {
+      throw new PayloadTooLargeException(
+        `This period contains ${total.toLocaleString('en-IN')} invoices, above the ` +
+          `${GST_RETURN_INVOICE_CAP.toLocaleString('en-IN')} this return builder can assemble ` +
+          `at once. Generate the return for a single GSTIN, or choose one month ` +
+          `instead of a quarter.`,
+      );
     }
 
-    return this.generateGstr1(invoices);
+    let cursor: string | undefined;
+
+    for (;;) {
+      const page = await this.prisma.invoice.findMany({
+        where,
+        include: {
+          lineItems: true,
+          // Table 9B reports the number of the invoice being reversed.
+          creditNoteFor: { select: { invoiceNumber: true } },
+        },
+        orderBy: { id: 'asc' },
+        take: GST_RETURN_PAGE_SIZE,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      });
+
+      for (const invoice of page) {
+        fold({
+          ...invoice,
+          creditNoteForNumber: invoice.creditNoteFor?.invoiceNumber ?? null,
+        } as unknown as ReturnInvoice);
+      }
+
+      if (page.length < GST_RETURN_PAGE_SIZE) break;
+      cursor = page[page.length - 1].id;
+    }
+
+    return total;
   }
 
   /**
@@ -706,6 +1470,10 @@ export class InvoiceService {
       cancelled,
       b2b,
       unpaid,
+      uninvoicedPaidOrders,
+      taxMismatches,
+      invoicesMissingHsn,
+      refundsNeedingCreditNoteRows,
     ] = await Promise.all([
       this.prisma.invoice.aggregate({
         where: issuedInMonth(currentMonth),
@@ -730,6 +1498,63 @@ export class InvoiceService {
         where: { ...scope, buyerGstin: { not: null } },
       }),
       this.prisma.invoice.count({ where: outstandingWhere }),
+      // Paid orders whose invoice could not be issued. Deliberately NOT
+      // scoped to `query.financialYear`: an org accruing uninvoiced paid
+      // orders needs to know regardless of which year the tab is showing.
+      this.prisma.order.count({
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          invoiceError: { not: null },
+          financialStatus: OrderFinancialStatus.PAID,
+        },
+      }),
+      // Invoices whose declared tax diverged from what the channel charged.
+      // Backed by the partial index invoices_org_tax_mismatch_idx.
+      this.prisma.invoice.count({ where: { ...scope, taxMismatch: true } }),
+      // Issued invoices carrying a line with no HSN. Table 12 cannot be filed
+      // until this is zero. Backed by invoices_org_hsn_missing_idx.
+      this.prisma.invoice.count({
+        where: { ...scope, status: InvoiceStatus.ISSUED, hsnMissing: true },
+      }),
+      // Refunded orders whose invoice has NOT been credited.
+      //
+      // This is what makes credit notes actually work. The machinery shipped
+      // but nothing surfaced the need, so a refunded sale sat at full value in
+      // the return until somebody remembered to open that invoice — which is
+      // the exact problem credit notes were built to solve.
+      //
+      // Deliberately NOT financial-year scoped, like uninvoicedPaidOrders: an
+      // org carrying uncredited refunds needs to know regardless of which year
+      // the tab is showing.
+      // Raw SQL because this is an AGGREGATE comparison — refunded total
+      // against credited total — which a Prisma `count` cannot express.
+      //
+      // The predicate it replaces was "has no credit note at all", so an order
+      // part-credited once dropped out of the warning permanently even when it
+      // was refunded again afterwards with money still uncredited. It also has
+      // to agree exactly with `listRefundsNeedingCreditNote`, or this banner
+      // states a number the list beneath it contradicts.
+      //
+      // Credit notes store POSITIVE amounts, as on the paper document, so this
+      // is a straight greater-than.
+      this.prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*) AS count
+        FROM orders o
+        WHERE o.organization_id = ${orgId}
+          AND o.deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM order_refunds r WHERE r.order_id = o.id)
+          AND EXISTS (
+            SELECT 1 FROM invoices i
+            WHERE i.order_id = o.id AND i.status = 'ISSUED'
+          )
+          AND COALESCE(
+                (SELECT SUM(r.amount) FROM order_refunds r WHERE r.order_id = o.id), 0
+              ) > COALESCE(
+                (SELECT SUM(i.grand_total) FROM invoices i
+                 WHERE i.order_id = o.id AND i.status = 'CREDIT_NOTE'), 0
+              )
+      `,
     ]);
 
     const decimal = (value: Prisma.Decimal | null | undefined) =>
@@ -765,6 +1590,15 @@ export class InvoiceService {
       // chip that could never match and a KPI sub-label that always read
       // "· 0 drafts". Reinstate it alongside a real draft-invoice lifecycle.
       counts: { all, issued, unpaid, b2b, cancelled },
+      // Siblings of `counts`, not members of it: `counts` counts INVOICES and
+      // drives the filter chips, while these two are warnings — one counts
+      // ORDERS, and neither corresponds to a chip.
+      uninvoicedPaidOrders,
+      taxMismatches,
+      invoicesMissingHsn,
+      refundsNeedingCreditNote: Number(
+        refundsNeedingCreditNoteRows[0]?.count ?? 0,
+      ),
       currency: org?.currency ?? 'INR',
     };
   }
@@ -776,196 +1610,6 @@ export class InvoiceService {
   private percentChange(current: number, previous: number): number | null {
     if (!previous) return null;
     return Math.round(((current - previous) / previous) * 100);
-  }
-
-  // ─── GSTR-1: DETAILED SALES RETURN ───
-  private generateGstr1(invoices: any[]) {
-    // B2B: Invoices where buyerGstin is present
-    const b2bInvoices = invoices.filter((inv) => inv.buyerGstin);
-    const b2cInvoices = invoices.filter((inv) => !inv.buyerGstin);
-
-    // Group B2B by buyer GSTIN
-    const b2bGrouped = new Map<string, any[]>();
-    for (const inv of b2bInvoices) {
-      const key = inv.buyerGstin;
-      if (!b2bGrouped.has(key)) b2bGrouped.set(key, []);
-      b2bGrouped.get(key)!.push(inv);
-    }
-
-    const b2b = Array.from(b2bGrouped.entries()).map(([gstin, invs]) => ({
-      buyerGstin: gstin,
-      buyerName: invs[0].buyerName,
-      invoiceCount: invs.length,
-      invoices: invs.map((inv) => ({
-        invoiceNumber: inv.invoiceNumber,
-        invoiceDate: inv.invoiceDate,
-        // Carried through so the GSTR-1 CSV can fill its placeOfSupply column.
-        // The B2B section is grouped by buyer GSTIN, but place of supply varies
-        // per invoice within a buyer, so it has to travel on the invoice — the
-        // exporter emitted an empty string for every B2B row without it, and
-        // place of supply is a mandatory GSTR-1 field.
-        placeOfSupply: inv.placeOfSupply,
-        placeOfSupplyName: inv.placeOfSupplyName,
-        gstType: inv.gstType,
-        subtotal: inv.subtotal,
-        cgst: inv.totalCgst,
-        sgst: inv.totalSgst,
-        igst: inv.totalIgst,
-        totalTax: inv.totalTax,
-        grandTotal: inv.grandTotal,
-      })),
-      totalTaxable: this.sumField(invs, 'subtotal'),
-      totalTax: this.sumField(invs, 'totalTax'),
-    }));
-
-    // B2C: Group by place of supply
-    const b2cGrouped = new Map<string, any[]>();
-    for (const inv of b2cInvoices) {
-      const key = inv.placeOfSupply;
-      if (!b2cGrouped.has(key)) b2cGrouped.set(key, []);
-      b2cGrouped.get(key)!.push(inv);
-    }
-
-    const b2cSummary = Array.from(b2cGrouped.entries()).map(
-      ([stateCode, invs]) => ({
-        placeOfSupply: stateCode,
-        placeOfSupplyName: invs[0].placeOfSupplyName,
-        invoiceCount: invs.length,
-        totalTaxable: this.sumField(invs, 'subtotal'),
-        totalCgst: this.sumField(invs, 'totalCgst'),
-        totalSgst: this.sumField(invs, 'totalSgst'),
-        totalIgst: this.sumField(invs, 'totalIgst'),
-        totalTax: this.sumField(invs, 'totalTax'),
-      }),
-    );
-
-    // HSN Summary: Group all line items by HSN code
-    const hsnMap = new Map<
-      string,
-      { hsnCode: string; quantity: number; taxable: number; tax: number }
-    >();
-    for (const inv of invoices) {
-      for (const item of inv.lineItems) {
-        const existing = hsnMap.get(item.hsnCode) || {
-          hsnCode: item.hsnCode,
-          quantity: 0,
-          taxable: 0,
-          tax: 0,
-        };
-        existing.quantity += item.quantity;
-        existing.taxable += parseFloat(item.taxableValue.toString());
-        existing.tax += parseFloat(item.totalTax.toString());
-        hsnMap.set(item.hsnCode, existing);
-      }
-    }
-
-    const hsnSummary = Array.from(hsnMap.values());
-
-    // Overall totals
-    const totals = {
-      totalTaxable: this.sumField(invoices, 'subtotal'),
-      totalCgst: this.sumField(invoices, 'totalCgst'),
-      totalSgst: this.sumField(invoices, 'totalSgst'),
-      totalIgst: this.sumField(invoices, 'totalIgst'),
-      totalTax: this.sumField(invoices, 'totalTax'),
-      totalInvoices: invoices.length,
-    };
-
-    return { b2b, b2cSummary, hsnSummary, totals };
-  }
-
-  // ─── GSTR-3B: SUMMARY RETURN ───
-  private generateGstr3B(invoices: any[]) {
-    // Group by GST rate
-    const rateMap = new Map<
-      number,
-      { taxable: number; cgst: number; sgst: number; igst: number }
-    >();
-
-    for (const inv of invoices) {
-      for (const item of inv.lineItems) {
-        const rate = parseFloat(item.gstRate.toString());
-        const existing = rateMap.get(rate) || {
-          taxable: 0,
-          cgst: 0,
-          sgst: 0,
-          igst: 0,
-        };
-        existing.taxable += parseFloat(item.taxableValue.toString());
-        existing.cgst += parseFloat(item.cgstAmount.toString());
-        existing.sgst += parseFloat(item.sgstAmount.toString());
-        existing.igst += parseFloat(item.igstAmount.toString());
-        rateMap.set(rate, existing);
-      }
-    }
-
-    const outwardSupplies = Array.from(rateMap.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([rate, data]) => ({
-        gstRate: rate,
-        taxableValue: Math.round(data.taxable * 100) / 100,
-        cgst: Math.round(data.cgst * 100) / 100,
-        sgst: Math.round(data.sgst * 100) / 100,
-        igst: Math.round(data.igst * 100) / 100,
-        totalTax:
-          Math.round((data.cgst + data.sgst + data.igst) * 100) / 100,
-      }));
-
-    // Inter-state summary
-    const interStateInvoices = invoices.filter(
-      (inv) => inv.gstType === GstType.IGST,
-    );
-    // Table 3.2 is inter-state supplies to *unregistered* persons, so it is
-    // narrower than the aggregate above (which spans every IGST invoice, B2B
-    // included). The aggregate keeps its existing meaning because the CSV
-    // exporter reads it.
-    const byStateMap = new Map<
-      string,
-      { name: string; invoiceCount: number; taxable: number; igst: number }
-    >();
-
-    for (const inv of interStateInvoices) {
-      if (inv.buyerGstin) continue; // registered buyer — not a 3.2 row
-
-      const code = inv.placeOfSupply;
-      const existing = byStateMap.get(code) || {
-        name: inv.placeOfSupplyName || getStateName(code) || code,
-        invoiceCount: 0,
-        taxable: 0,
-        igst: 0,
-      };
-      existing.invoiceCount += 1;
-      existing.taxable += parseFloat(inv.subtotal.toString());
-      existing.igst += parseFloat(inv.totalIgst.toString());
-      byStateMap.set(code, existing);
-    }
-
-    const byState = Array.from(byStateMap.entries())
-      .map(([placeOfSupply, data]) => ({
-        placeOfSupply,
-        placeOfSupplyName: data.name,
-        invoiceCount: data.invoiceCount,
-        totalTaxable: Math.round(data.taxable * 100) / 100,
-        totalIgst: Math.round(data.igst * 100) / 100,
-      }))
-      .sort((a, b) => b.totalTaxable - a.totalTaxable);
-
-    const interState = {
-      invoiceCount: interStateInvoices.length,
-      totalTaxable: this.sumField(interStateInvoices, 'subtotal'),
-      totalIgst: this.sumField(interStateInvoices, 'totalIgst'),
-      byState,
-    };
-
-    // Tax payable
-    const taxPayable = {
-      cgst: this.sumField(invoices, 'totalCgst'),
-      sgst: this.sumField(invoices, 'totalSgst'),
-      igst: this.sumField(invoices, 'totalIgst'),
-      total: this.sumField(invoices, 'totalTax'),
-    };
-
-    return { outwardSupplies, interState, taxPayable };
   }
 
   // ─── EXPORT INVOICES AS CSV ───
@@ -1005,7 +1649,10 @@ export class InvoiceService {
       orderNumber: inv.order.name,
       buyerName: inv.buyerName,
       buyerGstin: inv.buyerGstin || 'B2C',
-      placeOfSupply: `${inv.placeOfSupply} - ${inv.placeOfSupplyName}`,
+      placeOfSupply: formatPlaceOfSupply(
+        inv.placeOfSupply,
+        inv.placeOfSupplyName,
+      ),
       gstType: inv.gstType,
       subtotal: inv.subtotal.toString(),
       discount: inv.totalDiscount.toString(),
@@ -1022,114 +1669,23 @@ export class InvoiceService {
   }
 
   // ─── GST RETURN CSV EXPORT ───
-  async getGstReturnExportData(orgId: string, query: QueryGstReturnDto) {
+  /**
+   * CSV rows for a GST return.
+   *
+   * Row shaping lives in `gst-return-rows.ts` so it can be tested against a
+   * literal return object, with no Prisma. This method is now only fetch +
+   * delegate — and it inherits the return builder’s no-truncation guarantee
+   * for free, which matters because the CSV is the artefact actually filed.
+   */
+  async getGstReturnExportData(
+    orgId: string,
+    query: QueryGstReturnDto,
+  ): Promise<CsvSection[]> {
     const returnData = await this.getGstReturn(orgId, query);
 
-    if (query.returnType === GstReturnType.GSTR3B) {
-      const data = returnData as any;
-      const rows: any[] = [];
-
-      // Outward supplies by rate
-      for (const row of data.outwardSupplies || []) {
-        rows.push({
-          section: 'Outward Supplies',
-          gstRate: `${row.gstRate}%`,
-          taxableValue: row.taxableValue,
-          cgst: row.cgst,
-          sgst: row.sgst,
-          igst: row.igst,
-          totalTax: row.totalTax,
-        });
-      }
-
-      // Inter-state summary
-      rows.push({
-        section: 'Inter-State Supplies',
-        gstRate: '',
-        taxableValue: data.interState?.totalTaxable || 0,
-        cgst: 0,
-        sgst: 0,
-        igst: data.interState?.totalIgst || 0,
-        totalTax: data.interState?.totalIgst || 0,
-      });
-
-      // Tax payable
-      rows.push({
-        section: 'Tax Payable',
-        gstRate: '',
-        taxableValue: '',
-        cgst: data.taxPayable?.cgst || 0,
-        sgst: data.taxPayable?.sgst || 0,
-        igst: data.taxPayable?.igst || 0,
-        totalTax: data.taxPayable?.total || 0,
-      });
-
-      return rows;
-    }
-
-    // GSTR-1 format
-    const data = returnData as any;
-    const rows: any[] = [];
-
-    // B2B invoices
-    for (const b2b of data.b2b || []) {
-      for (const inv of b2b.invoices || []) {
-        rows.push({
-          section: 'B2B',
-          buyerGstin: b2b.buyerGstin,
-          buyerName: b2b.buyerName,
-          invoiceNumber: inv.invoiceNumber,
-          invoiceDate: new Date(inv.invoiceDate).toISOString().split('T')[0],
-          placeOfSupply: inv.placeOfSupply
-            ? `${inv.placeOfSupply} - ${inv.placeOfSupplyName}`
-            : '',
-          taxableValue: inv.subtotal,
-          cgst: inv.cgst,
-          sgst: inv.sgst,
-          igst: inv.igst,
-          totalTax: inv.totalTax,
-          grandTotal: inv.grandTotal,
-        });
-      }
-    }
-
-    // B2C summary
-    for (const b2c of data.b2cSummary || []) {
-      rows.push({
-        section: 'B2C',
-        buyerGstin: '',
-        buyerName: '',
-        invoiceNumber: `${b2c.invoiceCount} invoices`,
-        invoiceDate: '',
-        placeOfSupply: `${b2c.placeOfSupply} - ${b2c.placeOfSupplyName}`,
-        taxableValue: b2c.totalTaxable,
-        cgst: b2c.totalCgst,
-        sgst: b2c.totalSgst,
-        igst: b2c.totalIgst,
-        totalTax: b2c.totalTax,
-        grandTotal: '',
-      });
-    }
-
-    // HSN summary
-    for (const hsn of data.hsnSummary || []) {
-      rows.push({
-        section: 'HSN Summary',
-        buyerGstin: '',
-        buyerName: '',
-        invoiceNumber: hsn.hsnCode,
-        invoiceDate: '',
-        placeOfSupply: '',
-        taxableValue: hsn.taxable,
-        cgst: '',
-        sgst: '',
-        igst: '',
-        totalTax: hsn.tax,
-        grandTotal: `Qty: ${hsn.quantity}`,
-      });
-    }
-
-    return rows;
+    return query.returnType === GstReturnType.GSTR3B
+      ? buildGstr3bSections(returnData as Gstr3bReturn)
+      : buildGstr1Sections(returnData as Gstr1Return);
   }
 
   /**
@@ -1205,15 +1761,17 @@ export class InvoiceService {
     period: string,
     timeZone: string,
   ): { from: Date; toExclusive: Date } {
-    return gstPeriodRange(financialYear, period, timeZone);
-  }
-
-  private sumField(items: any[], field: string): number {
-    return Math.round(
-      items.reduce(
-        (sum, item) => sum + parseFloat(item[field]?.toString() || '0'),
-        0,
-      ) * 100,
-    ) / 100;
+    try {
+      return gstPeriodRange(financialYear, period, timeZone);
+    } catch (error) {
+      // `gstPeriodRange` throws a bare Error, which NestJS renders as a 500.
+      // The DTOs now reject malformed values up front, so reaching this means
+      // a caller bypassed them — still the caller's mistake, so still a 400.
+      // Kept here rather than in zoned-date.util.ts so that helper stays free
+      // of Nest imports and usable from scripts.
+      throw new BadRequestException(
+        error instanceof Error ? error.message : 'Invalid GST return period.',
+      );
+    }
   }
 }

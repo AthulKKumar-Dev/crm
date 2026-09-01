@@ -1,0 +1,313 @@
+import { formatPlaceOfSupply } from '../gst/constants/indian-states';
+import type { Gstr1Return, Gstr3bReturn } from './gst-return.accumulator';
+
+/**
+ * Shapes a generated return into the downloaded CSV.
+ *
+ * WHY SECTIONS RATHER THAN ONE FLAT TABLE. Every section used to share a single
+ * fixed 12-column row, which forced two columns to carry the wrong thing: the
+ * HSN summary put its code in the `invoiceNumber` column and the string
+ * `"Qty: 6"` in `grandTotal`, and the B2C summary put `"3 invoices"` in
+ * `invoiceNumber`. Beyond being unreadable, it left no column free — Table 12
+ * legally needs a UQC and a rate, and neither could be added without changing
+ * the column count of every other section.
+ *
+ * Each statutory table now owns its own header block, so it can carry exactly
+ * the columns the statute asks for.
+ *
+ * Section titles carry the GSTR table numbers on purpose. On the real GSTR-3B
+ * form, 3.2 is a MEMO BREAKDOWN of supplies already inside 3.1 — the previous
+ * export wrote it as a sibling row, so anyone summing the tax column
+ * double-counted the file they were about to file.
+ */
+
+export interface CsvSection {
+  /** Statutory table label, e.g. "12 — HSN summary". */
+  title: string;
+  headers: string[];
+  rows: Array<Array<string | number>>;
+}
+
+/** RFC-4180 field escaping. */
+function escapeCsv(value: string | number): string {
+  const text = value === null || value === undefined ? '' : String(value);
+  // Quote when the value contains a delimiter, a quote, or a line break —
+  // buyer names and addresses routinely contain commas.
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+/**
+ * Render sections into one CSV document.
+ *
+ * A blank line separates blocks. Spreadsheet software treats the result as one
+ * sheet with several stacked tables, which is what an accountant reading a
+ * sectioned return expects.
+ */
+export function renderCsvSections(sections: CsvSection[]): string {
+  const blocks = sections.map((section) => {
+    const lines = [
+      escapeCsv(section.title),
+      section.headers.map(escapeCsv).join(','),
+      ...section.rows.map((row) => row.map(escapeCsv).join(',')),
+    ];
+    return lines.join('\r\n');
+  });
+
+  return blocks.join('\r\n\r\n');
+}
+
+const HSN_MISSING = 'MISSING';
+
+function toDateOnly(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().split('T')[0];
+}
+
+export function buildGstr1Sections(data: Gstr1Return): CsvSection[] {
+  const sections: CsvSection[] = [];
+
+  sections.push({
+    title: '4A — B2B invoices (supplies to registered persons)',
+    headers: [
+      'Buyer GSTIN',
+      'Buyer name',
+      'Invoice number',
+      'Invoice date',
+      'Place of supply',
+      'Supply type',
+      'Taxable value',
+      'CGST',
+      'SGST',
+      'IGST',
+      'Total tax',
+      'Invoice value',
+    ],
+    rows: (data.b2b ?? []).flatMap((group) =>
+      (group.invoices ?? []).map((inv) => [
+        group.buyerGstin,
+        group.buyerName,
+        inv.invoiceNumber,
+        toDateOnly(inv.invoiceDate),
+        formatPlaceOfSupply(inv.placeOfSupply, inv.placeOfSupplyName),
+        inv.gstType === 'IGST' ? 'Inter-State' : 'Intra-State',
+        inv.subtotal,
+        inv.cgst,
+        inv.sgst,
+        inv.igst,
+        inv.totalTax,
+        inv.grandTotal,
+      ]),
+    ),
+  });
+
+  sections.push({
+    title: '5 — B2CL (inter-State supplies to unregistered persons, above threshold)',
+    headers: [
+      'Invoice number',
+      'Invoice date',
+      'Place of supply',
+      'Rate',
+      'Taxable value',
+      'IGST',
+      'Invoice value',
+    ],
+    rows: (data.b2cl ?? []).map((row) => [
+      row.invoiceNumber,
+      toDateOnly(row.invoiceDate),
+      formatPlaceOfSupply(row.placeOfSupply, row.placeOfSupplyName),
+      `${row.gstRate}%`,
+      row.taxableValue,
+      row.igst,
+      row.invoiceValue,
+    ]),
+  });
+
+  sections.push({
+    title: '7 — B2CS (other supplies to unregistered persons, rate-wise)',
+    headers: [
+      'Place of supply',
+      'Supply type',
+      'Rate',
+      'Taxable value',
+      'CGST',
+      'SGST',
+      'IGST',
+    ],
+    rows: (data.b2cs ?? []).map((row) => [
+      formatPlaceOfSupply(row.placeOfSupply, row.placeOfSupplyName),
+      row.supplyType === 'INTER' ? 'Inter-State' : 'Intra-State',
+      `${row.gstRate}%`,
+      row.taxableValue,
+      row.cgst,
+      row.sgst,
+      row.igst,
+    ]),
+  });
+
+  sections.push({
+    title: '8 — Nil-rated, exempted and non-GST outward supplies',
+    headers: ['Section', 'Description', 'Nil rated', 'Exempted', 'Non-GST'],
+    rows: (data.nilRated ?? []).map((row) => [
+      row.section,
+      row.description,
+      row.nilRated,
+      row.exempted,
+      row.nonGst,
+    ]),
+  });
+
+  // 9B before 12, matching the order of the statutory form.
+  sections.push({
+    title: '9B — Credit notes against registered persons (CDNR)',
+    headers: [
+      'Note number',
+      'Note date',
+      'Buyer GSTIN',
+      'Original invoice',
+      'Place of supply',
+      'Reason',
+      'Taxable value',
+      'CGST',
+      'SGST',
+      'IGST',
+      'Note value',
+    ],
+    rows: (data.creditNotes ?? [])
+      .filter((n) => n.section === 'CDNR')
+      .map((n) => [
+        n.noteNumber,
+        toDateOnly(n.noteDate),
+        n.buyerGstin ?? '',
+        n.originalInvoiceNumber ?? '',
+        formatPlaceOfSupply(n.placeOfSupply, n.placeOfSupplyName),
+        n.reason ?? '',
+        n.taxableValue,
+        n.cgst,
+        n.sgst,
+        n.igst,
+        n.noteValue,
+      ]),
+  });
+
+  sections.push({
+    title: '9B — Credit notes against unregistered persons (CDNUR)',
+    headers: [
+      'Note number',
+      'Note date',
+      'Original invoice',
+      'Place of supply',
+      'Reason',
+      'Taxable value',
+      'CGST',
+      'SGST',
+      'IGST',
+      'Note value',
+    ],
+    rows: (data.creditNotes ?? [])
+      .filter((n) => n.section === 'CDNUR')
+      .map((n) => [
+        n.noteNumber,
+        toDateOnly(n.noteDate),
+        n.originalInvoiceNumber ?? '',
+        formatPlaceOfSupply(n.placeOfSupply, n.placeOfSupplyName),
+        n.reason ?? '',
+        n.taxableValue,
+        n.cgst,
+        n.sgst,
+        n.igst,
+        n.noteValue,
+      ]),
+  });
+
+  sections.push({
+    title: '12 — HSN summary',
+    headers: [
+      'HSN',
+      'Description',
+      'UQC',
+      'Rate',
+      'Total quantity',
+      'Total value',
+      'Taxable value',
+      'CGST',
+      'SGST',
+      'IGST',
+    ],
+    rows: (data.hsnSummary ?? []).map((row) => [
+      // Never invent a code. A blank would look like an export bug, so the gap
+      // is named — this column must be filled before the return can be filed.
+      row.hsnCode ?? HSN_MISSING,
+      row.description,
+      row.uqc,
+      `${row.gstRate}%`,
+      row.quantity,
+      row.totalValue,
+      row.taxableValue,
+      row.cgst,
+      row.sgst,
+      row.igst,
+    ]),
+  });
+
+  return sections;
+}
+
+export const GSTR3B_SECTION_OUTWARD = '3.1(a) — Outward taxable supplies';
+export const GSTR3B_SECTION_OTHER =
+  '3.1(b)(c)(e) — Zero-rated, nil-rated/exempt and non-GST supplies';
+export const GSTR3B_SECTION_INTERSTATE =
+  '3.2 — Inter-State supplies to unregistered persons (memo of 3.1)';
+export const GSTR3B_SECTION_PAYABLE = '5.1 — Tax payable';
+
+export function buildGstr3bSections(data: Gstr3bReturn): CsvSection[] {
+  return [
+    {
+      title: GSTR3B_SECTION_OUTWARD,
+      headers: ['Rate', 'Taxable value', 'CGST', 'SGST', 'IGST', 'Total tax'],
+      rows: (data.outwardSupplies ?? []).map((row) => [
+        `${row.gstRate}%`,
+        row.taxableValue,
+        row.cgst,
+        row.sgst,
+        row.igst,
+        row.totalTax,
+      ]),
+    },
+    {
+      title: GSTR3B_SECTION_OTHER,
+      headers: ['Nature of supply', 'Taxable value'],
+      rows: [
+        ['(b) Zero-rated (exports / SEZ)', data.otherSupplies?.zeroRated ?? 0],
+        ['(c) Nil-rated and exempted', data.otherSupplies?.nilRatedExempt ?? 0],
+        ['(e) Non-GST outward supplies', data.otherSupplies?.nonGst ?? 0],
+      ],
+    },
+    {
+      // A MEMO of 3.1, not an addition to it — stated in the title so nobody
+      // sums this column into the total.
+      title: GSTR3B_SECTION_INTERSTATE,
+      headers: ['Place of supply', 'Invoices', 'Taxable value', 'IGST'],
+      rows: (data.interState?.byState ?? []).map((row) => [
+        formatPlaceOfSupply(row.placeOfSupply, row.placeOfSupplyName),
+        row.invoiceCount,
+        row.totalTaxable,
+        row.totalIgst,
+      ]),
+    },
+    {
+      title: GSTR3B_SECTION_PAYABLE,
+      headers: ['CGST', 'SGST', 'IGST', 'Total'],
+      rows: [
+        [
+          data.taxPayable?.cgst ?? 0,
+          data.taxPayable?.sgst ?? 0,
+          data.taxPayable?.igst ?? 0,
+          data.taxPayable?.total ?? 0,
+        ],
+      ],
+    },
+  ];
+}
