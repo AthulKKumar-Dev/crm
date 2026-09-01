@@ -259,9 +259,12 @@ export class OrderService {
       totalPages: Math.ceil(total / limit),
     };
 
-    // VENDOR role: a deliberately narrow projection — no customer, and the
-    // amount is the vendor's own subtotal (their items only), matching the
-    // vendor order detail page's `vendorSubtotal`.
+    // VENDOR role: a deliberately narrow projection. The customer is limited to
+    // their display name — the vendor needs to tell rows apart, and
+    // `findOneForVendor` already shows them the name on the detail page, so
+    // withholding it here only produced a misleading "Guest" on every row. Email
+    // and customer id stay out. The amount is the vendor's own subtotal (their
+    // items only), matching the vendor order detail page's `vendorSubtotal`.
     if (vendorScope) {
       return {
         data: data.map((order) => ({
@@ -269,6 +272,9 @@ export class OrderService {
           orderNumber: order.orderNumber,
           name: order.name,
           fulfillmentStatus: order.fulfillmentStatus,
+          customer: order.customer
+            ? { firstName: order.customer.firstName, lastName: order.customer.lastName }
+            : null,
           totalPrice: order.lineItems.reduce(
             (sum, li) => sum + Number(li.price) * li.quantity,
             0,
