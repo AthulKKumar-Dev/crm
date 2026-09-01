@@ -76,11 +76,15 @@ export function useOrderActionGates(order: OrderDetail | undefined) {
   const canOperate = canManage || role === "AGENT"; //                            ORG_OPERATORS
   const canOperateOrVendor = canOperate || role === "VENDOR"; //  ORG_OPERATORS_AND_VENDORS
 
-  // `order` is optional because the detail page must call this above its
-  // vendor / error / loading early-returns to keep the hook order stable.
-  // Everything is false until the order lands, so nothing renders early.
-  const isShopify = order?.channel.platform === "SHOPIFY";
-  const isManual = order?.channel.platform === "MANUAL";
+  // `order` is optional because the detail page calls this above its error /
+  // loading early-returns to keep the hook order stable. Everything is false
+  // until the order lands, so nothing renders early.
+  //
+  // `channel` is optional-chained too: the vendor projection of `GET /orders/:id`
+  // has no `channel` key at all, and only the route’s role router keeps that
+  // payload out of here. Guard it anyway — this hook is exported.
+  const isShopify = order?.channel?.platform === "SHOPIFY";
+  const isManual = order?.channel?.platform === "MANUAL";
   const isCancelled = !!order?.cancelledAt;
   const isClosed = !!order?.closedAt;
   const canMarkPaid =
