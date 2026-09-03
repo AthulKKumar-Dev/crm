@@ -13,8 +13,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  // App traffic goes through the Supabase pooler in transaction mode
+  // (port 6543, `?pgbouncer=true`). Prisma Migrate needs a session-mode
+  // connection (port 5432) for its advisory locks, hence directUrl.
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum OrganizationType {
@@ -628,6 +632,15 @@ model ProductVariant {
   continueSellingWhenOutOfStock Boolean        @default(false) @map("continue_selling_when_out_of_stock")
   hsCode                        String?        @map("hs_code") // Customs HS code, e.g. "6109.10"
   countryOfOrigin               String?        @map("country_of_origin") // ISO-3166 alpha-2
+  // GST override for THIS variant only. Null inherits the Product's value —
+  // the product-level fields stay the default for every variant, and a
+  // variant sets these only when it is classified differently (a bundle
+  // listing mixing 5% and 18% goods, say). Resolved per line at invoice /
+  // order time; see gst/line-tax-classification.util.ts and TaxResolverService.
+  hsnCode                       String?        @map("hsn_code")
+  gstRate                       Decimal?       @map("gst_rate") @db.Decimal(5, 2)
+  unitOfMeasure                 String?        @map("unit_of_measure")
+  supplyType                    GstSupplyType? @map("supply_type")
   imageId                       String?        @map("image_id") // Variant-specific image (FK → ProductImage)
   createdAt                     DateTime       @default(now()) @map("created_at")
   updatedAt                     DateTime       @updatedAt @map("updated_at")

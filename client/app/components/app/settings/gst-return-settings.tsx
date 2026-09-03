@@ -10,33 +10,7 @@ import {
 } from "~/components/ui/select";
 import { useOrganizationSettings } from "~/hooks/use-settings-queries";
 import { useUpdateTaxSettingsMutation } from "~/hooks/use-settings-mutations";
-
-/**
- * Unit quantity codes the GST portal accepts.
- *
- * Deliberately the common subset rather than all 46 — a merchant picking a unit
- * should not scroll past BOU (billions of units) or GGK (great gross). The
- * server validates against the full statutory list, so nothing here is a cap on
- * what can be stored.
- */
-const COMMON_UQC = [
-  { code: "NOS", label: "NOS — Numbers" },
-  { code: "PCS", label: "PCS — Pieces" },
-  { code: "KGS", label: "KGS — Kilograms" },
-  { code: "GMS", label: "GMS — Grams" },
-  { code: "LTR", label: "LTR — Litres" },
-  { code: "MLT", label: "MLT — Millilitres" },
-  { code: "MTR", label: "MTR — Metres" },
-  { code: "SQF", label: "SQF — Square feet" },
-  { code: "SQM", label: "SQM — Square metres" },
-  { code: "BOX", label: "BOX — Box" },
-  { code: "PAC", label: "PAC — Packs" },
-  { code: "SET", label: "SET — Sets" },
-  { code: "DOZ", label: "DOZ — Dozens" },
-  { code: "PRS", label: "PRS — Pairs" },
-  { code: "TON", label: "TON — Tonnes" },
-  { code: "OTH", label: "OTH — Others" },
-];
+import { COMMON_UQC } from "~/lib/gst-uqc";
 
 /**
  * GST return settings — the two values that shape the filed return.

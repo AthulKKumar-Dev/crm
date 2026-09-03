@@ -20,6 +20,8 @@ import {
     sumTaxLines,
 } from './shopify-tax-lines.util';
 import { extractRefundTax } from './refund-tax.util';
+import { planImageReconcile } from './product-image-identity.util';
+import { normalizeShopifyOptions } from './product-options.util';
 import {
     gstTypeForSupply,
     type SellerRegistrations,
@@ -575,6 +577,23 @@ export class ShopifySyncService {
                 position: v.position,
                 requires_shipping: v.inventoryItem?.requiresShipping ?? true,
                 taxable: v.taxable,
+                // REST names for the inventory toggles the push writes as
+                // `inventoryPolicy` / `inventoryItem.tracked` — so the values
+                // the CRM sends round-trip instead of drifting after any edit
+                // made in Shopify Admin.
+                inventory_policy: v.inventoryPolicy ? v.inventoryPolicy.toLowerCase() : undefined,
+                inventory_management: v.inventoryItem
+                    ? (v.inventoryItem.tracked ? 'shopify' : null)
+                    : undefined,
+                // Inventory-item fields the REST product webhook does NOT carry
+                // (they live on the inventory item there). Only the GraphQL
+                // pull can refresh them; `upsertProduct` leaves the column
+                // alone when the key is absent.
+                cost: v.inventoryItem ? (v.inventoryItem.unitCost?.amount ?? null) : undefined,
+                hs_code: v.inventoryItem ? (v.inventoryItem.harmonizedSystemCode ?? null) : undefined,
+                country_of_origin: v.inventoryItem
+                    ? (v.inventoryItem.countryCodeOfOrigin ?? null)
+                    : undefined,
             };
         });
 
@@ -1295,19 +1314,12 @@ export class ShopifySyncService {
         // Only touch vendor_key when a value was resolved (string|null). undefined = leave as-is.
         const vendorKeyUpdate = vendorKey === undefined ? {} : { vendorKey };
 
-        // Shopify signals "no real options" with a placeholder option named
-        // "Title" whose only value is "Default Title". Store null instead —
-        // our convention for single-variant products — so the UI never renders
-        // a fake "Title" option. (The CSV importer already filters this; the
-        // pull path must match.)
-        const isPlaceholderOptions =
-            Array.isArray(sp.options) &&
-            sp.options.length === 1 &&
-            sp.options[0]?.name === 'Title' &&
-            Array.isArray(sp.options[0]?.values) &&
-            sp.options[0].values.length === 1 &&
-            sp.options[0].values[0] === 'Default Title';
-        const normalizedOptions = isPlaceholderOptions ? null : (sp.options || null);
+        // Down to the three keys ProductOptionDto accepts back. The webhook
+        // door delivers REST options carrying id/product_id, and storing those
+        // made every later save of the product 400 — see product-options.util.
+        // The Title/Default Title placeholder still stores null.
+        const normalizedOptions =
+            normalizeShopifyOptions(sp.options) ?? Prisma.DbNull;
 
         const product = await this.prisma.product.upsert({
             where: { channelId_externalId: { channelId, externalId } },
@@ -1335,6 +1347,16 @@ export class ShopifySyncService {
         // flow. Legacy orgs keep the pull-writes-quantity behavior, now WITH
         // ledger events (previously this path mutated stock silently).
         const warehousing = await this.inventoryLedger.isWarehousingEnabled(orgId);
+        // The org-wide "all products" overrides force what the PUSH sends for
+        // inventory_policy / tracked, so what Shopify holds while they are ON
+        // is the forced value, not the merchant's per-variant choice. Pulling
+        // it back would flip every variant's own toggle to the forced value —
+        // the merchant switches a variant off, syncs, and finds it back on —
+        // and would leave every row stuck that way once the override is
+        // turned off again. While an override is ON its column is left alone.
+        const productSettings = await this.orgSettings.getProductSettings(orgId);
+        const oversellForced = productSettings.allowOversellGlobally === true;
+        const trackForced = productSettings.trackQuantityGlobally === true;
         const priorVariants = await this.prisma.productVariant.findMany({
             where: { productId: product.id },
             // barcodeSource decides whether an incoming empty barcode is allowed
@@ -1372,6 +1394,28 @@ export class ShopifySyncService {
             const incomingBarcode = sv.barcode || null;
             const keepLocalBarcode =
                 incomingBarcode === null && prior?.barcodeSource === 'GENERATED';
+
+            // Inventory toggles. Both doors carry these — REST as
+            // `inventory_policy` ('continue' | 'deny') and
+            // `inventory_management` ('shopify' | null), GraphQL bridged to the
+            // same names in transformGraphqlProduct. Absent key = leave alone,
+            // the same `undefined` idiom inventoryItemId uses below.
+            const continueSelling: boolean | undefined =
+                oversellForced || sv.inventory_policy === undefined
+                    ? undefined
+                    : String(sv.inventory_policy).toLowerCase() === 'continue';
+            const trackQuantity: boolean | undefined =
+                trackForced || sv.inventory_management === undefined
+                    ? undefined
+                    : sv.inventory_management === 'shopify';
+            // Inventory-item fields: only the GraphQL pull supplies them (the
+            // REST product webhook has no cost / HS code / country). Absent key
+            // = leave alone, so a webhook never blanks what the pull fetched.
+            const cost = sv.cost === undefined ? undefined : (sv.cost != null ? String(sv.cost) : null);
+            const hsCode = sv.hs_code === undefined ? undefined : (sv.hs_code || null);
+            const countryOfOrigin =
+                sv.country_of_origin === undefined ? undefined : (sv.country_of_origin || null);
+
             const row = await this.prisma.productVariant.upsert({
                 where: { productId_externalId: { productId: product.id, externalId: String(sv.id) } },
                 create: {
@@ -1387,6 +1431,11 @@ export class ShopifySyncService {
                     option1: sv.option1, option2: sv.option2, option3: sv.option3,
                     position: sv.position ?? 1, requiresShipping: sv.requires_shipping ?? true,
                     taxable: sv.taxable ?? true,
+                    ...(continueSelling !== undefined ? { continueSellingWhenOutOfStock: continueSelling } : {}),
+                    ...(trackQuantity !== undefined ? { trackQuantity } : {}),
+                    ...(cost !== undefined ? { cost } : {}),
+                    ...(hsCode !== undefined ? { hsCode } : {}),
+                    ...(countryOfOrigin !== undefined ? { countryOfOrigin } : {}),
                 },
                 update: {
                     title: sv.title || 'Default', sku: sv.sku,
@@ -1401,6 +1450,15 @@ export class ShopifySyncService {
                     inventoryItemId: sv.inventory_item_id ? String(sv.inventory_item_id) : undefined,
                     weight: sv.weight ? String(sv.weight) : null, weightUnit: sv.weight_unit,
                     option1: sv.option1, option2: sv.option2, option3: sv.option3, position: sv.position ?? 1,
+                    // Both were written on create but never refreshed, so a
+                    // change made in Shopify Admin drifted permanently.
+                    requiresShipping: sv.requires_shipping ?? true,
+                    taxable: sv.taxable ?? true,
+                    continueSellingWhenOutOfStock: continueSelling,
+                    trackQuantity,
+                    cost,
+                    hsCode,
+                    countryOfOrigin,
                 },
             });
             if (!warehousing) {
@@ -1420,13 +1478,62 @@ export class ShopifySyncService {
             }
         }
 
-        for (const si of sp.images || []) {
-            await this.prisma.productImage.upsert({
-                where: { productId_externalId: { productId: product.id, externalId: String(si.id) } },
-                create: { productId: product.id, externalId: String(si.id), src: si.src, alt: si.alt, position: si.position ?? 1 },
-                update: { src: si.src, alt: si.alt, position: si.position ?? 1 },
-            });
-        }
+        await this.reconcileProductImages(product.id, sp.images);
+    }
+
+    /**
+     * Make this product's stored images match a Shopify payload.
+     *
+     * The decision lives in `planImageReconcile` (pure, unit-tested); this is
+     * only the executor. What it must get right is the ORDER, which is
+     * load-bearing in both directions:
+     *
+     *   repoint variants -> delete rows -> write the incoming set
+     *
+     * `ProductVariant.image` is `onDelete: SetNull`, so deleting before
+     * repointing would silently blank a variant's image rather than move it to
+     * the surviving row. And a survivor cannot take the incoming externalId
+     * while a doomed row still holds that value, or the (productId, externalId)
+     * unique fires mid-transaction.
+     */
+    private async reconcileProductImages(productId: string, rawImages: unknown) {
+        const existing = await this.prisma.productImage.findMany({
+            where: { productId },
+            orderBy: { createdAt: 'asc' }, // oldest first — the survivor rule
+            select: { id: true, externalId: true, src: true },
+        });
+
+        const { doomed, writes } = planImageReconcile(existing, rawImages);
+        if (doomed.length === 0 && writes.length === 0) return;
+
+        await this.prisma.$transaction(async (tx) => {
+            for (const row of doomed) {
+                await tx.productVariant.updateMany({
+                    where: { imageId: row.id },
+                    data: { imageId: row.repointTo },
+                });
+            }
+
+            if (doomed.length > 0) {
+                await tx.productImage.deleteMany({
+                    where: { id: { in: doomed.map((row) => row.id) } },
+                });
+            }
+
+            for (const w of writes) {
+                const data = {
+                    externalId: w.externalId,
+                    src: w.src,
+                    alt: w.alt,
+                    position: w.position,
+                };
+                if (w.updateId) {
+                    await tx.productImage.update({ where: { id: w.updateId }, data });
+                } else {
+                    await tx.productImage.create({ data: { productId, ...data } });
+                }
+            }
+        });
     }
 
     /**

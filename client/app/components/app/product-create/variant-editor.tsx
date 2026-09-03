@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { GripVertical, MoreVertical, Trash2, X } from "lucide-react";
-import type { ProductOption, ProductVariantInput } from "~/types/api";
+import type { GstSupplyType, ProductOption, ProductVariantInput } from "~/types/api";
+import { COMMON_UQC, GST_RATE_OPTIONS, GST_SUPPLY_TYPES } from "~/lib/gst-uqc";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { formatMargin } from "~/lib/utils";
@@ -20,10 +21,16 @@ export function VariantEditor({
   options,
   variants,
   onChange,
+  stockReadOnly = false,
 }: {
   options: ProductOption[];
   variants: ProductVariantInput[];
   onChange: (next: ProductVariantInput[]) => void;
+  /**
+   * Warehousing orgs keep stock per warehouse; the variant column is a cache
+   * the ledger recomputes, so typing into it here would be silently undone.
+   */
+  stockReadOnly?: boolean;
 }) {
   const optionNames = useMemo(
     () => options.map((o) => o.name).filter(Boolean),
@@ -182,7 +189,9 @@ export function VariantEditor({
                             inventoryQuantity: e.target.value === "" ? 0 : parseInt(e.target.value, 10),
                           })
                         }
-                        className="h-7 w-16 rounded border border-input bg-white dark:bg-gray-900 px-2 text-right text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#CEF17B]"
+                        disabled={stockReadOnly}
+                        title={stockReadOnly ? "Set per warehouse in Inventory" : undefined}
+                        className="h-7 w-16 rounded border border-input bg-white dark:bg-gray-900 px-2 text-right text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-[#CEF17B] disabled:opacity-50"
                       />
                     )}
                   </td>
@@ -229,6 +238,7 @@ export function VariantEditor({
           variant={variants[expandedIdx]}
           onChange={(patch) => patchVariant(expandedIdx, patch)}
           onClose={() => setExpandedIdx(null)}
+          stockReadOnly={stockReadOnly}
         />
       )}
     </>
@@ -251,10 +261,12 @@ function VariantDetailPanel({
   variant,
   onChange,
   onClose,
+  stockReadOnly = false,
 }: {
   variant: ProductVariantInput;
   onChange: (patch: Partial<ProductVariantInput>) => void;
   onClose: () => void;
+  stockReadOnly?: boolean;
 }) {
   const { data: org } = useCurrentOrg();
   // Vendors cannot change the per-variant tax flag — render it read-only.
@@ -336,12 +348,23 @@ function VariantDetailPanel({
             />
             {variant.trackQuantity !== false && (
               <>
-                <PanelField
-                  label="Stock on hand"
-                  type="number"
-                  value={variant.inventoryQuantity ?? 0}
-                  onChange={(v) => onChange({ inventoryQuantity: v === "" ? 0 : parseInt(v, 10) })}
-                />
+                {stockReadOnly ? (
+                  <div className="flex flex-col">
+                    <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                      Stock on hand
+                    </span>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {variant.inventoryQuantity ?? 0} — set per warehouse in Inventory.
+                    </p>
+                  </div>
+                ) : (
+                  <PanelField
+                    label="Stock on hand"
+                    type="number"
+                    value={variant.inventoryQuantity ?? 0}
+                    onChange={(v) => onChange({ inventoryQuantity: v === "" ? 0 : parseInt(v, 10) })}
+                  />
+                )}
                 <PanelToggle
                   label="Continue selling when out of stock"
                   hint="Allow orders even when inventory is 0."
@@ -367,7 +390,15 @@ function VariantDetailPanel({
                   type="number"
                   step="0.01"
                   value={variant.weight ?? ""}
-                  onChange={(v) => onChange({ weight: v === "" ? undefined : parseFloat(v) })}
+                  onChange={(v) =>
+                    onChange({
+                      weight: v === "" ? undefined : parseFloat(v),
+                      // The select below DISPLAYS "kg" as its default without
+                      // ever writing it, so a weight typed here used to save
+                      // with no unit at all.
+                      weightUnit: v === "" ? variant.weightUnit : (variant.weightUnit ?? "kg"),
+                    })
+                  }
                 />
                 <label className="block">
                   <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
@@ -399,7 +430,7 @@ function VariantDetailPanel({
               mono
             />
             <PanelField
-              label="HS code"
+              label="HS code (customs — sent to Shopify; invoices use the GST HSN below)"
               value={variant.hsCode ?? ""}
               onChange={(v) => onChange({ hsCode: v || undefined })}
               mono
@@ -423,6 +454,87 @@ function VariantDetailPanel({
               onChange={(checked) => onChange({ taxable: checked })}
               disabled={isVendor}
             />
+            <p className="text-[10px] text-gray-500 dark:text-gray-400">
+              GST override — leave blank to use the product&apos;s HSN, rate, unit
+              and supply type. Set only when this variant is classified differently.
+            </p>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                  HSN / SAC override
+                </span>
+                <input
+                  value={variant.hsnCode ?? ""}
+                  onChange={(e) => onChange({ hsnCode: e.target.value || undefined })}
+                  disabled={isVendor}
+                  placeholder="Same as product"
+                  className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                  GST rate override
+                </span>
+                <select
+                  value={variant.gstRate == null ? "" : String(Number(variant.gstRate))}
+                  onChange={(e) =>
+                    onChange({
+                      gstRate: e.target.value === "" ? undefined : Number(e.target.value),
+                    })
+                  }
+                  disabled={isVendor}
+                  className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                >
+                  <option value="">Same as product</option>
+                  {GST_RATE_OPTIONS.map((rate) => (
+                    <option key={rate} value={rate}>
+                      {rate}%
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                  Unit of measure override
+                </span>
+                <select
+                  value={variant.unitOfMeasure ?? ""}
+                  onChange={(e) => onChange({ unitOfMeasure: e.target.value || undefined })}
+                  disabled={isVendor}
+                  className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                >
+                  <option value="">Same as product</option>
+                  {COMMON_UQC.map((u) => (
+                    <option key={u.code} value={u.code}>
+                      {u.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                  Supply type override
+                </span>
+                <select
+                  value={variant.supplyType ?? ""}
+                  onChange={(e) =>
+                    onChange({
+                      supplyType:
+                        e.target.value === "" ? undefined : (e.target.value as GstSupplyType),
+                    })
+                  }
+                  disabled={isVendor}
+                  className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                >
+                  <option value="">Same as product</option>
+                  {GST_SUPPLY_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
           </PanelSection>
         </div>
 

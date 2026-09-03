@@ -1,5 +1,13 @@
+import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import type { ProductOption } from "~/types/api";
+
+function parseValues(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
 
 /**
  * Editor for the product's option types (Size, Color, Material).
@@ -16,6 +24,14 @@ export function OptionsEditor({
   options: ProductOption[];
   onChange: (next: ProductOption[]) => void;
 }) {
+  // What the user is TYPING in each values box, kept separately from the
+  // parsed array the parent owns. Rendering `values.join(", ")` straight
+  // back into a controlled input meant every keystroke was parsed and
+  // re-serialised — "S," became "S" before the next character arrived, so a
+  // comma could never be typed and "S, M" turned into "SM". The buffer is
+  // dropped on blur, at which point the box shows the normalised list.
+  const [valueDrafts, setValueDrafts] = useState<Record<number, string>>({});
+
   function patchOption(idx: number, patch: Partial<ProductOption>) {
     onChange(options.map((o, i) => (i === idx ? { ...o, ...patch } : o)));
   }
@@ -29,6 +45,8 @@ export function OptionsEditor({
   }
 
   function removeOption(idx: number) {
+    // Indexes shift; drop every draft rather than re-key them.
+    setValueDrafts({});
     onChange(
       options
         .filter((_, i) => i !== idx)
@@ -60,13 +78,17 @@ export function OptionsEditor({
             </button>
           </div>
           <input
-            value={opt.values.join(", ")}
-            onChange={(e) =>
-              patchOption(idx, {
-                values: e.target.value
-                  .split(",")
-                  .map((v) => v.trim())
-                  .filter(Boolean),
+            value={valueDrafts[idx] ?? opt.values.join(", ")}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setValueDrafts((prev) => ({ ...prev, [idx]: raw }));
+              patchOption(idx, { values: parseValues(raw) });
+            }}
+            onBlur={() =>
+              setValueDrafts((prev) => {
+                const next = { ...prev };
+                delete next[idx];
+                return next;
               })
             }
             placeholder="Values, comma-separated (e.g. Small, Medium, Large)"

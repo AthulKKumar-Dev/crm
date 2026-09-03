@@ -19,6 +19,7 @@ import {
   Calendar,
   ChevronDown,
   ChevronRight,
+  UploadCloud,
 } from "lucide-react";
 import {
   useProduct,
@@ -29,18 +30,23 @@ import { useOrders } from "~/hooks/use-order-queries";
 import {
   useBulkUpdateVariantsMutation,
   useGenerateVariantsMutation,
+  useSyncProductMutation,
   useUpdateOptionsMutation,
   useUpdateProductMutation,
   useUpdateVariantMutation,
 } from "~/hooks/use-product-mutations";
 import { useCurrentRole } from "~/hooks/use-current-role";
+import { useOrganizationSettings } from "~/hooks/use-settings-queries";
 import { useInventoryStatus, useVariantStock } from "~/hooks/use-inventory-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { calcMargin, cn, formatCurrency } from "~/lib/utils";
 import { formatDate, formatDateTime } from "~/lib/format-date";
 import { handleMutationError } from "~/lib/handle-mutation-error";
+import { normalizeProductOptions } from "~/lib/product-options";
+import { COMMON_UQC, GST_RATE_OPTIONS, GST_SUPPLY_TYPES } from "~/lib/gst-uqc";
 import { toast } from "sonner";
 import type {
+  GstSupplyType,
   ProductDetail,
   ProductOption,
   ProductShopifySync,
@@ -144,25 +150,15 @@ function toNullableNumber(input: string): number | null | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function normalizeOptions(options: ProductOption[]): ProductOption[] {
-  return options.map((option, index) => ({
-    name: option.name?.trim() ?? "",
-    values: (option.values ?? [])
-      .map((value) => value.trim())
-      .filter(Boolean),
-    position: index + 1,
-  }));
-}
-
 function optionsEqual(a: ProductOption[], b: ProductOption[]): boolean {
   return (
-    JSON.stringify(normalizeOptions(a)) === JSON.stringify(normalizeOptions(b))
+    JSON.stringify(normalizeProductOptions(a)) === JSON.stringify(normalizeProductOptions(b))
   );
 }
 
 /**
  * Local editable option with a stable client-side key for React lists.
- * The `uid` never leaves the client — normalizeOptions strips it from
+ * The `uid` never leaves the client — normalizeProductOptions strips it from
  * payloads and comparisons.
  */
 type EditableOption = ProductOption & { uid: string };
@@ -230,9 +226,25 @@ type FormBaseline = {
   trackQuantity: boolean;
   continueSelling: boolean;
   inventoryQuantity: string;
+  requiresShipping: boolean;
+  weight: string;
+  weightUnit: string;
+  hsCode: string;
+  countryOfOrigin: string;
+  hsnCode: string;
+  gstRate: string;
+  unitOfMeasure: string;
+  supplyType: GstSupplyType;
   options: ProductOption[];
   variantDrafts: Record<string, VariantDraft>;
 };
+
+/** GST rate as the select option string ("18", "0.25"), "" when unset. */
+function toGstRateOption(value: number | string | null | undefined): string {
+  if (value == null || value === "") return "";
+  const n = Number(value);
+  return Number.isFinite(n) ? String(n) : "";
+}
 
 function captureBaseline(p: ProductDetail): FormBaseline {
   const defaultVariant = p.variants?.[0];
@@ -252,7 +264,16 @@ function captureBaseline(p: ProductDetail): FormBaseline {
     trackQuantity: defaultVariant?.trackQuantity ?? true,
     continueSelling: defaultVariant?.continueSellingWhenOutOfStock ?? false,
     inventoryQuantity: toInputNumber(defaultVariant?.inventoryQuantity ?? 0),
-    options: normalizeOptions(p.options ?? []),
+    requiresShipping: defaultVariant?.requiresShipping ?? true,
+    weight: toInputNumber(defaultVariant?.weight),
+    weightUnit: defaultVariant?.weightUnit ?? "kg",
+    hsCode: defaultVariant?.hsCode ?? "",
+    countryOfOrigin: defaultVariant?.countryOfOrigin ?? "",
+    hsnCode: p.hsnCode ?? "",
+    gstRate: toGstRateOption(p.gstRate),
+    unitOfMeasure: p.unitOfMeasure ?? "",
+    supplyType: p.supplyType ?? "TAXABLE",
+    options: normalizeProductOptions(p.options ?? []),
     variantDrafts: buildVariantDrafts(p.variants ?? []),
   };
 }
@@ -302,6 +323,12 @@ export default function ProductDetailPage() {
   const { isVendor } = useCurrentRole();
   const { data: product, isLoading, isError, refetch } = useProduct(id);
   const { data: org } = useCurrentOrg();
+  // Org-wide "(all products)" overrides from Settings → Sync. While ON they
+  // decide what is pushed to Shopify, so the per-variant switches are shown
+  // forced and disabled rather than silently ignored.
+  const { data: orgSettings } = useOrganizationSettings();
+  const oversellForced = orgSettings?.productSettings?.allowOversellGlobally === true;
+  const trackForced = orgSettings?.productSettings?.trackQuantityGlobally === true;
   const { data: productTypes = [] } = useProductTypes();
   const { data: vendors = [] } = useProductVendors();
   const currency = org?.currency ?? "INR";
@@ -320,6 +347,17 @@ export default function ProductDetailPage() {
   const [trackQuantity, setTrackQuantity] = useState(true);
   const [continueSelling, setContinueSelling] = useState(false);
   const [inventoryQuantity, setInventoryQuantity] = useState("0");
+  // Shipping / customs of the default variant (simple products only).
+  const [requiresShipping, setRequiresShipping] = useState(true);
+  const [weight, setWeight] = useState("");
+  const [weightUnit, setWeightUnit] = useState("kg");
+  const [hsCode, setHsCode] = useState("");
+  const [countryOfOrigin, setCountryOfOrigin] = useState("");
+  // Product-level GST fields.
+  const [hsnCode, setHsnCode] = useState("");
+  const [gstRate, setGstRate] = useState("");
+  const [unitOfMeasure, setUnitOfMeasure] = useState("");
+  const [supplyType, setSupplyType] = useState<GstSupplyType>("TAXABLE");
   const [activeTab, setActiveTab] = useState<ProductTab>("overview");
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [expandedVariantGroups, setExpandedVariantGroups] = useState<Set<string>>(
@@ -351,7 +389,7 @@ export default function ProductDetailPage() {
     setVendor(p.vendor ?? "");
     setStatus(p.status);
     setTags(p.tags ?? []);
-    const nextOptions = normalizeOptions(p.options ?? []);
+    const nextOptions = normalizeProductOptions(p.options ?? []);
     setOptions(nextOptions.map((option) => ({ ...option, uid: newUid() })));
     setOptionValueDrafts(nextOptions.map(() => ""));
     setVariantDrafts(buildVariantDrafts(p.variants ?? []));
@@ -365,6 +403,15 @@ export default function ProductDetailPage() {
     setTrackQuantity(defaultVariant?.trackQuantity ?? true);
     setContinueSelling(defaultVariant?.continueSellingWhenOutOfStock ?? false);
     setInventoryQuantity(toInputNumber(defaultVariant?.inventoryQuantity ?? 0));
+    setRequiresShipping(defaultVariant?.requiresShipping ?? true);
+    setWeight(toInputNumber(defaultVariant?.weight));
+    setWeightUnit(defaultVariant?.weightUnit ?? "kg");
+    setHsCode(defaultVariant?.hsCode ?? "");
+    setCountryOfOrigin(defaultVariant?.countryOfOrigin ?? "");
+    setHsnCode(p.hsnCode ?? "");
+    setGstRate(toGstRateOption(p.gstRate));
+    setUnitOfMeasure(p.unitOfMeasure ?? "");
+    setSupplyType(p.supplyType ?? "TAXABLE");
     baselineRef.current = captureBaseline(p);
   }, []);
 
@@ -530,7 +577,23 @@ export default function ProductDetailPage() {
       continueSelling !== baseline.continueSelling ||
       inventoryQuantity !== baseline.inventoryQuantity);
 
-  const isVariantDirty = isPricingDirty || isInventoryDirty;
+  const isShippingDirty =
+    isSimpleProduct &&
+    !!baseline &&
+    (requiresShipping !== baseline.requiresShipping ||
+      weight !== baseline.weight ||
+      weightUnit !== baseline.weightUnit ||
+      hsCode !== baseline.hsCode ||
+      countryOfOrigin !== baseline.countryOfOrigin);
+
+  const isTaxDirty =
+    !!baseline &&
+    (hsnCode !== baseline.hsnCode ||
+      gstRate !== baseline.gstRate ||
+      unitOfMeasure !== baseline.unitOfMeasure ||
+      supplyType !== baseline.supplyType);
+
+  const isVariantDirty = isPricingDirty || isInventoryDirty || isShippingDirty;
   const isOptionsDirty = baseline
     ? !optionsEqual(options, baseline.options)
     : false;
@@ -550,6 +613,7 @@ export default function ProductDetailPage() {
       vendor !== baseline.vendor ||
       !tagsEqual(tags, baseline.tags) ||
       status !== baseline.status ||
+      isTaxDirty ||
       isVariantDirty ||
       isOptionsDirty ||
       isVariantsTableDirty);
@@ -645,6 +709,18 @@ export default function ProductDetailPage() {
     if (status !== product.status) {
       data.status = status;
     }
+    if (hsnCode !== (product.hsnCode ?? "")) {
+      data.hsnCode = hsnCode.trim();
+    }
+    if (gstRate !== toGstRateOption(product.gstRate) && gstRate !== "") {
+      data.gstRate = Number(gstRate);
+    }
+    if (unitOfMeasure !== (product.unitOfMeasure ?? "")) {
+      data.unitOfMeasure = unitOfMeasure;
+    }
+    if (supplyType !== (product.supplyType ?? "TAXABLE")) {
+      data.supplyType = supplyType;
+    }
 
     const hasProductChanges = Object.keys(data).length > 0;
 
@@ -694,6 +770,26 @@ export default function ProductDetailPage() {
         if (Number.isFinite(parsedQty)) {
           variantData.inventoryQuantity = parsedQty;
         }
+      }
+      if (requiresShipping !== (defaultVariant.requiresShipping ?? true)) {
+        variantData.requiresShipping = requiresShipping;
+      }
+      if (weight !== toInputNumber(defaultVariant.weight)) {
+        const next = toNullableNumber(weight);
+        if (next !== undefined) variantData.weight = next;
+      }
+      if (
+        weightUnit !== (defaultVariant.weightUnit ?? "kg") &&
+        weight.trim() !== ""
+      ) {
+        variantData.weightUnit = weightUnit as UpdateVariantRequest["weightUnit"];
+      }
+      if (hsCode !== (defaultVariant.hsCode ?? "")) {
+        variantData.hsCode = hsCode.trim() || null;
+      }
+      if (countryOfOrigin !== (defaultVariant.countryOfOrigin ?? "")) {
+        variantData.countryOfOrigin =
+          countryOfOrigin.trim().toUpperCase() || null;
       }
       if (Object.keys(variantData).length === 0) {
         variantData = null;
@@ -759,7 +855,7 @@ export default function ProductDetailPage() {
       }
 
       if (isOptionsDirty) {
-        const normalized = normalizeOptions(options);
+        const normalized = normalizeProductOptions(options);
         const canGenerate =
           normalized.length > 0 &&
           normalized.every((option) => option.name && option.values.length > 0);
@@ -1015,7 +1111,10 @@ export default function ProductDetailPage() {
                   {galleryImages.length > 0 ? (
                     <div className="flex items-start gap-3">
                       <div className="relative aspect-square min-w-0 flex-[4] overflow-hidden rounded-2xl bg-[#f5f5f7] dark:bg-gray-800">
-                        <span className="absolute left-4 top-4 z-10 rounded-full bg-white px-3 py-1 text-xs font-medium text-gray-900 shadow-sm dark:bg-gray-900 dark:text-gray-100">
+                        <span
+                          title={selectedImage?.alt ?? undefined}
+                          className="absolute left-4 top-4 z-10 max-w-[70%] truncate rounded-full bg-white px-3 py-1 text-xs font-medium text-gray-900 shadow-sm dark:bg-gray-900 dark:text-gray-100"
+                        >
                           {selectedImage?.alt ?? "Front view"}
                         </span>
                         <div className="flex h-full w-full items-center justify-center">
@@ -1260,12 +1359,18 @@ export default function ProductDetailPage() {
                           <FieldLabel className="text-[13px]" htmlFor="product-track-quantity">
                             Track quantity
                           </FieldLabel>
+                          {trackForced && (
+                            <FieldDescription className="text-[11px] text-amber-700 dark:text-amber-300">
+                              Forced ON for all products in{" "}
+                              <Link to="/settings" className="underline">Settings → Sync</Link>.
+                            </FieldDescription>
+                          )}
                         </FieldContent>
                         <Switch
                           id="product-track-quantity"
-                          checked={trackQuantity}
+                          checked={trackForced ? true : trackQuantity}
                           onCheckedChange={setTrackQuantity}
-                          disabled={!defaultVariant}
+                          disabled={!defaultVariant || trackForced}
                         />
                       </Field>
 
@@ -1277,12 +1382,19 @@ export default function ProductDetailPage() {
                           >
                             Continue selling when out of stock
                           </FieldLabel>
+                          {oversellForced && (
+                            <FieldDescription className="text-[11px] text-amber-700 dark:text-amber-300">
+                              Forced ON for all products in{" "}
+                              <Link to="/settings" className="underline">Settings → Sync</Link>.
+                              Shopify receives "continue" regardless of this switch.
+                            </FieldDescription>
+                          )}
                         </FieldContent>
                         <Switch
                           id="product-continue-selling"
-                          checked={continueSelling}
+                          checked={oversellForced ? true : continueSelling}
                           onCheckedChange={setContinueSelling}
-                          disabled={!defaultVariant}
+                          disabled={!defaultVariant || oversellForced}
                         />
                       </Field>
 
@@ -1337,6 +1449,116 @@ export default function ProductDetailPage() {
                           </span>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </Section>
+              )}
+
+              {isSimpleProduct && (
+                <Section title="Shipping">
+                  <div className="space-y-4">
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldLabel className="text-[13px]" htmlFor="product-physical">
+                          This is a physical product
+                        </FieldLabel>
+                        <FieldDescription className="text-[11px]">
+                          Off for digital downloads, services, etc.
+                        </FieldDescription>
+                      </FieldContent>
+                      <Switch
+                        id="product-physical"
+                        checked={requiresShipping}
+                        onCheckedChange={setRequiresShipping}
+                        disabled={!defaultVariant}
+                      />
+                    </Field>
+                    {requiresShipping && (
+                      <div className="flex flex-row gap-2">
+                        <div className="flex flex-col flex-1 gap-1">
+                          <Label
+                            htmlFor="product-weight"
+                            className="text-[12px] font-medium text-muted-foreground"
+                          >
+                            Weight
+                          </Label>
+                          <Input
+                            id="product-weight"
+                            type="number"
+                            inputMode="decimal"
+                            min="0"
+                            step="0.01"
+                            placeholder="0.0"
+                            className="h-8 bg-white dark:bg-gray-900"
+                            value={weight}
+                            onChange={(e) => setWeight(e.target.value)}
+                            disabled={!defaultVariant}
+                          />
+                        </div>
+                        <div className="flex flex-col w-28 gap-1">
+                          <Label
+                            htmlFor="product-weight-unit"
+                            className="text-[12px] font-medium text-muted-foreground"
+                          >
+                            Unit
+                          </Label>
+                          <select
+                            id="product-weight-unit"
+                            value={weightUnit}
+                            onChange={(e) => setWeightUnit(e.target.value)}
+                            disabled={!defaultVariant}
+                            className="h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+                          >
+                            <option value="g">g</option>
+                            <option value="kg">kg</option>
+                            <option value="oz">oz</option>
+                            <option value="lb">lb</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </Section>
+              )}
+
+              {isSimpleProduct && (
+                <Section title="Customs">
+                  <div className="flex flex-row gap-2">
+                    <div className="flex flex-col flex-1 gap-1">
+                      <Label
+                        htmlFor="product-hs-code"
+                        className="text-[12px] font-medium text-muted-foreground"
+                      >
+                        HS code (customs, for Shopify shipping)
+                      </Label>
+                      <Input
+                        id="product-hs-code"
+                        placeholder="6109.10"
+                        className="h-8 bg-white dark:bg-gray-900 font-mono"
+                        value={hsCode}
+                        onChange={(e) => setHsCode(e.target.value)}
+                        disabled={!defaultVariant}
+                      />
+                    </div>
+                    <div className="flex flex-col flex-1 gap-1">
+                      <Label
+                        htmlFor="product-country"
+                        className="text-[12px] font-medium text-muted-foreground"
+                      >
+                        Country of origin
+                      </Label>
+                      <Input
+                        id="product-country"
+                        placeholder="IN"
+                        maxLength={2}
+                        className="h-8 bg-white dark:bg-gray-900 font-mono uppercase"
+                        value={countryOfOrigin}
+                        onChange={(e) => setCountryOfOrigin(e.target.value.toUpperCase())}
+                        disabled={!defaultVariant}
+                      />
+                      <span className="text-[11px] text-muted-foreground">
+                        Two-letter ISO code
+                      </span>
                     </div>
                   </div>
                 </Section>
@@ -1637,6 +1859,12 @@ export default function ProductDetailPage() {
                       null)
                     : null
                 }
+                productTax={{
+                  hsnCode: product.hsnCode ?? null,
+                  gstRate: toGstRateOption(product.gstRate),
+                  unitOfMeasure: product.unitOfMeasure ?? null,
+                  supplyType: product.supplyType ?? "TAXABLE",
+                }}
                 draft={
                   editingVariantId
                     ? variantDrafts[editingVariantId] ?? null
@@ -1743,7 +1971,7 @@ export default function ProductDetailPage() {
               </Section>
               {sync && (
                 <Section title="Shopify Sync">
-                  <ShopifySyncCard sync={sync} />
+                  <ShopifySyncCard sync={sync} productId={product.id} />
                 </Section>
               )}
             </>
@@ -1820,6 +2048,101 @@ export default function ProductDetailPage() {
             </div>
           </Section>
 
+
+          <Section title="Tax (GST)">
+            <div className="space-y-3 text-xs">
+              <div className="flex flex-col gap-1">
+                <Label
+                  htmlFor="product-hsn"
+                  className="text-[12px] font-medium text-muted-foreground"
+                >
+                  HSN / SAC code
+                </Label>
+                <Input
+                  id="product-hsn"
+                  placeholder="6109"
+                  className="h-8 bg-white dark:bg-gray-900 font-mono"
+                  value={hsnCode}
+                  onChange={(e) => setHsnCode(e.target.value)}
+                  disabled={isVendor}
+                />
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label
+                  htmlFor="product-gst-rate"
+                  className="text-[12px] font-medium text-muted-foreground"
+                >
+                  GST rate
+                </Label>
+                <select
+                  id="product-gst-rate"
+                  value={gstRate}
+                  onChange={(e) => setGstRate(e.target.value)}
+                  disabled={isVendor}
+                  className="h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+                >
+                  <option value="">Not set</option>
+                  {GST_RATE_OPTIONS.map((rate) => (
+                    <option key={rate} value={rate}>
+                      {rate}%
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label
+                  htmlFor="product-uqc"
+                  className="text-[12px] font-medium text-muted-foreground"
+                >
+                  Unit of measure (UQC)
+                </Label>
+                <select
+                  id="product-uqc"
+                  value={unitOfMeasure}
+                  onChange={(e) => setUnitOfMeasure(e.target.value)}
+                  disabled={isVendor}
+                  className="h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+                >
+                  <option value="">Default (NOS)</option>
+                  {COMMON_UQC.map((u) => (
+                    <option key={u.code} value={u.code}>
+                      {u.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex flex-col gap-1">
+                <Label
+                  htmlFor="product-supply-type"
+                  className="text-[12px] font-medium text-muted-foreground"
+                >
+                  Supply type
+                </Label>
+                <select
+                  id="product-supply-type"
+                  value={supplyType}
+                  onChange={(e) => setSupplyType(e.target.value as GstSupplyType)}
+                  disabled={isVendor}
+                  className="h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+                >
+                  {GST_SUPPLY_TYPES.map((t) => (
+                    <option key={t.value} value={t.value}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Applies to every variant unless a variant sets its own override
+                in the variant editor.
+              </p>
+              {isVendor && (
+                <p className="text-[11px] text-muted-foreground">
+                  Tax fields are managed by the store owner.
+                </p>
+              )}
+            </div>
+          </Section>
 
           <Section title="Product Organization">
             <dl className="space-y-3 text-xs">
@@ -1902,9 +2225,31 @@ export default function ProductDetailPage() {
 
 function ShopifySyncCard({
   sync,
+  productId,
 }: {
   sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error">;
+  productId: string;
 }) {
+  const syncMutation = useSyncProductMutation();
+  // Same action as the list page's cloud icon. The card used to tell the
+  // merchant to "click Sync to Shopify" while the only button lived on the
+  // list — so an out-of-sync product had no way to push from its own page.
+  const syncButton = (
+    <button
+      type="button"
+      disabled={syncMutation.isPending}
+      onClick={() => syncMutation.mutate(productId)}
+      className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+    >
+      {syncMutation.isPending ? (
+        <Loader2 className="size-3.5 animate-spin" />
+      ) : (
+        <UploadCloud className="size-3.5" />
+      )}
+      {sync.status === "FAILED" ? "Retry sync" : "Sync to Shopify"}
+    </button>
+  );
+
   if (sync.status === "SYNCED") {
     return (
       <div className="space-y-2 text-xs">
@@ -1936,8 +2281,9 @@ function ShopifySyncCard({
           Out of sync
         </span>
         <p className="text-[10px] text-muted-foreground">
-          Local edits haven't been pushed yet. Click <em>Sync to Shopify</em> when ready.
+          Local edits haven't been pushed yet.
         </p>
+        {syncButton}
       </div>
     );
   }
@@ -1948,6 +2294,7 @@ function ShopifySyncCard({
         Sync failed
       </span>
       {sync.error && <p className="text-[10px] text-red-700 dark:text-red-400">{sync.error}</p>}
+      {syncButton}
     </div>
   );
 }
@@ -2111,6 +2458,14 @@ function VariantTableRow({
         {subtitle && !isDefaultVariantLabel(subtitle) && (
           <p className="text-[10px] text-muted-foreground">{subtitle}</p>
         )}
+        {hasGstOverride(v) && (
+          <span
+            className="mt-1 inline-flex rounded-full bg-amber-50 dark:bg-amber-900/30 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+            title="This variant overrides the product's GST classification"
+          >
+            GST override
+          </span>
+        )}
       </td>
       <td className="px-5 py-3">
         <Input
@@ -2251,10 +2606,29 @@ function VariantWarehouseStock({ variantId }: { variantId: string }) {
   );
 }
 
+/** The product's Tax (GST) values, shown as the "inherit" hint in the dialog. */
+type ProductTaxDefaults = {
+  hsnCode: string | null;
+  /** Select option string ("18"), "" when unset. */
+  gstRate: string;
+  unitOfMeasure: string | null;
+  supplyType: GstSupplyType;
+};
+
+function hasGstOverride(v: ProductVariant): boolean {
+  return (
+    v.hsnCode != null ||
+    v.gstRate != null ||
+    v.unitOfMeasure != null ||
+    v.supplyType != null
+  );
+}
+
 function VariantEditDialog({
   variant,
   draft,
   currency,
+  productTax,
   open,
   onOpenChange,
   onSaveDraft,
@@ -2264,12 +2638,14 @@ function VariantEditDialog({
   variant: ProductVariant | null;
   draft: VariantDraft | null;
   currency: string;
+  productTax: ProductTaxDefaults;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaveDraft: (patch: Partial<VariantDraft>) => void;
   onSave: (data: UpdateVariantRequest) => Promise<void>;
   isSaving: boolean;
 }) {
+  const { isVendor } = useCurrentRole();
   const [price, setPrice] = useState("");
   const [compareAtPrice, setCompareAtPrice] = useState("");
   const [cost, setCost] = useState("");
@@ -2279,6 +2655,16 @@ function VariantEditDialog({
   const [trackQuantity, setTrackQuantity] = useState(true);
   const [continueSelling, setContinueSelling] = useState(false);
   const [taxable, setTaxable] = useState(true);
+  const [requiresShipping, setRequiresShipping] = useState(true);
+  const [weight, setWeight] = useState("");
+  const [weightUnit, setWeightUnit] = useState("kg");
+  const [hsCode, setHsCode] = useState("");
+  const [countryOfOrigin, setCountryOfOrigin] = useState("");
+  // GST override — "" everywhere means "inherit from the product".
+  const [gstHsnCode, setGstHsnCode] = useState("");
+  const [gstRateOverride, setGstRateOverride] = useState("");
+  const [uqcOverride, setUqcOverride] = useState("");
+  const [supplyTypeOverride, setSupplyTypeOverride] = useState("");
 
   // With warehousing on, this variant's stock is the sum of per-warehouse
   // buckets and `inventoryQuantity` is only a cache of it. Writing the field
@@ -2286,6 +2672,13 @@ function VariantEditDialog({
   // by the next stock movement, so it becomes read-only and the real numbers
   // are shown below instead.
   const warehousingEnabled = useInventoryStatus().data?.warehousingEnabled === true;
+  // The org-wide "(all products)" toggles in Settings → Sync force what is
+  // pushed to Shopify, so the per-variant switch has no effect while they are
+  // on. Show that instead of letting the merchant flip a switch that syncs
+  // back the other way.
+  const { data: orgSettings } = useOrganizationSettings();
+  const oversellForced = orgSettings?.productSettings?.allowOversellGlobally === true;
+  const trackForced = orgSettings?.productSettings?.trackQuantityGlobally === true;
 
   useEffect(() => {
     if (!variant || !open) return;
@@ -2300,6 +2693,15 @@ function VariantEditDialog({
     setTrackQuantity(variant.trackQuantity ?? true);
     setContinueSelling(variant.continueSellingWhenOutOfStock ?? false);
     setTaxable(variant.taxable ?? true);
+    setRequiresShipping(variant.requiresShipping ?? true);
+    setWeight(toInputNumber(variant.weight));
+    setWeightUnit(variant.weightUnit ?? "kg");
+    setHsCode(variant.hsCode ?? "");
+    setCountryOfOrigin(variant.countryOfOrigin ?? "");
+    setGstHsnCode(variant.hsnCode ?? "");
+    setGstRateOverride(toGstRateOption(variant.gstRate));
+    setUqcOverride(variant.unitOfMeasure ?? "");
+    setSupplyTypeOverride(variant.supplyType ?? "");
     // Seed once per open (or when switching variants). Depending on `draft`
     // or the `variant` object identity would re-seed over the user's typing
     // whenever a background refetch re-renders the parent.
@@ -2322,6 +2724,20 @@ function VariantEditDialog({
     data.trackQuantity = trackQuantity;
     data.continueSellingWhenOutOfStock = continueSelling;
     data.taxable = taxable;
+    data.requiresShipping = requiresShipping;
+    const nextWeight = toNullableNumber(weight);
+    if (nextWeight !== undefined) data.weight = nextWeight;
+    if (nextWeight) data.weightUnit = weightUnit as UpdateVariantRequest["weightUnit"];
+    data.hsCode = hsCode.trim() || null;
+    data.countryOfOrigin = countryOfOrigin.trim().toUpperCase() || null;
+    if (!isVendor) {
+      // null = back to inheriting from the product.
+      data.hsnCode = gstHsnCode.trim() || null;
+      data.gstRate = gstRateOverride === "" ? null : Number(gstRateOverride);
+      data.unitOfMeasure = uqcOverride || null;
+      data.supplyType =
+        supplyTypeOverride === "" ? null : (supplyTypeOverride as GstSupplyType);
+    }
 
     onSaveDraft({
       price,
@@ -2334,7 +2750,7 @@ function VariantEditDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Edit variant</DialogTitle>
         </DialogHeader>
@@ -2415,11 +2831,19 @@ function VariantEditDialog({
               <FieldLabel className="text-[13px]" htmlFor="ve-track">
                 Track quantity
               </FieldLabel>
+              {trackForced && (
+                <FieldDescription className="text-[11px] text-amber-700 dark:text-amber-300">
+                  Forced ON for all products in{" "}
+                  <Link to="/settings" className="underline">Settings → Sync</Link>.
+                  Shopify receives "tracked" regardless of this switch.
+                </FieldDescription>
+              )}
             </FieldContent>
             <Switch
               id="ve-track"
-              checked={trackQuantity}
+              checked={trackForced ? true : trackQuantity}
               onCheckedChange={setTrackQuantity}
+              disabled={trackForced}
             />
           </Field>
           <Field orientation="horizontal">
@@ -2427,11 +2851,19 @@ function VariantEditDialog({
               <FieldLabel className="text-[13px]" htmlFor="ve-continue">
                 Continue selling when out of stock
               </FieldLabel>
+              {oversellForced && (
+                <FieldDescription className="text-[11px] text-amber-700 dark:text-amber-300">
+                  Forced ON for all products in{" "}
+                  <Link to="/settings" className="underline">Settings → Sync</Link>.
+                  Shopify receives "continue" regardless of this switch.
+                </FieldDescription>
+              )}
             </FieldContent>
             <Switch
               id="ve-continue"
-              checked={continueSelling}
+              checked={oversellForced ? true : continueSelling}
               onCheckedChange={setContinueSelling}
+              disabled={oversellForced}
             />
           </Field>
           <Field orientation="horizontal">
@@ -2442,6 +2874,175 @@ function VariantEditDialog({
             </FieldContent>
             <Switch id="ve-taxable" checked={taxable} onCheckedChange={setTaxable} />
           </Field>
+
+          <Separator />
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Shipping
+          </p>
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel className="text-[13px]" htmlFor="ve-physical">
+                This is a physical product
+              </FieldLabel>
+              <FieldDescription className="text-[11px]">
+                Off for digital downloads, services, etc.
+              </FieldDescription>
+            </FieldContent>
+            <Switch
+              id="ve-physical"
+              checked={requiresShipping}
+              onCheckedChange={setRequiresShipping}
+            />
+          </Field>
+          {requiresShipping && (
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="ve-weight" className="text-[12px]">Weight</Label>
+                <Input
+                  id="ve-weight"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0.0"
+                  value={weight}
+                  onChange={(e) => setWeight(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="ve-weight-unit" className="text-[12px]">Weight unit</Label>
+                <select
+                  id="ve-weight-unit"
+                  value={weightUnit}
+                  onChange={(e) => setWeightUnit(e.target.value)}
+                  className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
+                >
+                  <option value="g">g</option>
+                  <option value="kg">kg</option>
+                  <option value="oz">oz</option>
+                  <option value="lb">lb</option>
+                </select>
+              </div>
+            </div>
+          )}
+
+          <Separator />
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Customs
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="ve-hs-code" className="text-[12px]">HS code (customs)</Label>
+              <Input
+                id="ve-hs-code"
+                placeholder="6109.10"
+                className="font-mono"
+                value={hsCode}
+                onChange={(e) => setHsCode(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Sent to Shopify for shipping. Invoices use the GST HSN below.
+              </p>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ve-country" className="text-[12px]">Country of origin</Label>
+              <Input
+                id="ve-country"
+                placeholder="IN"
+                maxLength={2}
+                className="font-mono uppercase"
+                value={countryOfOrigin}
+                onChange={(e) => setCountryOfOrigin(e.target.value.toUpperCase())}
+              />
+              <p className="text-[11px] text-muted-foreground">Two-letter ISO code</p>
+            </div>
+          </div>
+
+          <Separator />
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Tax (GST) override
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            Leave blank to use the product&apos;s values. Set a field only when this
+            variant is classified differently from the product.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="ve-hsn" className="text-[12px]">HSN / SAC code</Label>
+              <Input
+                id="ve-hsn"
+                placeholder={productTax.hsnCode ? `Product: ${productTax.hsnCode}` : "Same as product"}
+                className="font-mono"
+                value={gstHsnCode}
+                onChange={(e) => setGstHsnCode(e.target.value)}
+                disabled={isVendor}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ve-gst-rate" className="text-[12px]">GST rate</Label>
+              <select
+                id="ve-gst-rate"
+                value={gstRateOverride}
+                onChange={(e) => setGstRateOverride(e.target.value)}
+                disabled={isVendor}
+                className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+              >
+                <option value="">
+                  Same as product ({productTax.gstRate ? `${productTax.gstRate}%` : "not set"})
+                </option>
+                {GST_RATE_OPTIONS.map((rate) => (
+                  <option key={rate} value={rate}>
+                    {rate}%
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ve-uqc" className="text-[12px]">Unit of measure (UQC)</Label>
+              <select
+                id="ve-uqc"
+                value={uqcOverride}
+                onChange={(e) => setUqcOverride(e.target.value)}
+                disabled={isVendor}
+                className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+              >
+                <option value="">
+                  Same as product ({productTax.unitOfMeasure || "NOS"})
+                </option>
+                {COMMON_UQC.map((u) => (
+                  <option key={u.code} value={u.code}>
+                    {u.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="ve-supply-type" className="text-[12px]">Supply type</Label>
+              <select
+                id="ve-supply-type"
+                value={supplyTypeOverride}
+                onChange={(e) => setSupplyTypeOverride(e.target.value)}
+                disabled={isVendor}
+                className="h-9 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+              >
+                <option value="">
+                  Same as product (
+                  {GST_SUPPLY_TYPES.find((t) => t.value === productTax.supplyType)?.label ??
+                    productTax.supplyType}
+                  )
+                </option>
+                {GST_SUPPLY_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {isVendor && (
+            <p className="text-[11px] text-muted-foreground">
+              Tax fields are managed by the store owner.
+            </p>
+          )}
         </div>
         <DialogFooter>
           <Button

@@ -34,9 +34,12 @@ import type { Product, ProductStatus } from "~/types/api";
  */
 export function BulkActionBar({
   selectedProducts,
+  offPageCount = 0,
   onClear,
 }: {
   selectedProducts: Product[];
+  /** How many of the selected products are on OTHER pages of the list. */
+  offPageCount?: number;
   onClear: () => void;
 }) {
   const ids = selectedProducts.map((p) => p.id);
@@ -134,6 +137,11 @@ export function BulkActionBar({
       <div className="sticky top-2 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-input bg-white dark:bg-gray-900 px-3 py-2 shadow-lg">
         <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">
           {ids.length} selected
+          {offPageCount > 0 && (
+            <span className="ml-1 font-normal text-muted-foreground">
+              ({offPageCount} on other pages)
+            </span>
+          )}
         </span>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
           <ActionButton onClick={handleArchive} disabled={isPending || editableCount === 0}>

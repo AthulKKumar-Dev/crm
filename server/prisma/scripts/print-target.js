@@ -22,18 +22,37 @@ try {
   // Running without dotenv — env vars are expected to be set already.
 }
 
-const url = process.env.DATABASE_URL;
+// prisma.config.ts sends CLI commands (including `db execute`) to DIRECT_URL
+// when it is set, so that is the URL a script actually hits. DATABASE_URL is
+// what the app uses. If the two name different hosts, somebody repointed only
+// one of them for a deploy and the "target" printed here could lie — refuse.
+const directUrl = process.env.DIRECT_URL;
+const appUrl = process.env.DATABASE_URL;
+const url = directUrl || appUrl;
 if (!url) {
-  console.error('\n  DATABASE_URL is not set — refusing to continue.\n');
+  console.error('\n  Neither DIRECT_URL nor DATABASE_URL is set — refusing to continue.\n');
   process.exit(1);
 }
 
-let host;
-try {
-  host = new URL(url).host;
-} catch {
-  console.error('\n  DATABASE_URL is not a valid URL — refusing to continue.\n');
-  process.exit(1);
+function hostOf(value, name) {
+  try {
+    return new URL(value).host;
+  } catch {
+    console.error(`\n  ${name} is not a valid URL — refusing to continue.\n`);
+    process.exit(1);
+  }
+}
+
+const host = hostOf(url, directUrl ? 'DIRECT_URL' : 'DATABASE_URL');
+if (directUrl && appUrl) {
+  const appHost = hostOf(appUrl, 'DATABASE_URL');
+  if (new URL(url).hostname !== new URL(appUrl).hostname) {
+    console.error(
+      `\n  DIRECT_URL (${host}) and DATABASE_URL (${appHost}) point at different` +
+        ' hosts — refusing to continue until both name the same database.\n',
+    );
+    process.exit(1);
+  }
 }
 
 const bar = '='.repeat(60);

@@ -698,6 +698,11 @@ export interface ProductVariant {
   countryOfOrigin?: string | null;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; null = inherit the product's value. */
+  hsnCode?: string | null;
+  gstRate?: number | string | null;
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType | null;
   option1: string | null;
   option2: string | null;
   option3: string | null;
@@ -750,12 +755,23 @@ export interface Product {
   shopifySync: ProductShopifySync | null;
 }
 
+/** GST nature of supply, per line item — mirrors the server's GstSupplyType enum. */
+export type GstSupplyType =
+  | "TAXABLE"
+  | "EXEMPT"
+  | "NIL_RATED"
+  | "NON_GST"
+  | "ZERO_RATED";
+
 /** A product detail response with all variants, images, and CRM-managed fields. */
 export interface ProductDetail extends Product {
   images: ProductImage[];
   bodyHtml?: string | null;
   hsnCode?: string | null;
   gstRate?: number | string | null;
+  /** GST unit quantity code for GSTR-1 (NOS, KGS, PCS…). Not the variant weight unit. */
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType;
   options?: ProductOption[] | null;
   publishedAt?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -817,6 +833,11 @@ export interface ProductVariantInput {
   countryOfOrigin?: string;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; omit to inherit the product's value. */
+  hsnCode?: string;
+  gstRate?: number;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   option1?: string;
   option2?: string;
   option3?: string;
@@ -836,10 +857,13 @@ export interface CreateProductRequest {
   tags?: string[];
   bodyHtml?: string;
   hsnCode?: string;
-  gstRate?: number;
+  /** `null` clears the rate on update. */
+  gstRate?: number | null;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   /** ISO 8601 string. When set on a DRAFT product in the future, the
-   *  scheduler will flip it to ACTIVE on/after this date. */
-  publishedAt?: string;
+   *  scheduler will flip it to ACTIVE on/after this date. `null` clears it. */
+  publishedAt?: string | null;
   variant?: ProductVariantInput;
   variants?: ProductVariantInput[];
   options?: ProductOption[];
@@ -868,6 +892,11 @@ export interface CreateVariantRequest {
   countryOfOrigin?: string;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; omit to inherit the product's value. */
+  hsnCode?: string;
+  gstRate?: number;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   option1?: string;
   option2?: string;
   option3?: string;
@@ -877,13 +906,32 @@ export interface CreateVariantRequest {
 
 export type UpdateVariantRequest = Omit<
   Partial<CreateVariantRequest>,
-  "imageId" | "sku" | "barcode" | "cost" | "compareAtPrice"
+  | "imageId"
+  | "sku"
+  | "barcode"
+  | "cost"
+  | "compareAtPrice"
+  | "weight"
+  | "hsCode"
+  | "countryOfOrigin"
+  | "hsnCode"
+  | "gstRate"
+  | "unitOfMeasure"
+  | "supplyType"
 > & {
   /** `null` clears the stored value; omit the field to leave it unchanged. */
   sku?: string | null;
   barcode?: string | null;
   cost?: number | null;
   compareAtPrice?: number | null;
+  weight?: number | null;
+  hsCode?: string | null;
+  countryOfOrigin?: string | null;
+  /** GST override; `null` = back to inheriting from the product. */
+  hsnCode?: string | null;
+  gstRate?: number | null;
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType | null;
 };
 
 /** Query parameters for the product list endpoint. */

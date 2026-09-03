@@ -802,7 +802,9 @@ export class OrderService {
               return {
                 productId: v.product.id,
                 // toNullableNumber, not toNumber: null (no rate configured) and
-                // 0 (explicitly exempt) must stay distinguishable.
+                // 0 (explicitly exempt) must stay distinguishable. The variant's
+                // own rate, when set, wins over the product's.
+                variantGstRate: this.calculator.toNullableNumber(v.gstRate),
                 productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
                 variantTaxable: v.taxable,
               };

@@ -24,7 +24,7 @@ import {
   GstCalculationResult,
 } from '../gst/gst-calculator.service';
 import { normalizeGstin } from '../gst/constants/gst-rates';
-import { normalizeUqc } from '../gst/constants/uqc';
+import { resolveLineTaxClassification } from '../gst/line-tax-classification.util';
 import { apportionShipping } from '../gst/shipping-apportionment.util';
 import { parseTaxSettings } from '../organization-settings/schemas/tax-settings.schema';
 import { compareTax } from '../gst/tax-reconciliation.util';
@@ -325,6 +325,9 @@ export class InvoiceService {
       placeOfSupplyCode,
       order.lineItems.map((item) => ({
         productId: item.variant?.product?.id ?? null,
+        // A variant classified differently from its product carries its own
+        // rate; null on the variant means "same as the product".
+        variantGstRate: this.calculator.toNullableNumber(item.variant?.gstRate),
         productGstRate: this.calculator.toNullableNumber(
           item.variant?.product?.gstRate,
         ),
@@ -336,27 +339,18 @@ export class InvoiceService {
 
     for (const [index, item] of order.lineItems.entries()) {
       const gstRate = lineGstRates[index];
-      // NULL, not the invented '0000'.
-      //
-      // '0000' is not a valid HSN and it was being stamped onto a statutory
-      // document whenever a product had none — which, on this data, is every
-      // product in every real organization. Writing null makes "unclassified"
-      // representable, and `hsnMissing` below makes it visible before filing.
-      const hsnCode = item.variant?.product?.hsnCode?.trim() || null;
-
-      // Table 12 needs a unit on every row. Product override first, then the
-      // org default (NOS), so a merchant who has classified nothing still
-      // produces a valid table.
-      const unitOfMeasure =
-        normalizeUqc(item.variant?.product?.unitOfMeasure) ??
-        taxSettings.defaultUnitOfMeasure;
-
-      // ZERO_RATED is DERIVED — an export is zero-rated because of where it is
-      // going, not because of what it is. Everything else is a property of the
-      // goods and is classified on the product.
-      const supplyType = isExportSupply
-        ? GstSupplyType.ZERO_RATED
-        : (item.variant?.product?.supplyType ?? GstSupplyType.TAXABLE);
+      // HSN / UQC / supply type resolve variant → product → fallback, field by
+      // field. HSN is NULL, never the invented '0000', when nobody classified
+      // the goods — `hsnMissing` below makes that visible before filing. UQC
+      // falls back to the org default so Table 12 always has a unit.
+      // ZERO_RATED is DERIVED from an export place of supply and cannot be
+      // overridden by either side.
+      const { hsnCode, unitOfMeasure, supplyType } = resolveLineTaxClassification({
+        variant: item.variant,
+        product: item.variant?.product,
+        defaultUnitOfMeasure: taxSettings.defaultUnitOfMeasure,
+        isExportSupply,
+      });
 
       const calculation = this.calculator.calculateLineItem(
         {
