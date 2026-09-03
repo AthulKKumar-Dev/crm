@@ -8,8 +8,8 @@ export const dashboardKeys = {
   all: ["dashboard"] as const,
   overview: (params?: DashboardQueryParams) =>
     [...dashboardKeys.all, "overview", params] as const,
-  monthlySales: (params?: DashboardQueryParams) =>
-    [...dashboardKeys.all, "monthly-sales", params] as const,
+  salesAndProfit: (params?: DashboardQueryParams) =>
+    [...dashboardKeys.all, "sales-and-profit", params] as const,
   salesByCategory: (params?: DashboardQueryParams) =>
     [...dashboardKeys.all, "sales-by-category", params] as const,
 };
@@ -22,11 +22,17 @@ export function useDashboard(params?: DashboardQueryParams) {
   });
 }
 
-/** Fetch monthly revenue & profit data for the bar chart. */
-export function useMonthlySales(params?: DashboardQueryParams) {
+/**
+ * Sales and gross profit for the selected window.
+ *
+ * Drives the stat cards AND the bar chart. Both must pass the SAME params or
+ * React Query hands them two different responses and the page goes back to
+ * showing a headline figure that disagrees with the bars underneath it.
+ */
+export function useSalesAndProfit(params?: DashboardQueryParams) {
   return useQuery({
-    queryKey: dashboardKeys.monthlySales(params),
-    queryFn: () => dashboardService.getMonthlySales(params),
+    queryKey: dashboardKeys.salesAndProfit(params),
+    queryFn: () => dashboardService.getSalesAndProfit(params),
   });
 }
 

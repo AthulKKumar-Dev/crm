@@ -1811,10 +1811,31 @@ export interface OrderStatsResponse {
 // ─── Dashboard Types ────────────────────────────────────────────────────────
 
 /** Query parameters for the dashboard overview endpoint. */
+/** Pre-canned windows offered by the dashboard's period selector. */
+export const DASHBOARD_RANGES = ["30d", "6m", "12m"] as const;
+export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
+
 export interface DashboardQueryParams {
+  /**
+   * The window every figure on the page shares. Passing it to one query and not
+   * another is what let "Total Sales" (all-time) sit beside "Total Revenue"
+   * (rolling 12 months) describing different populations.
+   */
+  range?: DashboardRange;
   dateFrom?: string;
   dateTo?: string;
   channelId?: string;
+}
+
+/** The window a dashboard response was computed over. */
+export interface DashboardPeriod {
+  from: string;
+  /** Exclusive. */
+  to: string;
+  /** "Last 12 months" — render this rather than re-deriving it. */
+  label: string;
+  /** The org timezone the buckets were cut in. */
+  timezone: string;
 }
 
 /** Fulfillment status breakdown counts. */
@@ -1866,6 +1887,13 @@ export interface DashboardRecentOrder {
 
 /** Full dashboard overview response. */
 export interface DashboardOverview {
+  period: DashboardPeriod;
+  /**
+   * Kept for the CSV/JSON export summary. The stat card reads
+   * `totals.grossSales` off the sales-and-profit response instead, so the
+   * headline figure and the chart beside it are the same number by
+   * construction.
+   */
   totalSales: number;
   totalOrders: number;
   totalCustomers: number;
@@ -2147,6 +2175,63 @@ export interface GstFiling {
   sellerGstinId: string | null;
   filedAt: string;
   arn: string | null;
+}
+
+/**
+ * What a payment supplier charged in one filing period.
+ *
+ * ⚠️ Never subtracted from sales. A sale keeps its full declared value however
+ * much the supplier deducts before settling — the fee is a separate purchase
+ * whose GST comes back as input tax credit. Nothing here feeds a return total.
+ */
+export interface InwardSupply {
+  id: string;
+  financialYear: string;
+  period: string;
+  supplier: string;
+  /** The fee itself, excluding tax. */
+  feeAmount: string;
+  /**
+   * NULL when the invoice never stated the tax — NOT the same as zero. Shown as
+   * unknown, never as ₹0, or a claim looks settled when nobody has supplied the
+   * figure yet.
+   */
+  gstAmount: string | null;
+  supplierGstin: string | null;
+  /** An import of services: GST is self-paid first, then reclaimed. */
+  isReverseCharge: boolean;
+  source: "MANUAL" | "SHOPIFY_SYNC";
+  note: string | null;
+}
+
+export interface InwardSupplySummary {
+  totalFee: number;
+  /** Null when no row stated a GST amount at all. */
+  totalGst: number | null;
+  /** While above zero, `totalGst` is a floor rather than the full claim. */
+  rowsWithUnknownGst: number;
+  /** The portion self-paid under reverse charge — GSTR-3B 4(A)(3). */
+  reverseChargeGst: number;
+  /** The taxable value behind it — GSTR-3B 3.1(d) needs the value, not the tax. */
+  reverseChargeTaxable: number;
+}
+
+export interface InwardSuppliesResponse {
+  fees: InwardSupply[];
+  summary: InwardSupplySummary;
+}
+
+/** Payload for PUT /inward-supplies. Idempotent on (year, period, supplier). */
+export interface UpsertInwardSupplyRequest {
+  financialYear: string;
+  period: string;
+  supplier: string;
+  feeAmount: number;
+  /** Omit when the invoice does not state it — omitted means unknown, not 0. */
+  gstAmount?: number;
+  supplierGstin?: string;
+  isReverseCharge?: boolean;
+  note?: string;
 }
 
 /** Payload for POST /invoices/gst-return/filings. */

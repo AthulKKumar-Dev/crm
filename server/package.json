@@ -28,7 +28,8 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "gst:reconcile": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-reconcile.ts",
     "gst:fixtures": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-fixtures.ts",
-    "gst:refund-check": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-refund-credit-check.ts"
+    "gst:refund-check": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-refund-credit-check.ts",
+    "gst:rcm-check": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/inward-supply-check.ts"
   },
   "dependencies": {
     "@nestjs/bullmq": "^11.0.4",

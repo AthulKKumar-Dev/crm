@@ -24,6 +24,7 @@ describe('InvoiceService.getGstReturn', () => {
   let prisma: {
     organization: { findUnique: jest.Mock };
     organizationSettings: { findUnique: jest.Mock };
+    inwardSupply: { findMany: jest.Mock };
     invoice: { count: jest.Mock; findMany: jest.Mock };
   };
 
@@ -73,6 +74,10 @@ describe('InvoiceService.getGstReturn', () => {
       organizationSettings: {
         findUnique: jest.fn().mockResolvedValue({ taxSettings: null }),
       },
+      // GSTR-3B 3.1(d) reads reverse-charge purchases from here. Empty by
+      // default: a period with no imported services must produce a zeroed row,
+      // not a crash.
+      inwardSupply: { findMany: jest.fn().mockResolvedValue([]) },
       invoice: { count: jest.fn(), findMany: jest.fn() },
     };
 

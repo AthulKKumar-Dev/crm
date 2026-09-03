@@ -26,6 +26,7 @@ import { SuperAdminGuard } from './auth/guards/super-admin.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
 import { OrganizationSettingsModule } from './organization-settings/organization-settings.module';
+import { InwardSupplyModule } from './inward-supply/inward-supply.module';
 import { EmailModule } from './email/email.module';
 import { ChannelModule } from './channel/channel.module';
 import { OrderModule } from './order/order.module';
@@ -81,6 +82,7 @@ import { InventoryModule } from './inventory/inventory.module';
     UserModule,
     OrganizationModule,
     OrganizationSettingsModule,
+    InwardSupplyModule,
     ChannelModule,
     OrderModule,
     DraftOrderModule,

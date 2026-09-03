@@ -6,6 +6,7 @@ import {
   GSTR3B_SECTION_INTERSTATE,
   GSTR3B_SECTION_OUTWARD,
   GSTR3B_SECTION_PAYABLE,
+  GSTR3B_SECTION_RCM_ITC,
   type CsvSection,
 } from './gst-return-rows';
 import type { Gstr1Return, Gstr3bReturn } from './gst-return.accumulator';
@@ -28,6 +29,9 @@ const gstr3b: Gstr3bReturn = {
     { gstRate: 18, taxableValue: 3000, cgst: 0, sgst: 0, igst: 540, totalTax: 540 },
   ],
   otherSupplies: { zeroRated: 5000, nilRatedExempt: 300, nonGst: 120 },
+  // A Shopify subscription: 1,000 of imported service, 180 of IGST self-paid
+  // under reverse charge and reclaimed in the same period.
+  reverseCharge: { taxableValue: 1000, igst: 180, entriesWithUnknownTax: 0 },
   interState: {
     invoiceCount: 3,
     totalTaxable: 3400,
@@ -102,12 +106,83 @@ describe('buildGstr3bSections', () => {
       outwardSupplies: [],
       otherSupplies: { zeroRated: 0, nilRatedExempt: 0, nonGst: 0 },
       interState: { invoiceCount: 0, totalTaxable: 0, totalIgst: 0, byState: [] },
+      reverseCharge: { taxableValue: 0, igst: 0, entriesWithUnknownTax: 0 },
       taxPayable: { cgst: 0, sgst: 0, igst: 0, total: 0 },
     });
 
     expect(find(sections, '5.1').rows).toHaveLength(1);
     expect(GSTR3B_SECTION_PAYABLE).toContain('5.1');
     expect(GSTR3B_SECTION_OUTWARD).toContain('3.1(a)');
+  });
+
+  /**
+   * Reverse charge is cash-neutral but DOUBLY declarable — the liability in
+   * 3.1(d), the matching credit in 4(A)(3). Netting to nil is exactly why it
+   * gets skipped, and skipping it is a non-declaration the department can see,
+   * because it knows the merchant paid a foreign supplier.
+   */
+  const sections = (data: Gstr3bReturn) => buildGstr3bSections(data);
+
+  describe('reverse charge — 3.1(d) and 4(A)(3)', () => {
+    it('emits both legs, carrying equal IGST', () => {
+      const sections = buildGstr3bSections(gstr3b);
+
+      // 1,000 of imported service at 18% = 180, self-paid then reclaimed.
+      expect(find(sections, '3.1(d)').rows[0].slice(0, 2)).toEqual([1000, 180]);
+      expect(find(sections, '4(A)(3)').rows[0][0]).toBe(180);
+    });
+
+    it('does NOT add reverse charge to tax payable', () => {
+      // The load-bearing assertion. 3.1(d) is settled in cash and reclaimed the
+      // same period; folding it into output tax would overstate what is owed on
+      // sales. 20 + 540 outward = 560, and the 180 above must not appear.
+      const sections = buildGstr3bSections(gstr3b);
+
+      expect(find(sections, '5.1').rows[0]).toEqual([0, 0, 560, 560]);
+    });
+
+    it('names 4(A)(3), never "Table 4"', () => {
+      // Table 4 also holds 4(A)(5), all other ITC on domestic purchases, which
+      // this system does not track. Naming the sub-row is what stops the block
+      // implying a completeness it does not have.
+      expect(GSTR3B_SECTION_RCM_ITC).toContain('4(A)(3)');
+      expect(find(sections(gstr3b), '4(A)(3)').rows[0][1]).toMatch(/4\(A\)\(5\)/);
+    });
+
+    it('prompts rather than staying silent when nothing is recorded', () => {
+      // A missing row is how a foreign subscription goes undeclared for a year.
+      // An explicit zero with a prompt is what makes someone check.
+      const empty = buildGstr3bSections({
+        ...gstr3b,
+        reverseCharge: { taxableValue: 0, igst: 0, entriesWithUnknownTax: 0 },
+      });
+
+      const row = find(empty, '3.1(d)').rows[0];
+      expect(row.slice(0, 2)).toEqual([0, 0]);
+      expect(String(row[2])).toMatch(/Nothing recorded/i);
+    });
+
+    it('marks the figure INCOMPLETE when a supply states no tax', () => {
+      // An unstated tax is not zero. The IGST shown is a floor, and saying so
+      // is the difference between a claim someone tops up and one they file.
+      const partial = buildGstr3bSections({
+        ...gstr3b,
+        reverseCharge: { taxableValue: 1500, igst: 180, entriesWithUnknownTax: 1 },
+      });
+
+      expect(String(find(partial, '3.1(d)').rows[0][2])).toMatch(/INCOMPLETE/);
+    });
+
+    it('places both legs between 3.2 and 5.1', () => {
+      // Statutory order — an accountant reads down the file.
+      const titles = sections(gstr3b).map((s) => s.title);
+      const at = (prefix: string) =>
+        titles.findIndex((t) => t.startsWith(prefix));
+
+      expect(at('3.2')).toBeLessThan(at('3.1(d)'));
+      expect(at('3.1(d)')).toBeLessThan(at('4(A)(3)'));
+      expect(at('4(A)(3)')).toBeLessThan(at('5.1'));
+    });
   });
 });
 

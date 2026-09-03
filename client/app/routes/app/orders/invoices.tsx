@@ -49,6 +49,7 @@ import { TableSkeleton } from "~/components/app/table-skeleton";
 import { QueryErrorState } from "~/components/app/query-error-state";
 import { useRefundsPendingCredit } from "~/hooks/use-invoice-queries";
 import { DismissibleWarning } from "~/components/app/dismissible-warning";
+import { InwardSuppliesPanel } from "~/components/app/inward-supplies-panel";
 import { useInvoices, useInvoiceStats, useGstReturn } from "~/hooks/use-invoice-queries";
 import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
@@ -881,6 +882,18 @@ export default function InvoicesPage() {
                   currency={currency}
                 />
               )}
+
+              {/* Below the return, and outside it. Gateway fees never alter a
+                  return figure — a sale keeps its full declared value however
+                  much the supplier deducts, and the fee's GST is recovered
+                  separately as input tax credit. Rendered here so the claim is
+                  visible next to the period it belongs to. */}
+              <InwardSuppliesPanel
+                financialYear={financialYear}
+                period={period}
+                currency={currency}
+                canEdit={canIssue}
+              />
             </div>
 
             <GstFilingSidebar

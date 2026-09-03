@@ -1422,7 +1422,71 @@ export class InvoiceService {
       accumulator.addInvoice(invoice),
     );
 
-    return accumulator.finish();
+    const result = accumulator.finish();
+
+    // GSTR-3B 3.1(d) and 4(A)(3) — inward supplies on which the RECIPIENT pays
+    // the tax. Read here rather than folded into the accumulator because that
+    // class folds invoices, which are outward; these are purchases.
+    //
+    // Cash-neutral but doubly declarable: the liability sits in 3.1(d), the
+    // matching credit in 4(A)(3). Omitting both is a non-declaration the
+    // department can see, since it knows the merchant paid a foreign supplier.
+    if (isGstr3b) {
+      (result as Gstr3bReturn).reverseCharge = await this.reverseChargeTotals(
+        orgId,
+        query.financialYear,
+        query.period,
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Fold the period's reverse-charge inward supplies.
+   *
+   * ⚠️ An unstated tax is NOT summed as zero. It is counted separately so the
+   * caller can present the figure as a floor — the same contract the refund and
+   * channel-tax paths hold, and the reason `gstAmount` is nullable at all.
+   *
+   * IGST throughout: this is scoped to imports of services, where the
+   * recipient's location is the place of supply and the supplier sits outside
+   * India, making it inter-state by definition. Domestic reverse charge (goods
+   * transport, advocates) can be CGST+SGST and is deliberately out of scope.
+   */
+  private async reverseChargeTotals(
+    orgId: string,
+    financialYear: string,
+    period: string,
+  ): Promise<Gstr3bReturn['reverseCharge']> {
+    const rows = await this.prisma.inwardSupply.findMany({
+      where: {
+        organizationId: orgId,
+        financialYear,
+        period,
+        isReverseCharge: true,
+      },
+      select: { feeAmount: true, gstAmount: true },
+    });
+
+    let taxableValue = new Prisma.Decimal(0);
+    let igst = new Prisma.Decimal(0);
+    let entriesWithUnknownTax = 0;
+
+    for (const row of rows) {
+      taxableValue = taxableValue.plus(row.feeAmount);
+      if (row.gstAmount === null) {
+        entriesWithUnknownTax += 1;
+        continue;
+      }
+      igst = igst.plus(row.gstAmount);
+    }
+
+    return {
+      taxableValue: parseFloat(taxableValue.toFixed(2)),
+      igst: parseFloat(igst.toFixed(2)),
+      entriesWithUnknownTax,
+    };
   }
 
   /**

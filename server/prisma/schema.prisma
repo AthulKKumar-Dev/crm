@@ -336,6 +336,7 @@ model Organization {
   stockReceipts          StockReceipt[]
   pickTasks              PickTask[]
   gstFilings        GstFiling[]
+  inwardSupplies    InwardSupply[]
 
   @@map("organizations")
 }
@@ -1517,6 +1518,80 @@ model GstFiling {
   @@unique([organizationId, financialYear, period, returnType, sellerGstinId])
   @@index([organizationId])
   @@map("gst_filings")
+}
+
+/// A purchase the merchant records by hand — a gateway fee, a foreign SaaS
+/// subscription, ad spend — with the GST on it.
+///
+/// ⚠️ NOTHING HERE REDUCES DECLARED TURNOVER. A sale keeps its full value
+/// however much a gateway deducts before settling; these are SEPARATE inward
+/// supplies whose tax is recovered through input credit. Netting them off sales
+/// would under-declare revenue against figures the department cross-matches.
+///
+/// Rows flagged `isReverseCharge` feed GSTR-3B **3.1(d)** (the self-paid
+/// liability) and **4(A)(3)** (the matching credit) — cash-neutral, but both
+/// legs are declarable and omitting them is a visible non-declaration. That is
+/// why this is not limited to payment gateways: Google Ads, Meta, AWS and Figma
+/// are reverse charge too, and a 3.1(d) built from gateway fees alone would be
+/// confidently too low.
+///
+/// ⚠️ NOT a purchase ledger. No line items, no HSN, no GSTR-2B matching, no
+/// blocked-credit rules. It supports 4(A)(3) only — general ITC on domestic
+/// purchases (4(A)(5)) stays out, and the exports must never say "Table 4"
+/// unqualified or they imply a completeness this does not have.
+///
+/// PERIOD-LEVEL rather than per-order, deliberately: a third-party gateway's
+/// fee is invisible to Shopify and arrives as a monthly statement, so the
+/// record matches how the data actually shows up. A Shopify Payments sync would
+/// aggregate into this same shape under `SHOPIFY_SYNC`.
+model InwardSupply {
+  id             String @id @default(cuid())
+  organizationId String @map("organization_id")
+  financialYear  String @map("financial_year")
+  period         String
+
+  /// Who charged it — "Shopify", "Google Ads", "Razorpay", "AWS". Free text,
+  /// not an enum: the set is open and an enum would need a migration to accept
+  /// the next one.
+  supplier String
+
+  /// The charge itself, excluding tax.
+  feeAmount Decimal @map("fee_amount") @db.Decimal(12, 2)
+
+  /// NULL means the invoice never told us the tax; 0.00 means it told us zero.
+  /// The same contract as `OrderRefund.totalTax` and the channel-tax columns —
+  /// summing NULL as zero would understate a tax claim while looking complete.
+  gstAmount Decimal? @map("gst_amount") @db.Decimal(12, 2)
+
+  /// Present ⇒ an ordinary domestic supply; the supplier remits the GST and you
+  /// claim it. Absent ⇒ typically an import of services, where you self-pay the
+  /// GST under reverse charge and reclaim the same amount.
+  supplierGstin String? @map("supplier_gstin")
+
+  /// Drives GSTR-3B 3.1(d) and 4(A)(3).
+  ///
+  /// ⚠️ Scoped to IMPORTS of services, which are always IGST — the recipient's
+  /// location is the place of supply and the supplier sits outside India, so it
+  /// is inter-state by definition. Domestic reverse charge (goods transport,
+  /// advocates) is out of scope: it can be CGST+SGST and the head depends on
+  /// the supplier's state.
+  isReverseCharge Boolean @default(false) @map("is_reverse_charge")
+
+  /// MANUAL | SHOPIFY_SYNC — stops a future auto-capture double-counting a
+  /// figure somebody already entered by hand.
+  source String @default("MANUAL")
+
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// One row per supplier per period; a duplicate collides rather than silently
+  /// doubling the claim.
+  @@unique([organizationId, financialYear, period, supplier])
+  @@index([organizationId, financialYear, period])
+  @@map("inward_supplies")
 }
 
 model StateTaxRate {
