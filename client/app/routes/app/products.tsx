@@ -105,7 +105,12 @@ export default function ProductsPage() {
   const [creatingProduct, setCreatingProduct] = useState(false);
   const [editingFullProductId, setEditingFullProductId] = useState<string | null>(null);
   // Phase 3: bulk-selection state + wizards
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  // Selected products by id, kept as full objects so a selection made on one
+  // page survives paging to another. This used to be a Set of ids resolved
+  // against the CURRENT page only, so the bar (and every bulk action) saw just
+  // the visible page's selection: select on page 1, click Next, and the bar
+  // vanished; come back and only page 1's rows were "selected".
+  const [selected, setSelected] = useState<Map<string, Product>>(new Map());
   const [importOpen, setImportOpen] = useState(false);
   const [activeFilters, setActiveFilters] = useState<string[]>([]);
   const [filterValues, setFilterValues] = useState<Record<string, string>>({});
@@ -144,13 +149,16 @@ export default function ProductsPage() {
   const totalPages = meta?.totalPages ?? 1;
   const categoryFilters = ["All", ...(productTypes ?? [])];
 
-  // Resolve the selected ids back to full Product objects (for the bulk bar).
-  const selectedProducts = useMemo(
-    () => products.filter((p) => selectedIds.has(p.id)),
-    [products, selectedIds],
-  );
+  // Every selected product across pages; rows visible on the current page are
+  // taken fresh from the list so status/tag changes show up in the bar.
+  const selectedProducts = useMemo(() => {
+    const byId = new Map(selected);
+    for (const p of products) if (byId.has(p.id)) byId.set(p.id, p);
+    return [...byId.values()];
+  }, [products, selected]);
+  const selectedOnPageCount = products.filter((p) => selected.has(p.id)).length;
   const allOnPageSelected =
-    products.length > 0 && products.every((p) => selectedIds.has(p.id));
+    products.length > 0 && selectedOnPageCount === products.length;
   const allFiltersSelected = activeFilters.length === FILTER_OPTIONS.length;
   // The catalog is genuinely empty (not just filtered/searched to zero results).
   // When true, the search/sort/filter controls are pointless, so we disable them.
@@ -172,19 +180,19 @@ export default function ProductsPage() {
     setCurrentPage(1);
   }
 
-  function toggleSelect(id: string, checked: boolean) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (checked) next.add(id);
-      else next.delete(id);
+  function toggleSelect(product: Product, checked: boolean) {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (checked) next.set(product.id, product);
+      else next.delete(product.id);
       return next;
     });
   }
 
   function toggleSelectAllOnPage(checked: boolean) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (checked) products.forEach((p) => next.add(p.id));
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (checked) products.forEach((p) => next.set(p.id, p));
       else products.forEach((p) => next.delete(p.id));
       return next;
     });
@@ -268,7 +276,8 @@ export default function ProductsPage() {
       {!isVendor && selectedProducts.length > 0 && (
         <BulkActionBar
           selectedProducts={selectedProducts}
-          onClear={() => setSelectedIds(new Set())}
+          offPageCount={selectedProducts.length - selectedOnPageCount}
+          onClear={() => setSelected(new Map())}
         />
       )}
 
@@ -475,15 +484,15 @@ export default function ProductsPage() {
                   {products.map((product) => (
                     <tr
                       key={product.id}
-                      className={`hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer ${selectedIds.has(product.id) ? "bg-[#CEF17B]/10" : ""
+                      className={`hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer ${selected.has(product.id) ? "bg-[#CEF17B]/10" : ""
                         }`}
                       onClick={() => navigate(`/products/${product.id}`)}
                     >
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
-                          checked={selectedIds.has(product.id)}
-                          onChange={(e) => toggleSelect(product.id, e.target.checked)}
+                          checked={selected.has(product.id)}
+                          onChange={(e) => toggleSelect(product, e.target.checked)}
                           className="size-3.5 accent-[#CEF17B] cursor-pointer"
                         />
                       </td>

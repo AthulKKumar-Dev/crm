@@ -327,7 +327,12 @@ export class InventoryService {
     };
   }
 
-  async getStockStats(orgId: string) {
+  // `warehouseId` scopes every figure to a single warehouse; omitted means
+  // org-wide. The stat tiles follow the warehouse selector ONLY — the search
+  // box and stock filter narrow the table beneath them, not these numbers, so
+  // "low stock lines" keeps meaning "lines low in this warehouse" instead of
+  // collapsing to the row count whenever the table is filtered to low stock.
+  async getStockStats(orgId: string, warehouseId?: string) {
     await this.assertWarehousing(orgId);
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
@@ -335,16 +340,27 @@ export class InventoryService {
     });
     const threshold = org?.lowStockThreshold ?? 10;
 
+    // organizationId stays in every clause, so a warehouseId belonging to
+    // another org yields zeros rather than leaking — the same property
+    // listStock leans on instead of a separate ownership lookup.
+    const scope: Prisma.StockLevelWhereInput = {
+      organizationId: orgId,
+      ...(warehouseId ? { warehouseId } : {}),
+    };
+    const warehouseFilter = warehouseId
+      ? Prisma.sql`AND sl."warehouse_id" = ${warehouseId}`
+      : Prisma.empty;
+
     const [sums, low, oversold, valueRows] = await Promise.all([
       this.prisma.stockLevel.aggregate({
-        where: { organizationId: orgId },
+        where: scope,
         _sum: { available: true, reserved: true, qc: true, damaged: true },
       }),
       this.prisma.stockLevel.count({
-        where: { organizationId: orgId, available: { gt: 0, lte: threshold } },
+        where: { ...scope, available: { gt: 0, lte: threshold } },
       }),
       this.prisma.stockLevel.count({
-        where: { organizationId: orgId, available: { lt: 0 } },
+        where: { ...scope, available: { lt: 0 } },
       }),
       // Stock value = SUM(onHand × variant.cost) — cost is nullable, so this
       // is a floor, not gospel; the UI labels it "known cost value".
@@ -352,7 +368,7 @@ export class InventoryService {
         SELECT SUM(("available" + "reserved" + "qc" + "damaged") * COALESCE(pv."cost", 0))::float AS value
         FROM "stock_levels" sl
         JOIN "product_variants" pv ON pv."id" = sl."variant_id"
-        WHERE sl."organization_id" = ${orgId}
+        WHERE sl."organization_id" = ${orgId} ${warehouseFilter}
       `,
     ]);
 

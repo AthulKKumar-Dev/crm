@@ -10,7 +10,11 @@ export default defineConfig({
     path: "prisma/migrations",
   },
   engine: "classic",
+  // CLI commands (migrate, db execute, studio) must use the session-mode
+  // connection (DIRECT_URL, pooler port 5432): Prisma Migrate takes advisory
+  // locks that transaction pooling (port 6543) cannot hold. Falls back to
+  // DATABASE_URL for environments without a pooler (docker-compose).
   datasource: {
-    url: env("DATABASE_URL"),
+    url: process.env.DIRECT_URL ? env("DIRECT_URL") : env("DATABASE_URL"),
   },
 });

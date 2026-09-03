@@ -17,7 +17,7 @@ import {
   isValidStateCode,
   getStateName,
 } from './constants/indian-states';
-import { extractStateCodeFromGstin } from './constants/gst-rates';
+import { extractStateCodeFromGstin, normalizeGstin } from './constants/gst-rates';
 
 @Injectable()
 export class GstService {
@@ -48,9 +48,27 @@ export class GstService {
   // ─── CREATE GSTIN ───
   // Adds a new GSTIN registration for the organization.
   // Validates state code matches the first 2 digits of GSTIN.
+  //
+  // Re-adding a GSTIN that was previously removed REVIVES the original row
+  // rather than inserting a second one. Removal here is a soft delete
+  // (`isActive: false`) because invoices and filed returns hold a foreign key
+  // to the row, but the unique index on (organization_id, gstin) covers
+  // inactive rows too — so an insert always hit P2002 and the merchant was
+  // told the GSTIN "is already registered" while the list showed nothing,
+  // with no way out. Reviving also keeps the id stable, so invoices issued
+  // under that registration still point at the live row instead of being
+  // orphaned by a fresh one.
   async create(orgId: string, dto: CreateGstinDto) {
+    // Stored uppercase and trimmed, so the same number typed in a different
+    // case is recognised as the same registration rather than slipping past
+    // the unique index as a near-duplicate. The DTO's regex should already
+    // guarantee this parses; the guard keeps the type honest.
+    const gstin = normalizeGstin(dto.gstin);
+    if (!gstin) {
+      throw new BadRequestException(`Invalid GSTIN: ${dto.gstin}`);
+    }
     // Validate state code from GSTIN matches provided stateCode
-    const gstinStateCode = extractStateCodeFromGstin(dto.gstin);
+    const gstinStateCode = extractStateCodeFromGstin(gstin);
     if (gstinStateCode !== dto.stateCode) {
       throw new BadRequestException(
         `GSTIN state code (${gstinStateCode}) does not match provided state code (${dto.stateCode})`,
@@ -68,35 +86,58 @@ export class GstService {
     const resolvedStateName =
       getStateName(dto.stateCode) || dto.stateName;
 
-    // If this is the first GSTIN or isDefault is true, handle default logic
-    const existingCount = await this.prisma.organizationGstin.count({
-      where: { organizationId: orgId },
+    // Does this number already exist for the org, active or not? The unique
+    // index does not distinguish, so this has to be checked before writing.
+    const existing = await this.prisma.organizationGstin.findFirst({
+      where: { organizationId: orgId, gstin },
     });
-
-    const shouldBeDefault = dto.isDefault || existingCount === 0;
-
-    // If setting as default, unset other defaults
-    if (shouldBeDefault) {
-      await this.prisma.organizationGstin.updateMany({
-        where: { organizationId: orgId, isDefault: true },
-        data: { isDefault: false },
-      });
+    if (existing?.isActive) {
+      throw new ConflictException(
+        'This GSTIN is already registered for your organization',
+      );
     }
 
+    // Only ACTIVE registrations count towards "is this the first one". A
+    // deactivated row used to keep the count above zero, so the first GSTIN
+    // added after clearing them all never became the default — leaving the
+    // org with none, which silently breaks invoice seller selection.
+    const activeCount = await this.prisma.organizationGstin.count({
+      where: { organizationId: orgId, isActive: true },
+    });
+    const shouldBeDefault = dto.isDefault || activeCount === 0;
+
+    const data = {
+      legalName: dto.legalName,
+      tradeName: dto.tradeName,
+      stateCode: dto.stateCode,
+      stateName: resolvedStateName,
+      address: dto.address,
+      isDefault: shouldBeDefault,
+    };
+
+    // One transaction. Unsetting the previous default used to run first and
+    // separately, so when the insert then failed on P2002 the org was left
+    // with NO default at all — a failed add quietly broke invoicing.
     try {
-      return await this.prisma.organizationGstin.create({
-        data: {
-          organizationId: orgId,
-          gstin: dto.gstin,
-          legalName: dto.legalName,
-          tradeName: dto.tradeName,
-          stateCode: dto.stateCode,
-          stateName: resolvedStateName,
-          address: dto.address,
-          isDefault: shouldBeDefault,
-        },
+      return await this.prisma.$transaction(async (tx) => {
+        if (shouldBeDefault) {
+          await tx.organizationGstin.updateMany({
+            where: { organizationId: orgId, isDefault: true },
+            data: { isDefault: false },
+          });
+        }
+        if (existing) {
+          return tx.organizationGstin.update({
+            where: { id: existing.id },
+            data: { ...data, isActive: true },
+          });
+        }
+        return tx.organizationGstin.create({
+          data: { organizationId: orgId, gstin, ...data },
+        });
       });
     } catch (error: any) {
+      // Still possible under a concurrent add of the same number.
       if (error.code === 'P2002') {
         throw new ConflictException(
           'This GSTIN is already registered for your organization',
@@ -109,10 +150,18 @@ export class GstService {
   // ─── UPDATE GSTIN ───
   async update(id: string, orgId: string, dto: UpdateGstinDto) {
     const existing = await this.findOne(id, orgId);
+    let gstin: string | undefined;
+    if (dto.gstin !== undefined) {
+      const normalized = normalizeGstin(dto.gstin);
+      if (!normalized) {
+        throw new BadRequestException(`Invalid GSTIN: ${dto.gstin}`);
+      }
+      gstin = normalized;
+    }
 
     // If updating GSTIN string, validate state code consistency
-    if (dto.gstin) {
-      const gstinStateCode = extractStateCodeFromGstin(dto.gstin);
+    if (gstin) {
+      const gstinStateCode = extractStateCodeFromGstin(gstin);
       const targetStateCode = dto.stateCode || existing.stateCode;
       if (gstinStateCode !== targetStateCode) {
         throw new BadRequestException(
@@ -127,42 +176,79 @@ export class GstService {
       );
     }
 
-    // Handle default toggle
-    if (dto.isDefault === true) {
-      await this.prisma.organizationGstin.updateMany({
-        where: { organizationId: orgId, isDefault: true, id: { not: id } },
-        data: { isDefault: false },
-      });
-    }
-
     const stateName = dto.stateCode
       ? getStateName(dto.stateCode) || dto.stateName
       : dto.stateName;
 
-    return this.prisma.organizationGstin.update({
-      where: { id },
-      data: {
-        ...(dto.gstin && { gstin: dto.gstin }),
-        ...(dto.legalName && { legalName: dto.legalName }),
-        ...(dto.tradeName !== undefined && { tradeName: dto.tradeName }),
-        ...(dto.stateCode && { stateCode: dto.stateCode }),
-        ...(stateName && { stateName }),
-        ...(dto.address !== undefined && { address: dto.address }),
-        ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
-        ...(dto.isActive !== undefined && { isActive: dto.isActive }),
-      },
-    });
+    // Both writes in one transaction: unsetting the old default and setting
+    // the new one must not be separable, or a failure mid-way leaves the org
+    // with no default.
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        if (dto.isDefault === true) {
+          await tx.organizationGstin.updateMany({
+            where: { organizationId: orgId, isDefault: true, id: { not: id } },
+            data: { isDefault: false },
+          });
+        }
+        return tx.organizationGstin.update({
+          where: { id },
+          data: {
+            ...(gstin && { gstin }),
+            ...(dto.legalName && { legalName: dto.legalName }),
+            ...(dto.tradeName !== undefined && { tradeName: dto.tradeName }),
+            ...(dto.stateCode && { stateCode: dto.stateCode }),
+            ...(stateName && { stateName }),
+            ...(dto.address !== undefined && { address: dto.address }),
+            ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
+            ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+          },
+        });
+      });
+    } catch (error: any) {
+      // Editing one registration onto a number the org already holds — even a
+      // deactivated one — used to surface as a raw 500.
+      if (error.code === 'P2002') {
+        throw new ConflictException(
+          'This GSTIN is already registered for your organization',
+        );
+      }
+      throw error;
+    }
   }
 
   // ─── DELETE (DEACTIVATE) GSTIN ───
   // Soft-delete by marking as inactive rather than removing.
   // WHY? Existing invoices reference this GSTIN — can't hard delete.
   async deactivate(id: string, orgId: string) {
-    await this.findOne(id, orgId);
+    const existing = await this.findOne(id, orgId);
 
-    await this.prisma.organizationGstin.update({
-      where: { id },
-      data: { isActive: false },
+    await this.prisma.$transaction(async (tx) => {
+      // Clearing `isDefault` matters: a deactivated row used to keep the flag,
+      // so `findDefault` (which requires isActive) returned nothing while the
+      // "unset other defaults" writes still targeted the dead row.
+      await tx.organizationGstin.update({
+        where: { id },
+        data: { isActive: false, isDefault: false },
+      });
+
+      // Removing the default would otherwise leave the org with none, and
+      // invoice seller selection falls back to nothing. Promote the oldest
+      // surviving registration so there is always exactly one default while
+      // any active registration exists.
+      if (existing.isDefault) {
+        const next = await tx.organizationGstin.findFirst({
+          where: { organizationId: orgId, isActive: true, id: { not: id } },
+          orderBy: { createdAt: 'asc' },
+          select: { id: true },
+        });
+        if (next) {
+          await tx.organizationGstin.update({
+            where: { id: next.id },
+            data: { isDefault: true },
+          });
+        }
+      }
     });
 
     return { message: 'GSTIN registration deactivated' };

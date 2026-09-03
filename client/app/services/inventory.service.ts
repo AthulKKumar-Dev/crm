@@ -43,8 +43,10 @@ export const inventoryService = {
       .get<PaginatedResponse<StockLine>>("/inventory/stock", { params })
       .then((r) => r.data),
 
-  stockStats: () =>
-    apiClient.get<StockStats>("/inventory/stock/stats").then((r) => r.data),
+  stockStats: (params?: { warehouseId?: string }) =>
+    apiClient
+      .get<StockStats>("/inventory/stock/stats", { params })
+      .then((r) => r.data),
 
   variantStock: (variantId: string) =>
     apiClient

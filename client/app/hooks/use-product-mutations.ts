@@ -165,7 +165,10 @@ export function useBulkUpdateVariantsMutation(
 }
 
 /** Delete a single variant (forbidden if it's the last one). */
-export function useDeleteVariantMutation(productId: string) {
+export function useDeleteVariantMutation(
+  productId: string,
+  options?: { silent?: boolean },
+) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (variantId: string) => productService.deleteVariant(variantId),
@@ -173,9 +176,11 @@ export function useDeleteVariantMutation(productId: string) {
       queryClient.invalidateQueries({ queryKey: productKeys.detail(productId) });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
       queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
-      toast.success("Variant deleted.");
+      if (!options?.silent) toast.success("Variant deleted.");
     },
-    onError: (error) => handleMutationError(error, "Failed to delete variant."),
+    onError: (error) => {
+      if (!options?.silent) handleMutationError(error, "Failed to delete variant.");
+    },
   });
 }
 

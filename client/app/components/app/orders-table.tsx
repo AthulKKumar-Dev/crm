@@ -25,7 +25,8 @@ import {
 } from "~/lib/order-status";
 import { ChannelBadge } from "~/components/app/channel-badge";
 import { useCurrentRole } from "~/hooks/use-current-role";
-import type { Order, ChannelPlatform } from "~/types/api";
+import type { Order, ChannelPlatform, OrderShopifySync } from "~/types/api";
+import { canRetryShopifySync, shopifySyncActionLabel } from "~/lib/shopify-sync";
 
 
 
@@ -254,9 +255,9 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
 function OrderRowSyncItem({ order }: { order: OrderRow }) {
   const mutation = useSyncOrderMutation(order.id);
   const isManual = order.channel?.platform === "MANUAL";
-  const sync = (order.metadata as { shopifySync?: { status?: string } } | undefined)
+  const sync = (order.metadata as { shopifySync?: OrderShopifySync } | undefined)
     ?.shopifySync;
-  const eligible = isManual && (!sync || sync.status === "FAILED");
+  const eligible = isManual && canRetryShopifySync(sync);
   if (!eligible) return null;
   return (
     <DropdownMenuItem
@@ -264,7 +265,7 @@ function OrderRowSyncItem({ order }: { order: OrderRow }) {
       onClick={() => mutation.mutate()}
     >
       <UploadCloud className="mr-1.5 size-3.5" />
-      {sync?.status === "FAILED" ? "Retry sync to Shopify" : "Sync to Shopify"}
+      {shopifySyncActionLabel(sync)}
     </DropdownMenuItem>
   );
 }

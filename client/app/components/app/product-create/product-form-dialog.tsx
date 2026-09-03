@@ -1,7 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, X, Loader2, Check, Sparkles } from "lucide-react";
+import { toast } from "sonner";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { useInventoryStatus } from "~/hooks/use-inventory-queries";
 import { formatMargin } from "~/lib/utils";
+import { normalizeProductOptions } from "~/lib/product-options";
+import { handleMutationError } from "~/lib/handle-mutation-error";
+import { RichTextEditor } from "~/components/ui/rich-text-editor";
 import {
   Select,
   SelectContent,
@@ -10,25 +15,48 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import {
+  useBulkUpdateVariantsMutation,
   useCreateProductMutation,
-  useCreateVariantMutation,
   useDeleteVariantMutation,
   useGenerateVariantsMutation,
   useUpdateOptionsMutation,
   useUpdateProductMutation,
-  useUpdateVariantMutation,
 } from "~/hooks/use-product-mutations";
 import { useProduct } from "~/hooks/use-product-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import type {
   CreateProductRequest,
+  GstSupplyType,
   ProductDetail,
   ProductOption,
   ProductStatus,
   ProductVariant,
   ProductVariantInput,
   UpdateProductRequest,
+  UpdateVariantRequest,
 } from "~/types/api";
+import { COMMON_UQC, GST_RATE_OPTIONS, GST_SUPPLY_TYPES } from "~/lib/gst-uqc";
+
+/**
+ * `<input type="datetime-local">` speaks LOCAL wall-clock time with no zone.
+ * Hydrating it from `toISOString().slice(0, 16)` fed it UTC, so every save
+ * shifted the schedule by the timezone offset (IST: 18:30Z rendered as 18:30,
+ * saved back as 13:00Z). Format with local getters instead; `new Date(local)`
+ * parses the same string back as local, so submit is just toISOString().
+ */
+function toDatetimeLocal(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function optionsEqual(a: ProductOption[] | null | undefined, b: ProductOption[] | null | undefined): boolean {
+  return (
+    JSON.stringify(normalizeProductOptions(a ?? [])) ===
+    JSON.stringify(normalizeProductOptions(b ?? []))
+  );
+}
 import { OptionsEditor } from "./options-editor";
 import { VariantEditor } from "./variant-editor";
 import { ImageGalleryUploader } from "./image-gallery-uploader";
@@ -50,6 +78,8 @@ type FormState = {
   bodyHtml: string;
   hsnCode: string;
   gstRate: string; // string in form, parsed to number on submit
+  unitOfMeasure: string; // GST UQC; "" = server default (NOS)
+  supplyType: GstSupplyType;
   /** ISO 8601 datetime-local string for the scheduled publish picker. */
   publishedAt: string;
   // Single-variant flow (toggle OFF). Mirrors the multi-variant detail panel
@@ -86,6 +116,8 @@ const EMPTY: FormState = {
   bodyHtml: "",
   hsnCode: "",
   gstRate: "",
+  unitOfMeasure: "",
+  supplyType: "TAXABLE",
   publishedAt: "",
   variant: {
     price: "",
@@ -119,11 +151,10 @@ function fromProduct(p: ProductDetail): FormState {
     tagsCsv: (p.tags ?? []).join(", "),
     bodyHtml: p.bodyHtml ?? "",
     hsnCode: p.hsnCode ?? "",
-    gstRate: p.gstRate != null ? String(p.gstRate) : "",
-    // Convert UTC ISO from server to the local-time format that <input type="datetime-local"> expects.
-    publishedAt: p.publishedAt
-      ? new Date(p.publishedAt).toISOString().slice(0, 16)
-      : "",
+    gstRate: p.gstRate != null ? String(Number(p.gstRate)) : "",
+    unitOfMeasure: p.unitOfMeasure ?? "",
+    supplyType: p.supplyType ?? "TAXABLE",
+    publishedAt: p.publishedAt ? toDatetimeLocal(p.publishedAt) : "",
     variant: {
       price: v ? String(v.price) : "",
       sku: v?.sku ?? "",
@@ -141,7 +172,7 @@ function fromProduct(p: ProductDetail): FormState {
       taxable: v?.taxable ?? true,
     },
     hasOptions: isMulti,
-    options: p.options ?? [],
+    options: normalizeProductOptions(p.options ?? []),
     variants: p.variants.map((vv) => ({
       id: vv.id,
       price: Number(vv.price),
@@ -158,6 +189,10 @@ function fromProduct(p: ProductDetail): FormState {
       countryOfOrigin: vv.countryOfOrigin ?? undefined,
       requiresShipping: vv.requiresShipping ?? true,
       taxable: vv.taxable ?? true,
+      hsnCode: vv.hsnCode ?? undefined,
+      gstRate: vv.gstRate != null ? Number(vv.gstRate) : undefined,
+      unitOfMeasure: vv.unitOfMeasure ?? undefined,
+      supplyType: vv.supplyType ?? undefined,
       option1: vv.option1 ?? undefined,
       option2: vv.option2 ?? undefined,
       option3: vv.option3 ?? undefined,
@@ -214,23 +249,57 @@ export function ProductFormDialog({
   // Vendors may edit product details but not the vendor assignment or tax
   // fields — those render read-only (backend also enforces this).
   const { isVendor } = useCurrentRole();
-  const { data: product, isLoading } = useProduct(productId ?? null);
+  const { data: product, isLoading, refetch } = useProduct(productId ?? null);
   const [form, setForm] = useState<FormState>(EMPTY);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  // Warehousing orgs keep stock per warehouse; the variant column is a cache
+  // the ledger recomputes, so the dialog must neither offer nor send it.
+  const warehousingEnabled = useInventoryStatus().data?.warehousingEnabled === true;
 
+  // Hydrate ONCE per opened product. This used to run on every new `product`
+  // object, and react-query hands out a new object on every refetch — the
+  // generate button invalidates the detail query, and useProduct polls every
+  // 3s while a Shopify push is PENDING — so typed values were wiped mid-edit,
+  // which reads exactly like "the field didn't save".
+  const hydratedIdRef = useRef<string | null>(null);
+  // Server state the diffs are computed against; refreshed after any
+  // structural change (generate / failed save) so a second Save is correct.
+  const baseProductRef = useRef<ProductDetail | null>(null);
   useEffect(() => {
-    setForm(product ? fromProduct(product) : EMPTY);
+    if (!productId) {
+      hydratedIdRef.current = null;
+      baseProductRef.current = null;
+      return;
+    }
+    if (!product || hydratedIdRef.current === product.id) return;
+    hydratedIdRef.current = product.id;
+    baseProductRef.current = product;
+    setForm(fromProduct(product));
     setErrors({});
-  }, [product]);
+  }, [product, productId]);
 
+  /** Replace only the structural part of the form with fresh server state. */
+  function applyFreshVariants(fresh: ProductDetail) {
+    baseProductRef.current = fresh;
+    const f = fromProduct(fresh);
+    setForm((prev) => ({
+      ...prev,
+      hasOptions: prev.hasOptions || f.hasOptions,
+      options: f.options,
+      variants: f.variants,
+    }));
+  }
+
+  // Every step of an edit is awaited in sequence below and reported once;
+  // the hooks stay silent so a 12-variant save is one toast, not thirteen.
   const createMutation = useCreateProductMutation();
-  const updateMutation = useUpdateProductMutation();
-  const updateOptionsMutation = useUpdateOptionsMutation(productId ?? "");
-  const generateVariantsMutation = useGenerateVariantsMutation(productId ?? "");
-  const createVariantMutation = useCreateVariantMutation(productId ?? "");
-  const updateVariantMutation = useUpdateVariantMutation(productId ?? "");
-  const deleteVariantMutation = useDeleteVariantMutation(productId ?? "");
-  const isPending = createMutation.isPending || updateMutation.isPending;
+  const updateMutation = useUpdateProductMutation({ silent: true });
+  const updateOptionsMutation = useUpdateOptionsMutation(productId ?? "", { silent: true });
+  const generateVariantsMutation = useGenerateVariantsMutation(productId ?? "", { silent: true });
+  const bulkUpdateVariantsMutation = useBulkUpdateVariantsMutation(productId ?? "", { silent: true });
+  const deleteVariantMutation = useDeleteVariantMutation(productId ?? "", { silent: true });
+  const [saving, setSaving] = useState(false);
+  const isPending = createMutation.isPending || saving;
 
   function patch(p: Partial<FormState>) {
     setForm((prev) => ({ ...prev, ...p }));
@@ -242,6 +311,139 @@ export function ProductFormDialog({
 
   function regenerateVariantsClient() {
     patch({ variants: generateVariantsLocally(form.options) });
+  }
+
+  function optionsError(): string | null {
+    if (form.options.length === 0) return "Add at least one option type";
+    if (form.options.some((o) => !o.name.trim())) return "Every option needs a name";
+    if (form.options.some((o) => o.values.length === 0)) return "Every option needs at least one value";
+    return null;
+  }
+
+  /**
+   * Edit mode: persist the option types FIRST, then let the server generate
+   * the missing combinations (it fills new slots on existing variants with
+   * the first value, same as Shopify), then pull the resulting rows into the
+   * form without touching anything else the user has typed. This used to call
+   * generate against the options already stored on the server, so a freshly
+   * typed option produced "Product has no options defined" or "Generated 0".
+   */
+  async function handleGenerateInEdit() {
+    const err = optionsError();
+    if (err) {
+      setErrors((prev) => ({ ...prev, options: err }));
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateOptionsMutation.mutateAsync(normalizeProductOptions(form.options));
+      const result = await generateVariantsMutation.mutateAsync();
+      const { data: fresh } = await refetch();
+      if (fresh) applyFreshVariants(fresh);
+      setErrors((prev) => ({ ...prev, options: "", variants: "" }));
+      toast.success(
+        `Generated ${result.created} new variant${result.created === 1 ? "" : "s"}.`,
+      );
+    } catch (e) {
+      handleMutationError(e, "Failed to generate variants.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /**
+   * Edit save, in the only order that keeps the server consistent:
+   *   1. product fields (+ the single default variant when no options)
+   *   2. collapsing to single-variant: drop rows 2..n, then clear options
+   *      (the server refuses to clear options while >1 variant exists)
+   *   3. multi-variant: rows the user removed → options (+ generate when they
+   *      changed) → one bulk field update for the rows that remain
+   * Any failure stops the sequence, keeps the dialog open with one error
+   * toast, and re-syncs the structural part of the form from the server.
+   */
+  async function runEditSave(tags: string[]) {
+    if (!productId) return;
+    const base = baseProductRef.current ?? product;
+    if (!base) return;
+    setSaving(true);
+    try {
+      const data: UpdateProductRequest = {
+        title: form.title.trim(),
+        // Empty strings are sent on purpose: `undefined` meant "leave as is",
+        // so a cleared Vendor / Product type / HSN came straight back.
+        vendor: form.vendor.trim(),
+        productType: form.productType.trim(),
+        bodyHtml: form.bodyHtml,
+        status: form.status,
+        tags,
+        hsnCode: form.hsnCode.trim(),
+        gstRate: form.gstRate ? Number(form.gstRate) : null,
+        unitOfMeasure: form.unitOfMeasure,
+        supplyType: form.supplyType,
+        publishedAt:
+          form.status === "DRAFT" && form.publishedAt
+            ? new Date(form.publishedAt).toISOString()
+            : null,
+      };
+      if (!form.hasOptions) {
+        const v = buildSingleVariantPayload(form.variant);
+        if (warehousingEnabled) delete v.inventoryQuantity;
+        data.variant = v;
+      }
+      await updateMutation.mutateAsync({ id: productId, data });
+
+      const hadOptions = (base.options?.length ?? 0) > 0;
+      if (hadOptions && !form.hasOptions) {
+        const [, ...extra] = base.variants;
+        for (const v of extra) await deleteVariantMutation.mutateAsync(v.id);
+        await updateOptionsMutation.mutateAsync([]);
+      }
+
+      if (form.hasOptions) {
+        const keptIds = new Set(form.variants.map((v) => v.id).filter(Boolean));
+        for (const v of base.variants) {
+          if (!keptIds.has(v.id)) await deleteVariantMutation.mutateAsync(v.id);
+        }
+
+        const normalized = normalizeProductOptions(form.options);
+        const optionsChanged = !optionsEqual(normalized, base.options);
+        if (optionsChanged) {
+          await updateOptionsMutation.mutateAsync(normalized);
+          await generateVariantsMutation.mutateAsync();
+        }
+
+        const originalById = new Map(base.variants.map((v) => [v.id, v]));
+        const updates: Array<UpdateVariantRequest & { variantId: string }> = [];
+        for (const v of form.variants) {
+          if (!v.id) continue;
+          const orig = originalById.get(v.id);
+          if (!orig) continue;
+          const diff = diffVariant(orig, v);
+          if (optionsChanged) {
+            // The server just remapped slots and positions; the form's copies
+            // predate that and must not overwrite it.
+            delete diff.option1;
+            delete diff.option2;
+            delete diff.option3;
+            delete diff.position;
+          }
+          if (warehousingEnabled) delete diff.inventoryQuantity;
+          if (Object.keys(diff).length > 0) {
+            updates.push({ variantId: v.id, ...(diff as UpdateVariantRequest) });
+          }
+        }
+        if (updates.length > 0) await bulkUpdateVariantsMutation.mutateAsync(updates);
+      }
+
+      toast.success("Product updated.");
+      onClose();
+    } catch (e) {
+      handleMutationError(e, "Failed to save product.");
+      const { data: fresh } = await refetch();
+      if (fresh) applyFreshVariants(fresh);
+    } finally {
+      setSaving(false);
+    }
   }
 
   function handleToggleOptions(checked: boolean) {
@@ -301,79 +503,7 @@ export function ProductFormDialog({
       .filter(Boolean);
 
     if (isEdit && productId) {
-      // EDIT MODE — patch top-level fields + (singular) default variant.
-      // Multi-variant edits happen via the variant-CRUD endpoints, not here;
-      // and option-type edits happen via PATCH /products/:id/options.
-      const data: UpdateProductRequest = {
-        title: form.title,
-        vendor: form.vendor || undefined,
-        productType: form.productType || undefined,
-        status: form.status,
-        tags,
-        hsnCode: form.hsnCode || undefined,
-        gstRate: form.gstRate ? parseFloat(form.gstRate) : undefined,
-        publishedAt:
-          form.status === "DRAFT" && form.publishedAt
-            ? new Date(form.publishedAt).toISOString()
-            : undefined,
-      };
-      if (!form.hasOptions) {
-        data.variant = buildSingleVariantPayload(form.variant);
-      }
-      updateMutation.mutate(
-        { id: productId, data },
-        {
-          onSuccess: async () => {
-            // Multi-variant batch sync: compare current form.variants against
-            // the originally-loaded product.variants and fan out create/update/
-            // delete calls. We tolerate individual failures so a single bad
-            // variant doesn't lose all the other edits.
-            if (form.hasOptions && product) {
-              await updateOptionsMutation.mutateAsync(form.options).catch(() => undefined);
-
-              const originalById = new Map(product.variants.map((v) => [v.id, v]));
-              const currentIds = new Set(
-                form.variants.map((v) => v.id).filter(Boolean) as string[],
-              );
-
-              // Deletes: rows present in original but missing from form.
-              const toDelete = product.variants
-                .map((v) => v.id)
-                .filter((id) => !currentIds.has(id));
-
-              // Updates + creates.
-              const toUpdate: Array<{ id: string; patch: Record<string, unknown> }> = [];
-              const toCreate: ProductVariantInput[] = [];
-              for (const v of form.variants) {
-                if (v.id) {
-                  const orig = originalById.get(v.id);
-                  if (!orig) continue;
-                  const patch = diffVariant(orig, v);
-                  if (Object.keys(patch).length > 0) {
-                    toUpdate.push({ id: v.id, patch });
-                  }
-                } else {
-                  toCreate.push(v);
-                }
-              }
-
-              for (const id of toDelete) {
-                await deleteVariantMutation.mutateAsync(id).catch(() => undefined);
-              }
-              for (const u of toUpdate) {
-                await updateVariantMutation
-                  .mutateAsync({ variantId: u.id, data: u.patch })
-                  .catch(() => undefined);
-              }
-              for (const c of toCreate) {
-                const { id: _id, imageId: _imageId, ...rest } = c;
-                await createVariantMutation.mutateAsync(rest).catch(() => undefined);
-              }
-            }
-            onClose();
-          },
-        },
-      );
+      void runEditSave(tags);
       return;
     }
 
@@ -387,6 +517,8 @@ export function ProductFormDialog({
       bodyHtml: form.bodyHtml || undefined,
       hsnCode: form.hsnCode || undefined,
       gstRate: form.gstRate ? parseFloat(form.gstRate) : undefined,
+      unitOfMeasure: form.unitOfMeasure || undefined,
+      supplyType: form.supplyType,
       publishedAt:
         form.status === "DRAFT" && form.publishedAt
           ? new Date(form.publishedAt).toISOString()
@@ -403,15 +535,22 @@ export function ProductFormDialog({
             barcode: v.barcode || undefined,
             compareAtPrice: v.compareAtPrice ?? undefined,
             cost: v.cost ?? undefined,
-            inventoryQuantity: v.inventoryQuantity ?? 0,
+            // Warehousing orgs seed stock per warehouse, never via this column.
+            inventoryQuantity: warehousingEnabled ? undefined : (v.inventoryQuantity ?? 0),
             trackQuantity: v.trackQuantity,
             continueSellingWhenOutOfStock: v.continueSellingWhenOutOfStock,
             weight: v.weight ?? undefined,
-            weightUnit: v.weightUnit ?? undefined,
+            weightUnit: v.weight != null ? (v.weightUnit ?? "kg") : undefined,
             hsCode: v.hsCode || undefined,
             countryOfOrigin: v.countryOfOrigin || undefined,
             requiresShipping: v.requiresShipping,
             taxable: v.taxable,
+            // Per-variant GST override — the panel offers these on create too;
+            // they were silently dropped from this payload.
+            hsnCode: v.hsnCode || undefined,
+            gstRate: v.gstRate ?? undefined,
+            unitOfMeasure: v.unitOfMeasure || undefined,
+            supplyType: v.supplyType ?? undefined,
             option1: v.option1 || undefined,
             option2: v.option2 || undefined,
             option3: v.option3 || undefined,
@@ -420,7 +559,11 @@ export function ProductFormDialog({
         }
       : {
           ...baseCreate,
-          variant: buildSingleVariantPayload(form.variant),
+          variant: (() => {
+            const single = buildSingleVariantPayload(form.variant);
+            if (warehousingEnabled) delete single.inventoryQuantity;
+            return single;
+          })(),
         };
     createMutation.mutate(data, { onSuccess: () => onClose() });
   }
@@ -514,6 +657,19 @@ export function ProductFormDialog({
                   placeholder="summer, sale"
                 />
               </div>
+              <label className="block">
+                <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                  Description
+                </span>
+                <div className="mt-1">
+                  <RichTextEditor
+                    key={productId ?? "new"}
+                    value={form.bodyHtml}
+                    onChange={(v) => patch({ bodyHtml: v })}
+                    placeholder="Describe this product…"
+                  />
+                </div>
+              </label>
               {form.status === "DRAFT" && (
                 <Field
                   label="Schedule publish (optional)"
@@ -536,15 +692,62 @@ export function ProductFormDialog({
                   placeholder="6109"
                   disabled={isVendor}
                 />
-                <Field
-                  label="GST rate (%)"
-                  error={errors.gstRate}
-                  value={form.gstRate}
-                  onChange={(v) => patch({ gstRate: v })}
-                  type="number"
-                  placeholder="18"
-                  disabled={isVendor}
-                />
+                <label className="block">
+                  <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                    GST rate (%)
+                  </span>
+                  <select
+                    value={form.gstRate}
+                    onChange={(e) => patch({ gstRate: e.target.value })}
+                    disabled={isVendor}
+                    className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                  >
+                    <option value="">Not set</option>
+                    {GST_RATE_OPTIONS.map((rate) => (
+                      <option key={rate} value={rate}>
+                        {rate}%
+                      </option>
+                    ))}
+                  </select>
+                  {errors.gstRate && (
+                    <span className="text-[10px] text-red-600">{errors.gstRate}</span>
+                  )}
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                    Unit of measure (UQC)
+                  </span>
+                  <select
+                    value={form.unitOfMeasure}
+                    onChange={(e) => patch({ unitOfMeasure: e.target.value })}
+                    disabled={isVendor}
+                    className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                  >
+                    <option value="">Default (NOS)</option>
+                    {COMMON_UQC.map((u) => (
+                      <option key={u.code} value={u.code}>
+                        {u.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+                    Supply type
+                  </span>
+                  <select
+                    value={form.supplyType}
+                    onChange={(e) => patch({ supplyType: e.target.value as GstSupplyType })}
+                    disabled={isVendor}
+                    className="mt-1 h-9 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50"
+                  >
+                    {GST_SUPPLY_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </Section>
 
@@ -572,6 +775,7 @@ export function ProductFormDialog({
                   variant={form.variant}
                   patch={patchVariant}
                   priceError={errors.price}
+                  stockReadOnly={warehousingEnabled}
                 />
               ) : (
                 <div className="space-y-3 mt-3">
@@ -613,11 +817,12 @@ export function ProductFormDialog({
                       ) : (
                         <button
                           type="button"
-                          onClick={() => generateVariantsMutation.mutate()}
-                          disabled={generateVariantsMutation.isPending}
+                          onClick={() => void handleGenerateInEdit()}
+                          disabled={saving || !!optionsError()}
+                          title={optionsError() ?? "Saves the option types, then creates every missing combination"}
                           className="inline-flex items-center gap-1 rounded-md border border-input bg-white dark:bg-gray-900 px-2 py-1 text-[10px] text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-40"
                         >
-                          {generateVariantsMutation.isPending ? (
+                          {saving ? (
                             <Loader2 className="size-3 animate-spin" />
                           ) : (
                             <Sparkles className="size-3" />
@@ -631,6 +836,7 @@ export function ProductFormDialog({
                         options={form.options}
                         variants={form.variants}
                         onChange={(next) => patch({ variants: next })}
+                        stockReadOnly={warehousingEnabled}
                       />
                     ) : (
                       <p className="rounded-lg border border-dashed border-input bg-gray-50 dark:bg-gray-800/40 py-4 text-center text-[11px] text-muted-foreground">
@@ -775,14 +981,29 @@ function diffVariant(
   const origWeight = orig.weight == null ? null : Number(orig.weight);
   const curWeight = cur.weight == null ? null : Number(cur.weight);
   if (!cmp(origWeight, curWeight)) patch.weight = curWeight;
-  if (!cmp(orig.weightUnit ?? null, cur.weightUnit ?? null)) {
-    patch.weightUnit = cur.weightUnit ?? null;
+  // A weight always carries a unit; "kg" is what the editor displays when
+  // none was chosen, so that is what gets stored.
+  const curUnit = curWeight != null ? (cur.weightUnit ?? "kg") : (cur.weightUnit ?? null);
+  if (!cmp(orig.weightUnit ?? null, curUnit)) {
+    patch.weightUnit = curUnit;
   }
   if (!cmp(orig.hsCode ?? null, cur.hsCode ?? null)) patch.hsCode = cur.hsCode ?? null;
   if (!cmp(orig.countryOfOrigin ?? null, cur.countryOfOrigin ?? null)) {
     patch.countryOfOrigin = cur.countryOfOrigin ?? null;
   }
   if (!cmp(orig.taxable ?? true, cur.taxable ?? true)) patch.taxable = cur.taxable ?? true;
+
+  // GST override: null clears the override (= inherit from the product).
+  if (!cmp(orig.hsnCode ?? null, cur.hsnCode ?? null)) patch.hsnCode = cur.hsnCode ?? null;
+  const origRate = orig.gstRate == null ? null : Number(orig.gstRate);
+  const curRate = cur.gstRate == null ? null : Number(cur.gstRate);
+  if (!cmp(origRate, curRate)) patch.gstRate = curRate;
+  if (!cmp(orig.unitOfMeasure ?? null, cur.unitOfMeasure ?? null)) {
+    patch.unitOfMeasure = cur.unitOfMeasure ?? null;
+  }
+  if (!cmp(orig.supplyType ?? null, cur.supplyType ?? null)) {
+    patch.supplyType = cur.supplyType ?? null;
+  }
 
   if (!cmp(orig.option1 ?? null, cur.option1 ?? null)) patch.option1 = cur.option1 ?? null;
   if (!cmp(orig.option2 ?? null, cur.option2 ?? null)) patch.option2 = cur.option2 ?? null;
@@ -804,10 +1025,12 @@ function SingleVariantFields({
   variant,
   patch,
   priceError,
+  stockReadOnly = false,
 }: {
   variant: FormState["variant"];
   patch: (p: Partial<FormState["variant"]>) => void;
   priceError?: string;
+  stockReadOnly?: boolean;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const { data: org } = useCurrentOrg();
@@ -840,7 +1063,16 @@ function SingleVariantFields({
           onChange={(v) => patch({ sku: v })}
           mono
         />
-        {variant.trackQuantity ? (
+        {variant.trackQuantity && stockReadOnly ? (
+          <div className="flex flex-col">
+            <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+              Stock on hand
+            </span>
+            <p className="mt-1 h-9 flex items-center text-xs text-muted-foreground">
+              {variant.inventoryQuantity || "0"} — set per warehouse in Inventory
+            </p>
+          </div>
+        ) : variant.trackQuantity ? (
           <Field
             label="Stock on hand"
             value={variant.inventoryQuantity}

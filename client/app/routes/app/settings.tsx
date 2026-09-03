@@ -10,6 +10,7 @@ import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
   Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag, Layers,
+  Pencil,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -47,6 +48,7 @@ import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-org
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
 import { GstReturnSettings } from "~/components/app/settings/gst-return-settings";
+import { InvoiceSeriesSetting } from "~/components/app/settings/invoice-series-setting";
 
 export function meta() {
   return [{ title: "Settings | Collabo CRM" }];
@@ -498,6 +500,41 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
     address: {},
   };
   const [form, setForm] = useState<CreateGstinRequest>(EMPTY_GSTIN_FORM);
+  // Id of the registration being edited, or null when the form is adding a new
+  // one. The same form serves both — the PATCH endpoint already accepted every
+  // field, there was simply no way to reach it from the UI.
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  function startEdit(g: OrganizationGstin) {
+    setEditingId(g.id);
+    setShowAddForm(true);
+    setForm({
+      gstin: g.gstin,
+      legalName: g.legalName,
+      tradeName: g.tradeName ?? "",
+      stateCode: g.stateCode,
+      stateName: g.stateName,
+      isDefault: g.isDefault,
+      address: (g.address as CreateGstinRequest["address"]) ?? {},
+    });
+  }
+
+  function closeGstinForm() {
+    setShowAddForm(false);
+    setEditingId(null);
+    setForm(EMPTY_GSTIN_FORM);
+  }
+
+  /** Open the form blank — never carrying values left over from an edit. */
+  function startAdd() {
+    setEditingId(null);
+    setForm(EMPTY_GSTIN_FORM);
+    setShowAddForm(true);
+  }
+
+  // Removing a registration is one unguarded click on a small icon, and it
+  // changes which GSTIN invoices are issued under. Confirm first.
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   function patchAddress(patch: Partial<NonNullable<CreateGstinRequest["address"]>>) {
     setForm((prev) => ({ ...prev, address: { ...prev.address, ...patch } }));
@@ -525,15 +562,20 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
         .filter(([, value]) => typeof value === "string" && value.trim() !== ""),
     );
 
-    createGstin.mutate(
-      { ...form, address: Object.keys(address).length > 1 ? address : undefined },
-      {
-        onSuccess: () => {
-          setShowAddForm(false);
-          setForm(EMPTY_GSTIN_FORM);
-        },
-      },
-    );
+    const payload = {
+      ...form,
+      address: Object.keys(address).length > 1 ? address : undefined,
+    };
+
+    if (editingId) {
+      updateGstin.mutate(
+        { id: editingId, data: payload },
+        { onSuccess: closeGstinForm },
+      );
+      return;
+    }
+
+    createGstin.mutate(payload, { onSuccess: closeGstinForm });
   }
 
   function handleStateChange(code: string) {
@@ -542,6 +584,9 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
   }
 
   const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+  const confirmDelete = activeGstins.find(
+    (g: OrganizationGstin) => g.id === confirmDeleteId,
+  );
 
   return (
     <>
@@ -569,7 +614,7 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
               <Receipt className="mx-auto size-8 text-muted-foreground/50" />
               <p className="mt-2 text-xs text-muted-foreground">No GSTIN registered yet.</p>
               <button
-                onClick={() => setShowAddForm(true)}
+                onClick={startAdd}
                 className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] transition-colors"
               >
                 <Plus className="size-3.5" /> Add GSTIN
@@ -615,9 +660,16 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
                         </button>
                       )}
                       <button
-                        onClick={() => deleteGstin.mutate(g.id)}
+                        onClick={() => startEdit(g)}
+                        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 hover:text-gray-900 dark:hover:bg-gray-800 dark:hover:text-gray-100 transition-colors"
+                        title="Edit registration"
+                      >
+                        <Pencil className="size-3.5" />
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(g.id)}
                         className="rounded-md p-1.5 text-muted-foreground hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 transition-colors"
-                        title="Deactivate"
+                        title="Remove registration"
                       >
                         <Trash2 className="size-3.5" />
                       </button>
@@ -629,7 +681,7 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
               {/* Add button */}
               {!showAddForm && (
                 <button
-                  onClick={() => setShowAddForm(true)}
+                  onClick={startAdd}
                   className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-dashed border-gray-300 px-3 py-1.5 text-xs text-muted-foreground hover:border-[#cdff8c] hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
                 >
                   <Plus className="size-3.5" /> Add another GSTIN
@@ -641,7 +693,9 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
           {/* Add GSTIN Form */}
           {showAddForm && (
             <div className="mt-4 space-y-3 rounded-lg border border-dashed border-[#cdff8c] bg-[#cdff8c]/5 p-4">
-              <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">Add GSTIN Registration</p>
+              <p className="text-xs font-semibold text-gray-900 dark:text-gray-100">
+                {editingId ? "Edit GSTIN Registration" : "Add GSTIN Registration"}
+              </p>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
@@ -749,14 +803,18 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
               <div className="flex items-center gap-2 pt-1">
                 <button
                   onClick={handleAddGstin}
-                  disabled={createGstin.isPending}
+                  disabled={createGstin.isPending || updateGstin.isPending}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-[#cdff8c] px-4 py-2 text-xs font-medium text-gray-900 hover:bg-[#b8e67d] disabled:opacity-50 transition-colors"
                 >
-                  {createGstin.isPending ? <Loader2 className="size-3 animate-spin" /> : <Check className="size-3" />}
-                  Save GSTIN
+                  {createGstin.isPending || updateGstin.isPending ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Check className="size-3" />
+                  )}
+                  {editingId ? "Save changes" : "Save GSTIN"}
                 </button>
                 <button
-                  onClick={() => setShowAddForm(false)}
+                  onClick={closeGstinForm}
                   className="rounded-lg px-4 py-2 text-xs text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
                 >
                   Cancel
@@ -784,6 +842,67 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
 
       {/* GST return settings — B2CL threshold and default UQC. */}
       {gstEnabled && <GstReturnSettings />}
+
+      {/* Invoice series prefix. Statutory output, same as the return settings
+          above, so it lives behind the same manager-gated route. */}
+      {gstEnabled && <InvoiceSeriesSetting />}
+
+      {/* Remove-registration confirmation. Same shape as the recompute-tiers
+          confirm above, so the page has one way of asking. */}
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setConfirmDeleteId(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-xl bg-white dark:bg-gray-900 p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              Remove this GSTIN registration?
+            </p>
+            <p className="mt-1 font-mono text-xs text-gray-700 dark:text-gray-300">
+              {confirmDelete.gstin}
+            </p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              New invoices can no longer be issued under it. Invoices already issued keep it,
+              and you can add the same number back later to restore this registration.
+            </p>
+            {confirmDelete.isDefault && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                It is your default registration, so the oldest remaining one becomes the
+                default in its place.
+              </p>
+            )}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteId(null)}
+                className="inline-flex h-8 items-center rounded-lg px-3 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleteGstin.isPending}
+                onClick={() =>
+                  deleteGstin.mutate(confirmDelete.id, {
+                    onSuccess: () => setConfirmDeleteId(null),
+                  })
+                }
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-red-600 px-3 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+              >
+                {deleteGstin.isPending ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="size-3.5" />
+                )}
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

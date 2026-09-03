@@ -158,7 +158,10 @@ function StockScreen() {
   );
 
   const stock = useStock(params);
-  const stats = useStockStats();
+  // Deliberately warehouse-only: `q` and `stockFilter` narrow the table, not
+  // the tiles. Feeding the stock filter in would make "Low stock lines" merely
+  // restate the row count and pin "Oversold lines" to 0.
+  const stats = useStockStats({ warehouseId: params.warehouseId });
   const warehouses = useWarehouses();
   const generateSkus = useGenerateSkusMutation();
   const generateBarcodes = useGenerateBarcodesMutation();
@@ -228,6 +231,14 @@ function StockScreen() {
     },
   ];
 
+  // The tiles above are scoped to the selected warehouse but sit above the
+  // picker, so name that warehouse in the heading — otherwise a scoped figure
+  // read on its own just looks like a wrong org-wide one.
+  const selectedWarehouseName = params.warehouseId
+    ? ((warehouses.data ?? []).find((w) => w.id === params.warehouseId)?.name ??
+      null)
+    : null;
+
   const labelHref =
     selectedIds.size > 0
       ? `/products/inventory/labels/print?variantIds=${[...selectedIds].join(",")}`
@@ -248,7 +259,14 @@ function StockScreen() {
     <div className="space-y-4">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Inventory</h1>
+        <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
+          Inventory
+          {selectedWarehouseName && (
+            <span className="ml-2 font-normal text-muted-foreground">
+              · {selectedWarehouseName}
+            </span>
+          )}
+        </h1>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"

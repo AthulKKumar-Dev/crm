@@ -73,6 +73,8 @@ services:
 
       # Database (uses internal Docker network DNS)
       DATABASE_URL: postgresql://${POSTGRES_USER:-collabo}:${POSTGRES_PASSWORD:-collabo_dev_password}@postgres:5432/${POSTGRES_DB:-collabo_crm}
+      # Local Postgres has no pooler, so the direct URL is the same as DATABASE_URL.
+      DIRECT_URL: postgresql://${POSTGRES_USER:-collabo}:${POSTGRES_PASSWORD:-collabo_dev_password}@postgres:5432/${POSTGRES_DB:-collabo_crm}
 
       # Redis
       REDIS_URL: redis://redis:6379

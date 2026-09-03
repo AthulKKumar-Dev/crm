@@ -15,10 +15,12 @@ export class DashboardController {
     return this.dashboardService.getOverview(user.orgId!, query);
   }
 
-  // GET /api/v1/dashboard/monthly-sales — Monthly revenue & profit for bar chart
+  // GET /api/v1/dashboard/monthly-sales — sales & gross profit, bucketed.
+  // Route name kept while the client migrates; the payload is now the source of
+  // truth for the stat cards too, not just the chart.
   @Get('monthly-sales')
-  getMonthlySales(@CurrentUser() user: JwtPayload, @Query() query: QueryDashboardDto) {
-    return this.dashboardService.getMonthlySales(user.orgId!, query);
+  getSalesAndProfit(@CurrentUser() user: JwtPayload, @Query() query: QueryDashboardDto) {
+    return this.dashboardService.getSalesAndProfit(user.orgId!, query);
   }
 
   // GET /api/v1/dashboard/sales-by-category — Sales breakdown by product type for donut chart
