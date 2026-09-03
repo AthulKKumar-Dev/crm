@@ -9,6 +9,7 @@ import {
 import {
   ChannelPlatform,
   ChannelStatus,
+  GstSupplyType,
   Prisma,
   ProductStatus,
   ProductVariant,
@@ -498,6 +499,8 @@ export class ProductService {
       });
 
       // Build variants payload.
+      // Product create is admin-only (no @AllowVendor on the route), so no
+      // vendor scope to thread here; the builder still takes one for parity.
       const variantsCreate = hasMulti
         ? dto.variants!.map((v, idx) =>
           this.buildVariantCreate(orgId, v, idx + 1, dto.options),
@@ -517,6 +520,8 @@ export class ProductService {
           bodyHtml: dto.bodyHtml ?? null,
           hsnCode: dto.hsnCode ?? null,
           gstRate: dto.gstRate ?? null,
+          unitOfMeasure: dto.unitOfMeasure || null,
+          ...(dto.supplyType ? { supplyType: dto.supplyType } : {}),
           options: hasMulti
             ? (dto.options as unknown as Prisma.InputJsonValue)
             : Prisma.JsonNull,
@@ -630,6 +635,7 @@ export class ProductService {
     v: CreateVariantDto,
     position: number,
     options: ProductOptionDto[] | undefined,
+    vendorScope?: string,
   ): Prisma.ProductVariantCreateWithoutProductInput {
     const optionLabels = [v.option1, v.option2, v.option3].filter(
       Boolean,
@@ -665,8 +671,34 @@ export class ProductService {
       option3: isMulti ? (v.option3 ?? null) : null,
       position: v.position ?? position,
       requiresShipping: v.requiresShipping ?? true,
-      taxable: v.taxable ?? true,
+      // Vendors cannot set tax fields — the same rule createVariant and
+      // buildVariantPatch apply; this builder used to skip it.
+      taxable: vendorScope ? true : (v.taxable ?? true),
+      ...(vendorScope ? {} : this.variantGstOverride(v)),
     };
+  }
+
+  /**
+   * The four per-variant GST override columns from a DTO, empty strings
+   * collapsed to null (= inherit from the product). Callers apply the vendor
+   * guard; this only shapes the values.
+   */
+  private variantGstOverride(v: {
+    hsnCode?: string | null;
+    gstRate?: number | null;
+    unitOfMeasure?: string | null;
+    supplyType?: GstSupplyType | null;
+  }): Pick<
+    Prisma.ProductVariantCreateWithoutProductInput,
+    'hsnCode' | 'gstRate' | 'unitOfMeasure' | 'supplyType'
+  > {
+    const out: ReturnType<ProductService['variantGstOverride']> = {};
+    if (v.hsnCode !== undefined) out.hsnCode = v.hsnCode?.trim() || null;
+    if (v.gstRate !== undefined) out.gstRate = v.gstRate;
+    if (v.unitOfMeasure !== undefined)
+      out.unitOfMeasure = v.unitOfMeasure?.trim().toUpperCase() || null;
+    if (v.supplyType !== undefined) out.supplyType = v.supplyType;
+    return out;
   }
 
   // ─── SYNC TO SHOPIFY ───
@@ -749,18 +781,24 @@ export class ProductService {
     const updated = await this.prisma.$transaction(async (tx) => {
       const productPatch: Prisma.ProductUpdateInput = {};
       if (dto.title !== undefined) productPatch.title = dto.title;
+      // Empty string clears the column (stored as null, like hsnCode) so a
+      // form that blanks the field can actually remove the value.
       if (!isVendor && dto.vendor !== undefined)
-        productPatch.vendor = dto.vendor;
+        productPatch.vendor = dto.vendor || null;
       if (dto.productType !== undefined)
-        productPatch.productType = dto.productType;
+        productPatch.productType = dto.productType || null;
       if (dto.status !== undefined) productPatch.status = dto.status;
       if (dto.tags !== undefined) productPatch.tags = dto.tags;
       if (dto.bodyHtml !== undefined)
         productPatch.bodyHtml = dto.bodyHtml;
       if (!isVendor && dto.hsnCode !== undefined)
-        productPatch.hsnCode = dto.hsnCode;
+        productPatch.hsnCode = dto.hsnCode || null;
       if (!isVendor && dto.gstRate !== undefined)
         productPatch.gstRate = dto.gstRate;
+      if (!isVendor && dto.unitOfMeasure !== undefined)
+        productPatch.unitOfMeasure = dto.unitOfMeasure || null;
+      if (!isVendor && dto.supplyType !== undefined)
+        productPatch.supplyType = dto.supplyType;
       if (dto.publishedAt !== undefined) {
         productPatch.publishedAt = dto.publishedAt
           ? new Date(dto.publishedAt)
@@ -771,18 +809,18 @@ export class ProductService {
         await tx.product.update({ where: { id }, data: productPatch });
       }
 
-      // Patch the default variant if singular variant fields provided.
+      // Patch the default variant if singular variant fields provided. Goes
+      // through the same builder as PATCH /variants/:id so every field the
+      // DTO accepts is honoured — this block used to copy only price / sku /
+      // compareAtPrice / inventoryQuantity and silently drop cost, barcode,
+      // weight, HS code, country, the inventory toggles and requiresShipping
+      // while still returning 200.
       if (dto.variant && product.variants[0]) {
-        const variantPatch: Prisma.ProductVariantUpdateInput = {};
-        if (dto.variant.price !== undefined)
-          variantPatch.price = dto.variant.price;
-        if (dto.variant.sku !== undefined)
-          variantPatch.sku = dto.variant.sku;
-        if (dto.variant.compareAtPrice !== undefined)
-          variantPatch.compareAtPrice = dto.variant.compareAtPrice;
-        if (dto.variant.inventoryQuantity !== undefined)
-          variantPatch.inventoryQuantity =
-            dto.variant.inventoryQuantity;
+        const variantPatch = this.buildVariantPatch(
+          dto.variant,
+          product.variants[0],
+          vendorScope,
+        );
 
         if (Object.keys(variantPatch).length > 0) {
           // Audited update — quantity changes always emit an InventoryEvent
@@ -981,6 +1019,7 @@ export class ProductService {
         requiresShipping: dto.requiresShipping ?? true,
         // Vendors cannot set the tax flag — always defaults to taxable.
         taxable: vendorScope ? true : (dto.taxable ?? true),
+        ...(vendorScope ? {} : this.variantGstOverride(dto)),
       },
       });
       // Ledger: initial stock when created with a non-zero quantity.
@@ -1053,9 +1092,10 @@ export class ProductService {
     if (dto.hsCode !== undefined) patch.hsCode = dto.hsCode;
     if (dto.countryOfOrigin !== undefined)
       patch.countryOfOrigin = dto.countryOfOrigin;
-    // Vendors cannot change the per-variant tax flag.
+    // Vendors cannot change the per-variant tax flag, nor the GST override.
     if (!vendorScope && dto.taxable !== undefined)
       patch.taxable = dto.taxable;
+    if (!vendorScope) Object.assign(patch, this.variantGstOverride(dto));
     if (dto.option1 !== undefined) patch.option1 = dto.option1;
     if (dto.option2 !== undefined) patch.option2 = dto.option2;
     if (dto.option3 !== undefined) patch.option3 = dto.option3;
@@ -1417,21 +1457,32 @@ export class ProductService {
 
     const variants = full?.variants ?? [];
 
-    // Single → multi transition: if the only variant is the "Default Title"
-    // placeholder, convert it into the FIRST combination (Shopify does the
-    // same), preserving its price / sku / stock instead of stranding them.
+    // Pre-existing variants that lack a value for some option get the FIRST
+    // value of each option they are missing — the single "Default Title"
+    // placeholder becoming the first combination is the special case of this.
+    // Shopify applies the same rule when an option is added
+    // (productOptionsCreate, LEAVE_AS_IS), so the CRM row and its Shopify
+    // variant keep describing the same combination and price / sku / stock
+    // stay attached. Leaving the slot null instead produced a row Shopify
+    // cannot represent PLUS a generated twin of what Shopify makes from the
+    // original — the push then tried to create that twin and was refused.
     // Mutating the snapshot BEFORE building the dedupe set makes the set see
-    // the converted key, not the old sentinel.
-    const defaultVariant =
-      variants.length === 1 &&
-        variants[0].option1 === DEFAULT_VARIANT_TITLE
-        ? variants[0]
-        : null;
-    if (defaultVariant && combos.length > 0) {
-      const first = combos[0];
-      defaultVariant.option1 = first.option1;
-      defaultVariant.option2 = first.option2;
-      defaultVariant.option3 = first.option3;
+    // the converted keys, not the old ones.
+    const slotKeys = ['option1', 'option2', 'option3'] as const;
+    const converted: typeof variants = [];
+    for (const v of variants) {
+      const isPlaceholder = v.option1 === DEFAULT_VARIANT_TITLE;
+      let changed = false;
+      for (let i = 0; i < slotKeys.length; i++) {
+        const current = isPlaceholder ? null : v[slotKeys[i]];
+        const first = (options[i]?.values?.[0] as string | undefined) ?? null;
+        const next = i < options.length ? (current ?? first) : null;
+        if (next !== v[slotKeys[i]]) {
+          v[slotKeys[i]] = next;
+          changed = true;
+        }
+      }
+      if (changed) converted.push(v);
     }
 
     const existing = new Set(
@@ -1479,20 +1530,18 @@ export class ProductService {
         };
       });
 
-    if (defaultVariant || toCreate.length > 0) {
+    if (converted.length > 0 || toCreate.length > 0) {
       await this.prisma.$transaction(async (tx) => {
-        if (defaultVariant) {
-          const labels = [
-            defaultVariant.option1,
-            defaultVariant.option2,
-            defaultVariant.option3,
-          ].filter(Boolean) as string[];
+        for (const v of converted) {
+          const labels = [v.option1, v.option2, v.option3].filter(
+            Boolean,
+          ) as string[];
           await tx.productVariant.update({
-            where: { id: defaultVariant.id },
+            where: { id: v.id },
             data: {
-              option1: defaultVariant.option1,
-              option2: defaultVariant.option2,
-              option3: defaultVariant.option3,
+              option1: v.option1,
+              option2: v.option2,
+              option3: v.option3,
               title:
                 labels.length > 0
                   ? labels.join(' / ')
@@ -1510,7 +1559,7 @@ export class ProductService {
     return {
       ok: true,
       created: toCreate.length,
-      converted: defaultVariant ? 1 : 0,
+      converted: converted.length,
     };
   }
 
@@ -2052,6 +2101,8 @@ export class ProductService {
         tags: original.tags,
         hsnCode: original.hsnCode,
         gstRate: original.gstRate,
+        unitOfMeasure: original.unitOfMeasure,
+        supplyType: original.supplyType,
         options: (original.options ??
           Prisma.JsonNull) as Prisma.InputJsonValue,
         metadata: {
@@ -2090,6 +2141,10 @@ export class ProductService {
             position: v.position,
             requiresShipping: v.requiresShipping,
             taxable: v.taxable,
+            hsnCode: v.hsnCode,
+            gstRate: v.gstRate,
+            unitOfMeasure: v.unitOfMeasure,
+            supplyType: v.supplyType,
           })),
         },
         images: {

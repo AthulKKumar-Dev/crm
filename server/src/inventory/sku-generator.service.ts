@@ -318,7 +318,12 @@ export class SkuGeneratorService {
 
   private async resolvePrefix(orgId: string): Promise<string> {
     const settings = await this.settings.getInventorySettings(orgId);
-    if (settings.skuPrefix) return settings.skuPrefix.toUpperCase();
+    // Sanitised the same way as the slug fallback below, not merely
+    // uppercased. The PATCH schema rejects punctuation, but a value stored
+    // before that rule existed would otherwise put a space or a hyphen inside
+    // a code whose own parts are joined with "-".
+    const configured = this.mnemonic(settings.skuPrefix, 10);
+    if (settings.skuPrefix && configured !== 'PRD') return configured;
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
       select: { slug: true, name: true },

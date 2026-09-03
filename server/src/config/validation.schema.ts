@@ -4,6 +4,8 @@ export const validationSchema = Joi.object({
     NODE_ENV: Joi.string().valid('development', 'production', 'test').required(),
     PORT: Joi.number().default(5000),
     DATABASE_URL: Joi.string().required(),
+    // Session-mode URL read by the Prisma CLI for migrations; the app itself never uses it.
+    DIRECT_URL: Joi.string().optional(),
     REDIS_URL: Joi.string().required(),
     JWT_ACCESS_SECRET: Joi.string().min(32).required(),
     JWT_REFRESH_SECRET: Joi.string().min(32).required(),

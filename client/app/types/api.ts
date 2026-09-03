@@ -698,6 +698,11 @@ export interface ProductVariant {
   countryOfOrigin?: string | null;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; null = inherit the product's value. */
+  hsnCode?: string | null;
+  gstRate?: number | string | null;
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType | null;
   option1: string | null;
   option2: string | null;
   option3: string | null;
@@ -750,12 +755,23 @@ export interface Product {
   shopifySync: ProductShopifySync | null;
 }
 
+/** GST nature of supply, per line item — mirrors the server's GstSupplyType enum. */
+export type GstSupplyType =
+  | "TAXABLE"
+  | "EXEMPT"
+  | "NIL_RATED"
+  | "NON_GST"
+  | "ZERO_RATED";
+
 /** A product detail response with all variants, images, and CRM-managed fields. */
 export interface ProductDetail extends Product {
   images: ProductImage[];
   bodyHtml?: string | null;
   hsnCode?: string | null;
   gstRate?: number | string | null;
+  /** GST unit quantity code for GSTR-1 (NOS, KGS, PCS…). Not the variant weight unit. */
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType;
   options?: ProductOption[] | null;
   publishedAt?: string | null;
   metadata?: Record<string, unknown> | null;
@@ -817,6 +833,11 @@ export interface ProductVariantInput {
   countryOfOrigin?: string;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; omit to inherit the product's value. */
+  hsnCode?: string;
+  gstRate?: number;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   option1?: string;
   option2?: string;
   option3?: string;
@@ -836,10 +857,13 @@ export interface CreateProductRequest {
   tags?: string[];
   bodyHtml?: string;
   hsnCode?: string;
-  gstRate?: number;
+  /** `null` clears the rate on update. */
+  gstRate?: number | null;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   /** ISO 8601 string. When set on a DRAFT product in the future, the
-   *  scheduler will flip it to ACTIVE on/after this date. */
-  publishedAt?: string;
+   *  scheduler will flip it to ACTIVE on/after this date. `null` clears it. */
+  publishedAt?: string | null;
   variant?: ProductVariantInput;
   variants?: ProductVariantInput[];
   options?: ProductOption[];
@@ -868,6 +892,11 @@ export interface CreateVariantRequest {
   countryOfOrigin?: string;
   requiresShipping?: boolean;
   taxable?: boolean;
+  /** GST override for this variant only; omit to inherit the product's value. */
+  hsnCode?: string;
+  gstRate?: number;
+  unitOfMeasure?: string;
+  supplyType?: GstSupplyType;
   option1?: string;
   option2?: string;
   option3?: string;
@@ -877,13 +906,32 @@ export interface CreateVariantRequest {
 
 export type UpdateVariantRequest = Omit<
   Partial<CreateVariantRequest>,
-  "imageId" | "sku" | "barcode" | "cost" | "compareAtPrice"
+  | "imageId"
+  | "sku"
+  | "barcode"
+  | "cost"
+  | "compareAtPrice"
+  | "weight"
+  | "hsCode"
+  | "countryOfOrigin"
+  | "hsnCode"
+  | "gstRate"
+  | "unitOfMeasure"
+  | "supplyType"
 > & {
   /** `null` clears the stored value; omit the field to leave it unchanged. */
   sku?: string | null;
   barcode?: string | null;
   cost?: number | null;
   compareAtPrice?: number | null;
+  weight?: number | null;
+  hsCode?: string | null;
+  countryOfOrigin?: string | null;
+  /** GST override; `null` = back to inheriting from the product. */
+  hsnCode?: string | null;
+  gstRate?: number | null;
+  unitOfMeasure?: string | null;
+  supplyType?: GstSupplyType | null;
 };
 
 /** Query parameters for the product list endpoint. */
@@ -940,6 +988,8 @@ export interface OrderShopifySync {
   shopifyOrderName?: string;
   error?: string;
   syncedAt?: string;
+  /** When the PENDING claim was stamped; absent on rows claimed before it existed. */
+  queuedAt?: string;
   attempts?: number;
 }
 
@@ -1134,6 +1184,14 @@ export interface OrderDetail extends Order {
   fulfillments: OrderFulfillment[];
   refunds: OrderRefund[];
   timeline: OrderTimeline[];
+  /**
+   * Why automatic invoicing did not issue a document for this order, if it
+   * tried and failed. Cleared as soon as an invoice is issued, and never set
+   * when the order already has one. The server has always returned it; it was
+   * simply never shown, so a failure was invisible on the order itself.
+   */
+  invoiceError?: string | null;
+  invoiceErrorAt?: string | null;
   /** The order's live (non-cancelled) GST invoice — at most one, enforced by
    *  a partial unique index server-side. Empty array when not invoiced. */
   invoices?: Pick<
@@ -1411,6 +1469,14 @@ export interface TaxSettings {
    * matches makes the invoice declare more than was collected.
    */
   taxShipping: boolean;
+  /**
+   * Series prefix for invoice numbers — "SJ" gives SJ-26-27/000001. Defaults
+   * to "INV". Up to 3 letters or digits; "CN" is reserved for credit notes.
+   *
+   * ⚠️ Changing it starts a new consecutive run at 000001, because the next
+   * number is read back per prefix.
+   */
+  invoicePrefix: string;
 }
 
 /** Response from GET /organization/settings — every domain returned together. */
@@ -1745,10 +1811,31 @@ export interface OrderStatsResponse {
 // ─── Dashboard Types ────────────────────────────────────────────────────────
 
 /** Query parameters for the dashboard overview endpoint. */
+/** Pre-canned windows offered by the dashboard's period selector. */
+export const DASHBOARD_RANGES = ["30d", "6m", "12m"] as const;
+export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
+
 export interface DashboardQueryParams {
+  /**
+   * The window every figure on the page shares. Passing it to one query and not
+   * another is what let "Total Sales" (all-time) sit beside "Total Revenue"
+   * (rolling 12 months) describing different populations.
+   */
+  range?: DashboardRange;
   dateFrom?: string;
   dateTo?: string;
   channelId?: string;
+}
+
+/** The window a dashboard response was computed over. */
+export interface DashboardPeriod {
+  from: string;
+  /** Exclusive. */
+  to: string;
+  /** "Last 12 months" — render this rather than re-deriving it. */
+  label: string;
+  /** The org timezone the buckets were cut in. */
+  timezone: string;
 }
 
 /** Fulfillment status breakdown counts. */
@@ -1800,6 +1887,13 @@ export interface DashboardRecentOrder {
 
 /** Full dashboard overview response. */
 export interface DashboardOverview {
+  period: DashboardPeriod;
+  /**
+   * Kept for the CSV/JSON export summary. The stat card reads
+   * `totals.grossSales` off the sales-and-profit response instead, so the
+   * headline figure and the chart beside it are the same number by
+   * construction.
+   */
   totalSales: number;
   totalOrders: number;
   totalCustomers: number;
@@ -2081,6 +2175,63 @@ export interface GstFiling {
   sellerGstinId: string | null;
   filedAt: string;
   arn: string | null;
+}
+
+/**
+ * What a payment supplier charged in one filing period.
+ *
+ * ⚠️ Never subtracted from sales. A sale keeps its full declared value however
+ * much the supplier deducts before settling — the fee is a separate purchase
+ * whose GST comes back as input tax credit. Nothing here feeds a return total.
+ */
+export interface InwardSupply {
+  id: string;
+  financialYear: string;
+  period: string;
+  supplier: string;
+  /** The fee itself, excluding tax. */
+  feeAmount: string;
+  /**
+   * NULL when the invoice never stated the tax — NOT the same as zero. Shown as
+   * unknown, never as ₹0, or a claim looks settled when nobody has supplied the
+   * figure yet.
+   */
+  gstAmount: string | null;
+  supplierGstin: string | null;
+  /** An import of services: GST is self-paid first, then reclaimed. */
+  isReverseCharge: boolean;
+  source: "MANUAL" | "SHOPIFY_SYNC";
+  note: string | null;
+}
+
+export interface InwardSupplySummary {
+  totalFee: number;
+  /** Null when no row stated a GST amount at all. */
+  totalGst: number | null;
+  /** While above zero, `totalGst` is a floor rather than the full claim. */
+  rowsWithUnknownGst: number;
+  /** The portion self-paid under reverse charge — GSTR-3B 4(A)(3). */
+  reverseChargeGst: number;
+  /** The taxable value behind it — GSTR-3B 3.1(d) needs the value, not the tax. */
+  reverseChargeTaxable: number;
+}
+
+export interface InwardSuppliesResponse {
+  fees: InwardSupply[];
+  summary: InwardSupplySummary;
+}
+
+/** Payload for PUT /inward-supplies. Idempotent on (year, period, supplier). */
+export interface UpsertInwardSupplyRequest {
+  financialYear: string;
+  period: string;
+  supplier: string;
+  feeAmount: number;
+  /** Omit when the invoice does not state it — omitted means unknown, not 0. */
+  gstAmount?: number;
+  supplierGstin?: string;
+  isReverseCharge?: boolean;
+  note?: string;
 }
 
 /** Payload for POST /invoices/gst-return/filings. */

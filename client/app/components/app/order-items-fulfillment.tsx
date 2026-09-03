@@ -31,7 +31,14 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { CarrierDatalist } from "~/components/app/carrier-datalist";
 import { EmptyState } from "~/components/app/empty-state";
-import { lineStatusClass, lineStatusLabel } from "~/lib/order-status";
+import {
+  canEditLineTracking,
+  canMarkLineDelivered,
+  canUnfulfilLine,
+  lineStatusClass,
+  lineStatusLabel,
+  remainingUnits,
+} from "~/lib/order-status";
 import { cn, formatCurrency } from "~/lib/utils";
 
 /**
@@ -196,8 +203,14 @@ function groupKeyOf(status: string | null): LineGroupKey {
   return "unfulfilled";
 }
 
-/** Units on a line still owed to the customer. */
-const remainingOf = (li: FulfillmentItem) => Math.max(li.quantity - (li.fulfilledQuantity ?? 0), 0);
+/**
+ * Units on a line still owed to the customer.
+ *
+ * Delegates to the shared helper so the status fallback applies: the Shopify
+ * sync never writes `fulfilledQuantity`, so subtracting it alone reported every
+ * Shopify-fulfilled line as entirely outstanding.
+ */
+const remainingOf = (li: FulfillmentItem) => remainingUnits(li);
 
 /**
  * Shipment summary for a group header — "Delhivery · AWB 4457 8891". Built from
@@ -245,7 +258,8 @@ export function OrderItemsFulfillment({
   headerAction,
   footer,
   groupCaptions,
-  canAct = true,
+  canActOnItems,
+  canCreateFulfillment,
 }: {
   orderId: string;
   items: FulfillmentItem[];
@@ -260,14 +274,27 @@ export function OrderItemsFulfillment({
   /** Rendered below the items, inside the card — e.g. the totals block. */
   footer?: ReactNode;
   /**
-   * Whether the viewer may change fulfilment state. When false the card is
-   * read-only: no select mode, no group actions, no row menus.
+   * Whether the viewer may correct fulfilment state on individual lines:
+   * unfulfil, mark delivered, add tracking, hold, release. Role only — no
+   * endpoint behind these looks at the order's fulfilment status. Which lines
+   * each action is offered on is decided per line by the predicates in
+   * `lib/order-status`, never by the group label.
    *
    * Every endpoint behind these controls is ORG_OPERATORS_AND_VENDORS, but this
    * component had no role awareness at all, so a VIEWER was shown the full
    * action set and every click 403'd.
    */
-  canAct?: boolean;
+  canActOnItems: boolean;
+  /**
+   * Whether the viewer may create a NEW shipment. Separate from the above
+   * because it is also false once nothing is outstanding — and folding the two
+   * together is what removed every per-line action from fully-fulfilled
+   * orders, which is the normal end state of every order.
+   *
+   * Both are required rather than defaulted: the vendor view used to omit the
+   * single flag and silently get the full action set.
+   */
+  canCreateFulfillment: boolean;
   /**
    * `"detail"` only. Overrides a group header's caption with something the
    * order payload knows and the line items do not — shipment dates, say. A
@@ -297,14 +324,16 @@ export function OrderItemsFulfillment({
   const [tUrl, setTUrl] = useState("");
 
   const isDetail = variant === "detail";
-  const columnCount = 6;
+  // Item / Qty / Unit price / Line total / Status, plus the selection column,
+  // which is only rendered for someone who can act on the lines.
+  const columnCount = canActOnItems ? 6 : 5;
 
   const selectedIds = [...selected];
-  // Only unfulfilled / on-hold lines can be bulk-selected — fulfilled & delivered
-  // items have their own per-product actions instead.
-  const selectableLines = items.filter(
-    (li) => li.fulfillmentStatus !== "fulfilled" && li.fulfillmentStatus !== "delivered",
-  );
+  // Only lines with units still to ship can be bulk-selected — the bulk actions
+  // all move a line forward. Keyed on units rather than the status string so a
+  // partly-shipped line stays selectable for its remainder, and a Shopify line
+  // carrying no `fulfilledQuantity` is not mistaken for unshipped.
+  const selectableLines = items.filter((li) => remainingOf(li) > 0);
   const allSelected =
     selectableLines.length > 0 && selectableLines.every((li) => selected.has(li.id));
 
@@ -387,6 +416,19 @@ export function OrderItemsFulfillment({
     }
   }
 
+  /**
+   * Of these lines, the ones marking delivered is actually legal on. A group
+   * can hold a partly-shipped line, and delivering that would strand its
+   * remaining units — the server would accept it and then refuse to unfulfil.
+   */
+  function deliverableIds(ids: string[]): string[] {
+    const byId = new Map(items.map((li) => [li.id, li]));
+    return ids.filter((id) => {
+      const li = byId.get(id);
+      return !!li && canMarkLineDelivered(li);
+    });
+  }
+
   function openTracking(li: FulfillmentItem) {
     setTrackingLine(li.id);
     setTNumber(li.trackingNumber ?? "");
@@ -428,54 +470,72 @@ export function OrderItemsFulfillment({
     unfulfill.isPending ||
     updateTracking.isPending;
 
-  /** Per-line actions, `"default"` layout. Delivered is terminal — no actions. */
+  /**
+   * Per-line actions, `"default"` layout.
+   *
+   * Each button asks the shared predicate for its own action rather than all
+   * three sharing one `status === "fulfilled"` test. That test hid every action
+   * on a partly-shipped line and on any Shopify-fulfilled line, and it offered
+   * Mark delivered on partials — which strands their remaining units, because
+   * delivering does not ship them and unfulfil then refuses the line for ever.
+   */
   function lineActions(li: FulfillmentItem) {
-    if (!canAct || li.fulfillmentStatus !== "fulfilled") return null;
+    if (!canActOnItems) return null;
+    const showDeliver = canMarkLineDelivered(li);
+    const showTracking = canEditLineTracking(li);
+    const showUnfulfil = canUnfulfilLine(li);
+    if (!showDeliver && !showTracking && !showUnfulfil) return null;
     // Tracking used to stay clickable mid-mutation while the other two were
     // disabled, so the dialog could open over an in-flight fulfil/unfulfil.
     const rowBusy = markDelivered.isPending || unfulfill.isPending;
     return (
       <div className="flex flex-wrap items-center justify-end gap-1">
-        <Button
-          variant="brand"
-          size="xs"
-          onClick={() => markDelivered.mutate(li.id)}
-          disabled={rowBusy}
-          className="text-micro"
-        >
-          {markDelivered.isPending && markDelivered.variables === li.id ? (
-            <Loader2 className="animate-spin" />
-          ) : (
-            <Truck />
-          )}
-          Mark delivered
-        </Button>
-        <Button
-          variant="outline"
-          size="xs"
-          onClick={() => openTracking(li)}
-          disabled={rowBusy}
-          title="Add or update tracking"
-          className="text-micro text-muted-foreground"
-        >
-          <MapPin />
-          {li.trackingNumber ? "Edit tracking" : "Add tracking"}
-        </Button>
-        <Button
-          variant="outline"
-          size="xs"
-          onClick={() => unfulfill.mutate(li.id)}
-          disabled={rowBusy}
-          title="Switch back to unfulfilled"
-          className="text-micro text-muted-foreground"
-        >
-          {unfulfill.isPending && unfulfill.variables === li.id ? (
-            <Loader2 className="animate-spin" />
-          ) : (
-            <Undo2 />
-          )}
-          Unfulfill
-        </Button>
+        {showDeliver && (
+          <Button
+            variant="brand"
+            size="xs"
+            onClick={() => markDelivered.mutate(li.id)}
+            disabled={rowBusy}
+            className="text-micro"
+          >
+            {markDelivered.isPending && markDelivered.variables === li.id ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Truck />
+            )}
+            Mark delivered
+          </Button>
+        )}
+        {showTracking && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() => openTracking(li)}
+            disabled={rowBusy}
+            title="Add or update tracking"
+            className="text-micro text-muted-foreground"
+          >
+            <MapPin />
+            {li.trackingNumber ? "Edit tracking" : "Add tracking"}
+          </Button>
+        )}
+        {showUnfulfil && (
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() => unfulfill.mutate(li.id)}
+            disabled={rowBusy}
+            title="Switch back to unfulfilled"
+            className="text-micro text-muted-foreground"
+          >
+            {unfulfill.isPending && unfulfill.variables === li.id ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Undo2 />
+            )}
+            Unfulfill
+          </Button>
+        )}
       </div>
     );
   }
@@ -590,19 +650,21 @@ export function OrderItemsFulfillment({
               {allSelected ? "Clear selection" : "Select all"}
             </Button>
           )}
-          <Button
-            variant="accent"
-            onClick={() => fulfillLines(selectedIds)}
-            disabled={busy || selectedIds.length === 0}
-            className="text-caption font-semibold text-brand-strong"
-          >
-            {createFulfillment.isPending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <CheckCircle2 className="size-3.5" />
-            )}
-            Mark fulfilled
-          </Button>
+          {canCreateFulfillment && (
+            <Button
+              variant="accent"
+              onClick={() => fulfillLines(selectedIds)}
+              disabled={busy || selectedIds.length === 0}
+              className="text-caption font-semibold text-brand-strong"
+            >
+              {createFulfillment.isPending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-3.5" />
+              )}
+              Mark fulfilled
+            </Button>
+          )}
           {allowInProgress && (
             <Button
               variant="ghost"
@@ -678,7 +740,7 @@ export function OrderItemsFulfillment({
 
     /** The one action that moves a group forward, mirrored in its overflow menu. */
     const groupAction = (key: LineGroupKey, ids: string[]) => {
-      if (!canAct) return null;
+      if (!canActOnItems) return null;
       switch (key) {
         // In progress has no "Add tracking" of its own on purpose: tracking is
         // written against a fulfilment, and updateItemTracking rejects a line
@@ -686,6 +748,7 @@ export function OrderItemsFulfillment({
         case "unfulfilled":
         case "in_progress":
         case "partial":
+          if (!canCreateFulfillment) return null;
           return (
             <Button variant="accent" size="xs" onClick={() => fulfillLines(ids)} disabled={busy}>
               {createFulfillment.isPending ? <Loader2 className="animate-spin" /> : null}
@@ -701,21 +764,35 @@ export function OrderItemsFulfillment({
               Release
             </Button>
           );
-        case "fulfilled":
+        case "fulfilled": {
+          // Only the lines this is actually legal on — a group can hold a
+          // partly-shipped line, and delivering that would strand its
+          // remainder.
+          const deliverable = deliverableIds(ids);
+          if (deliverable.length === 0) return null;
           return (
-            <Button variant="brand" size="xs" onClick={() => deliverLines(ids)} disabled={busy}>
+            <Button
+              variant="brand"
+              size="xs"
+              onClick={() => deliverLines(deliverable)}
+              disabled={busy}
+            >
               {markDelivered.isPending ? <Loader2 className="animate-spin" /> : null}
               Mark delivered
             </Button>
           );
+        }
         default:
           return null;
       }
     };
 
-    /** Group overflow menu. Delivered is terminal server-side, so it gets none. */
+    /**
+     * Group overflow menu. Delivered keeps one — selecting its lines is still
+     * useful, and the rows themselves stay re-trackable.
+     */
     const groupMenu = (key: LineGroupKey, ids: string[]) => {
-      if (!canAct || key === "delivered") return null;
+      if (!canActOnItems) return null;
       return (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -729,17 +806,24 @@ export function OrderItemsFulfillment({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-52">
-            {key === "fulfilled" ? (
-              <DropdownMenuItem onSelect={() => deliverLines(ids)} disabled={busy}>
-                <Truck />
-                Mark all delivered
-              </DropdownMenuItem>
+            {key === "delivered" ? null : key === "fulfilled" ? (
+              deliverableIds(ids).length > 0 ? (
+                <DropdownMenuItem
+                  onSelect={() => deliverLines(deliverableIds(ids))}
+                  disabled={busy}
+                >
+                  <Truck />
+                  Mark all delivered
+                </DropdownMenuItem>
+              ) : null
             ) : (
               <>
-                <DropdownMenuItem onSelect={() => fulfillLines(ids)} disabled={busy}>
-                  <CheckCircle2 />
-                  Fulfil these items
-                </DropdownMenuItem>
+                {canCreateFulfillment && (
+                  <DropdownMenuItem onSelect={() => fulfillLines(ids)} disabled={busy}>
+                    <CheckCircle2 />
+                    Fulfil these items
+                  </DropdownMenuItem>
+                )}
                 {key === "on_hold" ? (
                   <DropdownMenuItem onSelect={() => releaseLines(ids)} disabled={busy}>
                     <PlayCircle />
@@ -775,15 +859,18 @@ export function OrderItemsFulfillment({
     };
 
     /**
-     * Row overflow menu. Delivered lines are terminal server-side
-     * (`unfulfillVendorItem` rejects them), so they only get a menu when there
-     * is a tracking link to open — never a dead one.
+     * Row overflow menu.
+     *
+     * Every entry asks its own predicate rather than the group label. Delivered
+     * lines still get Edit tracking (a corrected AWB is a legitimate edit the
+     * server accepts) but never Unfulfil, which is the one transition the
+     * server refuses.
      */
     const rowMenu = (li: FulfillmentItem) => {
       const key = groupKeyOf(li.fulfillmentStatus);
       // A read-only viewer still gets the tracking link — it reveals nothing
       // the row does not already show and changes nothing.
-      if (!canAct && !li.trackingUrl) return null;
+      if (!canActOnItems && !li.trackingUrl) return null;
       const trigger = (
         <DropdownMenuTrigger asChild>
           <Button
@@ -805,7 +892,7 @@ export function OrderItemsFulfillment({
         </DropdownMenuItem>
       ) : null;
 
-      if (!canAct || key === "delivered") {
+      if (!canActOnItems) {
         if (!trackLink) return null;
         return (
           <DropdownMenu>
@@ -817,50 +904,73 @@ export function OrderItemsFulfillment({
         );
       }
 
+      const showFulfil = canCreateFulfillment && remainingOf(li) > 0;
+      const showDeliver = canMarkLineDelivered(li);
+      const showTracking = canEditLineTracking(li);
+      const showUnfulfil = canUnfulfilLine(li);
+      // Hold / release stay keyed on the group: they are genuinely a statement
+      // about the line's status rather than about what has shipped.
+      const showHold = key !== "delivered" && key !== "fulfilled";
+      const showInProgress = allowInProgress && showHold && key !== "in_progress";
+      if (
+        !showFulfil &&
+        !showDeliver &&
+        !showTracking &&
+        !showUnfulfil &&
+        !showHold &&
+        !trackLink
+      ) {
+        return null;
+      }
+
       return (
         <DropdownMenu>
           {trigger}
           <DropdownMenuContent align="end" className="w-48">
-            {key === "fulfilled" ? (
+            {showFulfil && (
+              <DropdownMenuItem onSelect={() => fulfillLines([li.id])} disabled={busy}>
+                <CheckCircle2 />
+                Fulfil this item
+              </DropdownMenuItem>
+            )}
+            {showDeliver && (
+              <DropdownMenuItem onSelect={() => markDelivered.mutate(li.id)} disabled={busy}>
+                <Truck />
+                Mark delivered
+              </DropdownMenuItem>
+            )}
+            {showTracking && (
+              <DropdownMenuItem onSelect={() => openTracking(li)} disabled={busy}>
+                <MapPin />
+                {li.trackingNumber ? "Edit tracking" : "Add tracking"}
+              </DropdownMenuItem>
+            )}
+            {trackLink}
+            {showHold &&
+              (key === "on_hold" ? (
+                <DropdownMenuItem onSelect={() => releaseLines([li.id])} disabled={busy}>
+                  <PlayCircle />
+                  Release hold
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem onSelect={() => holdLines([li.id])} disabled={busy}>
+                  <PauseCircle />
+                  Put on hold
+                </DropdownMenuItem>
+              ))}
+            {showInProgress && (
+              <DropdownMenuItem onSelect={() => inProgressLines([li.id])} disabled={busy}>
+                <Clock />
+                Mark in progress
+              </DropdownMenuItem>
+            )}
+            {showUnfulfil && (
               <>
-                <DropdownMenuItem onSelect={() => markDelivered.mutate(li.id)} disabled={busy}>
-                  <Truck />
-                  Mark delivered
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => openTracking(li)} disabled={busy}>
-                  <MapPin />
-                  {li.trackingNumber ? "Edit tracking" : "Add tracking"}
-                </DropdownMenuItem>
-                {trackLink}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => unfulfill.mutate(li.id)} disabled={busy}>
                   <Undo2 />
                   Switch to unfulfilled
                 </DropdownMenuItem>
-              </>
-            ) : (
-              <>
-                <DropdownMenuItem onSelect={() => fulfillLines([li.id])} disabled={busy}>
-                  <CheckCircle2 />
-                  Fulfil this item
-                </DropdownMenuItem>
-                {key === "on_hold" ? (
-                  <DropdownMenuItem onSelect={() => releaseLines([li.id])} disabled={busy}>
-                    <PlayCircle />
-                    Release hold
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem onSelect={() => holdLines([li.id])} disabled={busy}>
-                    <PauseCircle />
-                    Put on hold
-                  </DropdownMenuItem>
-                )}
-                {allowInProgress && key !== "in_progress" && (
-                  <DropdownMenuItem onSelect={() => inProgressLines([li.id])} disabled={busy}>
-                    <Clock />
-                    Mark in progress
-                  </DropdownMenuItem>
-                )}
               </>
             )}
           </DropdownMenuContent>
@@ -885,7 +995,7 @@ export function OrderItemsFulfillment({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {canAct && items.length > 0 && (
+            {canActOnItems && items.length > 0 && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -1080,8 +1190,10 @@ export function OrderItemsFulfillment({
         </div>
       </div>
 
-      {/* Bulk action toolbar — shown only when items are selected. */}
-      {selectedIds.length > 0 && bulkToolbar()}
+      {/* Bulk action toolbar — shown only when items are selected. Gated: this
+          layout had no role awareness at all, so a read-only viewer got a full
+          bulk fulfil / hold toolbar. */}
+      {canActOnItems && selectedIds.length > 0 && bulkToolbar()}
 
       {items.length === 0 ? (
         empty
@@ -1090,17 +1202,21 @@ export function OrderItemsFulfillment({
           <table className="w-full text-caption">
             <thead className="text-micro uppercase tracking-wider text-muted-foreground">
               <tr className="border-b">
-                <th className="w-8 px-5 py-2 text-left">
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    onChange={(e) =>
-                      setSelected(
-                        e.target.checked ? new Set(selectableLines.map((li) => li.id)) : new Set(),
-                      )
-                    }
-                  />
-                </th>
+                {canActOnItems && (
+                  <th className="w-8 px-5 py-2 text-left">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={(e) =>
+                        setSelected(
+                          e.target.checked
+                            ? new Set(selectableLines.map((li) => li.id))
+                            : new Set(),
+                        )
+                      }
+                    />
+                  </th>
+                )}
                 <th className="px-5 py-2 text-left font-medium">Item</th>
                 <th className="px-5 py-2 text-right font-medium">Qty</th>
                 <th className="px-5 py-2 text-right font-medium">Unit price</th>
@@ -1112,18 +1228,17 @@ export function OrderItemsFulfillment({
               {items.map((li) => (
                 <Fragment key={li.id}>
                   <tr>
-                    <td className="px-5 py-3 align-top">
-                      <input
-                        type="checkbox"
-                        checked={selected.has(li.id)}
-                        disabled={
-                          li.fulfillmentStatus === "fulfilled" ||
-                          li.fulfillmentStatus === "delivered"
-                        }
-                        onChange={(e) => toggle(li.id, e.target.checked)}
-                        className="disabled:opacity-30"
-                      />
-                    </td>
+                    {canActOnItems && (
+                      <td className="px-5 py-3 align-top">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(li.id)}
+                          disabled={remainingOf(li) === 0}
+                          onChange={(e) => toggle(li.id, e.target.checked)}
+                          className="disabled:opacity-30"
+                        />
+                      </td>
+                    )}
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-2.5">
                         {li.imageUrl ? (
@@ -1186,8 +1301,13 @@ export function OrderItemsFulfillment({
                   {/* Inline "add tracking" form for this product. */}
                   {trackingLine === li.id && (
                     <tr className="bg-surface-sunken dark:bg-muted/40">
-                      <td />
-                      <td colSpan={columnCount - 1} className="px-5 pb-3">
+                      {/* Spacer under the selection column, which is only
+                          rendered when the viewer can act. */}
+                      {canActOnItems && <td />}
+                      <td
+                        colSpan={canActOnItems ? columnCount - 1 : columnCount}
+                        className="px-5 pb-3"
+                      >
                         {trackingForm(li.id)}
                       </td>
                     </tr>

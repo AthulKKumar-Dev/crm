@@ -1,26 +1,56 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { QueryDashboardDto } from './dto/query-dashboard.dto';
+import {
+  QueryDashboardDto,
+  rangeToWindow,
+  windowStart,
+} from './dto/query-dashboard.dto';
 import { Prisma } from '@prisma/client';
 import { Parser } from 'json2csv';
+import {
+  SALES_FINANCIAL_STATUSES,
+  placedBetween,
+  salesOrderWhere,
+} from '../common/utils/order-window.util';
+import {
+  computeBucket,
+  emptyBucket,
+  round2,
+  totalsOf,
+  type ProfitBucket,
+  type SalesProfitRow,
+} from './profit.util';
+
+/** The window every figure on the dashboard is reported over. */
+interface Window {
+  from: Date;
+  /** Exclusive. */
+  to: Date;
+  unit: 'day' | 'month';
+  label: string;
+  timezone: string;
+}
+
+export interface SalesProfitPoint extends ProfitBucket {
+  /** Axis label — "Jan" for monthly buckets, "3 Sep" for daily ones. */
+  bucket: string;
+  /** "2026-01" / "2026-01-03". Bucket LABELS collide; this is the real key. */
+  bucketKey: string;
+  newCustomers: number;
+}
 
 @Injectable()
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) { }
 
   async getOverview(orgId: string, query: QueryDashboardDto) {
-    // Build date filter for orders
-    const dateFilter: Prisma.OrderWhereInput = {};
-    if (query.dateFrom || query.dateTo) {
-      dateFilter.externalCreatedAt = {};
-      if (query.dateFrom) dateFilter.externalCreatedAt.gte = new Date(query.dateFrom);
-      if (query.dateTo) dateFilter.externalCreatedAt.lte = new Date(query.dateTo);
-    }
-    const baseOrderWhere: Prisma.OrderWhereInput = {
+    const window = await this.resolveWindow(orgId, query);
+
+    const orderWhere: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       ...(query.channelId && { channelId: query.channelId }),
-      ...dateFilter,
+      ...placedBetween(window.from, window.to),
     };
 
     const baseProductWhere: Prisma.ProductWhereInput = {
@@ -41,22 +71,28 @@ export class DashboardService {
       totalCustomers,
       lowStockProducts,
     ] = await Promise.all([
-      // 1. Total sales (sum of totalPrice for paid orders)
+      // 1. Total sales over the window. NOTE: the dashboard CARD no longer
+      //    reads this — it reads `totals.grossSales` off /monthly-sales, so the
+      //    headline figure and the chart beside it are literally the same
+      //    number and cannot drift apart again. This one survives for the
+      //    JSON/CSV export summary.
       this.prisma.order.aggregate({
-        where: {
-          ...baseOrderWhere,
-          financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
-        },
+        where: salesOrderWhere({
+          orgId,
+          channelId: query.channelId,
+          from: window.from,
+          to: window.to,
+        }),
         _sum: { totalPrice: true },
       }),
 
       // 2. Total orders count
-      this.prisma.order.count({ where: baseOrderWhere }),
+      this.prisma.order.count({ where: orderWhere }),
 
       // 3. Orders grouped by fulfillment status
       this.prisma.order.groupBy({
         by: ['fulfillmentStatus'],
-        where: baseOrderWhere,
+        where: orderWhere,
         _count: true,
       }),
 
@@ -74,11 +110,17 @@ export class DashboardService {
       }),
 
       // 6. Top 5 selling products (by total quantity sold)
-      this.getTopSellingProducts(orgId, query, 5),
+      this.getTopSellingProducts(orgId, query, window, 5),
 
-      // 7. Recent 5 orders
+      // 7. Recent 5 orders — deliberately NOT windowed. "Recent" means the last
+      //    five, whatever the selected period is; an empty panel on a quiet
+      //    week is not useful.
       this.prisma.order.findMany({
-        where: baseOrderWhere,
+        where: {
+          organizationId: orgId,
+          deletedAt: null,
+          ...(query.channelId && { channelId: query.channelId }),
+        },
         include: {
           customer: {
             select: { id: true, firstName: true, lastName: true, email: true },
@@ -90,12 +132,21 @@ export class DashboardService {
         take: 5,
       }),
 
-      // 8. Total customers count
+      // 8. Customers first seen inside the window. `externalCreatedAt` is null
+      //    for CRM-native customers, so the OR is what stops offline signups
+      //    from vanishing — same reason the order filters use `placedBetween`.
       this.prisma.customer.count({
         where: {
           organizationId: orgId,
           deletedAt: null,
           ...(query.channelId && { channelId: query.channelId }),
+          OR: [
+            { externalCreatedAt: { gte: window.from, lt: window.to } },
+            {
+              externalCreatedAt: null,
+              createdAt: { gte: window.from, lt: window.to },
+            },
+          ],
         },
       }),
 
@@ -110,6 +161,8 @@ export class DashboardService {
     }
 
     return {
+      period: this.describe(window),
+
       // Sales overview
       totalSales: totalSales._sum.totalPrice ?? 0,
       totalOrders,
@@ -205,112 +258,297 @@ export class DashboardService {
     return parser.parse(data);
   }
 
-  // ─── MONTHLY REVENUE & PROFIT (for bar chart) ───
-  // Also carries the per-month `orders` / `newCustomers` counts the dashboard's
-  // KPI sparklines plot, and a real last-30-days profit comparison for the trend
-  // badge. Those extras sit a little oddly under a route named "monthly-sales",
-  // but they all come off the 12-month window this method already scans — a
-  // separate endpoint would cost an extra round trip for one sparkline.
-  async getMonthlySales(orgId: string, query: QueryDashboardDto) {
-    const now = new Date();
-    const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
-    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+  // ─── SALES & GROSS PROFIT (feeds the stat cards AND the bar chart) ───
+  //
+  // One query behind both. The card used to read an ALL-TIME _sum(totalPrice)
+  // from /dashboard while the chart read a hard-coded rolling 12 months from
+  // here, so "Total Sales" and "Total Revenue" sat side by side describing
+  // different populations — before you even reach the fact that the old
+  // `profit` was `totalPrice − shipping − discounts`, which contains no cost of
+  // goods, double-counts discounts (totalPrice is already net of them), treats
+  // shipping CHARGED as a cost, and books collected tax as profit. For an
+  // offline order (shipping and discounts are always 0) it reduced to
+  // profit === revenue exactly, which is why the two bars were the same height.
+  //
+  // Now: gross profit = net sales (post-discount, pre-tax, pre-shipping, net of
+  // refunds) − COGS, reported only over the lines whose variant has a known
+  // cost, with that coverage published so the figure is never quietly
+  // understated by omission.
+  async getSalesAndProfit(orgId: string, query: QueryDashboardDto) {
+    const window = await this.resolveWindow(orgId, query);
+    const previous = this.precedingWindow(window);
 
-    const [orders, customers] = await Promise.all([
-      this.prisma.order.findMany({
-        where: {
-          organizationId: orgId,
-          deletedAt: null,
-          financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
-          externalCreatedAt: { gte: twelveMonthsAgo },
-          ...(query.channelId && { channelId: query.channelId }),
-        },
-        select: {
-          totalPrice: true,
-          totalDiscounts: true,
-          totalShippingPrice: true,
-          externalCreatedAt: true,
-          createdAt: true,
-        },
-      }),
-
-      // Customers synced from a storefront carry that storefront's own signup
-      // date; ones created in the CRM only have `createdAt`. Either one landing
-      // in the window counts, hence the OR rather than a single filter.
-      this.prisma.customer.findMany({
-        where: {
-          organizationId: orgId,
-          deletedAt: null,
-          ...(query.channelId && { channelId: query.channelId }),
-          OR: [
-            { externalCreatedAt: { gte: twelveMonthsAgo } },
-            { externalCreatedAt: null, createdAt: { gte: twelveMonthsAgo } },
-          ],
-        },
-        select: { externalCreatedAt: true, createdAt: true },
-      }),
+    const [rows, customerRows, previousRows] = await Promise.all([
+      this.fetchProfitRows(orgId, window, query.channelId),
+      this.fetchNewCustomerRows(orgId, window, query.channelId),
+      // The trend compares this window against the one immediately before it,
+      // matching "vs previous period" everywhere else in the app. The old badge
+      // was pinned to 30-vs-30 days regardless of what the chart beside it
+      // actually covered.
+      this.fetchProfitRows(orgId, previous, query.channelId),
     ]);
 
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const monthMap = new Map<
-      string,
-      { revenue: number; profit: number; orders: number; newCustomers: number }
-    >();
+    const newCustomersByBucket = new Map(
+      customerRows.map((r) => [this.bucketKey(r.bucket, window.unit), Number(r.count)]),
+    );
 
-    for (let i = 0; i < 12; i++) {
-      const d = new Date(now.getFullYear(), now.getMonth() - 11 + i, 1);
-      monthMap.set(monthNames[d.getMonth()], { revenue: 0, profit: 0, orders: 0, newCustomers: 0 });
-    }
+    const data: SalesProfitPoint[] = rows.map((row) => {
+      const key = this.bucketKey(row.bucket, window.unit);
+      return {
+        ...computeBucket(row),
+        bucket: this.bucketLabel(row.bucket, window.unit),
+        bucketKey: key,
+        newCustomers: newCustomersByBucket.get(key) ?? 0,
+      };
+    });
 
-    // Both 30-day windows sit inside the 12-month fetch above, so the trend
-    // costs no extra query — just a running total over the same rows.
-    let profitLast30 = 0;
-    let profitPrev30 = 0;
-
-    for (const order of orders) {
-      const date = order.externalCreatedAt || order.createdAt;
-      const revenue = parseFloat(order.totalPrice.toString());
-      const costs = parseFloat(order.totalShippingPrice.toString()) + parseFloat(order.totalDiscounts.toString());
-      const profit = revenue - costs;
-
-      const existing = monthMap.get(monthNames[date.getMonth()]);
-      if (existing) {
-        existing.revenue += revenue;
-        existing.profit += profit;
-        existing.orders += 1;
-      }
-
-      if (date >= thirtyDaysAgo) profitLast30 += profit;
-      else if (date >= sixtyDaysAgo) profitPrev30 += profit;
-    }
-
-    for (const customer of customers) {
-      const date = customer.externalCreatedAt || customer.createdAt;
-      const existing = monthMap.get(monthNames[date.getMonth()]);
-      if (existing) existing.newCustomers += 1;
-    }
-
-    const data = Array.from(monthMap.entries()).map(([month, values]) => ({
-      month,
-      revenue: Math.round(values.revenue * 100) / 100,
-      profit: Math.round(values.profit * 100) / 100,
-      orders: values.orders,
-      newCustomers: values.newCustomers,
-    }));
-
-    const totalRevenue = data.reduce((s, d) => s + d.revenue, 0);
-    const totalProfit = data.reduce((s, d) => s + d.profit, 0);
-
-    const current = Math.round(profitLast30 * 100) / 100;
-    const previous = Math.round(profitPrev30 * 100) / 100;
+    const totals = totalsOf(data.length ? data : [emptyBucket()]);
+    const previousTotals = totalsOf(
+      previousRows.length ? previousRows.map(computeBucket) : [emptyBucket()],
+    );
 
     return {
+      period: this.describe(window),
       data,
-      totalRevenue: Math.round(totalRevenue * 100) / 100,
-      totalProfit: Math.round(totalProfit * 100) / 100,
-      profitTrend: { current, previous, change: this.calcChange(current, previous) },
+      totals: {
+        ...totals,
+        newCustomers: data.reduce((s, d) => s + d.newCustomers, 0),
+      },
+      // Null rather than a zero trend when there is no profit to trend.
+      profitTrend:
+        totals.grossProfit === null
+          ? null
+          : {
+            current: totals.grossProfit,
+            previous: previousTotals.grossProfit ?? 0,
+            change: this.calcChange(
+              totals.grossProfit,
+              previousTotals.grossProfit ?? 0,
+            ),
+          },
     };
+  }
+
+  /**
+   * The whole aggregate, in one round trip.
+   *
+   * Raw SQL rather than `orderLineItem.findMany({ include: { variant } })`
+   * because the latter ships every sold line to Node to produce at most a few
+   * dozen numbers, and because summing money as float64 across tens of
+   * thousands of rows accumulates error a profit line should not carry — here
+   * it stays NUMERIC until one ROUND per bucket.
+   *
+   * If this ever gets slow, the daily `AnalyticsSnapshot` rows and their
+   * scheduler already exist; adding these sums to that blob and reading buckets
+   * from it is the escape hatch, not a bigger query.
+   */
+  private async fetchProfitRows(
+    orgId: string,
+    window: Window,
+    channelId?: string,
+  ): Promise<SalesProfitRow[]> {
+    const channelFilter = channelId
+      ? Prisma.sql`AND o."channel_id" = ${channelId}`
+      : Prisma.empty;
+
+    const tz = window.timezone;
+    const unit = window.unit;
+    const step = unit === 'day' ? '1 day' : '1 month';
+
+    return this.prisma.$queryRaw<SalesProfitRow[]>`
+      WITH scoped AS (
+        SELECT
+          o."id",
+          date_trunc(
+            ${unit},
+            COALESCE(o."external_created_at", o."created_at")
+              AT TIME ZONE 'UTC' AT TIME ZONE ${tz}
+          ) AS bucket,
+          o."total_price"          AS gross_sales,
+          o."total_tax"            AS tax,
+          o."total_shipping_price" AS shipping,
+          -- subtotal_price is already post-discount and pre-shipping on both
+          -- write paths (Shopify's own subtotal_price; the manual order
+          -- builder's subtotal), which is what makes it the one revenue basis
+          -- both order sources agree on. When the channel prices tax-inclusive
+          -- it also carries tax, so take that back out — less the SHIPPING tax,
+          -- which subtotal_price never contained. A null taxes_included means
+          -- the channel never told us; treat it as exclusive, matching the
+          -- manual-order convention.
+          o."subtotal_price" - CASE
+            WHEN o."taxes_included" IS TRUE
+            THEN GREATEST(o."total_tax" - COALESCE(o."channel_shipping_tax_amount", 0), 0)
+            ELSE 0
+          END AS net_sales_gross
+        FROM "orders" o
+        WHERE o."organization_id" = ${orgId}
+          AND o."deleted_at"   IS NULL
+          AND o."cancelled_at" IS NULL
+          AND o."financial_status"::text IN (${Prisma.join(SALES_FINANCIAL_STATUSES)})
+          AND COALESCE(o."external_created_at", o."created_at") >= ${window.from}::timestamptz AT TIME ZONE 'UTC'
+          AND COALESCE(o."external_created_at", o."created_at") <  ${window.to}::timestamptz AT TIME ZONE 'UTC'
+          ${channelFilter}
+      ),
+      -- Lines and refunds are aggregated in SEPARATE CTEs on purpose: joining
+      -- both onto scoped in one pass produces their cross product and
+      -- silently multiplies each sum by the other's row count.
+      sales AS (
+        SELECT bucket,
+               SUM(gross_sales)     AS gross_sales,
+               SUM(tax)             AS tax,
+               SUM(shipping)        AS shipping,
+               SUM(net_sales_gross) AS net_sales_gross,
+               COUNT(*)             AS orders
+        FROM scoped GROUP BY bucket
+      ),
+      lines AS (
+        SELECT s.bucket,
+               SUM(li."price" * li."quantity" - li."total_discount") AS line_net,
+               -- A line whose variant is gone (variant_id is SET NULL on
+               -- delete) or whose variant has no cost must LOWER COVERAGE, not
+               -- contribute cost-free profit. The LEFT JOIN leaves pv."cost"
+               -- null and both branches fall to 0, which is the correct
+               -- treatment on both sides of the ratio.
+               SUM(CASE WHEN pv."cost" IS NOT NULL
+                        THEN li."price" * li."quantity" - li."total_discount"
+                        ELSE 0 END) AS line_net_with_cost,
+               SUM(CASE WHEN pv."cost" IS NOT NULL
+                        THEN pv."cost" * li."quantity"
+                        ELSE 0 END) AS cogs_gross
+        FROM scoped s
+        JOIN "order_line_items" li ON li."order_id" = s."id"
+        LEFT JOIN "product_variants" pv ON pv."id" = li."variant_id"
+        GROUP BY s.bucket
+      ),
+      refunds AS (
+        -- Attributed to the ORDER's bucket, not the refund's, so each bucket
+        -- stays internally reconcilable with the orders in it. A past bar can
+        -- therefore move when a refund lands; that is the intent.
+        SELECT s.bucket,
+               SUM(GREATEST(r."amount" - COALESCE(r."total_tax", 0), 0)) AS refunded_net
+        FROM scoped s
+        JOIN "order_refunds" r ON r."order_id" = s."id"
+        GROUP BY s.bucket
+      ),
+      -- Generated in SQL so the empty buckets land on date_trunc's own
+      -- boundaries in the org's timezone, rather than on JS's idea of a month
+      -- in whatever timezone the server happens to run.
+      buckets AS (
+        SELECT generate_series(
+          date_trunc(${unit}, ${window.from}::timestamptz AT TIME ZONE ${tz}),
+          date_trunc(${unit}, ${window.to}::timestamptz   AT TIME ZONE ${tz}),
+          CAST(${step} AS interval)
+        ) AS bucket
+      )
+      SELECT
+        b.bucket,
+        ROUND(COALESCE(sa.gross_sales, 0), 2)::float8        AS gross_sales,
+        ROUND(COALESCE(sa.tax, 0), 2)::float8                AS tax,
+        ROUND(COALESCE(sa.shipping, 0), 2)::float8           AS shipping,
+        ROUND(COALESCE(sa.net_sales_gross, 0), 2)::float8    AS net_sales_gross,
+        ROUND(COALESCE(rf.refunded_net, 0), 2)::float8       AS refunded_net,
+        ROUND(COALESCE(l.line_net, 0), 2)::float8            AS line_net,
+        ROUND(COALESCE(l.line_net_with_cost, 0), 2)::float8  AS line_net_with_cost,
+        ROUND(COALESCE(l.cogs_gross, 0), 2)::float8          AS cogs_gross,
+        COALESCE(sa.orders, 0)::int                          AS orders
+      FROM buckets b
+      LEFT JOIN sales   sa ON sa.bucket = b.bucket
+      LEFT JOIN lines   l  ON l.bucket  = b.bucket
+      LEFT JOIN refunds rf ON rf.bucket = b.bucket
+      ORDER BY b.bucket ASC`;
+  }
+
+  /** New customers per bucket, cut on the same boundaries as the sales rows. */
+  private async fetchNewCustomerRows(
+    orgId: string,
+    window: Window,
+    channelId?: string,
+  ): Promise<Array<{ bucket: Date; count: number }>> {
+    const channelFilter = channelId
+      ? Prisma.sql`AND c."channel_id" = ${channelId}`
+      : Prisma.empty;
+
+    return this.prisma.$queryRaw<Array<{ bucket: Date; count: number }>>`
+      SELECT
+        date_trunc(
+          ${window.unit},
+          COALESCE(c."external_created_at", c."created_at")
+            AT TIME ZONE 'UTC' AT TIME ZONE ${window.timezone}
+        ) AS bucket,
+        COUNT(*)::int AS count
+      FROM "customers" c
+      WHERE c."organization_id" = ${orgId}
+        AND c."deleted_at" IS NULL
+        AND COALESCE(c."external_created_at", c."created_at") >= ${window.from}::timestamptz AT TIME ZONE 'UTC'
+        AND COALESCE(c."external_created_at", c."created_at") <  ${window.to}::timestamptz AT TIME ZONE 'UTC'
+        ${channelFilter}
+      GROUP BY 1`;
+  }
+
+  /**
+   * The window every figure on the page shares.
+   *
+   * `dateFrom`/`dateTo` still win when present — the export endpoints pass them
+   * — but the UI drives `range`, so the card and the chart cannot end up
+   * describing different periods the way they did when one defaulted to
+   * all-time and the other to a hard-coded twelve months.
+   */
+  private async resolveWindow(
+    orgId: string,
+    query: QueryDashboardDto,
+  ): Promise<Window> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true },
+    });
+
+    const range = rangeToWindow(query.range);
+    const explicit = Boolean(query.dateFrom || query.dateTo);
+    const to = query.dateTo ? new Date(query.dateTo) : new Date();
+    const from = query.dateFrom
+      ? new Date(query.dateFrom)
+      : windowStart(to, range);
+
+    return {
+      from,
+      to,
+      unit: explicit ? 'month' : range.unit,
+      label: explicit ? 'Selected range' : range.label,
+      timezone: org?.timezone || 'UTC',
+    };
+  }
+
+  /** The equally long window ending where this one begins. */
+  private precedingWindow(window: Window): Window {
+    const span = window.to.getTime() - window.from.getTime();
+    return {
+      ...window,
+      from: new Date(window.from.getTime() - span),
+      to: window.from,
+    };
+  }
+
+  private describe(window: Window) {
+    return {
+      from: window.from.toISOString(),
+      to: window.to.toISOString(),
+      label: window.label,
+      timezone: window.timezone,
+    };
+  }
+
+  private bucketKey(bucket: Date, unit: 'day' | 'month'): string {
+    const iso = new Date(bucket).toISOString();
+    return unit === 'day' ? iso.slice(0, 10) : iso.slice(0, 7);
+  }
+
+  private bucketLabel(bucket: Date, unit: 'day' | 'month'): string {
+    const d = new Date(bucket);
+    const month = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+    ][d.getUTCMonth()];
+    return unit === 'day' ? `${d.getUTCDate()} ${month}` : month;
   }
 
   /**
@@ -333,23 +571,16 @@ export class DashboardService {
 
   // ─── SALES BY PRODUCT TYPE (for donut chart) ───
   async getSalesByCategory(orgId: string, query: QueryDashboardDto) {
-    const dateFilter: Prisma.OrderWhereInput = {};
-    if (query.dateFrom || query.dateTo) {
-      dateFilter.externalCreatedAt = {
-        ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-        ...(query.dateTo && { lte: new Date(query.dateTo) }),
-      };
-    }
+    const window = await this.resolveWindow(orgId, query);
 
     const lineItems = await this.prisma.orderLineItem.findMany({
       where: {
-        order: {
-          organizationId: orgId,
-          deletedAt: null,
-          financialStatus: { in: ['PAID', 'PARTIALLY_PAID', 'PARTIALLY_REFUNDED'] },
-          ...dateFilter,
-          ...(query.channelId && { channelId: query.channelId }),
-        },
+        order: salesOrderWhere({
+          orgId,
+          channelId: query.channelId,
+          from: window.from,
+          to: window.to,
+        }),
       },
       select: {
         price: true,
@@ -371,33 +602,27 @@ export class DashboardService {
 
     const data = sorted.slice(0, 6).map(([name, value], i) => ({
       name,
-      value: Math.round(value * 100) / 100,
+      value: round2(value),
       color: COLORS[i % COLORS.length],
     }));
 
     const otherTotal = sorted.slice(6).reduce((s, [, v]) => s + v, 0);
     if (otherTotal > 0) {
-      data.push({ name: 'Other', value: Math.round(otherTotal * 100) / 100, color: '#9ca3af' });
+      data.push({ name: 'Other', value: round2(otherTotal), color: '#9ca3af' });
     }
 
-    return { data, total: Math.round(data.reduce((s, d) => s + d.value, 0) * 100) / 100 };
+    return { data, total: round2(data.reduce((s, d) => s + d.value, 0)) };
   }
 
-  private async getTopSellingProducts(orgId: string, query: QueryDashboardDto, limit: number) {
-    // The dashboard panel this feeds is captioned "Last 30 days", so an absent
-    // range means the last 30 days — not all time. Deliberately scoped to this
-    // method: `getOverview` threads its date filter through `baseOrderWhere`, so
-    // defaulting there would silently re-scope Total Sales, Total Orders and
-    // Recent Orders too, and those should stay all-time.
-    const dateRange =
-      query.dateFrom || query.dateTo
-        ? {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo && { lte: new Date(query.dateTo) }),
-        }
-        : { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) };
-
-    // Group line items by externalProductId to get total quantity sold per product
+  private async getTopSellingProducts(
+    orgId: string,
+    query: QueryDashboardDto,
+    window: Window,
+    limit: number,
+  ) {
+    // Group line items by externalProductId to get total quantity sold per
+    // product. Scoped through `placedBetween`, so manual/offline orders — whose
+    // `externalCreatedAt` is null — are no longer invisible in this panel.
     const topItems = await this.prisma.orderLineItem.groupBy({
       by: ['externalProductId'],
       where: {
@@ -405,7 +630,7 @@ export class DashboardService {
           organizationId: orgId,
           deletedAt: null,
           ...(query.channelId && { channelId: query.channelId }),
-          externalCreatedAt: dateRange,
+          ...placedBetween(window.from, window.to),
         },
         externalProductId: { not: null },
       },
@@ -495,4 +720,3 @@ export class DashboardService {
       .slice(0, limit);
   }
 }
-

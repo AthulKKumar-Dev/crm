@@ -22,6 +22,35 @@ describe('TaxSettings', () => {
       // OFF by default: this is the only setting here that changes tax charged
       // on a real transaction, so no merchant inherits it.
       taxShipping: false,
+      // The built-in series. An org that never configures one keeps issuing
+      // INV-… exactly as before.
+      invoicePrefix: 'INV',
+    });
+  });
+
+  describe('invoicePrefix', () => {
+    it('accepts a short merchant series, trimmed and uppercased', () => {
+      expect(UpdateTaxSettingsSchema.parse({ invoicePrefix: ' sj ' })).toEqual({
+        invoicePrefix: 'SJ',
+      });
+    });
+
+    it('rejects punctuation that would collide with the number separators', () => {
+      // The sequence is read back with LIKE '<prefix>-%' and split on "/".
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'S-J' })).toThrow();
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'S/J' })).toThrow();
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'S J' })).toThrow();
+    });
+
+    it('rejects a prefix too long to fit the sixteen-character limit', () => {
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'ABCD' })).toThrow();
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: '' })).toThrow();
+    });
+
+    it('refuses the reserved credit-note series', () => {
+      // Sharing it would merge the two runs and gap the invoice sequence.
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'CN' })).toThrow();
+      expect(() => UpdateTaxSettingsSchema.parse({ invoicePrefix: 'cn' })).toThrow();
     });
   });
 

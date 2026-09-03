@@ -10,7 +10,7 @@ import {
 } from "~/hooks/use-settings-mutations";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useUpdateOrganizationMutation } from "~/hooks/use-org-mutations";
-import type { ProductSettings } from "~/types/api";
+import type { InventorySettings, ProductSettings } from "~/types/api";
 
 /**
  * Combined "Products" and "Orders" settings panes. Each domain has one toggle
@@ -312,6 +312,7 @@ function BarcodePushCard() {
 
   return (
     <SettingsCard>
+      <SkuPrefixRow settings={settings} mutation={mutation} />
       <SettingsToggleRow
         label="Send generated barcodes to Shopify"
         help="The CRM gives products a short numeric barcode so they can be printed on small and jewellery label stock, where a full SKU is too long to scan. When ON, that code is included when a product is pushed to Shopify, so Shopify POS can scan the same labels. When OFF (default), it stays in the CRM and your Shopify barcode field is left untouched — the right choice if you may assign real GTINs later. Barcodes that came from Shopify or that you typed yourself are always sent, either way."
@@ -320,6 +321,92 @@ function BarcodePushCard() {
         onChange={(checked) => mutation.mutate({ pushGeneratedBarcodes: checked })}
       />
     </SettingsCard>
+  );
+}
+
+/**
+ * SKU prefix — the code generated SKUs start with.
+ *
+ * The generator builds `{PREFIX}-{PRODUCT}-{SEQ}-{OPTIONS}`, so "SJ" yields
+ * SJ-SAR-001-BLK. Left blank it derives a three-letter prefix from the
+ * organization name instead, which is the existing behaviour.
+ *
+ * Letters and digits only, matching the server rule: the parts are joined with
+ * "-", so punctuation here would produce a code that cannot be read back.
+ * Committed on blur rather than per keystroke, like the fields above.
+ */
+function SkuPrefixRow({
+  settings,
+  mutation,
+}: {
+  settings: InventorySettings;
+  mutation: ReturnType<typeof useUpdateInventorySettingsMutation>;
+}) {
+  const serverPrefix = settings.skuPrefix ?? "";
+  const [draft, setDraft] = useState(serverPrefix);
+
+  useEffect(() => setDraft(serverPrefix), [serverPrefix]);
+
+  const candidate = draft.trim().toUpperCase();
+  const invalid = !/^[A-Z0-9]{0,10}$/.test(candidate);
+
+  function commit() {
+    if (invalid) {
+      setDraft(serverPrefix);
+      return;
+    }
+    if (candidate === serverPrefix) return;
+    mutation.mutate({ skuPrefix: candidate });
+  }
+
+  return (
+    <div className="space-y-2 px-5 py-4">
+      <div className="min-w-0">
+        {/* A real label, not a placeholder: a placeholder alone leaves the
+            input with no accessible name. */}
+        <label
+          htmlFor="sku-prefix"
+          className="text-sm font-medium text-gray-900 dark:text-gray-100"
+        >
+          SKU prefix
+        </label>
+        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+          The code generated SKUs begin with — enter SJ and a saree becomes
+          SJ-SAR-001. Letters and digits only, up to 10. Leave it empty to use a
+          short code derived from your business name. Existing SKUs are not
+          renamed.
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        <input
+          id="sku-prefix"
+          value={draft}
+          maxLength={10}
+          onChange={(e) => setDraft(e.target.value.toUpperCase())}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              setDraft(serverPrefix);
+              e.currentTarget.blur();
+            }
+          }}
+          placeholder="e.g. SJ"
+          className="h-8 w-28 rounded-lg border border-input bg-white px-3 font-mono text-xs uppercase focus:outline-none focus:ring-2 focus:ring-[#cdff8c] dark:bg-gray-800"
+        />
+        <span className="font-mono text-xs text-muted-foreground">
+          {(candidate || "———") + "-SAR-001"}
+        </span>
+        {isFieldSaving(mutation, "skuPrefix") && (
+          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+        )}
+      </div>
+      {invalid && (
+        <p className="text-[10px] text-red-600">
+          Letters and digits only, with no spaces or punctuation.
+        </p>
+      )}
+    </div>
   );
 }
 

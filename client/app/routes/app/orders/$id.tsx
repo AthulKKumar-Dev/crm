@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import {
+  AlertTriangle,
   ChevronRight,
   Loader2,
   Plus,
@@ -38,6 +39,10 @@ import {
   FULFILLMENT_CLASSES,
   FULFILLMENT_LABELS_FULL,
   isLineFulfilled,
+  isShipmentCancelled,
+  isShipmentDelivered,
+  isShipmentShipped,
+  remainingUnits,
 } from "~/lib/order-status";
 import { QueryErrorState } from "~/components/app/query-error-state";
 import type {
@@ -95,7 +100,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
   const [dialog, setDialog] = useState<"fulfill" | "capture" | "cancel" | null>(null);
   // Same gates the Actions menu uses, so the rail below can't offer a button
   // the menu deliberately hides.
-  const { canManage, canCapture, canCancel, canFulfill, canEdit } =
+  const { canManage, canCapture, canCancel, canFulfill, canActOnItems, canEdit } =
     useOrderActionGates(order);
 
   const currency = order?.currency ?? org?.currency ?? "INR";
@@ -139,7 +144,10 @@ function OwnerOrderDetail({ id }: { id: string }) {
   const fulfilledCount = order.lineItems.filter((li) =>
     isLineFulfilled(li.fulfillmentStatus),
   ).length;
-  const outstanding = order.lineItems.filter((li) => !isLineFulfilled(li.fulfillmentStatus));
+  // Units still owed, not "lines whose status is not fulfilled". A line that is
+  // on hold with everything already shipped is not outstanding, and a Shopify
+  // line carrying no `fulfilledQuantity` must not be counted as unshipped.
+  const outstanding = order.lineItems.filter((li) => remainingUnits(li) > 0);
 
   // Prefer the fulfilment record; fall back to the tracking the server already
   // flattens onto each line.
@@ -159,7 +167,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
   // the single-shipment case, which is nearly all of them; multi-shipment
   // orders fall through to the per-line summary instead.
   const lineGroupCaptions = (() => {
-    const live = (order.fulfillments ?? []).filter((f) => f.status !== "cancelled");
+    const live = (order.fulfillments ?? []).filter((f) => !isShipmentCancelled(f));
     if (live.length !== 1) return undefined;
     const [f] = live;
     const ref = [f.trackingCompany, f.trackingNumber ? `AWB ${f.trackingNumber}` : null]
@@ -352,7 +360,8 @@ function OwnerOrderDetail({ id }: { id: string }) {
             variant="detail"
             title="Line items"
             allowInProgress
-            canAct={canFulfill}
+            canActOnItems={canActOnItems}
+            canCreateFulfillment={canFulfill}
             groupCaptions={lineGroupCaptions}
             headerAction={
               /* Labelled for what it does — this opens FulfillDialog, not the
@@ -450,12 +459,13 @@ function OwnerOrderDetail({ id }: { id: string }) {
                     Every item on this order has been fulfilled.
                   </p>
                 )}
+                {/* `canFulfill` already requires outstanding units, so this is
+                    absent rather than present-but-dead once everything ships. */}
                 {canFulfill && (
                   <Button
                     variant="outline"
                     size="sm"
                     className="w-full"
-                    disabled={outstanding.length === 0}
                     onClick={() => setDialog("fulfill")}
                   >
                     <Truck className="size-3.5" />
@@ -467,7 +477,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
           </section>
 
           {/* Existing shipments, with edit-tracking / cancel. Self-nulls when empty. */}
-          <OrderFulfillmentsSection order={order} />
+          <OrderFulfillmentsSection order={order} canAct={canActOnItems} />
 
           {/* Activity — `orgMembers` is already fetched above for the Owner row. */}
           <OrderActivity order={order} currency={currency} members={orgMembers} />
@@ -532,6 +542,16 @@ function OwnerOrderDetail({ id }: { id: string }) {
                   Generate GST invoice
                 </Button>
               )
+            )}
+            {/* Why automatic invoicing did not produce one. The server has
+                always recorded this; showing it only in the aggregate banner
+                on the invoices tab meant the one place you would look — the
+                order itself — said nothing. */}
+            {!invoice && order.invoiceError && (
+              <p className="flex items-start gap-1.5 rounded-lg bg-warning-subtle px-3 py-2 text-[10px] leading-relaxed text-warning">
+                <AlertTriangle className="mt-px size-3 shrink-0" />
+                <span>{order.invoiceError}</span>
+              </p>
             )}
             <Button asChild variant="outline" className="w-full">
               <Link to={`/orders/${order.id}/packing-slip`} target="_blank">
@@ -651,20 +671,23 @@ function deriveOrderState(order: OrderDetail): { label: string; className: strin
 /**
  * Shipping pill.
  *
- * `OrderFulfillment.status` is a free-form string that only ever holds
- * `pending` / `fulfilled` / `delivered` / `cancelled`, so this is as granular as
- * the data gets. An order with no fulfilment rows has not shipped at all.
+ * `OrderFulfillment.status` is a free-form string carrying TWO vocabularies:
+ * the CRM's (`pending` / `fulfilled` / `delivered` / `cancelled`) and Shopify's
+ * lowercased enum, where a completed shipment reads `success`. Compare through
+ * the helpers in `lib/order-status` — a direct `=== "delivered"` silently
+ * misread every synced shipment. An order with no fulfilment rows has not
+ * shipped at all.
  */
 function deriveShippingState(fulfillments: OrderFulfillment[]): {
   label: string;
   className: string;
 } {
-  const live = fulfillments.filter((f) => f.status !== "cancelled");
+  const live = fulfillments.filter((f) => !isShipmentCancelled(f));
   if (live.length === 0) return { label: "Pending", className: "bg-warning-subtle text-warning" };
-  if (live.some((f) => f.deliveredAt || f.status === "delivered")) {
+  if (live.some(isShipmentDelivered)) {
     return { label: "Delivered", className: "bg-brand/30 text-brand-strong" };
   }
-  if (live.some((f) => f.shippedAt)) {
+  if (live.some(isShipmentShipped)) {
     return { label: "In transit", className: "bg-info-subtle text-info" };
   }
   return { label: "Packed", className: "bg-muted text-muted-foreground" };
@@ -891,9 +914,8 @@ function TotalRow({
  */
 function ShipmentStepper({ fulfillment }: { fulfillment?: OrderFulfillment }) {
   const steps = useMemo(() => {
-    const delivered =
-      !!fulfillment?.deliveredAt || fulfillment?.status === "delivered";
-    const shipped = !!fulfillment?.shippedAt || delivered;
+    const delivered = !!fulfillment && isShipmentDelivered(fulfillment);
+    const shipped = !!fulfillment && (isShipmentShipped(fulfillment) || delivered);
     return [
       { label: "Fulfilled", done: !!fulfillment },
       { label: "Shipped", done: shipped },

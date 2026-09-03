@@ -3,6 +3,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsEnum,
   IsIn,
   IsInt,
   IsISO31661Alpha2,
@@ -11,10 +12,13 @@ import {
   IsOptional,
   IsString,
   Length,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { GstSupplyType } from '@prisma/client';
+import { IsGstRateSlab } from '../../gst/validators/is-gst-rate-slab.validator';
 
 export const WEIGHT_UNITS = ['g', 'kg', 'oz', 'lb'] as const;
 export type WeightUnit = (typeof WEIGHT_UNITS)[number];
@@ -92,6 +96,30 @@ export class CreateVariantDto {
   @IsOptional()
   @IsBoolean()
   taxable?: boolean;
+
+  // ── GST override (null = inherit from the product) ───────────────────────
+  // The product's Tax (GST) fields are the default for every variant; these
+  // exist for the one variant classified differently. Vendors cannot set them.
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  hsnCode?: string | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @IsGstRateSlab()
+  gstRate?: number | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  unitOfMeasure?: string | null;
+
+  @IsOptional()
+  @IsEnum(GstSupplyType)
+  supplyType?: GstSupplyType | null;
 
   // ── Options + structure ──────────────────────────────────────────────────
   @IsOptional()
@@ -180,6 +208,28 @@ export class UpdateVariantDto {
   @IsOptional()
   @IsBoolean()
   taxable?: boolean;
+
+  // GST override, mirrored from CreateVariantDto. Null clears (= inherit).
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  hsnCode?: string | null;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @IsGstRateSlab()
+  gstRate?: number | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  unitOfMeasure?: string | null;
+
+  @IsOptional()
+  @IsEnum(GstSupplyType)
+  supplyType?: GstSupplyType | null;
 
   @IsOptional()
   @IsString()

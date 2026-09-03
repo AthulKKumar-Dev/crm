@@ -8,11 +8,12 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
-import { ProductStatus } from '@prisma/client';
+import { GstSupplyType, ProductStatus } from '@prisma/client';
 import { CreateVariantDto } from './variant.dto';
 import { ProductOptionDto } from './option.dto';
 
@@ -56,13 +57,26 @@ export class CreateProductDto {
   gstRate?: number;
 
   /**
+   * GST unit quantity code (UQC) for GSTR-1 table 12 — "NOS", "KGS", "PCS"…
+   * Distinct from a variant's weightUnit. Server-side fallback is "NOS".
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  unitOfMeasure?: string;
+
+  @IsOptional()
+  @IsEnum(GstSupplyType)
+  supplyType?: GstSupplyType;
+
+  /**
    * Optional ISO 8601 date for scheduled publishing. When the product status
    * is DRAFT and this date is in the future, ProductPublishScheduler flips
    * the product to ACTIVE on/after the date.
    */
   @IsOptional()
   @IsDateString()
-  publishedAt?: string;
+  publishedAt?: string | null;
 
   // ── Variant inputs (mutually exclusive) ─────────────────────────────────
   // - `variant`  (singular): legacy single-default-variant flow.

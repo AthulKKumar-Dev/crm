@@ -6,6 +6,11 @@ import { isLineTaxable } from './taxability.util';
 /** One sale line, as the batch resolver needs to see it. */
 export interface BatchLineInput {
   productId: string | null;
+  /**
+   * `toNullableNumber(variant.gstRate)` — the variant's own override, null
+   * when it inherits. Same null-vs-0 rule as the product rate: 0 is EXEMPT.
+   */
+  variantGstRate?: number | null;
   /** `toNullableNumber(product.gstRate)` — null (unset) and 0 (exempt) differ. */
   productGstRate: number | null;
   lineTaxable?: boolean | null;
@@ -15,7 +20,9 @@ export interface BatchLineInput {
 /**
  * Resolves the effective GST rate for a product using the priority chain:
  *
- *   1. Product gstRate (highest priority — explicit per-product override)
+ *   0. Variant gstRate (a single variant classified differently from its
+ *      product — null on the variant means "same as the product")
+ *   1. Product gstRate (highest product-level priority — explicit per-product override)
  *   2. Collection tax override (if product belongs to a collection with an override)
  *   3. Product type tax rate (default rate for the product's type, e.g. "T-Shirts" = 12%)
  *   4. State base tax rate (default rate for the place of supply state)
@@ -59,14 +66,20 @@ export class TaxResolverService {
   ): Promise<number[]> {
     const rates = new Array<number>(lines.length).fill(0);
 
-    // Lines still needing a lookup after the two decisions that need no query:
-    // a non-taxable line is 0%, and an explicit product rate wins outright
-    // (`>= 0`, so a product configured at 0% is EXEMPT and stops here).
+    // Lines still needing a lookup after the decisions that need no query:
+    // a non-taxable line is 0%, and an explicit variant or product rate wins
+    // outright (`>= 0`, so a variant or product configured at 0% is EXEMPT
+    // and stops here). The variant is checked first — it is the narrower
+    // classification, set only when that variant differs from its product.
     const pending: number[] = [];
 
     lines.forEach((line, i) => {
       if (!isLineTaxable(line)) {
         rates[i] = 0;
+        return;
+      }
+      if (line.variantGstRate != null && line.variantGstRate >= 0) {
+        rates[i] = line.variantGstRate;
         return;
       }
       if (line.productGstRate !== null && line.productGstRate >= 0) {

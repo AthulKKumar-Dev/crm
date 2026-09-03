@@ -24,9 +24,10 @@ import {
   GstCalculationResult,
 } from '../gst/gst-calculator.service';
 import { normalizeGstin } from '../gst/constants/gst-rates';
-import { normalizeUqc } from '../gst/constants/uqc';
+import { resolveLineTaxClassification } from '../gst/line-tax-classification.util';
 import { apportionShipping } from '../gst/shipping-apportionment.util';
 import { parseTaxSettings } from '../organization-settings/schemas/tax-settings.schema';
+import { parseOrderSettings } from '../organization-settings/schemas/order-settings.schema';
 import { compareTax } from '../gst/tax-reconciliation.util';
 import {
   EXPORT_PLACE_OF_SUPPLY,
@@ -155,6 +156,92 @@ export class InvoiceService {
           ),
       },
     );
+  }
+
+  /**
+   * Issue an invoice for an order that has just reached PAID, if the org opted
+   * in via `orderSettings.autoInvoiceOnPayment`.
+   *
+   * Shared by every path that can move an order to PAID — the Shopify webhook,
+   * and the CRM's own Mark-as-paid and Capture actions. Those two used to
+   * write PAID locally and stop there; the reconciling webhook then saw
+   * PAID → PAID, `becamePaid` returned false, and the order was never
+   * invoiced. Paying an order inside the CRM silently produced no invoice.
+   *
+   * Never throws. Invoicing must not be able to break the thing that triggered
+   * it — a failed webhook is redelivered and would re-run the whole upsert,
+   * and a failed capture would leave money taken with an error on screen.
+   */
+  async autoInvoiceForPaidOrder(orgId: string, orderId: string): Promise<void> {
+    try {
+      // Read the flag off the column directly, as the tax settings are read
+      // elsewhere in this file — no extra injection, and it cannot see a value
+      // some surrounding transaction has not committed.
+      const settingsRow = await this.prisma.organizationSettings.findUnique({
+        where: { organizationId: orgId },
+        select: { orderSettings: true },
+      });
+      if (!parseOrderSettings(settingsRow?.orderSettings ?? null).autoInvoiceOnPayment) {
+        return;
+      }
+
+      const invoice = await this.create(orgId, { orderId } as CreateInvoiceDto);
+      this.logger.log(
+        `Auto-issued invoice ${invoice.invoiceNumber} for paid order ${orderId}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`Auto-invoice skipped for paid order ${orderId}: ${message}`);
+      await this.recordAutoInvoiceFailure(orgId, orderId, message);
+    }
+  }
+
+  /**
+   * Record why auto-invoicing did not issue a document — unless it turns out
+   * the order already has one.
+   *
+   * Redelivered and concurrent webhooks both reach `create` for the same
+   * order; the second is rejected with "Invoice … already exists", which is
+   * the guard working, not a failure. Storing that message stamped a
+   * frightening error on a perfectly invoiced order, and nothing ever cleared
+   * it: the clear lives inside a SUCCESSFUL issue, so an error recorded after
+   * the invoice existed was permanent. It also counted towards the uninvoiced
+   * banner. Treat "already invoiced" as the success it is.
+   */
+  private async recordAutoInvoiceFailure(
+    orgId: string,
+    orderId: string,
+    message: string,
+  ): Promise<void> {
+    try {
+      const live = await this.prisma.invoice.findFirst({
+        where: {
+          orderId,
+          organizationId: orgId,
+          status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+        },
+        select: { id: true },
+      });
+
+      if (live) {
+        await this.prisma.order.updateMany({
+          where: { id: orderId, organizationId: orgId, invoiceError: { not: null } },
+          data: { invoiceError: null, invoiceErrorAt: null },
+        });
+        return;
+      }
+
+      await this.prisma.order.updateMany({
+        where: { id: orderId, organizationId: orgId },
+        data: { invoiceError: message.slice(0, 500), invoiceErrorAt: new Date() },
+      });
+    } catch (bookkeepingErr) {
+      // Bookkeeping must never be the thing that breaks ingestion.
+      this.logger.error(
+        `Could not record auto-invoice outcome for order ${orderId}`,
+        bookkeepingErr instanceof Error ? bookkeepingErr.stack : undefined,
+      );
+    }
   }
 
   /**
@@ -325,6 +412,9 @@ export class InvoiceService {
       placeOfSupplyCode,
       order.lineItems.map((item) => ({
         productId: item.variant?.product?.id ?? null,
+        // A variant classified differently from its product carries its own
+        // rate; null on the variant means "same as the product".
+        variantGstRate: this.calculator.toNullableNumber(item.variant?.gstRate),
         productGstRate: this.calculator.toNullableNumber(
           item.variant?.product?.gstRate,
         ),
@@ -336,27 +426,18 @@ export class InvoiceService {
 
     for (const [index, item] of order.lineItems.entries()) {
       const gstRate = lineGstRates[index];
-      // NULL, not the invented '0000'.
-      //
-      // '0000' is not a valid HSN and it was being stamped onto a statutory
-      // document whenever a product had none — which, on this data, is every
-      // product in every real organization. Writing null makes "unclassified"
-      // representable, and `hsnMissing` below makes it visible before filing.
-      const hsnCode = item.variant?.product?.hsnCode?.trim() || null;
-
-      // Table 12 needs a unit on every row. Product override first, then the
-      // org default (NOS), so a merchant who has classified nothing still
-      // produces a valid table.
-      const unitOfMeasure =
-        normalizeUqc(item.variant?.product?.unitOfMeasure) ??
-        taxSettings.defaultUnitOfMeasure;
-
-      // ZERO_RATED is DERIVED — an export is zero-rated because of where it is
-      // going, not because of what it is. Everything else is a property of the
-      // goods and is classified on the product.
-      const supplyType = isExportSupply
-        ? GstSupplyType.ZERO_RATED
-        : (item.variant?.product?.supplyType ?? GstSupplyType.TAXABLE);
+      // HSN / UQC / supply type resolve variant → product → fallback, field by
+      // field. HSN is NULL, never the invented '0000', when nobody classified
+      // the goods — `hsnMissing` below makes that visible before filing. UQC
+      // falls back to the org default so Table 12 always has a unit.
+      // ZERO_RATED is DERIVED from an export place of supply and cannot be
+      // overridden by either side.
+      const { hsnCode, unitOfMeasure, supplyType } = resolveLineTaxClassification({
+        variant: item.variant,
+        product: item.variant?.product,
+        defaultUnitOfMeasure: taxSettings.defaultUnitOfMeasure,
+        isExportSupply,
+      });
 
       const calculation = this.calculator.calculateLineItem(
         {
@@ -1341,7 +1422,71 @@ export class InvoiceService {
       accumulator.addInvoice(invoice),
     );
 
-    return accumulator.finish();
+    const result = accumulator.finish();
+
+    // GSTR-3B 3.1(d) and 4(A)(3) — inward supplies on which the RECIPIENT pays
+    // the tax. Read here rather than folded into the accumulator because that
+    // class folds invoices, which are outward; these are purchases.
+    //
+    // Cash-neutral but doubly declarable: the liability sits in 3.1(d), the
+    // matching credit in 4(A)(3). Omitting both is a non-declaration the
+    // department can see, since it knows the merchant paid a foreign supplier.
+    if (isGstr3b) {
+      (result as Gstr3bReturn).reverseCharge = await this.reverseChargeTotals(
+        orgId,
+        query.financialYear,
+        query.period,
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * Fold the period's reverse-charge inward supplies.
+   *
+   * ⚠️ An unstated tax is NOT summed as zero. It is counted separately so the
+   * caller can present the figure as a floor — the same contract the refund and
+   * channel-tax paths hold, and the reason `gstAmount` is nullable at all.
+   *
+   * IGST throughout: this is scoped to imports of services, where the
+   * recipient's location is the place of supply and the supplier sits outside
+   * India, making it inter-state by definition. Domestic reverse charge (goods
+   * transport, advocates) can be CGST+SGST and is deliberately out of scope.
+   */
+  private async reverseChargeTotals(
+    orgId: string,
+    financialYear: string,
+    period: string,
+  ): Promise<Gstr3bReturn['reverseCharge']> {
+    const rows = await this.prisma.inwardSupply.findMany({
+      where: {
+        organizationId: orgId,
+        financialYear,
+        period,
+        isReverseCharge: true,
+      },
+      select: { feeAmount: true, gstAmount: true },
+    });
+
+    let taxableValue = new Prisma.Decimal(0);
+    let igst = new Prisma.Decimal(0);
+    let entriesWithUnknownTax = 0;
+
+    for (const row of rows) {
+      taxableValue = taxableValue.plus(row.feeAmount);
+      if (row.gstAmount === null) {
+        entriesWithUnknownTax += 1;
+        continue;
+      }
+      igst = igst.plus(row.gstAmount);
+    }
+
+    return {
+      taxableValue: parseFloat(taxableValue.toFixed(2)),
+      igst: parseFloat(igst.toFixed(2)),
+      entriesWithUnknownTax,
+    };
   }
 
   /**
@@ -1498,15 +1643,27 @@ export class InvoiceService {
         where: { ...scope, buyerGstin: { not: null } },
       }),
       this.prisma.invoice.count({ where: outstandingWhere }),
-      // Paid orders whose invoice could not be issued. Deliberately NOT
-      // scoped to `query.financialYear`: an org accruing uninvoiced paid
-      // orders needs to know regardless of which year the tab is showing.
+      // Paid orders carrying no live invoice. Deliberately NOT scoped to
+      // `query.financialYear`: an org accruing uninvoiced paid orders needs to
+      // know regardless of which year the tab is showing.
+      //
+      // Counted by ABSENCE OF AN INVOICE rather than by `invoiceError`, which
+      // was wrong in both directions. It missed every order auto-invoicing
+      // skipped silently — the setting off, or the order ingested by a sync
+      // rather than a webhook — which is the case a merchant most needs to
+      // see. And it counted orders whose only "error" was a duplicate attempt
+      // that had been correctly rejected, so a perfectly invoiced order drove
+      // the warning banner.
       this.prisma.order.count({
         where: {
           organizationId: orgId,
           deletedAt: null,
-          invoiceError: { not: null },
           financialStatus: OrderFinancialStatus.PAID,
+          invoices: {
+            none: {
+              status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+            },
+          },
         },
       }),
       // Invoices whose declared tax diverged from what the channel charged.

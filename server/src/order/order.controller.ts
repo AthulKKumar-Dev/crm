@@ -171,7 +171,11 @@ export class OrderController {
     return this.orderService.findAdjacent(id, user.orgId!, vendorScopeFor(user));
   }
 
+  // Reads what is left to ship, and only the fulfilment UI consumes it. The
+  // RolesGuard is allow-by-default, so without a decorator this was open to
+  // every member including VIEWER — match the endpoint it feeds.
   @Get(':id/fulfillable-line-items')
+  @Roles(...ORG_OPERATORS_AND_VENDORS)
   fulfillableLineItems(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.orderService.listFulfillableLineItems(id, user.orgId!);
   }
