@@ -698,8 +698,10 @@ export default function InvoicesPage() {
                   {stats.uninvoicedPaidOrders === 1 ? "order has" : "orders have"} no
                   invoice.
                 </strong>{" "}
-                Auto-invoicing failed for them, so their tax is missing from every
-                return below. Check Settings → Tax &amp; GST, then reissue from the order.
+                Their tax is missing from every return below. Auto-invoicing may
+                have failed, or never run — it only fires on live Shopify
+                webhooks, and only when it is switched on in Settings → Orders.
+                Open the order to see the reason and issue the invoice.
               </p>
             </DismissibleWarning>
           )}

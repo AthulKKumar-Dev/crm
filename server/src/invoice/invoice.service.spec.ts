@@ -217,3 +217,95 @@ describe('InvoiceService.getGstReturn', () => {
     expect(result.interState.byState[0].invoiceCount).toBe(2);
   });
 });
+
+/**
+ * Automatic invoicing on the payment edge.
+ *
+ * Two failures this covers, both seen on real data:
+ *   - a redelivered or concurrent webhook re-attempted an invoice, was
+ *     correctly rejected with "already exists", and that rejection was stored
+ *     on the order as a permanent error — on an order that was perfectly
+ *     invoiced — which then drove the uninvoiced-orders banner.
+ *   - paying an order inside the CRM wrote PAID locally, so the reconciling
+ *     webhook saw PAID → PAID, `becamePaid` returned false, and no invoice was
+ *     ever issued.
+ */
+describe('InvoiceService.autoInvoiceForPaidOrder', () => {
+  const ORG = 'org_1';
+  const ORDER = 'order_1';
+
+  function build(opts: { enabled?: boolean; liveInvoice?: boolean; createError?: Error } = {}) {
+    const orderUpdates: Array<{ where: any; data: any }> = [];
+    const prisma = {
+      organizationSettings: {
+        findUnique: jest.fn().mockResolvedValue({
+          orderSettings: { autoInvoiceOnPayment: opts.enabled ?? true },
+        }),
+      },
+      invoice: {
+        findFirst: jest.fn().mockResolvedValue(opts.liveInvoice ? { id: 'inv_1' } : null),
+      },
+      order: {
+        updateMany: jest.fn((args: any) => {
+          orderUpdates.push(args);
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      $transaction: jest.fn(),
+    };
+    const service = new InvoiceService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    const create = jest
+      .spyOn(service, 'create')
+      .mockImplementation(async () =>
+        opts.createError
+          ? Promise.reject(opts.createError)
+          : ({ invoiceNumber: 'INV-26-27/000001' } as any),
+      );
+    return { service, prisma, create, orderUpdates };
+  }
+
+  it('issues an invoice when the org has opted in', async () => {
+    const { service, create } = build();
+    await service.autoInvoiceForPaidOrder(ORG, ORDER);
+    expect(create).toHaveBeenCalledWith(ORG, { orderId: ORDER });
+  });
+
+  it('does nothing when the org has not opted in', async () => {
+    const { service, create, orderUpdates } = build({ enabled: false });
+    await service.autoInvoiceForPaidOrder(ORG, ORDER);
+    expect(create).not.toHaveBeenCalled();
+    // Not an error either — the merchant chose this.
+    expect(orderUpdates).toHaveLength(0);
+  });
+
+  it('records the reason when invoicing genuinely fails', async () => {
+    const { service, orderUpdates } = build({
+      createError: new Error('No GSTIN registration found.'),
+    });
+    await service.autoInvoiceForPaidOrder(ORG, ORDER);
+    expect(orderUpdates).toHaveLength(1);
+    expect(orderUpdates[0].data.invoiceError).toMatch(/No GSTIN/);
+    expect(orderUpdates[0].data.invoiceErrorAt).toBeInstanceOf(Date);
+  });
+
+  it('treats a duplicate attempt on an already-invoiced order as success', async () => {
+    const { service, orderUpdates } = build({
+      liveInvoice: true,
+      createError: new Error('Invoice INV-26-27/000001 already exists for this order.'),
+    });
+
+    await service.autoInvoiceForPaidOrder(ORG, ORDER);
+
+    // Clears any stale error rather than recording a new one.
+    expect(orderUpdates).toHaveLength(1);
+    expect(orderUpdates[0].data).toEqual({ invoiceError: null, invoiceErrorAt: null });
+    expect(orderUpdates[0].where.invoiceError).toEqual({ not: null });
+  });
+
+  it('never throws, so it cannot break the payment that triggered it', async () => {
+    const { service } = build({ createError: new Error('boom') });
+    await expect(service.autoInvoiceForPaidOrder(ORG, ORDER)).resolves.toBeUndefined();
+  });
+});

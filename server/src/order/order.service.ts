@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   ChannelPlatform,
@@ -35,7 +36,13 @@ import { GstCalculatorService } from '../gst/gst-calculator.service';
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
-import { ShopifyPushService } from '../channel/shopify-push.service';
+import { ShopifyPushService, isStalePendingSync } from '../channel/shopify-push.service';
+
+/// Recorded on `metadata.shopifySync.error` when a push could not even be
+/// queued. Distinct wording from a worker failure so the audit can tell the
+/// two apart; `attempts` is not incremented because nothing ran.
+const QUEUE_UNAVAILABLE_ERROR =
+  'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -98,6 +105,7 @@ import {
   ORDER_OPEN_MUTATION,
   ORDER_UPDATE_MUTATION,
 } from '../channel/shopify-graphql.types';
+import { mapFulfilmentLines } from '../channel/fulfillment-line-map.util';
 
 /**
  * Fulfilment-order states Shopify will not accept a fulfilment against.
@@ -782,6 +790,11 @@ export class OrderService {
           lineTotal: number;
           taxAmount: number;
           taxable: boolean;
+          /// The GST heads this line was charged, in the REST `tax_lines`
+          /// shape (rate as a fraction) so `OrderLineItem.channelTaxLines`
+          /// reads the same for offline and Shopify-pulled orders. The push
+          /// to Shopify sends exactly these.
+          taxLines: Array<{ title: string; rate: number; price: string }>;
         }> = [];
 
         let subtotal = 0;
@@ -860,6 +873,13 @@ export class OrderService {
             // a non-taxable line, so honouring the flag at rate resolution
             // would have changed nothing on this path.
             taxable: v.taxable !== false,
+            taxLines: isIntraState
+              ? [
+                { title: 'CGST', rate: calc.cgstRate / 100, price: calc.cgstAmount.toFixed(2) },
+                { title: 'SGST', rate: calc.sgstRate / 100, price: calc.sgstAmount.toFixed(2) },
+              ].filter((t) => t.rate > 0)
+              : [{ title: 'IGST', rate: calc.igstRate / 100, price: calc.igstAmount.toFixed(2) }]
+                .filter((t) => t.rate > 0),
           });
         }
 
@@ -919,6 +939,10 @@ export class OrderService {
             // back instead of re-deriving and possibly disagreeing.
             placeOfSupplyCode: sellerGstin ? placeOfSupplyCode : null,
             gstType: sellerGstin ? resolvedGstType : null,
+            // Unit prices are pre-tax and the tax is on the lines — the same
+            // convention a Shopify order with `taxes_included: false` carries,
+            // so the push and the eventual rebadge agree on every total.
+            taxesIncluded: false,
             note: dto.note,
             metadata: {
               source: 'offline',
@@ -938,6 +962,11 @@ export class OrderService {
                 price: li.unitPrice,
                 totalDiscount: li.totalDiscount,
                 taxable: li.taxable,
+                // The MANUAL channel IS the sales channel here, so "tax the
+                // channel charged" is the GST the CRM computed. Read back by
+                // the Shopify push (see `pushOrder`).
+                channelTaxAmount: li.taxAmount,
+                channelTaxLines: li.taxLines as Prisma.InputJsonValue,
                 requiresShipping: false,
               })),
             },
@@ -1097,11 +1126,22 @@ export class OrderService {
           // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
           // even before the worker picks the job up.
           await this.markPendingSync(result.order.id, orgId);
-          await this.shopifyPushEnqueuer.enqueueOrderPush({
+          const queued = await this.shopifyPushEnqueuer.enqueueOrderPush({
             type: 'order',
             orderId: result.order.id,
             organizationId: orgId,
           });
+          if (!queued) {
+            // The claim above is only honest while a job exists. Without this
+            // the order sat PENDING for ever: the server answered
+            // ALREADY_QUEUED and the client hid the Sync action.
+            await this.shopifyPushService.recordFailure(
+              result.order.id,
+              orgId,
+              QUEUE_UNAVAILABLE_ERROR,
+              /* incrementAttempt */ false,
+            );
+          }
         }
       }
     } catch (err) {
@@ -1211,13 +1251,18 @@ export class OrderService {
 
     const meta = (order.metadata as Prisma.JsonObject) ?? {};
     const sync = (meta.shopifySync ?? null) as
-      | { status: 'PENDING' | 'SYNCED' | 'FAILED' }
+      | { status: 'PENDING' | 'SYNCED' | 'FAILED'; queuedAt?: string }
       | null;
 
     if (sync?.status === 'SYNCED') {
       return { status: 'ALREADY_SYNCED' as const, orderId: order.id };
     }
-    if (sync?.status === 'PENDING') {
+    // A PENDING claim is only trusted while it is young enough to still be
+    // in flight. An older one means the job never ran or was lost (queue
+    // down at claim time, job evicted) — let the merchant re-claim it. The
+    // enqueuer's per-order job id makes that safe even if the old job is
+    // somehow still live.
+    if (sync?.status === 'PENDING' && !isStalePendingSync(sync)) {
       return { status: 'ALREADY_QUEUED' as const, orderId: order.id };
     }
 
@@ -1242,11 +1287,22 @@ export class OrderService {
       },
     });
 
-    await this.shopifyPushEnqueuer.enqueueOrderPush({
+    const queued = await this.shopifyPushEnqueuer.enqueueOrderPush({
       type: 'order',
       orderId: order.id,
       organizationId: orgId,
     });
+    if (!queued) {
+      await this.shopifyPushService.recordFailure(
+        order.id,
+        orgId,
+        QUEUE_UNAVAILABLE_ERROR,
+        /* incrementAttempt */ false,
+      );
+      throw new ServiceUnavailableException(
+        'The Shopify sync queue is unavailable right now. The order is marked as failed to sync — try again in a few minutes.',
+      );
+    }
     return { status: 'QUEUED' as const, orderId: order.id };
   }
 
@@ -1271,7 +1327,15 @@ export class OrderService {
       'orders',
       orderId,
       organizationId,
-      { shopifySync: { status: 'PENDING', attempts: 0 } },
+      {
+        shopifySync: {
+          status: 'PENDING',
+          attempts: 0,
+          // Dates the claim so `isStalePendingSync` can tell a lost job from
+          // one still working through its retries.
+          queuedAt: new Date().toISOString(),
+        },
+      },
       Prisma.sql`AND COALESCE("metadata" -> 'shopifySync' ->> 'status', '') <> 'SYNCED'`,
     );
     return updated > 0;
@@ -1695,16 +1759,24 @@ export class OrderService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const updated = await tx.order.update({
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.order.update({
         where: { id },
         data: { financialStatus: OrderFinancialStatus.PAID },
       });
       await tx.orderTimelineEvent.create({
         data: { orderId: id, actorId: userId, action: 'paid', message: 'Order marked as paid' },
       });
-      return updated;
+      return row;
     });
+
+    // This IS the payment edge, so it invoices on the same terms as a Shopify
+    // webhook. Writing PAID locally used to defeat the webhook trigger: the
+    // reconciling `orders/updated` then saw PAID → PAID, which is not a
+    // transition, so marking an order paid in the CRM never produced an
+    // invoice. After the commit and non-throwing, like every other caller.
+    await this.invoiceService.autoInvoiceForPaidOrder(orgId, id);
+    return updated;
   }
 
   /**
@@ -1785,7 +1857,7 @@ export class OrderService {
     );
     ShopifyGraphqlClient.throwIfUserErrors(capResp.orderCapture.userErrors, 'orderCapture');
 
-    return this.prisma.$transaction(async (tx) => {
+    const captured = await this.prisma.$transaction(async (tx) => {
       const updated = await tx.order.update({
         where: { id },
         data: { financialStatus: OrderFinancialStatus.PAID },
@@ -1805,6 +1877,10 @@ export class OrderService {
       });
       return updated;
     });
+
+    // Capturing IS the payment edge — same reasoning as `markPaid`.
+    await this.invoiceService.autoInvoiceForPaidOrder(orgId, id);
+    return captured;
   }
 
   // ─── PHASE 2: FULFILLMENT & TRACKING ──────────────────────────────────────
@@ -2057,7 +2133,14 @@ export class OrderService {
         // hiding units that had already gone out.
         const held = await tx.orderLineItem.findMany({
           where: { id: { in: lineItemIds }, orderId },
-          select: { id: true, quantity: true, fulfilledQuantity: true },
+          select: {
+            id: true, quantity: true, fulfilledQuantity: true,
+            // Read so the line's CURRENT status can be passed as `previous`
+            // below. Hard-coding null there defeated the "never downgrade a
+            // delivered line" branch, so releasing a hold silently demoted a
+            // delivered line back to merely fulfilled.
+            fulfillmentStatus: true,
+          },
         });
         for (const li of held) {
           await tx.orderLineItem.update({
@@ -2066,7 +2149,7 @@ export class OrderService {
               fulfillmentStatus: this.statusForFulfilledQuantity(
                 li.fulfilledQuantity,
                 li.quantity,
-                null,
+                li.fulfillmentStatus,
               ),
             },
           });
@@ -2460,35 +2543,73 @@ export class OrderService {
       ORDER_FULFILLMENTS_WITH_LINES_QUERY,
       { id: ShopifyGraphqlClient.toGid('Order', order.externalId) },
     );
-    const shopifyMatch = (resp.order?.fulfillments ?? []).find(
-      (f) =>
-        f.status !== 'CANCELLED' &&
-        f.fulfillmentLineItems.nodes.some(
-          (n) => n.lineItem && ShopifyGraphqlClient.extractId(n.lineItem.id) === line.externalId,
-        ),
-    );
-    if (!shopifyMatch) return null;
+    const remote = resp.order?.fulfillments ?? [];
 
-    // Record the mapping so per-product actions are instant next time.
-    const externalId = ShopifyGraphqlClient.extractId(shopifyMatch.id);
-    const existing = local.find((f) => f.externalId === externalId);
-    const lineItemIds = Array.from(
-      new Set([
-        ...(existing ? this.fulfillmentLineItemIds(existing.metadata) : []),
-        line.id,
-      ]),
-    );
-    return this.prisma.orderFulfillment.upsert({
-      where: { orderId_externalId: { orderId: order.id, externalId } },
-      create: {
-        orderId: order.id,
-        externalId,
-        status: 'fulfilled',
-        shippedAt: new Date(),
-        metadata: { lineItemIds } as Prisma.InputJsonValue,
+    // Backfill EVERY shipment in this response, not just the one line asked
+    // about. The response already carries all of them with their lines, so
+    // recording one id at a time cost the same call and left the stored array a
+    // permanent subset — which is why per-line tracking stayed blank on
+    // Shopify orders even after a line had been resolved once.
+    const localLines = await this.prisma.orderLineItem.findMany({
+      where: { orderId: order.id },
+      select: {
+        id: true, externalId: true, quantity: true,
+        fulfillmentStatus: true, fulfilledQuantity: true,
       },
-      update: { metadata: { lineItemIds } as Prisma.InputJsonValue },
     });
+    const existingIds = new Map<string, string[]>();
+    for (const f of local) {
+      if (f.externalId) existingIds.set(f.externalId, this.fulfillmentLineItemIds(f.metadata));
+    }
+    const { lineItemIdsByExternalId, linePatches } = mapFulfilmentLines(
+      remote.map((f) => ({
+        externalId: ShopifyGraphqlClient.extractId(f.id),
+        status: f.status,
+        lines: f.fulfillmentLineItems.nodes
+          .filter((n) => n.lineItem)
+          .map((n) => ({
+            shopifyLineId: ShopifyGraphqlClient.extractId(n.lineItem!.id),
+            quantity: n.quantity,
+          })),
+      })),
+      localLines,
+      existingIds,
+    );
+
+    let resolved: Awaited<ReturnType<typeof this.prisma.orderFulfillment.upsert>> | null = null;
+    for (const [externalId, lineItemIds] of lineItemIdsByExternalId) {
+      const row = await this.prisma.orderFulfillment.upsert({
+        where: { orderId_externalId: { orderId: order.id, externalId } },
+        create: {
+          orderId: order.id,
+          externalId,
+          status: 'fulfilled',
+          shippedAt: new Date(),
+          metadata: { lineItemIds } as Prisma.InputJsonValue,
+        },
+        update: { metadata: { lineItemIds } as Prisma.InputJsonValue },
+      });
+      // Only a live shipment can answer for the line — a cancelled one is
+      // recorded for membership but must not be handed back as its fulfilment.
+      if (lineItemIds.includes(line.id) && row.status !== 'cancelled') resolved = row;
+    }
+
+    // The order's own line rows carry no shipped counts on the Shopify path, so
+    // correct them while we know the truth. Best-effort: the caller's action
+    // matters more than this bookkeeping.
+    for (const patch of linePatches) {
+      await this.prisma.orderLineItem
+        .update({
+          where: { id: patch.id },
+          data: {
+            fulfilledQuantity: patch.fulfilledQuantity,
+            fulfillmentStatus: patch.fulfillmentStatus,
+          },
+        })
+        .catch(() => undefined);
+    }
+
+    return resolved;
   }
 
   /** Best-effort: cancel a fulfilment on Shopify. */
@@ -2605,6 +2726,23 @@ export class OrderService {
     // Cancelling a fulfilment reverts ALL of its lines to unfulfilled.
     const revertIds = fulfillment ? this.fulfillmentLineItemIds(fulfillment.metadata) : [];
     const ids = revertIds.length ? revertIds : [lineId];
+
+    // A shared shipment can carry another supplier's items, and this reverts
+    // every line on it. The fulfil path asserts ownership before acting; this
+    // one did not, so a vendor could wipe a co-vendor's lines by unfulfilling
+    // their own. Refuse rather than silently reverting a subset, which would
+    // leave the shipment cancelled while its other lines still read fulfilled.
+    if (vendorScope && ids.length > 1) {
+      const foreign = await this.prisma.orderLineItem.count({
+        where: { id: { in: ids }, orderId, vendor: { not: vendorScope } },
+      });
+      if (foreign > 0) {
+        throw new BadRequestException(
+          "This shipment also contains another supplier's items, so it cannot be " +
+          'unfulfilled here. Ask the merchant to cancel the shipment instead.',
+        );
+      }
+    }
     // One transaction: reverting the lines, cancelling the shipment and
     // recomputing the order's status are a single logical change, and a partial
     // apply leaves the order header disagreeing with its own line items.
@@ -3254,11 +3392,18 @@ export class OrderService {
     let ordered = 0;
     let shipped = 0;
     for (const li of items) {
+      // The `?? ` fallback below never fired: the column is NOT NULL with a
+      // default of 0, so a Shopify line — which the sync gives a status but no
+      // count — read 0 rather than undefined. Recomputing the header on such an
+      // order flipped it from FULFILLED to UNFULFILLED. Treat a zero count on a
+      // line whose status says shipped as fully shipped.
+      const counted = li.fulfilledQuantity ?? 0;
       const done =
-        li.fulfilledQuantity ??
-        (li.fulfillmentStatus === 'fulfilled' || li.fulfillmentStatus === 'delivered'
-          ? li.quantity
-          : 0);
+        counted > 0
+          ? counted
+          : li.fulfillmentStatus === 'fulfilled' || li.fulfillmentStatus === 'delivered'
+            ? li.quantity
+            : 0;
       ordered += li.quantity;
       shipped += Math.min(done, li.quantity);
     }

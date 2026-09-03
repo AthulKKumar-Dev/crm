@@ -3,6 +3,7 @@ import { ArrowLeft, Loader2, Printer } from "lucide-react";
 import { useOrder } from "~/hooks/use-order-queries";
 import { OrderItemsFulfillment } from "~/components/app/order-items-fulfillment";
 import { cn } from "~/lib/utils";
+import { fulfillmentStatusLabel, hasOutstandingUnits } from "~/lib/order-status";
 import type { VendorOrderDetail as VendorOrder } from "~/types/api";
 import { QueryErrorState } from "~/components/app/query-error-state";
 
@@ -100,6 +101,13 @@ export function VendorOrderDetail({ orderId }: { orderId: string }) {
             title="Your items"
             showSubtotal
             allowInProgress
+            /* This component renders only for a VENDOR (see the role router in
+               routes/app/orders/$id.tsx), and every fulfilment endpoint accepts
+               vendors, so acting is always allowed here. Passed explicitly
+               because both props are required — omitting the old single flag
+               silently granted the full action set. */
+            canActOnItems
+            canCreateFulfillment={hasOutstandingUnits(order.lineItems)}
           />
 
           {/* Shipments — read-only tracking. */}
@@ -114,7 +122,7 @@ export function VendorOrderDetail({ orderId }: { orderId: string }) {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="text-xs font-medium capitalize">
-                          {f.status.replace("_", " ")}
+                          {fulfillmentStatusLabel(f.status)}
                         </p>
                         {f.trackingNumber && (
                           <p className="text-[10px] text-muted-foreground">

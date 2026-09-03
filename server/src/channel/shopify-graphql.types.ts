@@ -70,6 +70,16 @@ export interface OrderLineItemNode {
   variantTitle: string | null;
   sku: string | null;
   quantity: number;
+  /**
+   * Units on this line NOT yet fulfilled. The only per-line shipping signal the
+   * GraphQL order query exposes — there is no flat `fulfillment_status` — and a
+   * plain scalar, so unlike a nested `fulfillmentLineItems` connection it adds
+   * nothing meaningful to the query's calculated cost. Without it a Shopify
+   * order fulfilled in the admin arrived with every line reading unfulfilled
+   * and no shipped count, so the whole order showed as outstanding and offered
+   * no fulfilment actions at all.
+   */
+  unfulfilledQuantity: number;
   originalUnitPriceSet: MoneyBag;
   totalDiscountSet: MoneyBag;
   requiresShipping: boolean;
@@ -178,6 +188,7 @@ export const ORDER_LINE_ITEMS_PAGE_QUERY = /* GraphQL */ `
           variantTitle
           sku
           quantity
+          unfulfilledQuantity
           originalUnitPriceSet { shopMoney { amount currencyCode } }
           totalDiscountSet { shopMoney { amount currencyCode } }
           requiresShipping
@@ -275,6 +286,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
             variantTitle
             sku
             quantity
+            unfulfilledQuantity
             originalUnitPriceSet { shopMoney { amount currencyCode } }
             totalDiscountSet { shopMoney { amount currencyCode } }
             requiresShipping

@@ -39,6 +39,13 @@ import { ShopifyLocationSyncService } from './shopify-location-sync.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { becamePaid } from './order-paid-transition.util';
+import { CRM_SOURCE_NAME, carriesCrmMarker, isLocallyPushedPayload, localOrderIdOf } from './order-rebadge.util';
+import {
+    mapFulfilmentLines,
+    shippedFromPayload,
+    shouldAcceptRemoteFulfilmentStatus,
+    statusForShippedUnits,
+} from './fulfillment-line-map.util';
 import {
     DRAFT_MIRROR_QUEUE,
     DraftMirrorJobData,
@@ -865,6 +872,11 @@ export class ShopifySyncService {
             quantity: li.quantity,
             price: li.originalUnitPriceSet?.shopMoney?.amount ?? '0',
             total_discount: li.totalDiscountSet?.shopMoney?.amount ?? '0',
+            // Emitted under its REST name so both ingestion paths converge —
+            // webhook payloads already carry `fulfillable_quantity`. This is
+            // what lets the upsert derive a shipped count, and from it a
+            // per-line status, on the pull path.
+            fulfillable_quantity: li.unfulfilledQuantity,
             // `fulfillment_status` is intentionally omitted — GraphQL OrderLineItem
             // has no flat equivalent; leaving it `undefined` means the upsert
             // preserves any prior value rather than overwriting with null.
@@ -1703,14 +1715,16 @@ export class ShopifySyncService {
                 shippingAddress: true, billingAddress: true,
             },
         });
-        if (
-            !existing &&
-            so.source_identifier &&
-            (!so.source_name || so.source_name === 'collabo-crm')
-        ) {
+        //
+        // The identifier alone decides (see order-rebadge.util). `source_name`
+        // and the `collabo-crm` tag are checked only to WARN when Shopify has
+        // rewritten the markers — a duplicate row is the silent failure this
+        // block exists to prevent, so a marker mismatch must be visible.
+        const localOrderId = localOrderIdOf(so);
+        if (!existing && localOrderId) {
             const pushedLocally = await this.prisma.order.findFirst({
                 where: {
-                    id: String(so.source_identifier),
+                    id: localOrderId,
                     organizationId: orgId,
                     channel: { platform: ChannelPlatform.MANUAL },
                 },
@@ -1722,6 +1736,13 @@ export class ShopifySyncService {
                 },
             });
             if (pushedLocally) {
+                if (!carriesCrmMarker(so)) {
+                    this.logger.warn(
+                        `Shopify order ${externalId} names local order ${pushedLocally.name} (${pushedLocally.id}) ` +
+                        `via source_identifier but carries source_name="${so.source_name ?? ''}" and no ` +
+                        `"${CRM_SOURCE_NAME}" tag — rebadging on the identifier alone. Check the push markers.`,
+                    );
+                }
                 await this.prisma.order.update({
                     where: { id: pushedLocally.id },
                     data: {
@@ -1968,27 +1989,41 @@ export class ShopifySyncService {
                 });
                 orderId = created.id;
 
-                // No prior state to diff against, so an order that arrives
-                // already paid IS the transition — the common case for an
-                // online checkout that captured payment before the webhook
-                // reached us.
-                if (becamePaid(null, this.mapFinancialStatus(so.financial_status))) {
-                    becamePaidOrderId = orderId;
-                }
-
-                // First time we have seen this order. One 'created' entry, dated
-                // to Shopify's own created_at so a backfill of an existing store
-                // does not date every historical order to the sync run.
-                await tx.orderTimelineEvent.create({
-                    data: {
-                        orderId,
-                        actorId: null,
-                        action: 'created',
-                        message: `Order placed in ${so.source_name === 'collabo-crm' ? 'the CRM' : 'Shopify'}`,
-                        metadata: { source: 'shopify' } as Prisma.InputJsonValue,
-                        createdAt: so.created_at ? new Date(so.created_at) : new Date(),
-                    },
+                // `existing` was read OUTSIDE this transaction, so two
+                // concurrent deliveries of the same new order can both arrive
+                // here. The upsert above resolves that correctly, but
+                // everything below is "first sighting" work and would run
+                // twice — which is exactly what happened: orders carrying two
+                // `created` entries, and a second PAID transition that tried
+                // to issue an invoice the first delivery had already issued.
+                // A prior `created` event is the in-transaction proof that
+                // this order was already known.
+                const alreadySeen = await tx.orderTimelineEvent.findFirst({
+                    where: { orderId, action: 'created' },
+                    select: { id: true },
                 });
+
+                if (!alreadySeen) {
+                    // No prior state to diff against, so an order that arrives
+                    // already paid IS the transition.
+                    if (becamePaid(null, this.mapFinancialStatus(so.financial_status))) {
+                        becamePaidOrderId = orderId;
+                    }
+
+                    // One 'created' entry, dated to Shopify's own created_at so
+                    // a backfill of an existing store does not date every
+                    // historical order to the sync run.
+                    await tx.orderTimelineEvent.create({
+                        data: {
+                            orderId,
+                            actorId: null,
+                            action: 'created',
+                            message: `Order placed in ${isLocallyPushedPayload(so) ? 'the CRM' : 'Shopify'}`,
+                            metadata: { source: 'shopify' } as Prisma.InputJsonValue,
+                            createdAt: so.created_at ? new Date(so.created_at) : new Date(),
+                        },
+                    });
+                }
             } else {
                 // Compare-and-set on `externalUpdatedAt`. It was written on
                 // every upsert and never read, so an `orders/create` arriving
@@ -2096,40 +2131,10 @@ export class ShopifySyncService {
      * backstops the race between two concurrent webhooks.
      */
     private async maybeAutoInvoice(orgId: string, orderId: string): Promise<void> {
-        try {
-            const settings = await this.orgSettings.getOrderSettings(orgId);
-            if (!settings.autoInvoiceOnPayment) return;
-
-            const invoice = await this.invoiceService.create(orgId, { orderId });
-            this.logger.log(
-                `Auto-issued invoice ${invoice.invoiceNumber} for paid order ${orderId}`,
-            );
-        } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            this.logger.warn(
-                `Auto-invoice skipped for paid order ${orderId}: ${message}`,
-            );
-
-            // RECORD it. Swallowing stays correct (see above), but swallowing
-            // SILENTLY meant an org with GST disabled or no default GSTIN
-            // accrued paid, uninvoiced orders that nothing in the product ever
-            // mentioned. The filing tab now counts these.
-            //
-            // Wrapped separately: bookkeeping must never be the thing that
-            // breaks order ingestion, which is the entire reason the outer
-            // catch exists.
-            try {
-                await this.prisma.order.updateMany({
-                    where: { id: orderId, organizationId: orgId },
-                    data: { invoiceError: message.slice(0, 500), invoiceErrorAt: new Date() },
-                });
-            } catch (bookkeepingErr) {
-                this.logger.error(
-                    `Could not record auto-invoice failure for order ${orderId}`,
-                    bookkeepingErr instanceof Error ? bookkeepingErr.stack : undefined,
-                );
-            }
-        }
+        // Delegated so the CRM's own Mark-as-paid and Capture actions issue
+        // invoices on exactly the same terms as a webhook — see
+        // `InvoiceService.autoInvoiceForPaidOrder`. It never throws.
+        await this.invoiceService.autoInvoiceForPaidOrder(orgId, orderId);
     }
 
     /**
@@ -2200,6 +2205,18 @@ export class ShopifySyncService {
             productByExternalId: Map<string, { vendor: string | null; vendorKey: string | null }>;
         },
     ): Promise<void> {
+        // Current per-line statuses, read once, so `statusForShippedUnits` can
+        // be given a real `previous` and never demote a line the CRM already
+        // marked delivered back to merely fulfilled.
+        const existingLineStatus = new Map<string, string | null>();
+        if (payloadLines.length > 0) {
+            const rows = await tx.orderLineItem.findMany({
+                where: { orderId },
+                select: { externalId: true, fulfillmentStatus: true },
+            });
+            for (const row of rows) existingLineStatus.set(row.externalId, row.fulfillmentStatus);
+        }
+
         for (const li of payloadLines) {
             const variant = li.variant_id
                 ? maps.variantByExternalId.get(String(li.variant_id))
@@ -2217,6 +2234,31 @@ export class ShopifySyncService {
                 product?.vendor ??
                 null;
 
+            // What Shopify says has shipped on this line.
+            //
+            // Nothing used to write `fulfilledQuantity` on the Shopify path at
+            // all, and the pull carries no flat per-line `fulfillment_status`,
+            // so an order fulfilled in the Shopify admin landed with every line
+            // reading unfulfilled and a zero count. The whole order then showed
+            // as outstanding, offered no fulfilment actions, and recomputing
+            // the header from those lines flipped it to UNFULFILLED.
+            //
+            // `fulfillable_quantity` is the units NOT yet shipped, and both
+            // ingestion paths now supply it. Absent (an older payload) leaves
+            // both fields untouched rather than asserting zero.
+            const shipped = shippedFromPayload(li);
+            const shipmentPatch =
+                shipped === null
+                    ? { ...(li.fulfillment_status !== undefined ? { fulfillmentStatus: li.fulfillment_status } : {}) }
+                    : {
+                        fulfilledQuantity: shipped,
+                        fulfillmentStatus: statusForShippedUnits(
+                            shipped,
+                            li.quantity,
+                            existingLineStatus.get(String(li.id)) ?? null,
+                        ),
+                    };
+
             await tx.orderLineItem.upsert({
                 where: { orderId_externalId: { orderId, externalId: String(li.id) } },
                 create: {
@@ -2228,8 +2270,9 @@ export class ShopifySyncService {
                     fulfillmentStatus: li.fulfillment_status, requiresShipping: li.requires_shipping ?? true,
                     taxable: li.taxable ?? true, properties: li.properties || null,
                     ...channelTax(li),
+                    ...shipmentPatch,
                 },
-                update: { variantId, vendor, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', fulfillmentStatus: li.fulfillment_status, ...channelTax(li) },
+                update: { variantId, vendor, title: li.title || 'Unknown', quantity: li.quantity, price: li.price || '0', totalDiscount: li.total_discount || '0', ...channelTax(li), ...shipmentPatch },
             });
         }
 
@@ -2278,11 +2321,108 @@ export class ShopifySyncService {
             }
         }
 
-        for (const ff of so.fulfillments || []) {
+        const incomingFulfilments: any[] = so.fulfillments || [];
+
+        // Which local lines each shipment covers, and what that says shipped.
+        //
+        // `metadata.lineItemIds` is the ONLY link between a shipment and its
+        // lines, and this upsert never wrote it — so on every Shopify-fulfilled
+        // order per-line tracking read null and "Add tracking" was rejected
+        // outright. The same pass writes back `fulfilledQuantity` /
+        // `fulfillmentStatus`, which nothing populated either: the GraphQL pull
+        // deliberately omits per-line fulfilment status, so a fully-shipped
+        // Shopify order arrived with every line looking unfulfilled.
+        //
+        // REST/webhook payloads carry `line_items` on each fulfilment for free.
+        // The GraphQL pull does not, and asking for it inside the paged orders
+        // query would multiply its cost by up to 50x100 nodes per order — those
+        // orders are reconciled instead by `resolveFulfillmentForLine`, which
+        // already fetches exactly this data. So: only do the work when the
+        // payload actually carried it.
+        const fulfilmentsWithLines = incomingFulfilments.filter(
+            (ff) => Array.isArray(ff.line_items) && ff.line_items.length > 0,
+        );
+        let lineIdsByFulfilment = new Map<string, string[]>();
+        if (fulfilmentsWithLines.length > 0) {
+            const localLines = await tx.orderLineItem.findMany({
+                where: { orderId },
+                select: {
+                    id: true, externalId: true, quantity: true,
+                    fulfillmentStatus: true, fulfilledQuantity: true,
+                },
+            });
+            const existingRows = await tx.orderFulfillment.findMany({
+                where: { orderId },
+                select: { externalId: true, metadata: true },
+            });
+            const existing = new Map<string, string[]>();
+            for (const row of existingRows) {
+                const ids = (row.metadata as any)?.lineItemIds;
+                if (row.externalId && Array.isArray(ids)) {
+                    existing.set(row.externalId, ids.filter((x: unknown): x is string => typeof x === 'string'));
+                }
+            }
+            const mapped = mapFulfilmentLines(
+                fulfilmentsWithLines.map((ff) => ({
+                    externalId: String(ff.id),
+                    status: ff.status ?? null,
+                    lines: (ff.line_items as any[]).map((fl) => ({
+                        shopifyLineId: String(fl.id),
+                        quantity: Number(fl.quantity ?? 0),
+                    })),
+                })),
+                localLines,
+                existing,
+            );
+            lineIdsByFulfilment = mapped.lineItemIdsByExternalId;
+            for (const patch of mapped.linePatches) {
+                await tx.orderLineItem.update({
+                    where: { id: patch.id },
+                    data: {
+                        fulfilledQuantity: patch.fulfilledQuantity,
+                        fulfillmentStatus: patch.fulfillmentStatus,
+                    },
+                });
+            }
+        }
+
+        // Read the local statuses once so a shipment the CRM marked delivered
+        // is not silently reverted to Shopify's `success` — Shopify has no
+        // delivered state, so its value carries less information than ours.
+        const localStatuses = new Map<string, string>();
+        if (incomingFulfilments.length > 0) {
+            const rows = await tx.orderFulfillment.findMany({
+                where: { orderId },
+                select: { externalId: true, status: true },
+            });
+            for (const row of rows) {
+                if (row.externalId) localStatuses.set(row.externalId, row.status);
+            }
+        }
+
+        for (const ff of incomingFulfilments) {
+            const externalId = String(ff.id);
+            const incomingStatus = ff.status || 'pending';
+            const acceptStatus = shouldAcceptRemoteFulfilmentStatus(
+                localStatuses.get(externalId),
+                incomingStatus,
+            );
+            const lineItemIds = lineIdsByFulfilment.get(externalId);
             await tx.orderFulfillment.upsert({
-                where: { orderId_externalId: { orderId, externalId: String(ff.id) } },
-                create: { orderId, externalId: String(ff.id), status: ff.status || 'pending', trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url, trackingCompany: ff.tracking_company, shippedAt: ff.created_at ? new Date(ff.created_at) : null },
-                update: { status: ff.status || 'pending', trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url, trackingCompany: ff.tracking_company },
+                where: { orderId_externalId: { orderId, externalId } },
+                create: {
+                    orderId, externalId, status: incomingStatus,
+                    trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url,
+                    trackingCompany: ff.tracking_company,
+                    shippedAt: ff.created_at ? new Date(ff.created_at) : null,
+                    ...(lineItemIds ? { metadata: { lineItemIds } as Prisma.InputJsonValue } : {}),
+                },
+                update: {
+                    ...(acceptStatus ? { status: incomingStatus } : {}),
+                    trackingNumber: ff.tracking_number, trackingUrl: ff.tracking_url,
+                    trackingCompany: ff.tracking_company,
+                    ...(lineItemIds ? { metadata: { lineItemIds } as Prisma.InputJsonValue } : {}),
+                },
             });
         }
 

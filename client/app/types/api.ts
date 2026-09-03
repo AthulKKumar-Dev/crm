@@ -988,6 +988,8 @@ export interface OrderShopifySync {
   shopifyOrderName?: string;
   error?: string;
   syncedAt?: string;
+  /** When the PENDING claim was stamped; absent on rows claimed before it existed. */
+  queuedAt?: string;
   attempts?: number;
 }
 
@@ -1182,6 +1184,14 @@ export interface OrderDetail extends Order {
   fulfillments: OrderFulfillment[];
   refunds: OrderRefund[];
   timeline: OrderTimeline[];
+  /**
+   * Why automatic invoicing did not issue a document for this order, if it
+   * tried and failed. Cleared as soon as an invoice is issued, and never set
+   * when the order already has one. The server has always returned it; it was
+   * simply never shown, so a failure was invisible on the order itself.
+   */
+  invoiceError?: string | null;
+  invoiceErrorAt?: string | null;
   /** The order's live (non-cancelled) GST invoice — at most one, enforced by
    *  a partial unique index server-side. Empty array when not invoiced. */
   invoices?: Pick<
@@ -1459,6 +1469,14 @@ export interface TaxSettings {
    * matches makes the invoice declare more than was collected.
    */
   taxShipping: boolean;
+  /**
+   * Series prefix for invoice numbers — "SJ" gives SJ-26-27/000001. Defaults
+   * to "INV". Up to 3 letters or digits; "CN" is reserved for credit notes.
+   *
+   * ⚠️ Changing it starts a new consecutive run at 000001, because the next
+   * number is read back per prefix.
+   */
+  invoicePrefix: string;
 }
 
 /** Response from GET /organization/settings — every domain returned together. */

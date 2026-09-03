@@ -35,7 +35,9 @@ import {
 } from "~/hooks/use-order-mutations";
 import { formatCurrency } from "~/lib/utils";
 import { useCurrentRole } from "~/hooks/use-current-role";
-import type { OrderDetail, OrderCancelReason } from "~/types/api";
+import type { OrderDetail, OrderCancelReason, OrderShopifySync } from "~/types/api";
+import { canRetryShopifySync } from "~/lib/shopify-sync";
+import { hasOutstandingUnits } from "~/lib/order-status";
 import {
   ModalShell,
   DialogFooter,
@@ -99,25 +101,44 @@ export function useOrderActionGates(order: OrderDetail | undefined) {
     isShopify &&
     (order.financialStatus === "AUTHORIZED" ||
       order.financialStatus === "PARTIALLY_PAID");
+  // Two DIFFERENT questions, which used to share one flag.
+  //
+  // `canFulfill` answers "may I create a new shipment", and one flag answering
+  // both meant the whole per-line action set vanished the moment an order was
+  // fully fulfilled — which the server does the instant the last unit ships. So
+  // on the normal end state of every order there was no way to unfulfil, mark
+  // delivered or add tracking, even though the server accepts all three there.
+  //
   // POST /orders/:id/fulfillments is ORG_OPERATORS_AND_VENDORS. This carried no
   // role gate at all, so a VIEWER was shown "Fulfil items" at four separate
   // entry points — every one of them a guaranteed 403.
+  //
+  // Keyed on units outstanding rather than the header enum: a RESTOCKED or
+  // FULFILLED order has nothing left to ship and so offers no Fulfil button,
+  // but a PARTIAL one still does, and the button is never rendered dead.
   const canFulfill =
     !!order &&
     canOperateOrVendor &&
     !isCancelled &&
-    order.fulfillmentStatus !== "FULFILLED" &&
-    order.fulfillmentStatus !== "RESTOCKED";
+    order.fulfillmentStatus !== "RESTOCKED" &&
+    hasOutstandingUnits(order.lineItems ?? []);
+
+  // Per-line corrections: unfulfil, mark delivered, add/edit tracking, hold and
+  // release. Role only — no server endpoint behind these looks at the order's
+  // fulfilment status. Still allowed on a CANCELLED order so a shipment sent in
+  // error can be walked back; only the forward actions above are withdrawn.
+  const canActOnItems = !!order && canOperateOrVendor;
   const canCancel = canManage && !isCancelled && !!order;
   // PATCH /orders/:id is ORG_OPERATORS — covers Edit details, the note field and
   // the tag editor, all three of which hit that one endpoint.
   const canEdit = !!order && canOperate;
 
   // Manual sync to Shopify: only meaningful for MANUAL orders that haven't
-  // been pushed yet (or where the previous push failed).
-  const syncMeta = (order?.metadata as { shopifySync?: { status?: string } } | undefined)
+  // been pushed yet, where the previous push failed, or whose PENDING claim
+  // is old enough that the job has clearly been lost (see lib/shopify-sync).
+  const syncMeta = (order?.metadata as { shopifySync?: OrderShopifySync } | undefined)
     ?.shopifySync;
-  const canSyncToShopify = isManual && (!syncMeta || syncMeta.status === "FAILED");
+  const canSyncToShopify = isManual && canRetryShopifySync(syncMeta);
 
   return {
     canManage,
@@ -128,6 +149,7 @@ export function useOrderActionGates(order: OrderDetail | undefined) {
     canMarkPaid,
     canCapture,
     canFulfill,
+    canActOnItems,
     canCancel,
     canEdit,
     canSyncToShopify,

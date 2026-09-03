@@ -73,7 +73,57 @@ export interface ShopifySyncMetadata {
   shopifyOrderName?: string;
   error?: string;
   syncedAt?: string;
+  /// When the PENDING claim was stamped. Lets a claim whose job never ran
+  /// (queue unreachable, job evicted) be told apart from one still in flight.
+  queuedAt?: string;
   attempts: number;
+}
+
+/**
+ * A PENDING claim older than this is treated as abandoned and may be
+ * re-claimed. The worker retries 5× with exponential backoff (10s → 160s),
+ * so a live job finishes or fails well inside this window. Mirrored on the
+ * client (`app/lib/shopify-sync.ts`) so the Sync action reappears at the
+ * same moment the server would accept it.
+ */
+export const STALE_PENDING_SYNC_MS = 15 * 60 * 1000;
+
+export function isStalePendingSync(
+  sync: Pick<ShopifySyncMetadata, 'status' | 'queuedAt'> | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (sync?.status !== 'PENDING') return false;
+  // Rows claimed before `queuedAt` existed cannot prove they are still live.
+  if (!sync.queuedAt) return true;
+  const at = Date.parse(sync.queuedAt);
+  return !Number.isFinite(at) || now - at > STALE_PENDING_SYNC_MS;
+}
+
+/**
+ * Per-line tax the CRM computed for an offline order, persisted on
+ * `OrderLineItem.channelTaxLines` in the REST `tax_lines` shape Shopify
+ * itself uses (rate as a fraction, price as a string) so pull and push read
+ * the same thing.
+ */
+export interface StoredTaxLine {
+  title: string;
+  rate: number;
+  price: string;
+}
+
+export function readStoredTaxLines(value: Prisma.JsonValue | null | undefined): StoredTaxLine[] {
+  if (!Array.isArray(value)) return [];
+  const out: StoredTaxLine[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const line = raw as Record<string, unknown>;
+    const title = typeof line.title === 'string' ? line.title : null;
+    const rate = typeof line.rate === 'number' ? line.rate : Number(line.rate);
+    const price = line.price === undefined || line.price === null ? null : String(line.price);
+    if (!title || !Number.isFinite(rate) || price === null) continue;
+    out.push({ title, rate, price });
+  }
+  return out;
 }
 
 /**
@@ -195,20 +245,29 @@ export class ShopifyPushService {
     const currency = order.currency;
     const money = (amount: string) => ({ shopMoney: { amount, currencyCode: currency } });
 
+    // `orderCreate` does NOT compute tax: without `taxLines` Shopify records
+    // the pre-tax unit prices as the whole order (verified on collabo-test
+    // #1008: total 1499.90, tax 0, against a 1769.90 SALE transaction). The
+    // offline path stores the GST it actually charged per line, so send it
+    // and the Shopify total matches the transaction — and the rebadge later
+    // writes the same totals back instead of erasing the tax on an order
+    // that already has a GST invoice.
     const lineItems = order.lineItems.map((li) => {
       const externalId = li.variant?.externalId;
       const hasShopifyVariant = !!externalId && !externalId.startsWith('manual_');
+      const taxLines = readStoredTaxLines(li.channelTaxLines).map((t) => ({
+        title: t.title,
+        rate: t.rate,
+        priceSet: money(t.price),
+      }));
+      const base = {
+        quantity: li.quantity,
+        priceSet: money(li.price.toString()),
+        ...(taxLines.length > 0 ? { taxLines } : {}),
+      };
       return hasShopifyVariant
-        ? {
-            variantId: ShopifyGraphqlClient.toGid('ProductVariant', externalId!),
-            quantity: li.quantity,
-            priceSet: money(li.price.toString()),
-          }
-        : {
-            title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title,
-            quantity: li.quantity,
-            priceSet: money(li.price.toString()),
-          };
+        ? { variantId: ShopifyGraphqlClient.toGid('ProductVariant', externalId!), ...base }
+        : { title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title, ...base };
     });
 
     // Customers originally synced from Shopify are associated by GID so no
@@ -223,6 +282,8 @@ export class ShopifyPushService {
 
     const orderInput: Record<string, unknown> = {
       currency,
+      // Line prices are pre-tax; the tax rides on `taxLines` above.
+      taxesIncluded: false,
       email: order.customer?.email ?? undefined,
       phone: order.customer?.phone ?? undefined,
       note: order.note ?? undefined,

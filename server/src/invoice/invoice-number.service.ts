@@ -2,9 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 
-/** Series prefixes. Each is its own gapless, consecutive statutory run. */
-const INVOICE_PREFIX = 'INV';
-const CREDIT_NOTE_PREFIX = 'CN';
+import { parseTaxSettings } from '../organization-settings/schemas/tax-settings.schema';
+import {
+  CREDIT_NOTE_PREFIX,
+  buildDocumentNumber,
+  resolveInvoicePrefix,
+} from './invoice-number.util';
 
 @Injectable()
 export class InvoiceNumberService {
@@ -12,8 +15,14 @@ export class InvoiceNumberService {
 
   /**
    * Generate the next sequential invoice number for an organization.
-   * Format: INV-{financialYear}/{paddedSequential}
-   * Example: INV-2025-26/000001
+   * Format: {series}-{shortFinancialYear}/{paddedSequential}
+   * Example: INV-25-26/000001, or SJ-25-26/000001 for a merchant series.
+   *
+   * The series comes from `taxSettings.invoicePrefix` and defaults to `INV`.
+   * Changing it starts a NEW consecutive run at 000001, because the sequence
+   * is read back per prefix — which is legitimate under GST (multiple series
+   * are allowed, each consecutive) but is a visible change the settings screen
+   * warns about before saving.
    *
    * Concurrency contract: this is read-max-then-increment, which races by
    * design. Safety comes from the caller, not from this helper —
@@ -33,7 +42,7 @@ export class InvoiceNumberService {
     financialYear: string,
     tx?: Prisma.TransactionClient,
   ): Promise<string> {
-    return this.next(orgId, financialYear, INVOICE_PREFIX, tx);
+    return this.next(orgId, financialYear, null, tx);
   }
 
   /**
@@ -52,10 +61,14 @@ export class InvoiceNumberService {
     return this.next(orgId, financialYear, CREDIT_NOTE_PREFIX, tx);
   }
 
+  /**
+   * @param prefix fixed series (credit notes), or null to read the org's
+   *   configured invoice series.
+   */
   private async next(
     orgId: string,
     financialYear: string,
-    prefix: string,
+    prefix: string | null,
     tx?: Prisma.TransactionClient,
   ): Promise<string> {
     if (tx) {
@@ -71,12 +84,30 @@ export class InvoiceNumberService {
     );
   }
 
+  /**
+   * The org's configured invoice series. Read on the caller's transaction
+   * rather than through OrganizationSettingsService, matching how
+   * InvoiceService reads the same blob: no new injection, and it cannot see a
+   * value the surrounding transaction did not.
+   */
+  private async resolvePrefix(
+    client: Prisma.TransactionClient,
+    orgId: string,
+  ): Promise<string> {
+    const row = await client.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { taxSettings: true },
+    });
+    return resolveInvoicePrefix(parseTaxSettings(row?.taxSettings ?? null).invoicePrefix);
+  }
+
   private async compute(
     client: Prisma.TransactionClient,
     orgId: string,
     financialYear: string,
-    prefix: string,
+    fixedPrefix: string | null,
   ): Promise<string> {
+    const prefix = fixedPrefix ?? (await this.resolvePrefix(client, orgId));
     // Numeric max of the sequence part. A string sort
     // (orderBy: invoiceNumber desc) would break once the padded width is
     // exceeded: "INV-FY/1000000" sorts BELOW "INV-FY/999999", which would make
@@ -103,9 +134,10 @@ export class InvoiceNumberService {
 
     const nextSequence = (rows[0]?.max ?? 0) + 1;
 
-    // padStart keeps the common case fixed-width for display; wider numbers
-    // simply grow past 6 digits (the numeric max above doesn't care).
-    const paddedSequence = nextSequence.toString().padStart(6, '0');
-    return `${prefix}-${financialYear}/${paddedSequence}`;
+    // The year is shortened to "26-27" so the whole number fits Rule 46(b)'s
+    // sixteen characters — see invoice-number.util. The LIKE filter and the
+    // `/`-delimited tail above are unchanged, so a series that started under
+    // the older 18-character form continues without a gap.
+    return buildDocumentNumber(prefix, financialYear, nextSequence);
   }
 }
