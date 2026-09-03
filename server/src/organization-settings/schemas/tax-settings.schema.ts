@@ -1,5 +1,10 @@
 import { z } from 'zod';
 import { DEFAULT_UQC, UQC_CODES } from '../../gst/constants/uqc';
+import {
+  CREDIT_NOTE_PREFIX,
+  DEFAULT_INVOICE_PREFIX,
+  SERIES_PREFIX_REGEX,
+} from '../../invoice/invoice-number.util';
 
 /**
  * Per-org GST/tax settings. Stored as `OrganizationSettings.taxSettings`
@@ -48,6 +53,22 @@ export const TaxSettingsSchema = z.object({
    * opting into rather than inheriting.
    */
   taxShipping: z.boolean().default(false),
+
+  /**
+   * Series prefix for invoice numbers — `SJ` gives `SJ-26-27/000001`.
+   *
+   * Lenient here on purpose: this is the READ schema, and a stored value that
+   * no longer validates must degrade to the default rather than fail the parse
+   * and take every other tax setting down with it (`parseTaxSettings` falls
+   * back wholesale). `resolveInvoicePrefix` sanitises at the point of use, and
+   * `UpdateTaxSettingsSchema` is where input is actually policed.
+   *
+   * ⚠️ Changing this starts a NEW consecutive run at 000001, because the next
+   * number is read back per prefix. Multiple series are permitted under GST as
+   * long as each is consecutive, so that is legitimate — but it is a visible
+   * change and the settings screen says so before saving.
+   */
+  invoicePrefix: z.string().default(DEFAULT_INVOICE_PREFIX),
 });
 
 export type TaxSettings = z.infer<typeof TaxSettingsSchema>;
@@ -66,6 +87,26 @@ export const UpdateTaxSettingsSchema = z.object({
   b2cLargeThreshold: z.number().positive().optional(),
   defaultUnitOfMeasure: z.enum(UQC_CODES).optional(),
   taxShipping: z.boolean().optional(),
+  /**
+   * Policed here rather than on the read schema. Uppercased and trimmed so
+   * "sj " is accepted, then held to letters and digits only — a hyphen or
+   * slash would collide with the separators the sequence reader splits on —
+   * and to three characters, which is what is left of Rule 46(b)'s sixteen
+   * once the year and the padded sequence are accounted for.
+   */
+  invoicePrefix: z
+    .string()
+    .transform((value) => value.trim().toUpperCase())
+    .refine((value) => SERIES_PREFIX_REGEX.test(value), {
+      message:
+        'Invoice prefix must be 1 to 3 letters or digits, with no spaces or punctuation.',
+    })
+    .refine((value) => value !== CREDIT_NOTE_PREFIX, {
+      message:
+        `"${CREDIT_NOTE_PREFIX}" is reserved for credit notes. Sharing it would merge the two ` +
+        'numbering series and break the consecutive invoice run.',
+    })
+    .optional(),
 });
 export type UpdateTaxSettingsInput = z.infer<typeof UpdateTaxSettingsSchema>;
 

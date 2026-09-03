@@ -19,6 +19,18 @@ import {
   ProductVariantsBulkUpdateResponse,
   PRODUCT_VARIANTS_BULK_CREATE_MUTATION,
   ProductVariantsBulkCreateResponse,
+  PRODUCT_OPTIONS_QUERY,
+  ProductOptionsQueryResponse,
+  PRODUCT_OPTIONS_CREATE_MUTATION,
+  ProductOptionsCreateResponse,
+  PRODUCT_OPTION_UPDATE_MUTATION,
+  ProductOptionUpdateResponse,
+  PRODUCT_OPTIONS_DELETE_MUTATION,
+  ProductOptionsDeleteResponse,
+  PRODUCT_OPTIONS_REORDER_MUTATION,
+  ProductOptionsReorderResponse,
+  ShopifyLiveOption,
+  ShopifyLiveVariantOptions,
   INVENTORY_SET_QUANTITIES_MUTATION,
   InventorySetQuantitiesResponse,
   VARIANT_INVENTORY_ITEM_QUERY,
@@ -28,6 +40,23 @@ import {
   FULFILLMENT_CREATE_MUTATION,
   FulfillmentCreateResponse,
 } from './shopify-graphql.types';
+import {
+  isNoopPlan,
+  isPlaceholderRemoteOptions,
+  LocalOption,
+  planOptionReconcile,
+} from './product-options-reconcile.util';
+import { DEFAULT_VARIANT_TITLE } from '../product/variant-title.util';
+
+/** The option-bearing columns of a `ProductVariant` row the push reconciles. */
+interface OptionCarryingVariant {
+  id: string;
+  externalId: string;
+  title: string;
+  option1: string | null;
+  option2: string | null;
+  option3: string | null;
+}
 
 // CRM weight_unit strings (REST heritage: kg/g/lb/oz) → GraphQL WeightUnit enum.
 const WEIGHT_UNIT_TO_GRAPHQL: Record<string, string> = {
@@ -44,7 +73,57 @@ export interface ShopifySyncMetadata {
   shopifyOrderName?: string;
   error?: string;
   syncedAt?: string;
+  /// When the PENDING claim was stamped. Lets a claim whose job never ran
+  /// (queue unreachable, job evicted) be told apart from one still in flight.
+  queuedAt?: string;
   attempts: number;
+}
+
+/**
+ * A PENDING claim older than this is treated as abandoned and may be
+ * re-claimed. The worker retries 5× with exponential backoff (10s → 160s),
+ * so a live job finishes or fails well inside this window. Mirrored on the
+ * client (`app/lib/shopify-sync.ts`) so the Sync action reappears at the
+ * same moment the server would accept it.
+ */
+export const STALE_PENDING_SYNC_MS = 15 * 60 * 1000;
+
+export function isStalePendingSync(
+  sync: Pick<ShopifySyncMetadata, 'status' | 'queuedAt'> | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (sync?.status !== 'PENDING') return false;
+  // Rows claimed before `queuedAt` existed cannot prove they are still live.
+  if (!sync.queuedAt) return true;
+  const at = Date.parse(sync.queuedAt);
+  return !Number.isFinite(at) || now - at > STALE_PENDING_SYNC_MS;
+}
+
+/**
+ * Per-line tax the CRM computed for an offline order, persisted on
+ * `OrderLineItem.channelTaxLines` in the REST `tax_lines` shape Shopify
+ * itself uses (rate as a fraction, price as a string) so pull and push read
+ * the same thing.
+ */
+export interface StoredTaxLine {
+  title: string;
+  rate: number;
+  price: string;
+}
+
+export function readStoredTaxLines(value: Prisma.JsonValue | null | undefined): StoredTaxLine[] {
+  if (!Array.isArray(value)) return [];
+  const out: StoredTaxLine[] = [];
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const line = raw as Record<string, unknown>;
+    const title = typeof line.title === 'string' ? line.title : null;
+    const rate = typeof line.rate === 'number' ? line.rate : Number(line.rate);
+    const price = line.price === undefined || line.price === null ? null : String(line.price);
+    if (!title || !Number.isFinite(rate) || price === null) continue;
+    out.push({ title, rate, price });
+  }
+  return out;
 }
 
 /**
@@ -166,20 +245,29 @@ export class ShopifyPushService {
     const currency = order.currency;
     const money = (amount: string) => ({ shopMoney: { amount, currencyCode: currency } });
 
+    // `orderCreate` does NOT compute tax: without `taxLines` Shopify records
+    // the pre-tax unit prices as the whole order (verified on collabo-test
+    // #1008: total 1499.90, tax 0, against a 1769.90 SALE transaction). The
+    // offline path stores the GST it actually charged per line, so send it
+    // and the Shopify total matches the transaction — and the rebadge later
+    // writes the same totals back instead of erasing the tax on an order
+    // that already has a GST invoice.
     const lineItems = order.lineItems.map((li) => {
       const externalId = li.variant?.externalId;
       const hasShopifyVariant = !!externalId && !externalId.startsWith('manual_');
+      const taxLines = readStoredTaxLines(li.channelTaxLines).map((t) => ({
+        title: t.title,
+        rate: t.rate,
+        priceSet: money(t.price),
+      }));
+      const base = {
+        quantity: li.quantity,
+        priceSet: money(li.price.toString()),
+        ...(taxLines.length > 0 ? { taxLines } : {}),
+      };
       return hasShopifyVariant
-        ? {
-            variantId: ShopifyGraphqlClient.toGid('ProductVariant', externalId!),
-            quantity: li.quantity,
-            priceSet: money(li.price.toString()),
-          }
-        : {
-            title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title,
-            quantity: li.quantity,
-            priceSet: money(li.price.toString()),
-          };
+        ? { variantId: ShopifyGraphqlClient.toGid('ProductVariant', externalId!), ...base }
+        : { title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title, ...base };
     });
 
     // Customers originally synced from Shopify are associated by GID so no
@@ -194,6 +282,8 @@ export class ShopifyPushService {
 
     const orderInput: Record<string, unknown> = {
       currency,
+      // Line prices are pre-tax; the tax rides on `taxLines` above.
+      taxesIncluded: false,
       email: order.customer?.email ?? undefined,
       phone: order.customer?.phone ?? undefined,
       note: order.note ?? undefined,
@@ -839,10 +929,17 @@ export class ShopifyPushService {
    *                                  (sku, cost, weight etc. live on inventoryItem)
    *   - inventorySetQuantities     — stock (available) per variant at the location
    *
-   * Option-structure changes (adding options / converting single→multi) are NOT
-   * synced here — that path was intentionally removed. Vendors cannot add or
-   * restructure variants (enforced in the UI); they only edit existing fields.
-   * Image changes on synced products are also out of scope.
+   * Between productUpdate and the variant mutations, `reconcileProductOptions`
+   * makes Shopify's option STRUCTURE match `Product.options` (create / add
+   * values / delete / reorder) and writes Shopify's resulting per-variant
+   * option assignment back to the CRM. Without that step a variant that names
+   * a new option is rejected by productVariantsBulkCreate — and that rejection
+   * used to be swallowed, so the product was stamped SYNCED with nothing
+   * changed on Shopify. Every Shopify userError in this method now throws; the
+   * processor records it as FAILED with the message.
+   *
+   * Vendors cannot add or restructure variants (enforced in the UI); they only
+   * edit existing fields. Image changes on synced products are out of scope.
    */
   private async pushProductUpdate(
     product: {
@@ -914,6 +1011,14 @@ export class ShopifyPushService {
       `productUpdate ${product.externalId}`,
     );
 
+    // Option structure first: everything below names options by name, so
+    // they must exist on Shopify before any variant is created. This may
+    // rewrite option columns on existing rows and drop generated duplicates —
+    // hence the reassignment.
+    const reconciled = await this.reconcileProductOptions(auth, product, productGid);
+    product.variants = reconciled.variants;
+    const optionNames = reconciled.optionNames;
+
     type PushVariant = (typeof product.variants)[number];
 
     // Shared per-variant input — sku / cost / weight / HS code / country /
@@ -960,96 +1065,84 @@ export class ShopifyPushService {
     }
 
     // Brand-new variants added locally (admin only — vendors can't add).
+    // Errors are NOT caught here: a rejected create must fail the job so the
+    // merchant sees "Sync failed" + Shopify's reason instead of a green badge.
     if (newLocal.length > 0) {
-      const optionNames = this.deriveOptionTypes(product);
-      try {
-        const res = await this.graphql.request<ProductVariantsBulkCreateResponse>(
-          auth,
-          PRODUCT_VARIANTS_BULK_CREATE_MUTATION,
-          {
-            productId: productGid,
-            variants: newLocal.map((v) => ({
-              optionValues:
-                optionNames.length > 0
-                  ? optionNames.map((name, i) => ({
-                      optionName: name,
-                      name: [v.option1, v.option2, v.option3][i] ?? 'Default',
-                    }))
-                  : [{ optionName: 'Title', name: v.option1 ?? v.title ?? 'Default Title' }],
-              ...sharedVariantInput(v),
-            })),
+      const res = await this.graphql.request<ProductVariantsBulkCreateResponse>(
+        auth,
+        PRODUCT_VARIANTS_BULK_CREATE_MUTATION,
+        {
+          productId: productGid,
+          variants: newLocal.map((v) => ({
+            optionValues:
+              optionNames.length > 0
+                ? optionNames.map((name, i) => ({
+                    optionName: name,
+                    name: [v.option1, v.option2, v.option3][i] ?? 'Default',
+                  }))
+                : [{ optionName: 'Title', name: v.option1 ?? v.title ?? DEFAULT_VARIANT_TITLE }],
+            ...sharedVariantInput(v),
+          })),
+        },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        res.productVariantsBulkCreate?.userErrors,
+        `productVariantsBulkCreate ${product.externalId}`,
+      );
+      const created = res.productVariantsBulkCreate?.productVariants ?? [];
+      for (let i = 0; i < newLocal.length && i < created.length; i++) {
+        const rv = created[i];
+        const invId = rv.inventoryItem
+          ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
+          : null;
+        await this.prisma.productVariant.update({
+          where: { id: newLocal[i].id },
+          data: {
+            externalId: ShopifyGraphqlClient.extractId(rv.id),
+            inventoryItemId: invId,
           },
-        );
-        const errors = res.productVariantsBulkCreate?.userErrors ?? [];
-        if (errors.length > 0) {
-          this.logger.warn(
-            `Failed to create new variant(s) for synced product ${product.externalId}: ${errors.map((e) => e.message).join('; ')}`,
-          );
-        }
-        const created = res.productVariantsBulkCreate?.productVariants ?? [];
-        for (let i = 0; i < newLocal.length && i < created.length; i++) {
-          const rv = created[i];
-          const invId = rv.inventoryItem
-            ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
-            : null;
-          await this.prisma.productVariant.update({
-            where: { id: newLocal[i].id },
-            data: {
-              externalId: ShopifyGraphqlClient.extractId(rv.id),
-              inventoryItemId: invId,
-            },
-          });
-          if (invId) inventoryItemIds.set(newLocal[i].id, invId);
-        }
-      } catch (err) {
-        this.logger.warn(
-          `Failed to create new variant(s) for synced product ${product.externalId}: ${err}`,
-        );
+        });
+        if (invId) inventoryItemIds.set(newLocal[i].id, invId);
       }
     }
 
-    // Existing variants — one bulk field-update call (no option/structure changes).
+    // Existing variants — one bulk field-update call. Option assignment was
+    // already settled by the reconcile above; this is fields only.
     if (existing.length > 0) {
-      try {
-        const res = await this.graphql.request<ProductVariantsBulkUpdateResponse>(
-          auth,
-          PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
-          {
-            productId: productGid,
-            variants: existing.map((v) => ({
-              id: ShopifyGraphqlClient.toGid('ProductVariant', v.externalId),
-              ...sharedVariantInput(v),
-            })),
-          },
-        );
-        const errors = res.productVariantsBulkUpdate?.userErrors ?? [];
-        if (errors.length > 0) {
-          this.logger.warn(
-            `Variant update failed for product ${product.externalId}: ${errors.map((e) => e.message).join('; ')}`,
-          );
+      const res = await this.graphql.request<ProductVariantsBulkUpdateResponse>(
+        auth,
+        PRODUCT_VARIANTS_BULK_UPDATE_MUTATION,
+        {
+          productId: productGid,
+          variants: existing.map((v) => ({
+            id: ShopifyGraphqlClient.toGid('ProductVariant', v.externalId),
+            ...sharedVariantInput(v),
+          })),
+        },
+      );
+      ShopifyGraphqlClient.throwIfUserErrors(
+        res.productVariantsBulkUpdate?.userErrors,
+        `productVariantsBulkUpdate ${product.externalId}`,
+      );
+      // Backfill inventoryItemIds from the response for variants where older
+      // pulls didn't persist them.
+      const returned = res.productVariantsBulkUpdate?.productVariants ?? [];
+      const byExternalId = new Map(
+        returned.map((rv) => [ShopifyGraphqlClient.extractId(rv.id), rv]),
+      );
+      for (const v of existing) {
+        if (inventoryItemIds.has(v.id)) continue;
+        const rv = byExternalId.get(v.externalId);
+        const invId = rv?.inventoryItem
+          ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
+          : null;
+        if (invId) {
+          inventoryItemIds.set(v.id, invId);
+          await this.prisma.productVariant.update({
+            where: { id: v.id },
+            data: { inventoryItemId: invId },
+          });
         }
-        // Backfill inventoryItemIds from the response for variants where older
-        // pulls didn't persist them.
-        const returned = res.productVariantsBulkUpdate?.productVariants ?? [];
-        const byExternalId = new Map(
-          returned.map((rv) => [ShopifyGraphqlClient.extractId(rv.id), rv]),
-        );
-        for (const v of existing) {
-          if (inventoryItemIds.has(v.id)) continue;
-          const rv = byExternalId.get(v.externalId);
-          const invId = rv?.inventoryItem
-            ? ShopifyGraphqlClient.extractId(rv.inventoryItem.id)
-            : null;
-          if (invId) {
-            inventoryItemIds.set(v.id, invId);
-            await this.prisma.productVariant.update({
-              where: { id: v.id },
-              data: { inventoryItemId: invId },
-            });
-          }
-        }
-      } catch (err) {
-        this.logger.warn(`Variant bulk update failed for ${product.externalId}: ${err}`);
       }
     }
 
@@ -1327,6 +1420,322 @@ export class ShopifyPushService {
         `Failed to resolve inventory_item_id for variant ${variantExternalId}: ${err}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Make Shopify's option structure match `Product.options`, then bring the
+   * CRM's per-variant option columns in line with what Shopify did about it.
+   *
+   * Runs before any variant mutation on the update path, because those name
+   * options by name and Shopify rejects a variant naming an option it does not
+   * have. Mutations run in the order delete → create → add values → reorder,
+   * each one failing the push on a userError.
+   *
+   * Returns the option names (in slot order) the variant mutations must use,
+   * and the variant list the rest of the push should work from: option
+   * columns of existing rows updated to Shopify's assignment, and generated
+   * `manual_` rows that now duplicate an existing combination removed.
+   */
+  private async reconcileProductOptions<V extends OptionCarryingVariant>(
+    auth: ShopifyAuthContext,
+    product: {
+      id: string;
+      externalId: string;
+      options: Prisma.JsonValue;
+      variants: V[];
+    },
+    productGid: string,
+  ): Promise<{ optionNames: string[]; variants: V[] }> {
+    const snapshot = await this.graphql.request<ProductOptionsQueryResponse>(
+      auth,
+      PRODUCT_OPTIONS_QUERY,
+      { id: productGid },
+    );
+    if (!snapshot.product) {
+      throw new Error(
+        `Shopify product ${product.externalId} no longer exists — cannot push local edits`,
+      );
+    }
+    let remoteOptions: ShopifyLiveOption[] = snapshot.product.options;
+    let remoteVariants: ShopifyLiveVariantOptions[] = snapshot.product.variants.nodes;
+    const adopt = (
+      p:
+        | { options: ShopifyLiveOption[]; variants: { nodes: ShopifyLiveVariantOptions[] } }
+        | null
+        | undefined,
+    ) => {
+      if (!p) return;
+      remoteOptions = p.options;
+      remoteVariants = p.variants.nodes;
+    };
+
+    const local = this.localOptionsForPush(product, remoteOptions);
+    const plan = planOptionReconcile(local, remoteOptions);
+    const ctx = `product ${product.externalId}`;
+
+    if (!isNoopPlan(plan)) {
+      if (plan.toDelete.length > 0) {
+        const res = await this.graphql.request<ProductOptionsDeleteResponse>(
+          auth,
+          PRODUCT_OPTIONS_DELETE_MUTATION,
+          { productId: productGid, options: plan.toDelete, strategy: 'POSITION' },
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          res.productOptionsDelete?.userErrors,
+          `productOptionsDelete ${ctx}`,
+        );
+        adopt(res.productOptionsDelete?.product);
+        this.logger.log(`Deleted ${plan.toDelete.length} option(s) on ${ctx}.`);
+      }
+
+      if (plan.toCreate.length > 0) {
+        const res = await this.graphql.request<ProductOptionsCreateResponse>(
+          auth,
+          PRODUCT_OPTIONS_CREATE_MUTATION,
+          { productId: productGid, options: plan.toCreate, variantStrategy: 'LEAVE_AS_IS' },
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          res.productOptionsCreate?.userErrors,
+          `productOptionsCreate ${ctx}`,
+        );
+        adopt(res.productOptionsCreate?.product);
+        this.logger.log(
+          `Created option(s) ${plan.toCreate.map((o) => `"${o.name}"`).join(', ')} on ${ctx}.`,
+        );
+
+        // Shopify replaces the Title/Default Title placeholder when a real
+        // option arrives. If it survived anyway, remove it: DEFAULT strategy
+        // suffices for a one-value option, and the pre-existing variant
+        // already carries the new options' first values so nothing dangles.
+        const leftover = remoteOptions.find(
+          (o) =>
+            o.name === 'Title' &&
+            o.values.length === 1 &&
+            o.values[0] === DEFAULT_VARIANT_TITLE &&
+            !local.some((l) => l.name === 'Title'),
+        );
+        if (leftover) {
+          const sweep = await this.graphql.request<ProductOptionsDeleteResponse>(
+            auth,
+            PRODUCT_OPTIONS_DELETE_MUTATION,
+            { productId: productGid, options: [leftover.id], strategy: 'DEFAULT' },
+          );
+          ShopifyGraphqlClient.throwIfUserErrors(
+            sweep.productOptionsDelete?.userErrors,
+            `productOptionsDelete (Title placeholder) ${ctx}`,
+          );
+          adopt(sweep.productOptionsDelete?.product);
+        }
+      }
+
+      for (const add of plan.valuesToAdd) {
+        const res = await this.graphql.request<ProductOptionUpdateResponse>(
+          auth,
+          PRODUCT_OPTION_UPDATE_MUTATION,
+          {
+            productId: productGid,
+            option: { id: add.optionId },
+            optionValuesToAdd: add.values,
+          },
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          res.productOptionUpdate?.userErrors,
+          `productOptionUpdate "${add.optionName}" ${ctx}`,
+        );
+        if (res.productOptionUpdate?.product) {
+          remoteOptions = res.productOptionUpdate.product.options;
+        }
+        this.logger.log(
+          `Added value(s) ${add.values.map((v) => `"${v.name}"`).join(', ')} to option "${add.optionName}" on ${ctx}.`,
+        );
+      }
+
+      if (plan.reorder) {
+        const res = await this.graphql.request<ProductOptionsReorderResponse>(
+          auth,
+          PRODUCT_OPTIONS_REORDER_MUTATION,
+          { productId: productGid, options: plan.reorder },
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          res.productOptionsReorder?.userErrors,
+          `productOptionsReorder ${ctx}`,
+        );
+        adopt(res.productOptionsReorder?.product);
+      }
+    }
+
+    // Always, not only after a structural change: a push that failed after
+    // the options landed leaves Shopify's assignment un-mirrored, and the
+    // retry's plan is a no-op.
+    const optionNames = local.map((o) => o.name);
+    const variants = await this.adoptRemoteVariantOptions(product, optionNames, remoteVariants);
+    return { optionNames, variants };
+  }
+
+  /**
+   * The CRM's option definition in the shape the reconcile compares:
+   * `Product.options` names + values, topped up with any value a variant
+   * carries that the JSON forgot. JSON values come first, in their order,
+   * because the FIRST value is what both sides assign to pre-existing
+   * variants when an option is added.
+   *
+   * Legacy rows with no options JSON but real variant values only have
+   * positional names ("Option 1"). For those, take Shopify's names by
+   * position — otherwise the plan would be a destructive delete + create of
+   * every real option on the store.
+   */
+  private localOptionsForPush(
+    product: {
+      options: Prisma.JsonValue;
+      variants: Array<{ option1: string | null; option2: string | null; option3: string | null }>;
+    },
+    remoteOptions: ShopifyLiveOption[],
+  ): LocalOption[] {
+    const optionKeys = ['option1', 'option2', 'option3'] as const;
+    let names = this.deriveOptionTypes(product);
+    if (names.length === 0) return [];
+
+    const stored = Array.isArray(product.options)
+      ? (product.options.filter(
+          (o) => o && typeof o === 'object' && !Array.isArray(o),
+        ) as Array<Record<string, unknown>>)
+      : null;
+
+    if (!stored) {
+      const remoteReal = isPlaceholderRemoteOptions(remoteOptions)
+        ? []
+        : [...remoteOptions].sort((a, b) => a.position - b.position);
+      if (remoteReal.length < names.length) {
+        throw new Error(
+          `Product uses ${names.length} option slot(s) but has no option definitions; set its options in the CRM before syncing.`,
+        );
+      }
+      names = names.map((_, i) => remoteReal[i].name);
+    }
+
+    return names.map((name, i) => {
+      const entry = stored?.find((o) => o.name === name);
+      const values = new Set<string>(
+        Array.isArray(entry?.values)
+          ? entry.values.filter((v): v is string => typeof v === 'string' && v.length > 0)
+          : [],
+      );
+      for (const v of product.variants) {
+        const value = v[optionKeys[i]];
+        if (value && value !== DEFAULT_VARIANT_TITLE) values.add(value);
+      }
+      if (values.size === 0) values.add('Default');
+      return { name, values: [...values] };
+    });
+  }
+
+  /**
+   * Write Shopify's per-variant option assignment back onto the CRM rows and
+   * drop rows that can no longer exist.
+   *
+   * After productOptionsCreate(LEAVE_AS_IS) every pre-existing Shopify variant
+   * carries the first value of each new option. The CRM's generator used to
+   * leave that slot null on existing rows and create the full cartesian
+   * product alongside — "S / Red" (no material) next to a generated
+   * "S / Red / Cotton". Shopify has now made the original "S / Red / Cotton"
+   * too, so the generated twin can never be created there; it is deleted here.
+   * Variants Shopify itself removed (productOptionsDelete POSITION) go the
+   * same way. A delete that anything still references fails the push with the
+   * variant named — better than a silent divergence.
+   *
+   * Returned in the caller's original order.
+   */
+  private async adoptRemoteVariantOptions<V extends OptionCarryingVariant>(
+    product: { externalId: string; variants: V[] },
+    optionNames: string[],
+    remoteVariants: ShopifyLiveVariantOptions[],
+  ): Promise<V[]> {
+    const remoteById = new Map(
+      remoteVariants.map((rv) => [ShopifyGraphqlClient.extractId(rv.id), rv]),
+    );
+    const isManual = (v: V) => !v.externalId || v.externalId.startsWith('manual_');
+    const tripleOf = (v: V) => `${v.option1 ?? ''}|${v.option2 ?? ''}|${v.option3 ?? ''}`;
+
+    const kept = new Set<string>();
+    const takenTriples = new Set<string>();
+
+    for (const v of product.variants) {
+      if (isManual(v)) continue;
+      const rv = remoteById.get(v.externalId);
+      if (!rv) {
+        await this.deleteVariantRow(
+          v,
+          product.externalId,
+          'no longer exists on Shopify after the option change',
+        );
+        continue;
+      }
+      const next: [string | null, string | null, string | null] = [null, null, null];
+      for (let i = 0; i < optionNames.length && i < 3; i++) {
+        next[i] = rv.selectedOptions.find((s) => s.name === optionNames[i])?.value ?? null;
+      }
+      const labels = next.filter(Boolean) as string[];
+      const title =
+        optionNames.length === 0 || labels.length === 0
+          ? DEFAULT_VARIANT_TITLE
+          : labels.join(' / ');
+      if (optionNames.length === 0) next[0] = DEFAULT_VARIANT_TITLE;
+
+      if (
+        v.option1 !== next[0] ||
+        v.option2 !== next[1] ||
+        v.option3 !== next[2] ||
+        v.title !== title
+      ) {
+        await this.prisma.productVariant.update({
+          where: { id: v.id },
+          data: { option1: next[0], option2: next[1], option3: next[2], title },
+        });
+        v.option1 = next[0];
+        v.option2 = next[1];
+        v.option3 = next[2];
+        v.title = title;
+      }
+      takenTriples.add(tripleOf(v));
+      kept.add(v.id);
+    }
+
+    for (const v of product.variants) {
+      if (!isManual(v)) continue;
+      const triple = tripleOf(v);
+      if (takenTriples.has(triple)) {
+        await this.deleteVariantRow(
+          v,
+          product.externalId,
+          'duplicates a combination Shopify already assigned to an existing variant',
+        );
+        continue;
+      }
+      takenTriples.add(triple);
+      kept.add(v.id);
+    }
+
+    return product.variants.filter((v) => kept.has(v.id));
+  }
+
+  private async deleteVariantRow(
+    v: OptionCarryingVariant,
+    productExternalId: string,
+    reason: string,
+  ): Promise<void> {
+    try {
+      await this.prisma.productVariant.delete({ where: { id: v.id } });
+      this.logger.log(
+        `Removed CRM variant "${v.title}" (${v.id}) of Shopify product ${productExternalId}: ${reason}.`,
+      );
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2003') {
+        throw new Error(
+          `Variant "${v.title}" ${reason}, but orders or stock records still reference it so it cannot be removed automatically. Resolve it in the CRM and sync again.`,
+        );
+      }
+      throw err;
     }
   }
 

@@ -6,14 +6,22 @@ import {
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
+  ReferenceLine,
 } from "recharts";
-import { TrendingUp, TrendingDown, MoreHorizontal, Loader2 } from "lucide-react";
-import { useMonthlySales } from "~/hooks/use-dashboard-queries";
+import { Link } from "react-router";
+import { TrendingUp, TrendingDown, Loader2 } from "lucide-react";
+import { useSalesAndProfit } from "~/hooks/use-dashboard-queries";
 import { cn, formatCurrency } from "~/lib/utils";
+import type { DashboardQueryParams } from "~/types/api";
+
+const SERIES_LABEL: Record<string, string> = {
+  netSales: "Net Sales",
+  grossProfit: "Gross Profit",
+};
 
 interface CustomTooltipProps {
   active?: boolean;
-  payload?: Array<{ value: number; name: string }>;
+  payload?: Array<{ value: number | null; name: string; dataKey?: string }>;
   label?: string;
   currency: string;
 }
@@ -24,10 +32,13 @@ function CustomTooltip({ active, payload, label, currency }: CustomTooltipProps)
     <div className="rounded-lg border bg-popover px-3 py-2 text-caption shadow-md">
       <p className="mb-1 font-medium text-popover-foreground">{label}</p>
       {payload.map((entry) => (
-        <p key={entry.name} className="text-muted-foreground">
-          {entry.name === "profit" ? "Profit" : "Revenue"}:{" "}
+        <p key={entry.dataKey ?? entry.name} className="text-muted-foreground">
+          {SERIES_LABEL[entry.dataKey ?? entry.name] ?? entry.name}:{" "}
           <span className="font-semibold text-popover-foreground">
-            {formatCurrency(entry.value, currency)}
+            {/* A null profit means no cost price was set for anything sold that
+                period. Formatting it as a currency would print a confident
+                zero for something we simply don't know. */}
+            {entry.value === null ? "—" : formatCurrency(entry.value, currency)}
           </span>
         </p>
       ))}
@@ -35,30 +46,69 @@ function CustomTooltip({ active, payload, label, currency }: CustomTooltipProps)
   );
 }
 
-/** Bar chart card showing monthly revenue vs. profit from real API data. */
-export function ProfitBarChart({ currency }: { currency: string }) {
-  const { data: monthlySales, isLoading } = useMonthlySales();
+/** One term in the walk from what customers paid down to gross profit. */
+function Term({
+  label,
+  value,
+  currency,
+  sign,
+}: {
+  label: string;
+  value: number;
+  currency: string;
+  sign?: "minus";
+}) {
+  return (
+    <span className="whitespace-nowrap">
+      {sign === "minus" && <span className="text-muted-foreground">− </span>}
+      <span className="text-muted-foreground">{label} </span>
+      <span className="font-medium text-foreground">
+        {formatCurrency(value, currency)}
+      </span>
+    </span>
+  );
+}
 
-  const chartData = monthlySales?.data ?? [];
-  const totalProfit = monthlySales?.totalProfit ?? 0;
+/**
+ * Sales and gross profit for the selected window.
+ *
+ * Takes `params` rather than calling the hook bare: the page reads its stat
+ * cards off the same query, and the two only share a React Query cache entry —
+ * and therefore only ever show the same numbers — when they pass identical
+ * params.
+ */
+export function ProfitBarChart({
+  currency,
+  params,
+}: {
+  currency: string;
+  params?: DashboardQueryParams;
+}) {
+  const { data: sales, isLoading } = useSalesAndProfit(params);
 
-  // Last 30 days against the 30 before it. This used to show the profit margin
-  // (profit ÷ revenue) inside a trending-up pill, which could essentially never
-  // point down and so always read as growth. `previous === 0` means there is no
-  // comparison period yet — the API reports that as a nominal 100% up, so the
-  // badge is hidden rather than presenting growth-from-nothing as a trend.
-  const trend = monthlySales?.profitTrend;
+  const chartData = sales?.data ?? [];
+  const totals = sales?.totals;
+  const grossProfit = totals?.grossProfit ?? null;
+  const coverage = totals?.costCoverage ?? 0;
+  const hasCostData = coverage > 0;
+
+  // `previous === 0` means there is no comparison period yet — the API reports
+  // that as a nominal 100% up, so the badge is hidden rather than presenting
+  // growth-from-nothing as a trend.
+  const trend = sales?.profitTrend;
   const showTrend =
-    trend !== undefined && trend.previous !== 0 && trend.change.direction !== "same";
+    !!trend && trend.previous !== 0 && trend.change.direction !== "same";
   const isUp = trend?.change.direction === "up";
 
   return (
     <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
-      <div className="mb-1 flex items-start justify-between">
-        <p className="text-body font-semibold text-foreground">Total Profit Overview</p>
-        <button className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted">
-          <MoreHorizontal className="size-4" />
-        </button>
+      <div className="mb-1 flex items-start justify-between gap-3">
+        <p className="text-body font-semibold text-foreground">Gross Profit</p>
+        {sales && (
+          <span className="shrink-0 text-caption text-muted-foreground">
+            {sales.period.label}
+          </span>
+        )}
       </div>
 
       {isLoading ? (
@@ -67,10 +117,20 @@ export function ProfitBarChart({ currency }: { currency: string }) {
         </div>
       ) : (
         <>
-          <div className="mb-3 flex items-center gap-2">
-            <p className="text-stat text-foreground">
-              {formatCurrency(totalProfit, currency)}
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <p
+              className={cn(
+                "text-stat",
+                hasCostData ? "text-foreground" : "text-muted-foreground"
+              )}
+            >
+              {grossProfit === null ? "—" : formatCurrency(grossProfit, currency)}
             </p>
+            {totals?.grossMarginPct != null && (
+              <span className="text-caption font-medium text-muted-foreground">
+                {totals.grossMarginPct.toFixed(1)}% margin
+              </span>
+            )}
             {showTrend && (
               <>
                 <span
@@ -82,21 +142,64 @@ export function ProfitBarChart({ currency }: { currency: string }) {
                   {isUp ? <TrendingUp className="size-3" /> : <TrendingDown className="size-3" />}
                   {trend.change.percentage}%
                 </span>
-                {/* The figure beside it is the 12-month total that the bars add
-                    up to, so the badge has to say which period it covers. */}
-                <span className="text-caption text-muted-foreground">vs. previous 30 days</span>
+                <span className="text-caption text-muted-foreground">
+                  vs. previous period
+                </span>
               </>
             )}
           </div>
 
+          {/* The walk from the Total Sales card down to the figure above it.
+              Sales and profit are different numbers for real reasons; printing
+              those reasons is what stops the pair looking arbitrary. */}
+          {totals && (
+            <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-caption">
+              <Term label="Sales" value={totals.grossSales} currency={currency} />
+              <Term label="tax" value={totals.tax} currency={currency} sign="minus" />
+              <Term label="shipping" value={totals.shipping} currency={currency} sign="minus" />
+              {totals.refunds > 0 && (
+                <Term label="refunds" value={totals.refunds} currency={currency} sign="minus" />
+              )}
+              <span className="whitespace-nowrap">
+                <span className="text-muted-foreground">= net sales </span>
+                <span className="font-medium text-foreground">
+                  {formatCurrency(totals.netSales, currency)}
+                </span>
+              </span>
+              {hasCostData && (
+                <Term label="COGS" value={totals.cogs} currency={currency} sign="minus" />
+              )}
+            </div>
+          )}
+
+          {!hasCostData ? (
+            <p className="mb-3 text-caption text-muted-foreground">
+              No cost prices set, so profit can&apos;t be calculated.{" "}
+              <Link to="/products" className="font-medium text-brand-strong hover:underline">
+                Add cost prices
+              </Link>{" "}
+              to your products to see it.
+            </p>
+          ) : coverage < 1 ? (
+            // Never present a partial figure as a whole one. The profit above
+            // covers only the items we can price.
+            <p className="mb-3 text-caption text-muted-foreground">
+              Based on {Math.round(coverage * 100)}% of sales —{" "}
+              <Link to="/products" className="font-medium text-brand-strong hover:underline">
+                the rest have no cost price set
+              </Link>
+              .
+            </p>
+          ) : null}
+
           <div className="mb-3 flex items-center gap-4 text-caption text-muted-foreground">
             <span className="flex items-center gap-1.5">
               <span className="inline-block size-2 rounded-full bg-border" />
-              Total Revenue
+              Net Sales
             </span>
             <span className="flex items-center gap-1.5">
               <span className="inline-block size-2 rounded-full bg-brand" />
-              Total Profit
+              Gross Profit
             </span>
           </div>
 
@@ -106,15 +209,21 @@ export function ProfitBarChart({ currency }: { currency: string }) {
                 <BarChart data={chartData} barGap={3} barCategoryGap="35%">
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                   <XAxis
-                    dataKey="month"
+                    dataKey="bucket"
                     tick={{ fontSize: 10, fill: "var(--muted-foreground)" }}
                     axisLine={false}
                     tickLine={false}
                   />
-                  <YAxis hide />
+                  {/* Gross profit can legitimately be negative once COGS is in
+                      the picture, so the axis has to be free to go below zero
+                      and the baseline has to be visible when it does. */}
+                  <YAxis hide domain={["auto", "auto"]} />
+                  <ReferenceLine y={0} stroke="var(--border)" />
                   <Tooltip content={<CustomTooltip currency={currency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
-                  <Bar dataKey="revenue" fill="var(--border)" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="profit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="netSales" fill="var(--border)" radius={[4, 4, 0, 0]} />
+                  {/* Recharts skips null, so a month with no cost data draws a
+                      sales bar and no profit bar — which is the truth. */}
+                  <Bar dataKey="grossProfit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

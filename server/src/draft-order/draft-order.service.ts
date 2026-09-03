@@ -453,7 +453,9 @@ export class DraftOrderService {
               const v = variantById.get(li.productVariantId)!;
               return {
                 productId: v.product.id,
-                // Preserve null (unset) vs 0 (explicitly exempt).
+                // Preserve null (unset) vs 0 (explicitly exempt). A variant's
+                // own rate, when set, wins over the product's.
+                variantGstRate: this.calculator.toNullableNumber(v.gstRate),
                 productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
                 // ProductVariant.taxable was stored and never read by any tax
                 // path; a variant marked non-taxable was quoted with tax.
@@ -783,7 +785,9 @@ export class DraftOrderService {
               const v = variantById.get(li.productVariantId)!;
               return {
                 productId: v.product.id,
-                // Preserve null (unset) vs 0 (explicitly exempt).
+                // Preserve null (unset) vs 0 (explicitly exempt). A variant's
+                // own rate, when set, wins over the product's.
+                variantGstRate: this.calculator.toNullableNumber(v.gstRate),
                 productGstRate: this.calculator.toNullableNumber(v.product.gstRate),
                 // ProductVariant.taxable was stored and never read by any tax
                 // path; a variant marked non-taxable was quoted with tax.

@@ -21,6 +21,13 @@ import {
   useMarkFulfillmentDeliveredMutation,
 } from "~/hooks/use-order-mutations";
 import { CarrierDatalist } from "~/components/app/carrier-datalist";
+import {
+  SHIPMENT_STATE_CLASSES,
+  fulfillmentStatusLabel,
+  isShipmentCancelled,
+  isShipmentDelivered,
+  normalizeFulfillmentStatus,
+} from "~/lib/order-status";
 import type {
   OrderDetail,
   OrderFulfillment,
@@ -37,7 +44,18 @@ import type {
  * If the order has no fulfillments yet the section returns `null` so the
  * detail page doesn't show an empty box.
  */
-export function OrderFulfillmentsSection({ order }: { order: OrderDetail }) {
+export function OrderFulfillmentsSection({
+  order,
+  canAct,
+}: {
+  order: OrderDetail;
+  /**
+   * Whether the viewer may edit shipments. Required, not defaulted: these three
+   * buttons carried no role check at all, so a read-only viewer was shown
+   * Cancel / Edit tracking / Mark delivered and every click 403'd.
+   */
+  canAct: boolean;
+}) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   // Held here rather than in the row so every row shares one in-flight state —
@@ -62,6 +80,7 @@ export function OrderFulfillmentsSection({ order }: { order: OrderDetail }) {
             <FulfillmentRow
               key={f.id}
               fulfillment={f}
+              canAct={canAct}
               onEditTracking={() => setEditingId(f.id)}
               onCancel={() => setCancellingId(f.id)}
               onMarkDelivered={() => markDelivered.mutate(f.id)}
@@ -92,6 +111,7 @@ export function OrderFulfillmentsSection({ order }: { order: OrderDetail }) {
 
 function FulfillmentRow({
   fulfillment,
+  canAct,
   onEditTracking,
   onCancel,
   onMarkDelivered,
@@ -99,6 +119,7 @@ function FulfillmentRow({
   busy,
 }: {
   fulfillment: OrderFulfillment;
+  canAct: boolean;
   onEditTracking: () => void;
   onCancel: () => void;
   onMarkDelivered: () => void;
@@ -106,25 +127,30 @@ function FulfillmentRow({
   deliveringId?: string;
   busy: boolean;
 }) {
-  const isCancelled = fulfillment.status === "cancelled";
-  const isDelivered = fulfillment.status === "delivered";
+  // Read through the normalizer: a Shopify-synced shipment carries `success`,
+  // not `fulfilled`, so both flags below used to be false on every synced row
+  // and the chip printed Shopify's raw word.
+  const stateKey = normalizeFulfillmentStatus(fulfillment.status);
+  const isCancelled = isShipmentCancelled(fulfillment);
+  // `deliveredAt` counts too: the next Shopify pull overwrites a locally-set
+  // `delivered` back to `success` while leaving the timestamp, which made
+  // "Mark delivered" reappear on an already-delivered shipment.
+  const isDelivered = isShipmentDelivered(fulfillment);
   return (
     <div className="flex items-start justify-between gap-3 px-5 py-3">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span
             className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-              isCancelled
-                ? "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300"
-                : "bg-[#CEF17B]/30 text-[#084734]"
+              SHIPMENT_STATE_CLASSES[isDelivered ? "delivered" : stateKey]
             }`}
           >
-            {isCancelled ? (
+            {isCancelled || stateKey === "failed" ? (
               <XCircle className="size-3" />
             ) : (
               <CheckCircle2 className="size-3" />
             )}
-            {fulfillment.status}
+            {isDelivered ? "Delivered" : fulfillmentStatusLabel(fulfillment.status)}
           </span>
           <span className="text-[10px] text-muted-foreground">
             {new Date(fulfillment.createdAt).toLocaleString("en-IN", {
@@ -157,7 +183,7 @@ function FulfillmentRow({
           <p className="mt-1 text-[10px] text-muted-foreground italic">No tracking info</p>
         )}
       </div>
-      {!isCancelled && (
+      {canAct && !isCancelled && (
         <div className="flex shrink-0 items-center gap-1">
           {/* Delivered is terminal, so this disappears once set — matching how
               the per-line actions treat it. */}

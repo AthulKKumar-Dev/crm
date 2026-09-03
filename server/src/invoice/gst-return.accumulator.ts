@@ -269,6 +269,33 @@ export interface Gstr3bReturn {
       totalIgst: number;
     }>;
   };
+  /**
+   * 3.1(d) and 4(A)(3) — inward supplies on which the RECIPIENT pays the tax.
+   *
+   * Not produced by this accumulator: it folds invoices, which are outward, and
+   * these are purchases. `InvoiceService.getGstReturn` fills them from the
+   * period's recorded inward supplies and hands them through here so the return
+   * payload is one object.
+   *
+   * ⚠️ Deliberately absent from `taxPayable`. Reverse charge is settled in cash
+   * and reclaimed as credit in the same period; adding it to output tax would
+   * overstate what is owed on sales.
+   */
+  reverseCharge: {
+    /** 3.1(d) — taxable value of the inward supplies. */
+    taxableValue: number;
+    /**
+     * Always IGST. Scoped to imports of services, where the recipient's
+     * location is the place of supply and the supplier sits outside India — so
+     * inter-state by definition.
+     */
+    igst: number;
+    /**
+     * Entries whose tax was never stated. Above zero, the figures here are a
+     * floor rather than the answer.
+     */
+    entriesWithUnknownTax: number;
+  };
   taxPayable: {
     cgst: number;
     sgst: number;
@@ -998,6 +1025,12 @@ export class Gstr3bAccumulator {
           }))
           .sort((a, b) => b.totalTaxable - a.totalTaxable),
       },
+      // Zeroed here and overwritten by `InvoiceService.getGstReturn` from the
+      // period's recorded inward supplies. This class folds INVOICES, which are
+      // outward; reverse charge is a purchase and has no business being
+      // computed from a sales fold. Emitting the empty shape keeps the payload
+      // one object rather than making every caller merge two.
+      reverseCharge: { taxableValue: 0, igst: 0, entriesWithUnknownTax: 0 },
       taxPayable: {
         cgst: toMoney(this.payableCgst),
         sgst: toMoney(this.payableSgst),

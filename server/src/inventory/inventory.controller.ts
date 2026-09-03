@@ -57,8 +57,11 @@ export class InventoryController {
   @Get('stock/stats')
   @Roles(...ORG_MEMBERS)
   @RequirePermissions('inventory.view')
-  getStockStats(@OrgId() orgId: string) {
-    return this.inventory.getStockStats(orgId);
+  getStockStats(
+    @OrgId() orgId: string,
+    @Query('warehouseId') warehouseId?: string,
+  ) {
+    return this.inventory.getStockStats(orgId, warehouseId);
   }
 
   // NOTE: declared after 'stock/stats' — NestJS matches routes in declaration

@@ -41,6 +41,49 @@ describe('TaxResolverService', () => {
     service = module.get(TaxResolverService);
   });
 
+  describe('variant override (rung 0)', () => {
+    const line = (variantGstRate: number | null, productGstRate: number | null) => ({
+      productId: 'p1',
+      variantGstRate,
+      productGstRate,
+    });
+
+    it('takes the variant rate above the product rate', async () => {
+      await expect(
+        service.resolveLineGstRates('org1', '27', [line(5, 18)]),
+      ).resolves.toEqual([5]);
+      expect(prisma.productCollection.findMany).not.toHaveBeenCalled();
+    });
+
+    it('treats an explicit 0% variant as EXEMPT even when the product is 18%', async () => {
+      await expect(
+        service.resolveLineGstRates('org1', '27', [line(0, 18)]),
+      ).resolves.toEqual([0]);
+    });
+
+    it('inherits the product rate when the variant rate is null', async () => {
+      await expect(
+        service.resolveLineGstRates('org1', '27', [line(null, 12)]),
+      ).resolves.toEqual([12]);
+    });
+
+    it('falls through the whole chain when both are null', async () => {
+      prisma.stateTaxRate.findFirst.mockResolvedValue({ gstRate: '18.00' });
+      await expect(
+        service.resolveLineGstRates('org1', '27', [line(null, null)]),
+      ).resolves.toEqual([18]);
+      expect(prisma.stateTaxRate.findFirst).toHaveBeenCalled();
+    });
+
+    it('still yields 0% for a non-taxable line regardless of the override', async () => {
+      await expect(
+        service.resolveLineGstRates('org1', '27', [
+          { ...line(5, 18), variantTaxable: false },
+        ]),
+      ).resolves.toEqual([0]);
+    });
+  });
+
   describe('resolveGstRate priority chain', () => {
     it('takes the product rate above everything else', async () => {
       await expect(service.resolveGstRate('org1', 'p1', 18, '27')).resolves.toBe(18);

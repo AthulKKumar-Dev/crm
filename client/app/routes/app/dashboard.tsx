@@ -1,7 +1,15 @@
+import { useState } from "react";
 import { ArrowRight, Download, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
 import {
   PageHeader,
   PageHeaderContent,
@@ -16,9 +24,14 @@ import { TopProductsPanel } from "~/components/app/top-products-panel";
 import { LowStockProductsPanel } from "~/components/app/low-stock-products-panel";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
-import { useDashboard, useExportDashboard, useMonthlySales } from "~/hooks/use-dashboard-queries";
+import {
+  useDashboard,
+  useExportDashboard,
+  useSalesAndProfit,
+} from "~/hooks/use-dashboard-queries";
 import type { SparklinePoint } from "~/components/app/chart-line-default";
-import type { MonthlySalesPoint } from "~/services/dashboard.service";
+import type { SalesProfitPoint } from "~/services/dashboard.service";
+import type { DashboardQueryParams, DashboardRange } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { formatCurrency } from "~/lib/utils";
 import { StatCard } from "~/components/app/stat-card";
@@ -32,16 +45,30 @@ export function meta() {
   ];
 }
 
+const RANGE_OPTIONS: ReadonlyArray<{ value: DashboardRange; label: string }> = [
+  { value: "30d", label: "Last 30 days" },
+  { value: "6m", label: "Last 6 months" },
+  { value: "12m", label: "Last 12 months" },
+];
+
 export default function DashboardPage() {
-  const { data: dashboard, isLoading } = useDashboard();
+  // One window for the whole page. Total Sales used to be an all-time figure
+  // sitting beside a chart hard-coded to a rolling 12 months, so the two could
+  // never be reconciled and neither said which period it covered.
+  const [range, setRange] = useState<DashboardRange>("12m");
+  const params: DashboardQueryParams = { range };
+
+  const { data: dashboard, isLoading } = useDashboard(params);
   const { exportCsv, exportJson } = useExportDashboard();
   const { data: org } = useCurrentOrg();
-  // Shares a query key with the call inside ProfitBarChart, so React Query
-  // serves both from one request.
-  const { data: monthlySales } = useMonthlySales();
+  // Same params as the chart below, so React Query serves both from one
+  // request and the cards cannot disagree with the bars.
+  const { data: sales, isLoading: salesLoading } = useSalesAndProfit(params);
   const orgCurrency = org?.currency ?? "USD";
   const recentOrders = dashboard?.recentOrders ?? [];
-  const monthly = monthlySales?.data;
+  const series = sales?.data;
+  const totals = sales?.totals;
+  const periodLabel = sales?.period.label ?? "";
 
   return (
     <div className="space-y-6">
@@ -56,10 +83,22 @@ export default function DashboardPage() {
             </PageHeaderDescription>
           </PageHeaderContent>
           <PageHeaderActions>
+            <Select value={range} onValueChange={(v) => setRange(v as DashboardRange)}>
+              <SelectTrigger className="h-8 w-36 rounded-lg text-caption font-medium shadow-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {RANGE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <Button
               size="action"
               variant="outline"
-              onClick={() => exportCsv()}
+              onClick={() => exportCsv(params)}
             >
               <Upload className="size-3.5" />
               Export CSV
@@ -67,7 +106,7 @@ export default function DashboardPage() {
             <Button
               variant="brand"
               size="action"
-              onClick={() => exportJson()}
+              onClick={() => exportJson(params)}
             >
               <Download className="size-3.5" />
               Download Report
@@ -79,15 +118,18 @@ export default function DashboardPage() {
       {/* Stat cards row */}
       <div className="flex gap-3 ">
         <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
+          {/* Reads the SAME payload as the profit chart — this is the figure the
+              chart's reconciliation strip walks down from. */}
           <StatCard
             sparkline
-            sparklineData={sparklineFor(monthly, "revenue")}
+            sparklineData={sparklineFor(series, "grossSales")}
             label="Total Sales"
-            value={dashboard ? formatCurrency(dashboard.totalSales, orgCurrency) : undefined}
+            value={totals ? formatCurrency(totals.grossSales, orgCurrency) : undefined}
+            changeLabel={periodLabel}
             icon={<Target className="size-4" />}
             linkTo="/orders"
             linkLabel="View Sales"
-            isLoading={isLoading}
+            isLoading={salesLoading}
           />
           {/* <StatCard
           label="Active Products"
@@ -99,19 +141,24 @@ export default function DashboardPage() {
         /> */}
           <StatCard
             sparkline
-            sparklineData={sparklineFor(monthly, "orders")}
+            sparklineData={sparklineFor(series, "orders")}
             label="Total Orders"
             value={dashboard ? dashboard.totalOrders.toLocaleString() : undefined}
+            changeLabel={periodLabel}
             icon={<ShoppingBag className="size-4" />}
             linkTo="/orders"
             linkLabel="View Orders"
             isLoading={isLoading}
           />
+          {/* "New" rather than "Total": the sparkline beside it has always
+              plotted per-period signups, and the count is now windowed to
+              match the rest of the page. */}
           <StatCard
             sparkline
-            sparklineData={sparklineFor(monthly, "newCustomers")}
-            label="Total Customers"
+            sparklineData={sparklineFor(series, "newCustomers")}
+            label="New Customers"
             value={dashboard ? dashboard.totalCustomers.toLocaleString() : undefined}
+            changeLabel={periodLabel}
             icon={<Users className="size-4" />}
             linkTo="/orders/customers"
             linkLabel="View Customers"
@@ -121,7 +168,7 @@ export default function DashboardPage() {
 
         {/* Charts row — 2 equal columns */}
         <div className="flex flex-col flex-2  overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
-          <ProfitBarChart currency={orgCurrency} />
+          <ProfitBarChart currency={orgCurrency} params={params} />
           {/* <SalesDonutChart currency={orgCurrency} /> */}
         </div>
       </div>
@@ -170,17 +217,15 @@ export default function DashboardPage() {
 }
 
 /**
- * The sparkline beside each KPI, drawn from the same 12-month series the profit
- * chart below plots. Mirrors `sparklineFor` on the analytics route.
- *
- * The card's own figure is an all-time cumulative total while the line is a
- * per-month series — the line is the shape that produced the total, not a
- * breakdown of it. Returns undefined while the request is in flight so the
- * chart renders empty rather than briefly plotting a partial series.
+ * The sparkline beside each KPI, drawn from the same series the profit chart
+ * below plots — so the line under a card is literally the shape that produced
+ * the card's figure, over the same window. Returns undefined while the request
+ * is in flight so the chart renders empty rather than briefly plotting a
+ * partial series.
  */
 function sparklineFor(
-  monthly: MonthlySalesPoint[] | undefined,
-  metric: "revenue" | "orders" | "newCustomers",
+  series: SalesProfitPoint[] | undefined,
+  metric: "grossSales" | "orders" | "newCustomers",
 ): SparklinePoint[] | undefined {
-  return monthly?.map((point) => ({ label: point.month, value: point[metric] }));
+  return series?.map((point) => ({ label: point.bucket, value: point[metric] }));
 }

@@ -74,7 +74,23 @@ export type InventorySettings = z.infer<typeof InventorySettingsSchema>;
 export const UpdateInventorySettingsSchema = z.object({
   qcOnReceiving: z.boolean().optional(),
   requireScanToPick: z.boolean().optional(),
-  skuPrefix: z.string().max(10).optional(),
+  /**
+   * Policed here rather than on the read schema, so an existing stored value
+   * that predates this rule cannot fail the parse and reset every other
+   * inventory setting to its default (`parseInventorySettings` falls back
+   * wholesale). Uppercased and trimmed, then held to letters and digits: the
+   * generator joins SKU parts with "-", so a prefix containing a hyphen or a
+   * space would produce an unparseable code. Empty clears it, which returns to
+   * the slug-derived prefix.
+   */
+  skuPrefix: z
+    .string()
+    .transform((value) => value.trim().toUpperCase())
+    .refine((value) => /^[A-Z0-9]{0,10}$/.test(value), {
+      message:
+        'SKU prefix must be up to 10 letters or digits, with no spaces or punctuation.',
+    })
+    .optional(),
   updateCostOnReceipt: z.boolean().optional(),
   pushGeneratedBarcodes: z.boolean().optional(),
 });

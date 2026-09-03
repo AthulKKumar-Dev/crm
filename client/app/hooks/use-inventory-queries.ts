@@ -7,7 +7,8 @@ export const inventoryKeys = {
   all: ["inventory"] as const,
   status: () => [...inventoryKeys.all, "status"] as const,
   stock: (params?: StockListParams) => [...inventoryKeys.all, "stock", params] as const,
-  stockStats: () => [...inventoryKeys.all, "stock-stats"] as const,
+  stockStats: (params?: { warehouseId?: string }) =>
+    [...inventoryKeys.all, "stock-stats", params] as const,
   variantStock: (variantId: string) =>
     [...inventoryKeys.all, "variant-stock", variantId] as const,
   ledger: (params?: LedgerParams) => [...inventoryKeys.all, "ledger", params] as const,
@@ -37,11 +38,17 @@ export function useStock(params?: StockListParams) {
   });
 }
 
-export function useStockStats(enabled = true) {
+/**
+ * Aggregate stock figures, scoped to one warehouse when `warehouseId` is set
+ * and org-wide when it is not. The warehouse sits in the query key so each one
+ * caches separately; `keepPreviousData` holds the last figures on screen while
+ * the next warehouse loads, instead of flashing the tiles back to skeletons.
+ */
+export function useStockStats(params?: { warehouseId?: string }) {
   return useQuery({
-    queryKey: inventoryKeys.stockStats(),
-    queryFn: () => inventoryService.stockStats(),
-    enabled,
+    queryKey: inventoryKeys.stockStats(params),
+    queryFn: () => inventoryService.stockStats(params),
+    placeholderData: keepPreviousData,
   });
 }
 

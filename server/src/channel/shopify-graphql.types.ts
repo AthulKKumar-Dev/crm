@@ -70,6 +70,16 @@ export interface OrderLineItemNode {
   variantTitle: string | null;
   sku: string | null;
   quantity: number;
+  /**
+   * Units on this line NOT yet fulfilled. The only per-line shipping signal the
+   * GraphQL order query exposes — there is no flat `fulfillment_status` — and a
+   * plain scalar, so unlike a nested `fulfillmentLineItems` connection it adds
+   * nothing meaningful to the query's calculated cost. Without it a Shopify
+   * order fulfilled in the admin arrived with every line reading unfulfilled
+   * and no shipped count, so the whole order showed as outstanding and offered
+   * no fulfilment actions at all.
+   */
+  unfulfilledQuantity: number;
   originalUnitPriceSet: MoneyBag;
   totalDiscountSet: MoneyBag;
   requiresShipping: boolean;
@@ -178,6 +188,7 @@ export const ORDER_LINE_ITEMS_PAGE_QUERY = /* GraphQL */ `
           variantTitle
           sku
           quantity
+          unfulfilledQuantity
           originalUnitPriceSet { shopMoney { amount currencyCode } }
           totalDiscountSet { shopMoney { amount currencyCode } }
           requiresShipping
@@ -275,6 +286,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
             variantTitle
             sku
             quantity
+            unfulfilledQuantity
             originalUnitPriceSet { shopMoney { amount currencyCode } }
             totalDiscountSet { shopMoney { amount currencyCode } }
             requiresShipping
@@ -1330,10 +1342,17 @@ export interface ProductVariantSyncNode {
   position: number;
   taxable: boolean;
   inventoryQuantity: number | null;
+  /** CONTINUE | DENY — REST `inventory_policy` in upper case. */
+  inventoryPolicy: string | null;
   selectedOptions: Array<{ name: string; value: string }>;
   inventoryItem: {
     id: string;
     requiresShipping: boolean;
+    /** REST `inventory_management === 'shopify'`. */
+    tracked: boolean;
+    harmonizedSystemCode: string | null;
+    countryCodeOfOrigin: string | null;
+    unitCost: { amount: string; currencyCode: string } | null;
     measurement: { weight: { value: number; unit: string } | null } | null;
   } | null;
 }
@@ -1425,10 +1444,15 @@ export const PRODUCTS_LIST_QUERY = /* GraphQL */ `
             position
             taxable
             inventoryQuantity
+            inventoryPolicy
             selectedOptions { name value }
             inventoryItem {
               id
               requiresShipping
+              tracked
+              harmonizedSystemCode
+              countryCodeOfOrigin
+              unitCost { amount currencyCode }
               measurement { weight { value unit } }
             }
           }
@@ -1874,6 +1898,169 @@ export const PRODUCT_VARIANTS_BULK_CREATE_MUTATION = /* GraphQL */ `
         inventoryItem { id }
       }
       userErrors { field message }
+    }
+  }
+`;
+
+// ─── product options (structure of an already-synced product) ───────────────
+// The update push reconciles the CRM's `Product.options` against Shopify's
+// live options before touching variants — a variant that names an option
+// Shopify has never heard of is rejected outright. Planning lives in
+// product-options-reconcile.util.ts; these are the documents it drives.
+
+export interface ShopifyLiveOption {
+  id: string;
+  name: string;
+  position: number;
+  values: string[];
+}
+
+export interface ShopifyLiveVariantOptions {
+  id: string;
+  selectedOptions: Array<{ name: string; value: string }>;
+}
+
+interface ProductOptionsSnapshot {
+  id: string;
+  options: ShopifyLiveOption[];
+  variants: { nodes: ShopifyLiveVariantOptions[] };
+}
+
+export interface ProductOptionsQueryResponse {
+  product: ProductOptionsSnapshot | null;
+}
+
+export const PRODUCT_OPTIONS_QUERY = /* GraphQL */ `
+  query ProductOptionsForPush($id: ID!) {
+    product(id: $id) {
+      id
+      options { id name position values }
+      variants(first: 100) {
+        nodes {
+          id
+          selectedOptions { name value }
+        }
+      }
+    }
+  }
+`;
+
+export interface ProductOptionsCreateResponse {
+  productOptionsCreate: {
+    product: ProductOptionsSnapshot | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+// LEAVE_AS_IS: no new variants; existing variants receive the FIRST value of
+// each new option (Shopify Admin does the same). The CRM mirrors that rule in
+// ProductService.generateVariantsFromOptions, so both sides agree on which
+// combination each pre-existing variant now represents.
+export const PRODUCT_OPTIONS_CREATE_MUTATION = /* GraphQL */ `
+  mutation ProductOptionsCreate(
+    $productId: ID!
+    $options: [OptionCreateInput!]!
+    $variantStrategy: ProductOptionCreateVariantStrategy
+  ) {
+    productOptionsCreate(productId: $productId, options: $options, variantStrategy: $variantStrategy) {
+      product {
+        id
+        options { id name position values }
+        variants(first: 100) {
+          nodes {
+            id
+            selectedOptions { name value }
+          }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+export interface ProductOptionUpdateResponse {
+  productOptionUpdate: {
+    product: { id: string; options: ShopifyLiveOption[] } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const PRODUCT_OPTION_UPDATE_MUTATION = /* GraphQL */ `
+  mutation ProductOptionUpdate(
+    $productId: ID!
+    $option: OptionUpdateInput!
+    $optionValuesToAdd: [OptionValueCreateInput!]
+    $variantStrategy: ProductOptionUpdateVariantStrategy
+  ) {
+    productOptionUpdate(
+      productId: $productId
+      option: $option
+      optionValuesToAdd: $optionValuesToAdd
+      variantStrategy: $variantStrategy
+    ) {
+      product {
+        id
+        options { id name position values }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+export interface ProductOptionsDeleteResponse {
+  productOptionsDelete: {
+    deletedOptionsIds: string[] | null;
+    product: ProductOptionsSnapshot | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+// POSITION: an option with variants can go; duplicate variants that result
+// are removed, highest position first. DEFAULT only allows a one-value option.
+export const PRODUCT_OPTIONS_DELETE_MUTATION = /* GraphQL */ `
+  mutation ProductOptionsDelete(
+    $productId: ID!
+    $options: [ID!]!
+    $strategy: ProductOptionDeleteStrategy
+  ) {
+    productOptionsDelete(productId: $productId, options: $options, strategy: $strategy) {
+      deletedOptionsIds
+      product {
+        id
+        options { id name position values }
+        variants(first: 100) {
+          nodes {
+            id
+            selectedOptions { name value }
+          }
+        }
+      }
+      userErrors { field message code }
+    }
+  }
+`;
+
+export interface ProductOptionsReorderResponse {
+  productOptionsReorder: {
+    product: ProductOptionsSnapshot | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const PRODUCT_OPTIONS_REORDER_MUTATION = /* GraphQL */ `
+  mutation ProductOptionsReorder($productId: ID!, $options: [OptionReorderInput!]!) {
+    productOptionsReorder(productId: $productId, options: $options) {
+      product {
+        id
+        options { id name position values }
+        variants(first: 100) {
+          nodes {
+            id
+            selectedOptions { name value }
+          }
+        }
+      }
+      userErrors { field message code }
     }
   }
 `;

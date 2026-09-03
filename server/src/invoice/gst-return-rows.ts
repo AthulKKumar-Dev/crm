@@ -260,6 +260,17 @@ export const GSTR3B_SECTION_OTHER =
   '3.1(b)(c)(e) — Zero-rated, nil-rated/exempt and non-GST supplies';
 export const GSTR3B_SECTION_INTERSTATE =
   '3.2 — Inter-State supplies to unregistered persons (memo of 3.1)';
+export const GSTR3B_SECTION_REVERSE_CHARGE =
+  '3.1(d) — Inward supplies liable to reverse charge';
+/**
+ * 4(A)(3) SPECIFICALLY, never "Table 4".
+ *
+ * Table 4 as a whole includes 4(A)(5), all other ITC on domestic purchases,
+ * which this system does not track. Naming the sub-row is what stops the block
+ * implying a completeness it does not have.
+ */
+export const GSTR3B_SECTION_RCM_ITC =
+  '4(A)(3) — ITC on inward supplies liable to reverse charge';
 export const GSTR3B_SECTION_PAYABLE = '5.1 — Tax payable';
 
 export function buildGstr3bSections(data: Gstr3bReturn): CsvSection[] {
@@ -297,6 +308,35 @@ export function buildGstr3bSections(data: Gstr3bReturn): CsvSection[] {
         row.totalIgst,
       ]),
     },
+    // 3.1(d) and 4(A)(3) — the two legs of reverse charge, in statutory order
+    // between 3.2 and the payment section.
+    //
+    // Emitted even when zero: silence is what lets a merchant forget that a
+    // foreign subscription is declarable at all, and a zero row prompts the
+    // question. The note carries the floor caveat when a tax was never stated.
+    {
+      title: GSTR3B_SECTION_REVERSE_CHARGE,
+      headers: ['Taxable value', 'IGST', 'Note'],
+      rows: [
+        [
+          data.reverseCharge?.taxableValue ?? 0,
+          data.reverseCharge?.igst ?? 0,
+          reverseChargeNote(data.reverseCharge),
+        ],
+      ],
+    },
+    {
+      title: GSTR3B_SECTION_RCM_ITC,
+      headers: ['IGST', 'Note'],
+      rows: [
+        [
+          data.reverseCharge?.igst ?? 0,
+          // Equal to 3.1(d) by construction — you reclaim exactly what you
+          // self-paid — which is why the pair nets to nothing in cash.
+          'Equal to the 3.1(d) tax above; the two net to nil in cash. Excludes all other ITC (4(A)(5)), which this system does not track.',
+        ],
+      ],
+    },
     {
       title: GSTR3B_SECTION_PAYABLE,
       headers: ['CGST', 'SGST', 'IGST', 'Total'],
@@ -310,4 +350,19 @@ export function buildGstr3bSections(data: Gstr3bReturn): CsvSection[] {
       ],
     },
   ];
+}
+
+/** Says plainly when 3.1(d) is a floor rather than the full figure. */
+function reverseChargeNote(
+  reverseCharge: Gstr3bReturn['reverseCharge'] | undefined,
+): string {
+  if (!reverseCharge || reverseCharge.taxableValue === 0) {
+    return 'Nothing recorded. Foreign services (Shopify, Google Ads, AWS…) are declarable here.';
+  }
+  if (reverseCharge.entriesWithUnknownTax > 0) {
+    return `INCOMPLETE — ${reverseCharge.entriesWithUnknownTax} recorded ${
+      reverseCharge.entriesWithUnknownTax === 1 ? 'supply states' : 'supplies state'
+    } no tax amount, so the IGST above is a floor.`;
+  }
+  return 'Self-paid, then reclaimed in 4(A)(3) below.';
 }

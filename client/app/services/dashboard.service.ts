@@ -1,27 +1,58 @@
 import { apiClient } from "~/lib/api-client";
-import type { DashboardOverview, DashboardQueryParams, StatMetric } from "~/types/api";
+import type {
+  DashboardOverview,
+  DashboardPeriod,
+  DashboardQueryParams,
+  StatMetric,
+} from "~/types/api";
 
-/** One month of the rolling 12-month series behind the profit chart. */
-export interface MonthlySalesPoint {
-  month: string;
-  revenue: number;
-  profit: number;
-  /** Orders placed that month — the Total Orders sparkline. */
+/**
+ * One bucket of the sales-and-profit series — a month, or a day on the 30-day
+ * range.
+ */
+export interface SalesProfitPoint {
+  /** Axis label. "Jan", or "3 Sep" on daily buckets. */
+  bucket: string;
+  /** "2026-01" / "2026-01-03". Labels collide across years; this does not. */
+  bucketKey: string;
+
+  /** What customers paid, tax and shipping included. */
+  grossSales: number;
+  tax: number;
+  shipping: number;
+  refunds: number;
+  /** Post-discount, pre-tax, pre-shipping, net of refunds. */
+  netSales: number;
+  /** The slice of `netSales` backed by a known cost — the profit denominator. */
+  netSalesWithCost: number;
+  cogs: number;
+  /**
+   * `netSalesWithCost − cogs`. NULL, never 0, when nothing sold in this bucket
+   * has a cost price set: the honest answer there is "unknown", not "zero".
+   */
+  grossProfit: number | null;
+  /** 0–1. Share of net sales backed by a known cost. */
+  costCoverage: number;
+
   orders: number;
-  /** Customers first seen that month — the Total Customers sparkline. */
   newCustomers: number;
 }
 
-export interface MonthlySalesData {
-  data: MonthlySalesPoint[];
-  totalRevenue: number;
-  totalProfit: number;
+export interface SalesProfitTotals extends Omit<SalesProfitPoint, "bucket" | "bucketKey"> {
+  /** `grossProfit ÷ netSalesWithCost × 100`. NULL whenever `grossProfit` is. */
+  grossMarginPct: number | null;
+}
+
+export interface SalesProfitData {
+  period: DashboardPeriod;
+  data: SalesProfitPoint[];
   /**
-   * Profit over the last 30 days against the 30 before it. Distinct from the
-   * 12-month `totalProfit` above, so anything rendering it needs to say which
-   * period it covers. `previous: 0` means there is no comparison period yet.
+   * The stat cards read from here, not from `/dashboard`, so the headline
+   * figures and the bars beside them are the same numbers by construction.
    */
-  profitTrend: StatMetric;
+  totals: SalesProfitTotals;
+  /** Against the equally long window before this one. NULL when profit is. */
+  profitTrend: StatMetric | null;
 }
 
 export interface SalesByCategoryData {
@@ -35,9 +66,9 @@ export const dashboardService = {
       .get<DashboardOverview>("/dashboard", { params })
       .then((response) => response.data),
 
-  getMonthlySales: (params?: DashboardQueryParams) =>
+  getSalesAndProfit: (params?: DashboardQueryParams) =>
     apiClient
-      .get<MonthlySalesData>("/dashboard/monthly-sales", { params })
+      .get<SalesProfitData>("/dashboard/monthly-sales", { params })
       .then((response) => response.data),
 
   getSalesByCategory: (params?: DashboardQueryParams) =>

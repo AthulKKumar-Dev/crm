@@ -28,14 +28,42 @@ export class ShopifyPushEnqueuer {
     @InjectQueue(SHOPIFY_PUSH_QUEUE) private readonly queue: Queue<ShopifyPushJobData>,
   ) {}
 
-  /** Push a single order created in the CRM (e.g. an offline / counter sale). */
-  async enqueueOrderPush(data: Extract<ShopifyPushJobData, { type: 'order' }>): Promise<void> {
+  /**
+   * Push a single order created in the CRM (e.g. an offline / counter sale).
+   *
+   * Returns whether a job now exists for the order. Callers stamp the order
+   * PENDING around this call, so a swallowed failure used to leave the order
+   * "syncing" for ever with nothing in the queue — the caller must be able
+   * to record that as FAILED instead.
+   *
+   * One job id per order: a re-claim while the previous job is still live
+   * (waiting / delayed between retries / active) is a no-op, so two Sync
+   * presses cannot run `orderCreate` twice. A finished job (completed or
+   * failed) is removed first so a retry after the 5 attempts are exhausted
+   * is not silently ignored by BullMQ's id de-duplication.
+   */
+  async enqueueOrderPush(data: Extract<ShopifyPushJobData, { type: 'order' }>): Promise<boolean> {
+    const jobId = `push-order:${data.orderId}`;
     try {
-      await this.queue.add('push-order', data, DEFAULT_JOB_OPTS);
+      const existing = await this.queue.getJob(jobId);
+      if (existing) {
+        const state = await existing.getState();
+        if (state === 'completed' || state === 'failed') {
+          await existing.remove();
+        } else {
+          this.logger.log(
+            `Shopify order push for ${data.orderId} already ${state} (job ${jobId}) — not re-enqueued.`,
+          );
+          return true;
+        }
+      }
+      await this.queue.add('push-order', data, { ...DEFAULT_JOB_OPTS, jobId });
+      return true;
     } catch (err) {
       this.logger.error(
         `Failed to enqueue Shopify order push for ${data.orderId}: ${err}`,
       );
+      return false;
     }
   }
 
