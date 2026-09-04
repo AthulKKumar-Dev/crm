@@ -76,13 +76,19 @@ export class ProductController {
   }
 
   @Get('types')
+  @AllowVendor()
   getProductTypes(@CurrentUser() user: JwtPayload) {
-    return this.productService.getProductTypes(user.orgId!);
+    return this.productService.getProductTypes(user.orgId!, vendorScopeFor(user));
   }
 
   @Get('stats')
+  @AllowVendor()
   getStats(@CurrentUser() user: JwtPayload, @Query('channelId') channelId?: string) {
-    return this.productService.getStats(user.orgId!, channelId);
+    return this.productService.getStats(
+      user.orgId!,
+      channelId,
+      vendorScopeFor(user),
+    );
   }
 
   // ── VARIANT-LEVEL ROUTES (must register BEFORE :id wildcards) ──────────

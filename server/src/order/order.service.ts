@@ -144,6 +144,14 @@ export function selectFulfillableFos<T extends { status: string }>(fos: T[]): T[
 /** Matches `fulfillmentOrders(first: 25)` in both FO queries — neither paginates. */
 const FULFILLMENT_ORDER_PAGE_SIZE = 25;
 
+/** The window a comparison reports on, plus the one immediately before it. */
+interface ComparisonPeriods {
+  currentStart: Date;
+  currentEnd: Date;
+  previousStart: Date;
+  previousEnd: Date;
+}
+
 @Injectable()
 export class OrderService {
   private readonly logger = new Logger(OrderService.name);
@@ -406,15 +414,8 @@ export class OrderService {
   }
 
   async getComparison(orgId: string, query: QueryDashboardDto) {
-    // Determine current and previous periods
-    const now = new Date();
-    const currentStart = query.dateFrom ? new Date(query.dateFrom) : new Date(now.getFullYear(), now.getMonth(), 1);
-    const currentEnd = query.dateTo ? new Date(query.dateTo) : now;
-
-    // Previous period = same duration, shifted back
-    const duration = currentEnd.getTime() - currentStart.getTime();
-    const previousStart = new Date(currentStart.getTime() - duration);
-    const previousEnd = new Date(currentStart.getTime() - 1); // 1ms before current period starts
+    const periods = this.comparisonPeriods(query);
+    const { currentStart, currentEnd, previousStart, previousEnd } = periods;
 
     const channelFilter = query.channelId ? { channelId: query.channelId } : {};
 
@@ -501,40 +502,222 @@ export class OrderService {
       }),
     ]);
 
+    return this.buildComparison(periods, {
+      orders: { current: currentOrders, previous: previousOrders },
+      pending: { current: currentPendingOrders, previous: previousPendingOrders },
+      sales: {
+        current: currentSales._sum.totalPrice ?? 0,
+        previous: previousSales._sum.totalPrice ?? 0,
+      },
+      sold: {
+        current: currentProductsSold._sum.quantity ?? 0,
+        previous: previousProductsSold._sum.quantity ?? 0,
+      },
+    });
+  }
+
+  /**
+   * The same four metrics as {@link getComparison}, but measured over a single
+   * vendor's line items rather than whole orders — an order can carry several
+   * vendors, and summing `Order.totalPrice` would hand this vendor the others'
+   * revenue.
+   *
+   * Two metrics cannot be expressed in Prisma and drop to raw SQL:
+   *   - pending compares two columns (`fulfilled_quantity < quantity`), which is
+   *     the only reliable partial-shipment test (see the note on
+   *     `OrderLineItem.fulfilledQuantity` — `fulfillmentStatus` alone cannot
+   *     express "2 of 5 shipped");
+   *   - sales sums a product of two columns (`price * quantity`).
+   *
+   * Kept as its own method rather than a flag threaded through the org-wide one:
+   * half its queries would have had to change engine, and this way the owner
+   * path — which already works — is not touched at all.
+   */
+  async getVendorComparison(
+    orgId: string,
+    query: QueryDashboardDto,
+    vendorScope: string,
+  ) {
+    const periods = this.comparisonPeriods(query);
+    const { currentStart, currentEnd, previousStart, previousEnd } = periods;
+
+    const channelFilter = query.channelId ? { channelId: query.channelId } : {};
+    // Raw-SQL twin of `channelFilter`, for the two queries below that cannot go
+    // through Prisma.
+    const channelSql = query.channelId
+      ? Prisma.sql`AND o."channel_id" = ${query.channelId}`
+      : Prisma.empty;
+
+    // Orders carrying at least one of this vendor's items — the same membership
+    // rule `findAll` applies via `where.lineItems.some.vendor`.
+    const ordersIn = (from: Date, to: Date): Prisma.OrderWhereInput => ({
+      organizationId: orgId,
+      deletedAt: null,
+      ...channelFilter,
+      externalCreatedAt: { gte: from, lte: to },
+      lineItems: { some: { vendor: vendorScope } },
+    });
+
+    // Orders where THIS vendor still owes units. An order whose other vendors
+    // are behind is not this vendor's pending work. COUNT(DISTINCT) because one
+    // vendor may hold several lines on the same order.
+    const pendingIn = (from: Date, to: Date) =>
+      this.prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(DISTINCT o."id")::int AS count
+        FROM "orders" o
+        JOIN "order_line_items" li ON li."order_id" = o."id"
+        WHERE o."organization_id" = ${orgId}
+          AND o."deleted_at" IS NULL
+          AND o."external_created_at" >= ${from}
+          AND o."external_created_at" <= ${to}
+          AND li."vendor" = ${vendorScope}
+          AND li."fulfilled_quantity" < li."quantity"
+          ${channelSql}
+      `;
+
+    // Their line revenue: price × quantity, the same figure `vendorSubtotal` and
+    // the vendor order rows already show, so the tile ties out against the list
+    // beneath it. Paid-only, matching the org-wide tile's financialStatus rule.
+    const salesIn = (from: Date, to: Date) =>
+      this.prisma.$queryRaw<Array<{ value: number | null }>>`
+        SELECT COALESCE(SUM(li."price" * li."quantity"), 0)::float AS value
+        FROM "order_line_items" li
+        JOIN "orders" o ON o."id" = li."order_id"
+        WHERE o."organization_id" = ${orgId}
+          AND o."deleted_at" IS NULL
+          AND o."financial_status"::text IN ('PAID', 'PARTIALLY_PAID')
+          AND o."external_created_at" >= ${from}
+          AND o."external_created_at" <= ${to}
+          AND li."vendor" = ${vendorScope}
+          ${channelSql}
+      `;
+
+    const soldIn = (from: Date, to: Date) =>
+      this.prisma.orderLineItem.aggregate({
+        where: {
+          vendor: vendorScope,
+          order: {
+            organizationId: orgId,
+            deletedAt: null,
+            ...channelFilter,
+            externalCreatedAt: { gte: from, lte: to },
+          },
+        },
+        _sum: { quantity: true },
+      });
+
+    const [
+      currentOrders,
+      previousOrders,
+      currentPending,
+      previousPending,
+      currentSales,
+      previousSales,
+      currentSold,
+      previousSold,
+    ] = await Promise.all([
+      this.prisma.order.count({ where: ordersIn(currentStart, currentEnd) }),
+      this.prisma.order.count({ where: ordersIn(previousStart, previousEnd) }),
+      pendingIn(currentStart, currentEnd),
+      pendingIn(previousStart, previousEnd),
+      salesIn(currentStart, currentEnd),
+      salesIn(previousStart, previousEnd),
+      soldIn(currentStart, currentEnd),
+      soldIn(previousStart, previousEnd),
+    ]);
+
+    return this.buildComparison(periods, {
+      orders: { current: currentOrders, previous: previousOrders },
+      pending: {
+        current: currentPending[0]?.count ?? 0,
+        previous: previousPending[0]?.count ?? 0,
+      },
+      sales: {
+        current: currentSales[0]?.value ?? 0,
+        previous: previousSales[0]?.value ?? 0,
+      },
+      sold: {
+        current: currentSold._sum.quantity ?? 0,
+        previous: previousSold._sum.quantity ?? 0,
+      },
+    });
+  }
+
+  /**
+   * The window to report on, plus the same-length window immediately before it.
+   * Shared by the org-wide and vendor comparisons so both quote the same dates.
+   */
+  private comparisonPeriods(query: QueryDashboardDto): ComparisonPeriods {
+    const now = new Date();
+    const currentStart = query.dateFrom
+      ? new Date(query.dateFrom)
+      : new Date(now.getFullYear(), now.getMonth(), 1);
+    const currentEnd = query.dateTo ? new Date(query.dateTo) : now;
+
+    // Previous period = same duration, shifted back
+    const duration = currentEnd.getTime() - currentStart.getTime();
+    return {
+      currentStart,
+      currentEnd,
+      previousStart: new Date(currentStart.getTime() - duration),
+      previousEnd: new Date(currentStart.getTime() - 1), // 1ms before current starts
+    };
+  }
+
+  /**
+   * Assembles the comparison response. Separate so the vendor-scoped variant
+   * returns a byte-identical shape — one set of tiles renders for every role.
+   */
+  private buildComparison(
+    periods: ComparisonPeriods,
+    metrics: {
+      orders: { current: number; previous: number };
+      pending: { current: number; previous: number };
+      // Decimal on the org-wide path (Prisma `_sum`), plain number on the
+      // vendor path (raw SQL). Both serialize fine — the client applies
+      // `Number()` before formatting either way.
+      sales: {
+        current: Prisma.Decimal | number;
+        previous: Prisma.Decimal | number;
+      };
+      sold: { current: number; previous: number };
+    },
+  ) {
+    const { orders, pending, sales, sold } = metrics;
     return {
       period: {
-        current: { from: currentStart.toISOString(), to: currentEnd.toISOString() },
-        previous: { from: previousStart.toISOString(), to: previousEnd.toISOString() },
+        current: {
+          from: periods.currentStart.toISOString(),
+          to: periods.currentEnd.toISOString(),
+        },
+        previous: {
+          from: periods.previousStart.toISOString(),
+          to: periods.previousEnd.toISOString(),
+        },
       },
 
       totalNewOrders: {
-        current: currentOrders,
-        previous: previousOrders,
-        change: this.calcChange(currentOrders, previousOrders),
+        current: orders.current,
+        previous: orders.previous,
+        change: this.calcChange(orders.current, orders.previous),
       },
 
       pendingOrders: {
-        current: currentPendingOrders,
-        previous: previousPendingOrders,
-        change: this.calcChange(currentPendingOrders, previousPendingOrders),
+        current: pending.current,
+        previous: pending.previous,
+        change: this.calcChange(pending.current, pending.previous),
       },
 
       totalSales: {
-        current: currentSales._sum.totalPrice ?? 0,
-        previous: previousSales._sum.totalPrice ?? 0,
-        change: this.calcChange(
-          Number(currentSales._sum.totalPrice ?? 0),
-          Number(previousSales._sum.totalPrice ?? 0),
-        ),
+        current: sales.current,
+        previous: sales.previous,
+        change: this.calcChange(Number(sales.current), Number(sales.previous)),
       },
 
       totalProductsSold: {
-        current: currentProductsSold._sum.quantity ?? 0,
-        previous: previousProductsSold._sum.quantity ?? 0,
-        change: this.calcChange(
-          currentProductsSold._sum.quantity ?? 0,
-          previousProductsSold._sum.quantity ?? 0,
-        ),
+        current: sold.current,
+        previous: sold.previous,
+        change: this.calcChange(sold.current, sold.previous),
       },
     };
   }
