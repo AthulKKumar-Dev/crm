@@ -748,6 +748,10 @@ export class ProductService {
     // even if present in the payload (backend guarantee; UI shows read-only).
     const isVendor = !!vendorScope;
 
+    // Variants whose stock actually moved; pushed after commit so a queue
+    // outage cannot roll the edit back.
+    const stockMovedVariantIds: string[] = [];
+
     const updated = await this.prisma.$transaction(async (tx) => {
       const productPatch: Prisma.ProductUpdateInput = {};
       if (dto.title !== undefined) productPatch.title = dto.title;
@@ -802,9 +806,15 @@ export class ProductService {
               data: variantPatch,
               reason: 'adjustment',
               referenceType: 'manual',
+              // Warehousing orgs: the quantity is one location's available, so
+              // the ledger needs to know which. It refuses the edit without it.
+              warehouseId: dto.variant.warehouseId,
             },
             tx,
           );
+          if (dto.variant.inventoryQuantity !== undefined) {
+            stockMovedVariantIds.push(product.variants[0].id);
+          }
         }
       }
 
@@ -821,6 +831,10 @@ export class ProductService {
     });
 
     await this.markOutOfSyncIfNeeded(id);
+    await this.shopifyPushEnqueuer.enqueueAvailabilityPush(
+      orgId,
+      stockMovedVariantIds,
+    );
     return updated;
   }
 
@@ -1118,9 +1132,15 @@ export class ProductService {
       data: this.buildVariantPatch(dto, variant, vendorScope),
       reason: 'adjustment',
       referenceType: 'manual',
+      warehouseId: dto.warehouseId,
     });
 
     await this.markOutOfSyncIfNeeded(variant.product.id);
+    // A stock change has to reach Shopify: the pull treats Shopify as
+    // authoritative, so an un-pushed local edit is reverted by the next sync.
+    if (dto.inventoryQuantity !== undefined) {
+      await this.shopifyPushEnqueuer.enqueueAvailabilityPush(orgId, [variantId]);
+    }
     return updated;
   }
 
@@ -1162,29 +1182,32 @@ export class ProductService {
       const updated: ProductVariant[] = [];
       for (const u of dto.updates) {
         const before = byId.get(u.variantId)!;
-        const row = await tx.productVariant.update({
-          where: { id: u.variantId },
-          data: this.buildVariantPatch(
-            u,
-            before,
-            vendorScope,
-          ),
-        });
-        // Ledger: `before` was loaded above in this request, so no re-read.
-        await this.inventoryLedger.recordQuantityChange(tx, {
-          orgId,
-          variantId: u.variantId,
-          quantityBefore: before.inventoryQuantity,
-          quantityAfter: row.inventoryQuantity,
-          reason: 'adjustment',
-          referenceType: 'manual',
-          sku: row.sku ?? before.sku,
-        });
+        // Routed through auditedVariantUpdate rather than a direct update plus
+        // recordQuantityChange, so this path inherits the warehouse guard: on a
+        // warehousing org a quantity edit here used to write the derived cache
+        // and be erased by the next movement, exactly as the single-variant
+        // PATCH did.
+        const row = await this.inventoryLedger.auditedVariantUpdate(
+          {
+            orgId,
+            variantId: u.variantId,
+            data: this.buildVariantPatch(u, before, vendorScope),
+            reason: 'adjustment',
+            referenceType: 'manual',
+            warehouseId: u.warehouseId,
+          },
+          tx,
+        );
         updated.push(row);
       }
       await this.markOutOfSyncIfNeeded(product.id, tx);
       return updated;
     });
+
+    const movedStock = dto.updates
+      .filter((u) => u.inventoryQuantity !== undefined)
+      .map((u) => u.variantId);
+    await this.shopifyPushEnqueuer.enqueueAvailabilityPush(orgId, movedStock);
 
     return { ok: true, updated: variants.length, variants };
   }

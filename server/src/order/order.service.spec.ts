@@ -48,6 +48,9 @@ function build(order: ReturnType<typeof manualOrder>, opts: { enqueued?: boolean
     {} as any,
     {} as any,
     {} as any,
+    // ledger, shopifyPushQueue
+    { isWarehousingEnabled: jest.fn().mockResolvedValue(false) } as any,
+    { add: jest.fn().mockResolvedValue(undefined) } as any,
   );
   return { service, prisma, enqueuer, pushService };
 }
@@ -185,6 +188,8 @@ describe('OrderService.setVendorItemsStatus (released)', () => {
     const service = new OrderService(
       prisma as any, {} as any, {} as any, {} as any, {} as any,
       {} as any, {} as any, {} as any, {} as any, {} as any,
+      { isWarehousingEnabled: jest.fn().mockResolvedValue(false) } as any,
+      { add: jest.fn().mockResolvedValue(undefined) } as any,
     );
     return { service, tx, updated };
   }

@@ -59,6 +59,15 @@ export class CreateVariantDto {
   @Min(0)
   inventoryQuantity?: number;
 
+  // Which warehouse `inventoryQuantity` refers to. REQUIRED for organisations
+  // that track stock per warehouse — there the number is one location's
+  // available, not an org-wide total, and the server refuses the edit without
+  // it rather than guessing a warehouse and silently rewriting the wrong one.
+  // Ignored by legacy orgs, which hold a single quantity per variant.
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
+
   @IsOptional()
   @IsBoolean()
   trackQuantity?: boolean;
@@ -174,6 +183,15 @@ export class UpdateVariantDto {
   @IsInt()
   @Min(0)
   inventoryQuantity?: number;
+
+  // Which warehouse `inventoryQuantity` refers to. REQUIRED for organisations
+  // that track stock per warehouse — there the number is one location's
+  // available, not an org-wide total, and the server refuses the edit without
+  // it rather than guessing a warehouse and silently rewriting the wrong one.
+  // Ignored by legacy orgs, which hold a single quantity per variant.
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
 
   @IsOptional()
   @IsBoolean()

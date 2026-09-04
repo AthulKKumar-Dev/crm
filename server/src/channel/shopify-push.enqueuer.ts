@@ -67,6 +67,32 @@ export class ShopifyPushEnqueuer {
     }
   }
 
+  /**
+   * Push current per-warehouse availability for specific variants.
+   *
+   * A CRM-origin stock change MUST reach Shopify, and not just because the two
+   * should agree: `pullLocationInventory` treats Shopify as authoritative, so
+   * an un-pushed local change is actively reverted by the next sync.
+   */
+  async enqueueAvailabilityPush(orgId: string, variantIds: string[]): Promise<void> {
+    if (variantIds.length === 0) return;
+    try {
+      await this.queue.add(
+        'push-availability',
+        {
+          type: 'push-availability',
+          organizationId: orgId,
+          variantIds: [...new Set(variantIds)],
+        },
+        DEFAULT_JOB_OPTS,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to enqueue availability push for org ${orgId}: ${err}`,
+      );
+    }
+  }
+
   /** Push a single CRM-native product (one-off, e.g. created while Shopify is connected). */
   async enqueueProductPush(data: Extract<ShopifyPushJobData, { type: 'product' }>): Promise<void> {
     try {

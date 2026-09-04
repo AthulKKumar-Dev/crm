@@ -20,10 +20,9 @@ function build(found: unknown) {
       update: jest.fn().mockResolvedValue(undefined),
     },
   };
+  // prisma, encryption, syncService, whatsappTrigger, config, inventoryLedger
   const controller = new ShopifyWebhookController(
     prisma as any,
-    {} as any,
-    {} as any,
     {} as any,
     {} as any,
     {} as any,

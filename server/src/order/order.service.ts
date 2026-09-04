@@ -15,6 +15,7 @@ import {
   OrderFinancialStatus,
   OrderFulfillmentStatus,
   Prisma,
+  StockBucket,
 } from '@prisma/client';
 import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
 import { singleDistinct } from '../channel/single-distinct.util';
@@ -48,6 +49,10 @@ import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
+import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { SHOPIFY_PUSH_QUEUE } from '../channel/shopify-push.queue';
 import { displayVariantTitle } from '../product/variant-title.util';
 import {
   retryOnNumberingConflict,
@@ -154,6 +159,9 @@ export class OrderService {
     private readonly shopifyOAuth: ShopifyOAuthService,
     private readonly settings: OrganizationSettingsService,
     private readonly loyalty: LoyaltyService,
+    private readonly ledger: InventoryLedgerService,
+    @InjectQueue(SHOPIFY_PUSH_QUEUE)
+    private readonly shopifyPushQueue: Queue,
   ) { }
 
   async findAll(orgId: string, query: QueryOrdersDto, vendorScope?: string) {
@@ -1556,6 +1564,9 @@ export class OrderService {
       throw new BadRequestException('Order is already cancelled');
     }
     const isShopify = order.channel.platform === ChannelPlatform.SHOPIFY;
+    // Variants restocked into a warehouse bucket; pushed to Shopify after the
+    // transaction commits so a failed push can never roll back the cancel.
+    const restockedVariantIds: string[] = [];
 
     if (isShopify) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
@@ -1638,6 +1649,31 @@ export class OrderService {
       if (dto.restock && !isShopify) {
         const productSettings = await this.settings.getProductSettings(orgId);
         const trackGlobally = productSettings.trackQuantityGlobally === true;
+
+        // Warehousing orgs hold the truth in stock_levels; inventoryQuantity is
+        // only a cache the ledger recomputes. Incrementing that cache directly
+        // (as this did) left stock_levels untouched, attributed the restock to
+        // no warehouse, told Shopify nothing, and was silently discarded by the
+        // next applyMovement, which recomputes the cache from stock_levels.
+        const warehousing = await this.ledger.isWarehousingEnabled(orgId);
+        // Goods return to the warehouse they were dispatched from; fall back to
+        // the default for orders stamped before dispatch was recorded.
+        const restockWarehouseId = warehousing
+          ? (updated.dispatchWarehouseId ??
+            (
+              await tx.warehouse.findFirst({
+                where: { organizationId: orgId, isDefault: true },
+                select: { id: true },
+              })
+            )?.id ??
+            null)
+          : null;
+        if (warehousing && !restockWarehouseId) {
+          this.logger.warn(
+            `Cannot restock order ${id}: org ${orgId} has warehousing on but no dispatch or default warehouse.`,
+          );
+        }
+
         const lineItems = await tx.orderLineItem.findMany({
           where: { orderId: id },
           include: { variant: true },
@@ -1645,6 +1681,33 @@ export class OrderService {
         for (const li of lineItems) {
           if (!li.variant) continue;
           if (!trackGlobally && li.variant.trackQuantity === false) continue;
+
+          if (warehousing) {
+            if (!restockWarehouseId) continue;
+            await this.ledger.applyMovement(
+              {
+                orgId,
+                variantId: li.variant.id,
+                warehouseId: restockWarehouseId,
+                fromBucket: null,
+                toBucket: StockBucket.AVAILABLE,
+                quantity: li.quantity,
+                reason: 'restock',
+                referenceType: 'order',
+                referenceId: id,
+                actorId: userId,
+                // A retried cancel must not restock twice. The atomic claim
+                // above already blocks a second cancel; this covers a retry
+                // that reaches here after a partial failure.
+                idempotencyKey: `restock:${id}:${li.id}`,
+              },
+              tx,
+            );
+            restockedVariantIds.push(li.variant.id);
+            continue;
+          }
+
+          // Legacy orgs: one number per variant, no stock_levels to move.
           const updatedVariant = await tx.productVariant.update({
             where: { id: li.variant.id },
             data: { inventoryQuantity: { increment: li.quantity } },
@@ -1700,6 +1763,28 @@ export class OrderService {
             `Loyalty recompute failed after cancelling order ${id}: ${err}`,
           ),
         );
+    }
+
+    // Restocked units are only real to Shopify once pushed. Outside the
+    // transaction and non-fatal for the same reason as the loyalty recompute:
+    // a queue outage must not roll back a completed cancellation. The push is
+    // per-warehouse, so it lands at the location the goods returned to.
+    if (restockedVariantIds.length > 0) {
+      try {
+        await this.shopifyPushQueue.add(
+          'push-availability',
+          {
+            type: 'push-availability',
+            organizationId: orgId,
+            variantIds: [...new Set(restockedVariantIds)],
+          },
+          { attempts: 5, backoff: { type: 'exponential', delay: 10_000 } },
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to enqueue availability push after cancelling order ${id}: ${err}`,
+        );
+      }
     }
 
     return cancelled;

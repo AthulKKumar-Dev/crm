@@ -28,6 +28,9 @@ const VARIANT_PAGE_SIZE = 25;
 /** Inventory levels per variant. A variant is stocked at ≤ this many locations. */
 const LEVELS_PER_VARIANT = 50;
 
+/** CreateWarehouseDto caps name at 100; stay valid for a later API edit. */
+const WAREHOUSE_NAME_MAX = 100;
+
 /**
  * Mirrors Shopify locations as CRM warehouses, and reconciles per-location
  * stock into each mapped warehouse's AVAILABLE bucket.
@@ -151,6 +154,7 @@ export class ShopifyLocationSyncService {
         where: { organizationId: orgId },
         select: {
           id: true,
+          name: true,
           code: true,
           shopifyLocationId: true,
           isDefault: true,
@@ -232,7 +236,11 @@ export class ShopifyLocationSyncService {
         if (match) {
           await this.prisma.warehouse.update({
             where: { id: match.id },
-            data: { isActive: node.isActive, ...enrichment(node, match) },
+            data: {
+              isActive: node.isActive,
+              ...this.adoptLocationName(node, match),
+              ...enrichment(node, match),
+            },
           });
         } else if (locationId === primaryLocationId && adoptable) {
           // Link the org's pre-existing warehouse to the primary location
@@ -243,6 +251,7 @@ export class ShopifyLocationSyncService {
             data: {
               shopifyLocationId: locationId,
               isActive: node.isActive,
+              ...this.adoptLocationName(node, adoptable),
               ...enrichment(node, adoptable),
             },
           });
@@ -669,6 +678,36 @@ export class ShopifyLocationSyncService {
   }
 
   // ─────────────────────────── helpers ───────────────────────────
+
+  /**
+   * Mirror Shopify's location name onto the warehouse, verbatim.
+   *
+   * Shopify owns location names the same way it owns per-location quantities —
+   * the module’s "Shopify wins on pull" rule — so a rename upstream lands here
+   * on the next sync. Before this, `syncLocations` wrote only isActive and the
+   * address/GSTIN enrichment onto an existing warehouse, so the name set at
+   * create time was permanent. Shrishti Jewels on 2026-09-04: the primary
+   * location "Shrishti Jewels 12 Stadium Bypass Road Selvapalayam" had been
+   * adopted into the warehouse `enable()` seeds as "Main Warehouse"/"WH1" and
+   * stayed on screen under that placeholder, so it read as a location that had
+   * never synced at all.
+   *
+   * Consequence worth knowing: a warehouse renamed in the CRM reverts to the
+   * Shopify name on the next sync. Rename it in Shopify instead.
+   *
+   * The `code` is deliberately never touched — it prefixes bin fullCodes and is
+   * printed on pick lists, so rewriting it would break scanning.
+   */
+  private adoptLocationName(
+    node: ShopifyLocationNode,
+    current: { name: string },
+  ): { name?: string } {
+    const name = node.name?.trim();
+    if (!name || name === current.name) return {};
+    // Guard only: Shopify allows longer names than CreateWarehouseDto accepts,
+    // and an over-long stored name would fail validation on a later API edit.
+    return { name: name.slice(0, WAREHOUSE_NAME_MAX) };
+  }
 
   /** `gid://shopify/Location/123` → `"123"`. Stored as text on Warehouse. */
   private numericId(gid: string): string {
