@@ -437,6 +437,9 @@ export class ShopifyLocationSyncService {
     let failed = 0;
     let unmappedLevels = 0;
     let truncatedVariants = 0;
+    // Rows materialised for levels Shopify stocks at zero. Not movements, so
+    // they are reported separately and excluded from the sync log counts.
+    let created = 0;
 
     try {
       let warehouses = await this.loadMappedWarehouses(orgId);
@@ -499,11 +502,21 @@ export class ShopifyLocationSyncService {
           ours.map((v) => [v.inventoryItemId as string, v.id]),
         );
 
-        // Current buckets for the whole page, keyed variant:warehouse. A
-        // missing row means zero — applyMovement creates it on demand.
-        const currentAvailable = await this.loadAvailable(
+        // Current buckets for the whole page, keyed variant:warehouse.
+        // `existing` distinguishes "no row" from "row holding zero" — the two
+        // are indistinguishable by quantity alone, and conflating them is what
+        // left zero-stock variants with no row and therefore invisible to
+        // InventoryService.listStock, which reads stock_levels only.
+        const { available: currentAvailable, existing } = await this.loadAvailable(
           [...variantByItemId.values()],
         );
+        // (variant, warehouse) pairs Shopify stocks but we hold no row for.
+        // Collected across the page and inserted in one statement below.
+        const missingRows: {
+          organizationId: string;
+          variantId: string;
+          warehouseId: string;
+        }[] = [];
 
         for (const node of res.productVariants.nodes) {
           const itemGid = node.inventoryItem?.id;
@@ -531,9 +544,19 @@ export class ShopifyLocationSyncService {
             )?.quantity;
             if (typeof available !== 'number') continue;
 
-            const current = currentAvailable.get(`${variantId}:${warehouseId}`) ?? 0;
+            const key = `${variantId}:${warehouseId}`;
+            const current = currentAvailable.get(key) ?? 0;
             const delta = available - current;
-            if (delta === 0) continue;
+            if (delta === 0) {
+              // Shopify stocks this item here. Nothing moved, but if we hold no
+              // row the variant never appears on the inventory screen at all —
+              // materialise it at zero. Deliberately no inventory_events row:
+              // creating an empty bucket is not a stock movement.
+              if (!existing.has(key)) {
+                missingRows.push({ organizationId: orgId, variantId, warehouseId });
+              }
+              continue;
+            }
 
             try {
               await this.ledger.applyMovement({
@@ -561,6 +584,19 @@ export class ShopifyLocationSyncService {
           }
         }
 
+        // One statement per page rather than a round trip per variant.
+        // skipDuplicates emits ON CONFLICT DO NOTHING with no conflict target,
+        // so it is safe against the partial unique index on
+        // (variant_id, warehouse_id) WHERE location_id IS NULL — an upsert,
+        // which must name a target, would not be.
+        if (missingRows.length > 0) {
+          await this.prisma.stockLevel.createMany({
+            data: missingRows,
+            skipDuplicates: true,
+          });
+          created += missingRows.length;
+        }
+
         cursor = res.productVariants.pageInfo.hasNextPage
           ? res.productVariants.pageInfo.endCursor
           : null;
@@ -583,7 +619,7 @@ export class ShopifyLocationSyncService {
         );
       }
       this.logger.log(
-        `Per-location inventory reconciled for org ${orgId}: ${processed} movement(s), ${failed} failed`,
+        `Per-location inventory reconciled for org ${orgId}: ${processed} movement(s), ${created} row(s) created, ${failed} failed`,
       );
       await this.completeSyncLog(syncLog.id, processed, failed);
     } catch (error) {
@@ -604,16 +640,32 @@ export class ShopifyLocationSyncService {
     });
   }
 
-  /** Warehouse-level AVAILABLE per variant, keyed `variantId:warehouseId`. */
-  private async loadAvailable(variantIds: string[]): Promise<Map<string, number>> {
-    if (variantIds.length === 0) return new Map();
+  /**
+   * Warehouse-level AVAILABLE per variant, keyed `variantId:warehouseId`.
+   *
+   * `existing` carries which keys actually have a row. A caller cannot infer
+   * that from `available` alone — an absent row and a row holding 0 both read
+   * as 0 — and the two need different handling.
+   */
+  private async loadAvailable(variantIds: string[]): Promise<{
+    available: Map<string, number>;
+    existing: Set<string>;
+  }> {
+    if (variantIds.length === 0) {
+      return { available: new Map(), existing: new Set() };
+    }
     const rows = await this.prisma.stockLevel.findMany({
       where: { variantId: { in: variantIds }, locationId: null },
       select: { variantId: true, warehouseId: true, available: true },
     });
-    return new Map(
-      rows.map((r) => [`${r.variantId}:${r.warehouseId}`, r.available]),
-    );
+    const available = new Map<string, number>();
+    const existing = new Set<string>();
+    for (const r of rows) {
+      const key = `${r.variantId}:${r.warehouseId}`;
+      available.set(key, r.available);
+      existing.add(key);
+    }
+    return { available, existing };
   }
 
   // ─────────────────────────── helpers ───────────────────────────
