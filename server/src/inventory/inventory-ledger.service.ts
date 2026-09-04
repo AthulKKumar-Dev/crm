@@ -172,6 +172,22 @@ export class InventoryLedgerService {
    * changes. THE fix for the historical silent-edit hole. Runs in its own
    * transaction unless the caller passes one.
    */
+  /**
+   * Patch a variant, guaranteeing an InventoryEvent for any quantity change.
+   *
+   * **Warehousing orgs must pass `warehouseId` whenever `data` carries
+   * `inventoryQuantity`.** For them the quantity is not a field — it is a
+   * derived cache over stock_levels, and writing it directly is silent data
+   * loss: the units enter no bucket, are attributed to no location, never
+   * reach Shopify, and are erased by the next applyMovement, which recomputes
+   * the cache from stock_levels. Production on 2026-09-04: SJ00376 was edited
+   * +1 then +2 from the product screen and all three units vanished when a
+   * Kochi adjustment landed 13 minutes later.
+   *
+   * The incoming number is the desired AVAILABLE at that ONE warehouse, and
+   * the difference is applied as a movement. Legacy orgs are untouched — for
+   * them inventoryQuantity IS the truth and there are no buckets to move.
+   */
   async auditedVariantUpdate(
     args: {
       orgId: string;
@@ -181,9 +197,35 @@ export class InventoryLedgerService {
       referenceType?: string;
       referenceId?: string;
       actorId?: string;
+      warehouseId?: string;
     },
     tx?: Prisma.TransactionClient,
   ) {
+    const warehousing = await this.isWarehousingEnabled(args.orgId);
+    const movesStock = warehousing && args.data.inventoryQuantity !== undefined;
+
+    // The movement owns that column for warehousing orgs — never write it here.
+    const data = { ...args.data };
+    let desiredAvailable = 0;
+    if (movesStock) {
+      const raw = args.data.inventoryQuantity;
+      const value = typeof raw === 'number' ? raw : (raw as { set?: number })?.set;
+      delete data.inventoryQuantity;
+      if (typeof value !== 'number') {
+        throw new ConflictException(
+          'Unsupported inventoryQuantity update for a warehousing organisation.',
+        );
+      }
+      if (!args.warehouseId) {
+        // Refusing beats guessing: with two warehouses, applying a bare number
+        // to a default silently rewrites one location and leaves the other.
+        throw new ConflictException(
+          'This organisation tracks stock per warehouse. Send warehouseId alongside inventoryQuantity, or adjust stock from the inventory screen.',
+        );
+      }
+      desiredAvailable = value;
+    }
+
     const run = async (db: Prisma.TransactionClient) => {
       const before = await db.productVariant.findUnique({
         where: { id: args.variantId },
@@ -192,8 +234,46 @@ export class InventoryLedgerService {
       if (!before) throw new NotFoundException('Variant not found');
       const updated = await db.productVariant.update({
         where: { id: args.variantId },
-        data: args.data,
+        data,
       });
+      if (movesStock) {
+        // Set-to semantics against THIS warehouse's available bucket.
+        const level = await db.stockLevel.findFirst({
+          where: {
+            variantId: args.variantId,
+            warehouseId: args.warehouseId,
+            locationId: null,
+          },
+          select: { available: true },
+        });
+        const delta = desiredAvailable - (level?.available ?? 0);
+        if (delta !== 0) {
+          // Recomputes the sellable cache from stock_levels as its last step,
+          // so `updated.inventoryQuantity` above is already stale — re-read it
+          // for the caller rather than returning the pre-movement value.
+          await this.applyMovement(
+            {
+              orgId: args.orgId,
+              variantId: args.variantId,
+              warehouseId: args.warehouseId as string,
+              fromBucket: delta < 0 ? StockBucket.AVAILABLE : null,
+              toBucket: delta > 0 ? StockBucket.AVAILABLE : null,
+              quantity: Math.abs(delta),
+              reason: args.reason,
+              referenceType: args.referenceType,
+              referenceId: args.referenceId,
+              actorId: args.actorId,
+            },
+            db,
+          );
+          return db.productVariant.findUniqueOrThrow({
+            where: { id: args.variantId },
+          });
+        }
+        // No movement, so no ledger row — nothing changed at this warehouse.
+        return updated;
+      }
+
       await this.recordQuantityChange(db, {
         orgId: args.orgId,
         variantId: args.variantId,
@@ -231,6 +311,17 @@ export class InventoryLedgerService {
     }
 
     const run = async (db: Prisma.TransactionClient): Promise<MovementResult> => {
+      // Serialise concurrent movements for this variant BEFORE touching any
+      // row, so every caller takes the same lock in the same order.
+      //
+      // Two movements for one variant at DIFFERENT warehouses write different
+      // stock_levels rows, so nothing else makes them block each other — and
+      // each would then compute step 3 from a snapshot missing the other, with
+      // the last commit overwriting the cache with a stale total. Observed in
+      // production on 2026-09-04: SJ965 took +2 at Kochi and -2 at Main 55ms
+      // apart and kept inventoryQuantity 22 against a true SUM of 20.
+      await db.$queryRaw`SELECT 1 FROM "product_variants" WHERE "id" = ${args.variantId} FOR UPDATE`;
+
       const level = await this.ensureLevel(db, args.orgId, args.variantId, args.warehouseId);
 
       // Effect of this movement on the sellable (available) quantity.

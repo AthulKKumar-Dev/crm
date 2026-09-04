@@ -146,3 +146,54 @@ describe('ShopifyLocationSyncService.pullLocationInventory', () => {
     expect(ledger.applyMovement).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Shopify owns location names, the same way it owns per-location quantities.
+ * Before this, syncLocations wrote only isActive and address/GSTIN enrichment
+ * onto an existing warehouse, so the name set at create time was permanent —
+ * and Shrishti Jewels’ primary location sat on screen as the placeholder
+ * "Main Warehouse" that enable() seeds, reading as a location that had never
+ * synced at all.
+ */
+describe('ShopifyLocationSyncService.adoptLocationName', () => {
+  const svc = new ShopifyLocationSyncService(
+    {} as any,
+    {} as any,
+    {} as any,
+    {} as any,
+  ) as any;
+
+  const SHOPIFY_NAME = 'Shrishti Jewels 12 Stadium Bypass Road Selvapalayam';
+
+  it('takes the Shopify name verbatim, replacing the seeded placeholder', () => {
+    expect(
+      svc.adoptLocationName({ name: SHOPIFY_NAME }, { name: 'Main Warehouse' }),
+    ).toEqual({ name: SHOPIFY_NAME });
+  });
+
+  it('overwrites any existing name, so a Shopify rename propagates', () => {
+    expect(
+      svc.adoptLocationName({ name: SHOPIFY_NAME }, { name: 'Kochi Store' }),
+    ).toEqual({ name: SHOPIFY_NAME });
+  });
+
+  it('is a no-op when the name already matches', () => {
+    expect(
+      svc.adoptLocationName({ name: SHOPIFY_NAME }, { name: SHOPIFY_NAME }),
+    ).toEqual({});
+  });
+
+  it('is a no-op when Shopify sends no usable name', () => {
+    const cur = { name: 'Main Warehouse' };
+    expect(svc.adoptLocationName({ name: '   ' }, cur)).toEqual({});
+    expect(svc.adoptLocationName({ name: undefined }, cur)).toEqual({});
+  });
+
+  it('truncates only past the 100-char DTO limit', () => {
+    const out = svc.adoptLocationName(
+      { name: 'x'.repeat(150) },
+      { name: 'Main Warehouse' },
+    );
+    expect(out.name).toHaveLength(100);
+  });
+});

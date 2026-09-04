@@ -24,6 +24,9 @@ describe('InventoryLedgerService', () => {
     productVariant: { findUnique: jest.Mock; update: jest.Mock };
     inventoryEvent: { create: jest.Mock; createMany: jest.Mock };
     $executeRawUnsafe: jest.Mock;
+    // applyMovement takes SELECT ... FOR UPDATE on the variant first, to
+    // serialise concurrent movements at different warehouses.
+    $queryRaw: jest.Mock;
   };
 
   beforeEach(async () => {
@@ -40,6 +43,7 @@ describe('InventoryLedgerService', () => {
       },
       inventoryEvent: { create: jest.fn().mockResolvedValue({}), createMany: jest.fn() },
       $executeRawUnsafe: jest.fn().mockResolvedValue(1),
+      $queryRaw: jest.fn().mockResolvedValue([{ ok: 1 }]),
     };
 
     const module: TestingModule = await Test.createTestingModule({

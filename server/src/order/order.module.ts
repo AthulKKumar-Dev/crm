@@ -6,6 +6,9 @@ import { InvoiceModule } from '../invoice/invoice.module';
 import { ChannelModule } from '../channel/channel.module';
 import { OrganizationSettingsModule } from '../organization-settings/organization-settings.module';
 import { LoyaltyModule } from '../loyalty/loyalty.module';
+import { InventoryModule } from '../inventory/inventory.module';
+import { BullModule } from '@nestjs/bullmq';
+import { SHOPIFY_PUSH_QUEUE } from '../channel/shopify-push.queue';
 
 // WHY these imports?
 //   GstModule                  — tax math (GstCalculatorService, TaxResolverService).
@@ -23,6 +26,12 @@ import { LoyaltyModule } from '../loyalty/loyalty.module';
     ChannelModule,
     OrganizationSettingsModule,
     LoyaltyModule,
+    InventoryModule,
+    // Cancelling a MANUAL order restocks into a warehouse bucket, and the new
+    // quantity has to reach Shopify. Registering the queue by name rather than
+    // importing a Shopify service keeps this the same cycle-free seam
+    // InventoryModule uses for its own availability pushes.
+    BullModule.registerQueue({ name: SHOPIFY_PUSH_QUEUE }),
   ],
   controllers: [OrderController],
   providers: [OrderService],
