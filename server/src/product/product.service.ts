@@ -331,12 +331,16 @@ export class ProductService {
   }
 
   // Get unique product types for filter dropdown
-  async getProductTypes(orgId: string) {
+  async getProductTypes(orgId: string, vendorScope?: string) {
     const types = await this.prisma.product.findMany({
       where: {
         organizationId: orgId,
         deletedAt: null,
         productType: { not: null },
+        // A vendor's filter should offer only the types they actually have —
+        // an unscoped list both leaks the org's catalogue shape and offers
+        // options that match none of their products.
+        ...(vendorScope ? { vendor: vendorScope } : {}),
       },
       select: { productType: true },
       distinct: ['productType'],
@@ -345,11 +349,16 @@ export class ProductService {
     return types.map((t) => t.productType).filter(Boolean);
   }
 
-  async getStats(orgId: string, channelId?: string) {
+  async getStats(orgId: string, channelId?: string, vendorScope?: string) {
+    // Every query below derives from baseWhere (the variant aggregate joins
+    // through `product: baseWhere`), so scoping here scopes all seven.
+    // Matches on `vendor` exactly as findAll does, keeping the tiles and the
+    // list they sit above in agreement — see the vendorKey caveat on findAll.
     const baseWhere: Prisma.ProductWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       ...(channelId && { channelId }),
+      ...(vendorScope ? { vendor: vendorScope } : {}),
     };
 
     // Get the org's low stock threshold

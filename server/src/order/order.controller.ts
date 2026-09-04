@@ -44,9 +44,15 @@ export class OrderController {
   }
 
   // GET /api/v1/orders/stats — MUST be before :id route
+  // A vendor gets the same four metrics measured over THEIR line items only;
+  // the org-wide method would hand them another vendor's revenue.
   @Get('stats')
+  @AllowVendor()
   getStats(@CurrentUser() user: JwtPayload, @Query() query: QueryDashboardDto) {
-    return this.orderService.getComparison(user.orgId!, query);
+    const vendorScope = vendorScopeFor(user);
+    return vendorScope
+      ? this.orderService.getVendorComparison(user.orgId!, query, vendorScope)
+      : this.orderService.getComparison(user.orgId!, query);
   }
 
   // GET /api/v1/orders/export/csv
