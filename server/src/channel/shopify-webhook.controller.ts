@@ -369,18 +369,28 @@ export class ShopifyWebhookController {
         });
     }
 
+    /**
+     * A product removed from Shopify is soft-deleted here, NOT marked ARCHIVED.
+     *
+     * ARCHIVED is one of Shopify's own three product statuses and arrives
+     * through the normal product sync, so writing it on delete made a deleted
+     * product indistinguishable from a genuinely archived one — and, because
+     * catalogue listings filter on deletedAt rather than status, kept it in
+     * the catalogue forever. Found on 2026-09-04: the store held 0 archived
+     * products while the CRM held 128, every one of them deleted in Shopify.
+     */
     private async handleProductDelete(channelId: string, body: { id: number }) {
         const externalId = String(body.id);
         const product = await this.prisma.product.findFirst({
-            where: { channelId, externalId },
+            where: { channelId, externalId, deletedAt: null },
         });
 
         if (product) {
             await this.prisma.product.update({
                 where: { id: product.id },
-                data: { status: 'ARCHIVED' },
+                data: { deletedAt: new Date() },
             });
-            this.logger.log(`Product ${externalId} marked as archived (deleted in Shopify)`);
+            this.logger.log(`Product ${externalId} soft-deleted (removed in Shopify)`);
         }
     }
 

@@ -242,10 +242,17 @@ export class InventoryService {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
 
-    const where: Prisma.StockLevelWhereInput = { organizationId: orgId };
+    // A product deleted in Shopify is soft-deleted, not removed, so its stock
+    // rows outlive it. Without this the inventory screen keeps listing items
+    // the merchant can no longer sell.
+    const where: Prisma.StockLevelWhereInput = {
+      organizationId: orgId,
+      variant: { product: { deletedAt: null } },
+    };
     if (query.warehouseId) where.warehouseId = query.warehouseId;
     if (query.q) {
       where.variant = {
+        product: { deletedAt: null },
         OR: [
           { sku: { contains: query.q, mode: 'insensitive' } },
           { barcode: { contains: query.q, mode: 'insensitive' } },
@@ -345,6 +352,8 @@ export class InventoryService {
     // listStock leans on instead of a separate ownership lookup.
     const scope: Prisma.StockLevelWhereInput = {
       organizationId: orgId,
+      // Matches listStock: deleted products must not inflate the stat tiles.
+      variant: { product: { deletedAt: null } },
       ...(warehouseId ? { warehouseId } : {}),
     };
     const warehouseFilter = warehouseId
@@ -368,7 +377,8 @@ export class InventoryService {
         SELECT SUM(("available" + "reserved" + "qc" + "damaged") * COALESCE(pv."cost", 0))::float AS value
         FROM "stock_levels" sl
         JOIN "product_variants" pv ON pv."id" = sl."variant_id"
-        WHERE sl."organization_id" = ${orgId} ${warehouseFilter}
+        JOIN "products" p ON p."id" = pv."product_id"
+        WHERE sl."organization_id" = ${orgId} AND p."deleted_at" IS NULL ${warehouseFilter}
       `,
     ]);
 
