@@ -78,6 +78,9 @@ export function buildGstr1Sections(data: Gstr1Return): CsvSection[] {
       'Invoice date',
       'Place of supply',
       'Supply type',
+      // Rule 46(p), and the column the offline utility's B2B sheet uses to
+      // separate table 4B from 4A.
+      'Reverse charge',
       'Taxable value',
       'CGST',
       'SGST',
@@ -93,6 +96,7 @@ export function buildGstr1Sections(data: Gstr1Return): CsvSection[] {
         toDateOnly(inv.invoiceDate),
         formatPlaceOfSupply(inv.placeOfSupply, inv.placeOfSupplyName),
         inv.gstType === 'IGST' ? 'Inter-State' : 'Intra-State',
+        inv.reverseCharge ? 'Y' : 'N',
         inv.subtotal,
         inv.cgst,
         inv.sgst,
@@ -222,35 +226,78 @@ export function buildGstr1Sections(data: Gstr1Return): CsvSection[] {
       ]),
   });
 
-  sections.push({
-    title: '12 — HSN summary',
-    headers: [
-      'HSN',
-      'Description',
-      'UQC',
-      'Rate',
-      'Total quantity',
-      'Total value',
-      'Taxable value',
-      'CGST',
-      'SGST',
-      'IGST',
-    ],
-    rows: (data.hsnSummary ?? []).map((row) => [
-      // Never invent a code. A blank would look like an export bug, so the gap
-      // is named — this column must be filled before the return can be filed.
-      row.hsnCode ?? HSN_MISSING,
-      row.description,
-      row.uqc,
-      `${row.gstRate}%`,
-      row.quantity,
-      row.totalValue,
-      row.taxableValue,
-      row.cgst,
-      row.sgst,
-      row.igst,
-    ]),
-  });
+  // Table 12 is TWO tables from the May-2025 return period onward: the portal
+  // reports HSN-B2B and HSN-B2C on separate tabs, each reconciling to its own
+  // supplies. Emitting one merged table produced a file no current period
+  // accepts. Both are always emitted, empty or not, so the reader can see which
+  // side a figure was expected on.
+  const hsnRows = data.hsnSummary ?? [];
+  for (const side of ['B2B', 'B2C'] as const) {
+    sections.push({
+      title: `12 — HSN summary (${side})`,
+      headers: [
+        'HSN',
+        'Description',
+        'UQC',
+        'Rate',
+        'Total quantity',
+        'Total value',
+        'Taxable value',
+        'CGST',
+        'SGST',
+        'IGST',
+      ],
+      rows: hsnRows
+        .filter((row) => row.recipientType === side)
+        .map((row) => [
+          // Never invent a code. A blank would look like an export bug, so the
+          // gap is named — this column must be filled before filing.
+          row.hsnCode ?? HSN_MISSING,
+          row.description,
+          row.uqc,
+          `${row.gstRate}%`,
+          row.quantity,
+          row.totalValue,
+          row.taxableValue,
+          row.cgst,
+          row.sgst,
+          row.igst,
+        ]),
+    });
+  }
+
+  // Table 13 — documents issued. Mandatory whenever outward supplies are
+  // reported. Only rendered when the service attached it (GSTR-1 only).
+  if (data.documentsIssued) {
+    sections.push({
+      title: '13 — Documents issued',
+      headers: [
+        'Nature of document',
+        'Series',
+        'Financial year',
+        'Sr. No. from',
+        'Sr. No. to',
+        'Total number',
+        'Documents present',
+        'Cancelled',
+        'Net issued',
+      ],
+      rows: data.documentsIssued.rows.map((row) => [
+        row.nature,
+        row.series,
+        row.financialYear,
+        row.from,
+        row.to,
+        row.total,
+        // Reported beside the span rather than instead of it: a difference is
+        // either a real serial gap or the effect of scoping to one GSTIN while
+        // the numbering series runs org-wide. Averaging them would hide both.
+        row.documents,
+        row.cancelled,
+        row.netIssued,
+      ]),
+    });
+  }
 
   return sections;
 }
@@ -260,6 +307,8 @@ export const GSTR3B_SECTION_OTHER =
   '3.1(b)(c)(e) — Zero-rated, nil-rated/exempt and non-GST supplies';
 export const GSTR3B_SECTION_INTERSTATE =
   '3.2 — Inter-State supplies to unregistered persons (memo of 3.1)';
+export const GSTR3B_SECTION_OUTWARD_RCM =
+  '3.1(a) note — Outward supplies under reverse charge (tax payable by recipient)';
 export const GSTR3B_SECTION_REVERSE_CHARGE =
   '3.1(d) — Inward supplies liable to reverse charge';
 /**
@@ -307,6 +356,24 @@ export function buildGstr3bSections(data: Gstr3bReturn): CsvSection[] {
         row.totalTaxable,
         row.totalIgst,
       ]),
+    },
+    // Outward supplies the RECIPIENT pays tax on. Excluded from 3.1(a), 3.2
+    // and 5.1 above, because the portal's own 3.1(a) is built from GSTR-1
+    // tables that omit 4B. Shown so the exclusion is visible and reconcilable
+    // rather than an unexplained shortfall against the sales figures.
+    {
+      title: GSTR3B_SECTION_OUTWARD_RCM,
+      headers: ['Invoices', 'Taxable value', 'Tax not payable by you', 'Note'],
+      rows: [
+        [
+          data.outwardReverseCharge?.invoiceCount ?? 0,
+          data.outwardReverseCharge?.taxableValue ?? 0,
+          data.outwardReverseCharge?.tax ?? 0,
+          (data.outwardReverseCharge?.unregisteredRecipients ?? 0) > 0
+            ? `${data.outwardReverseCharge!.unregisteredRecipients} of these have no buyer GSTIN — reverse charge on outward supplies is B2B, so check those invoices.`
+            : 'Reported in GSTR-1 table 4B; the recipient declares this tax in their own 3.1(d).',
+        ],
+      ],
     },
     // 3.1(d) and 4(A)(3) — the two legs of reverse charge, in statutory order
     // between 3.2 and the payment section.

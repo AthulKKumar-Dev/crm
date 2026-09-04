@@ -36,8 +36,10 @@ function Amount({ value, currency }: { value: number; currency: string }) {
  * (e) were permanently empty. Products now carry a supply type, so those rows
  * are real and live in Gstr3bOtherSuppliesPanel below.
  *
- * Row (d), inward supplies liable to reverse charge, is still absent — this
- * module reports outward supplies only, and nothing records inward ones.
+ * Row (d), inward supplies liable to reverse charge, is filled by the service
+ * from recorded inward supplies and rendered by InwardSuppliesPanel. OUTWARD
+ * supplies under reverse charge are a different thing again — see
+ * Gstr3bOutwardReverseChargePanel below.
  */
 export function Gstr3bOutwardPanel({ data, currency }: PanelProps) {
   const totals = outwardSupplyTotals(data.outwardSupplies);
@@ -172,6 +174,61 @@ export function Gstr3bInterStatePanel({ data, currency }: PanelProps) {
  * products carried a supply type, because nil-rated, exempted and non-GST all
  * resolve to a 0% rate and could not be told apart from each other.
  */
+/**
+ * Outward supplies the RECIPIENT pays tax on — GSTR-1 table 4B.
+ *
+ * Deliberately NOT part of 3.1(a): the portal's system-computed 3.1(a) is built
+ * from GSTR-1 tables 4A/4C/5/6C/7/9/10/11 and omits 4B, because the supplier
+ * owes nothing on these and the recipient declares the same tax in their own
+ * 3.1(d). Shown so the exclusion is visible and reconcilable rather than an
+ * unexplained shortfall against the sales figures.
+ *
+ * Hidden entirely when there are none, which is the overwhelming majority of
+ * merchants — an always-zero row would invite the question every month.
+ */
+export function Gstr3bOutwardReverseChargePanel({ data, currency }: PanelProps) {
+  const rcm = data.outwardReverseCharge;
+  if (!rcm || rcm.invoiceCount === 0) return null;
+
+  return (
+    <SectionCard
+      title="Outward supplies under reverse charge"
+      description="Reported in GSTR-1 table 4B — excluded from 3.1(a) and from tax payable"
+    >
+      <div className="space-y-3 px-5 py-4">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-caption text-muted-foreground">
+            {rcm.invoiceCount} invoice{rcm.invoiceCount === 1 ? "" : "s"}
+          </span>
+          <span className="text-caption font-semibold tabular-nums">
+            {formatCurrency(rcm.taxableValue, currency)}
+          </span>
+        </div>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-caption text-muted-foreground">
+            Tax payable by the recipient, not by you
+          </span>
+          <span className="text-caption font-semibold tabular-nums">
+            {formatCurrency(rcm.tax, currency)}
+          </span>
+        </div>
+        {rcm.unregisteredRecipients > 0 && (
+          <p className="rounded-md bg-warning-subtle px-3 py-2 text-caption">
+            <strong className="font-semibold">
+              {rcm.unregisteredRecipients} of these have no buyer GSTIN.
+            </strong>{" "}
+            Reverse charge on outward supplies applies between registered
+            persons, so check whether those invoices were flagged by mistake.
+          </p>
+        )}
+        <p className="text-micro text-muted-foreground">
+          Confirm the treatment with your CA before filing.
+        </p>
+      </div>
+    </SectionCard>
+  );
+}
+
 export function Gstr3bOtherSuppliesPanel({ data, currency }: PanelProps) {
   const rows = [
     {

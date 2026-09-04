@@ -46,7 +46,9 @@ import {
 import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-tab";
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
-import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse } from "~/types/api";
+import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse, Warehouse } from "~/types/api";
+import { readAddress } from "~/lib/address";
+import { useWarehouses } from "~/hooks/use-inventory-queries";
 import { GstReturnSettings } from "~/components/app/settings/gst-return-settings";
 import { InvoiceSeriesSetting } from "~/components/app/settings/invoice-series-setting";
 
@@ -484,6 +486,49 @@ const THEME_OPTIONS = [
 // rate the server would accept.
 const GST_RATE_OPTIONS = ["0", "0.25", "3", "5", "12", "18", "28"];
 
+/**
+ * The places of business operating under one registration: the principal one
+ * (the registered address) plus every warehouse declared as an additional
+ * place of business (APOB) of it.
+ *
+ * This is the view a merchant needs before filing — GST registers per STATE,
+ * and every branch invoicing under a GSTIN must be declared on the portal
+ * under that same registration.
+ */
+function PlacesOfBusiness({
+  gstin,
+  warehouses,
+}: {
+  gstin: OrganizationGstin;
+  warehouses: Warehouse[];
+}) {
+  const principal = readAddress(gstin.address);
+  const additional = warehouses.filter((w) => w.gstinId === gstin.id);
+
+  return (
+    <div className="mt-2 space-y-1 border-l-2 border-gray-100 dark:border-gray-800 pl-2">
+      <p className="text-[9px] font-semibold uppercase tracking-wider text-gray-400">
+        Places of business
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        <span className="text-gray-600 dark:text-gray-400">Principal:</span>{" "}
+        {principal.hasAddress ? principal.lines.join(", ") : "No registered address"}
+      </p>
+      {additional.map((w) => (
+        <p key={w.id} className="text-[10px] text-muted-foreground">
+          <span className="text-gray-600 dark:text-gray-400">{w.name}:</span>{" "}
+          {readAddress(w.address).lines.join(", ") || "No address"}
+          {!w.apobDeclared && (
+            <span className="ml-1 rounded bg-amber-50 px-1 text-[9px] text-amber-700">
+              not declared on portal
+            </span>
+          )}
+        </p>
+      ))}
+    </div>
+  );
+}
+
 function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gstEnabled: boolean }) {
   const [gstEnabled, setGstEnabled] = useState(initialGstEnabled);
   const [showAddForm, setShowAddForm] = useState(false);
@@ -584,6 +629,17 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
   }
 
   const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  // Composed client-side rather than through a new endpoint: this is two lists
+  // the app already fetches. Renders nothing extra when the warehouses query
+  // fails or is forbidden (it needs inventory.view, which this tab does not).
+  const warehouses = useWarehouses();
+  const warehouseRows = (warehouses.data ?? []).filter((w) => w.isActive);
+  const unlinkedWarehouses = warehouseRows.filter((w) => !w.gstinId).length;
+  const undeclaredWarehouses = warehouseRows.filter(
+    (w) => w.gstinId && !w.apobDeclared,
+  ).length;
+
   const confirmDelete = activeGstins.find(
     (g: OrganizationGstin) => g.id === confirmDeleteId,
   );
@@ -648,6 +704,7 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
                           {g.stateName} ({g.stateCode})
                         </p>
                       </div>
+                      <PlacesOfBusiness gstin={g} warehouses={warehouseRows} />
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       {!g.isDefault && (
@@ -677,6 +734,28 @@ function TaxGstTab({ orgId, gstEnabled: initialGstEnabled }: { orgId: string; gs
                   </div>
                 ))}
               </div>
+
+              {/* Warehouses that invoice but are not attached to any
+                  registration, and linked ones the merchant has not yet
+                  declared on the portal. Both are compliance gaps this app can
+                  only point at — the portal amendment is theirs to file. */}
+              {(unlinkedWarehouses > 0 || undeclaredWarehouses > 0) && (
+                <div className="mt-3 space-y-1">
+                  {unlinkedWarehouses > 0 && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {unlinkedWarehouses} warehouse{unlinkedWarehouses === 1 ? " is" : "s are"} not linked to a GST registration.{" "}
+                      <Link to="/products/inventory/warehouses" className="underline hover:text-gray-900 dark:hover:text-gray-100">
+                        Link them
+                      </Link>
+                    </p>
+                  )}
+                  {undeclaredWarehouses > 0 && (
+                    <p className="text-[10px] text-muted-foreground">
+                      {undeclaredWarehouses} place{undeclaredWarehouses === 1 ? "" : "s"} of business not yet marked as declared on the GST portal.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Add button */}
               {!showAddForm && (

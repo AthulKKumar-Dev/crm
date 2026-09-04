@@ -26,6 +26,7 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "gst:export": "ts-node -r tsconfig-paths/register prisma/scripts/gst-export-check.ts",
     "gst:reconcile": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-reconcile.ts",
     "gst:fixtures": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-fixtures.ts",
     "gst:refund-check": "node prisma/scripts/print-target.js && ts-node -r tsconfig-paths/register prisma/scripts/gst-refund-credit-check.ts",

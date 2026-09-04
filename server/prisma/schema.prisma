@@ -335,8 +335,8 @@ model Organization {
   stockReservations      StockReservation[]
   stockReceipts          StockReceipt[]
   pickTasks              PickTask[]
-  gstFilings        GstFiling[]
-  inwardSupplies    InwardSupply[]
+  gstFilings             GstFiling[]
+  inwardSupplies         InwardSupply[]
 
   @@map("organizations")
 }
@@ -755,36 +755,41 @@ model CustomerActivityLog {
 }
 
 model Order {
-  id                 String                 @id @default(cuid())
-  organizationId     String                 @map("organization_id")
-  channelId          String                 @map("channel_id")
-  customerId         String?                @map("customer_id") // Nullable: guest orders
-  externalId         String                 @map("external_id") // Shopify order ID
-  orderNumber        Int                    @map("order_number") // 1001, 1002...
-  name               String // "#1001"
-  financialStatus    OrderFinancialStatus   @map("financial_status")
-  fulfillmentStatus  OrderFulfillmentStatus @default(UNFULFILLED) @map("fulfillment_status")
-  currency           String                 @default("USD")
-  subtotalPrice      Decimal                @map("subtotal_price") @db.Decimal(12, 2)
-  totalPrice         Decimal                @map("total_price") @db.Decimal(12, 2)
-  totalTax           Decimal                @default(0) @map("total_tax") @db.Decimal(12, 2)
-  totalDiscounts     Decimal                @default(0) @map("total_discounts") @db.Decimal(12, 2)
-  totalShippingPrice Decimal                @default(0) @map("total_shipping_price") @db.Decimal(12, 2)
-  shippingAddress    Json?                  @map("shipping_address") @db.JsonB
-  billingAddress     Json?                  @map("billing_address") @db.JsonB
-  note               String?
-  tags               String[]               @default([])
-  cancelReason       OrderCancelReason?     @map("cancel_reason")
-  cancelledAt        DateTime?              @map("cancelled_at")
-  closedAt           DateTime?              @map("closed_at")
+  id                  String                 @id @default(cuid())
+  organizationId      String                 @map("organization_id")
+  channelId           String                 @map("channel_id")
+  customerId          String?                @map("customer_id") // Nullable: guest orders
+  externalId          String                 @map("external_id") // Shopify order ID
+  orderNumber         Int                    @map("order_number") // 1001, 1002...
+  name                String // "#1001"
+  financialStatus     OrderFinancialStatus   @map("financial_status")
+  fulfillmentStatus   OrderFulfillmentStatus @default(UNFULFILLED) @map("fulfillment_status")
+  currency            String                 @default("USD")
+  subtotalPrice       Decimal                @map("subtotal_price") @db.Decimal(12, 2)
+  totalPrice          Decimal                @map("total_price") @db.Decimal(12, 2)
+  totalTax            Decimal                @default(0) @map("total_tax") @db.Decimal(12, 2)
+  totalDiscounts      Decimal                @default(0) @map("total_discounts") @db.Decimal(12, 2)
+  totalShippingPrice  Decimal                @default(0) @map("total_shipping_price") @db.Decimal(12, 2)
+  shippingAddress     Json?                  @map("shipping_address") @db.JsonB
+  billingAddress      Json?                  @map("billing_address") @db.JsonB
+  note                String?
+  tags                String[]               @default([])
+  cancelReason        OrderCancelReason?     @map("cancel_reason")
+  cancelledAt         DateTime?              @map("cancelled_at")
+  closedAt            DateTime?              @map("closed_at")
   /// GST place of supply resolved AT THE TIME THE ORDER WAS TAXED, plus the
   /// resulting CGST+SGST vs IGST split. Persisted so the invoice reports what
   /// the customer was actually charged instead of re-deriving it later from
   /// data that may have changed (the two derivations previously disagreed and
   /// could produce a different tax head and a different amount). Null for
   /// orders created before this was introduced, and for non-GST orgs.
-  placeOfSupplyCode  String?                @map("place_of_supply_code")
-  gstType            GstType?               @map("gst_type")
+  placeOfSupplyCode   String?                @map("place_of_supply_code")
+  gstType             GstType?               @map("gst_type")
+  /// Warehouse the goods left from. Stamped FIRST-WRITE-ONLY by the offline
+  /// order DTO, the Shopify fulfilment location, or the fulfillment-order
+  /// assignment read before auto-invoicing; never null-overwritten by a later
+  /// sync. Snapshotted onto the invoice as "Dispatch From".
+  dispatchWarehouseId String?                @map("dispatch_warehouse_id")
 
   /// What the SALES CHANNEL says it charged in tax, as opposed to what the CRM
   /// computes. Nullable with no default on purpose: NULL means "never told"
@@ -808,19 +813,20 @@ model Order {
   externalCreatedAt DateTime? @map("external_created_at")
   externalUpdatedAt DateTime? @map("external_updated_at")
 
-  organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  channel          Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
-  customer         Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  lineItems        OrderLineItem[]
-  fulfillments     OrderFulfillment[]
-  refunds          OrderRefund[]
-  timeline         OrderTimelineEvent[]
-  invoices         Invoice[]
-  whatsappMessages WhatsAppMessageLog[]
+  organization      Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  channel           Channel              @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  customer          Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  dispatchWarehouse Warehouse?           @relation("OrderDispatchWarehouse", fields: [dispatchWarehouseId], references: [id], onDelete: SetNull)
+  lineItems         OrderLineItem[]
+  fulfillments      OrderFulfillment[]
+  refunds           OrderRefund[]
+  timeline          OrderTimelineEvent[]
+  invoices          Invoice[]
+  whatsappMessages  WhatsAppMessageLog[]
   /// Back-relation for DraftOrder.completedOrderId. A finalized order may
   /// originate from a draft; this lets us link "this order was created from
   /// draft <name>" in the UI.
-  draftOrderOrigin DraftOrder?          @relation("DraftOrderCompletedOrder")
+  draftOrderOrigin  DraftOrder?          @relation("DraftOrderCompletedOrder")
 
   @@unique([channelId, externalId])
   // NOTE (not expressible in Prisma): a PARTIAL unique index
@@ -834,6 +840,7 @@ model Order {
   @@index([organizationId])
   @@index([channelId])
   @@index([customerId])
+  @@index([dispatchWarehouseId])
   @@index([financialStatus])
   @@index([fulfillmentStatus])
   @@index([orderNumber])
@@ -1086,19 +1093,34 @@ model Warehouse {
   // Numeric Shopify location id this warehouse mirrors (V1: at most one mapped
   // warehouse per org — seeded from Channel.metadata.shopifyLocationId).
   shopifyLocationId String?  @map("shopify_location_id")
+  // Canonical address keys ({ address1, address2, city, zip, province }) plus
+  // `stateCode` (GST 2-digit) so both `extractStateFromAddress` (server) and
+  // `readAddress` (client) can read it. Filled once from Shopify when absent,
+  // then the merchant's to edit; the sync never overwrites it.
   address           Json?    @db.JsonB
+  /// Which GST registration this warehouse operates under — an *additional
+  /// place of business* (APOB) of that GSTIN. Null = not linked. The state of
+  /// `address` must match the registration's state (a place of business in
+  /// another state needs its own GSTIN); enforced in WarehouseService.
+  gstinId           String?  @map("gstin_id")
+  /// Merchant's confirmation that this APOB has been declared on the GST
+  /// portal — a registration amendment the app cannot perform for them.
+  apobDeclared      Boolean  @default(false) @map("apob_declared")
   isDefault         Boolean  @default(false) @map("is_default")
   isActive          Boolean  @default(true) @map("is_active") // deactivate, never hard-delete (ledger references)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  locations       WarehouseLocation[]
-  stockLevels     StockLevel[]
-  reservations    StockReservation[]
-  receipts        StockReceipt[]
-  pickTasks       PickTask[]
-  inventoryEvents InventoryEvent[]
+  organization     Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  locations        WarehouseLocation[]
+  stockLevels      StockLevel[]
+  reservations     StockReservation[]
+  receipts         StockReceipt[]
+  pickTasks        PickTask[]
+  inventoryEvents  InventoryEvent[]
+  gstin            OrganizationGstin?  @relation(fields: [gstinId], references: [id], onDelete: SetNull)
+  dispatchOrders   Order[]             @relation("OrderDispatchWarehouse")
+  dispatchInvoices Invoice[]           @relation("InvoiceDispatchWarehouse")
 
   // SQL-only partial uniques:
   //   (organization_id) WHERE is_default          — one default per org
@@ -1108,6 +1130,7 @@ model Warehouse {
   //       stock across two warehouses. See 20260818090000.
   @@unique([organizationId, code])
   @@index([organizationId])
+  @@index([gstinId])
   @@map("warehouses")
 }
 
@@ -1336,6 +1359,7 @@ model OrganizationGstin {
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   invoices     Invoice[]
+  warehouses   Warehouse[]
 
   @@unique([organizationId, gstin])
   @@index([organizationId])
@@ -1360,6 +1384,15 @@ model Invoice {
   sellerAddress   Json?  @map("seller_address") @db.JsonB
   sellerStateCode String @map("seller_state_code")
   sellerStateName String @map("seller_state_name")
+
+  // Dispatch-from snapshot: the additional place of business the goods left
+  // from, when the org tracks warehouses. Snapshotted like the seller block so
+  // the document never changes under the merchant. All null = dispatched from
+  // the registered address (or the org does not track warehouses).
+  dispatchWarehouseId String? @map("dispatch_warehouse_id")
+  dispatchName        String? @map("dispatch_name")
+  dispatchAddress     Json?   @map("dispatch_address") @db.JsonB
+  dispatchStateCode   String? @map("dispatch_state_code") // GST 2-digit; spec App A `dispatch_state_code`
 
   // Buyer snapshot
   buyerName      String  @map("buyer_name")
@@ -1406,18 +1439,18 @@ model Invoice {
   /// NOTE (not expressible in Prisma): the one-live-invoice partial index now
   ///   reads WHERE status NOT IN ('CANCELLED', 'CREDIT_NOTE') — a credit note
   ///   must not occupy the single live-invoice slot for its order.
-  creditNoteForId  String?  @map("credit_note_for_id")
-  creditNoteReason String?  @map("credit_note_reason")
-  creditNoteFor    Invoice? @relation("InvoiceCreditNotes", fields: [creditNoteForId], references: [id], onDelete: Restrict)
+  creditNoteForId  String?   @map("credit_note_for_id")
+  creditNoteReason String?   @map("credit_note_reason")
+  creditNoteFor    Invoice?  @relation("InvoiceCreditNotes", fields: [creditNoteForId], references: [id], onDelete: Restrict)
   creditNotes      Invoice[] @relation("InvoiceCreditNotes")
   /// Any line on this invoice has no HSN code. Derivable by joining line items,
   /// but stored and partially indexed so the filing tab's warning is one index
   /// scan. Counts both null and the legacy '0000' as missing.
   /// NOTE (not expressible in Prisma): partial index
   ///   invoices_org_hsn_missing_idx ON (organization_id) WHERE hsn_missing
-  hsnMissing       Boolean  @default(false) @map("hsn_missing")
-  grandTotal       Decimal  @map("grand_total") @db.Decimal(12, 2)
-  currency         String   @default("INR")
+  hsnMissing       Boolean   @default(false) @map("hsn_missing")
+  grandTotal       Decimal   @map("grand_total") @db.Decimal(12, 2)
+  currency         String    @default("INR")
 
   // Status & metadata
   reverseCharge Boolean       @default(false) @map("reverse_charge")
@@ -1428,10 +1461,13 @@ model Invoice {
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  order          Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  sellerGstinRec OrganizationGstin @relation(fields: [sellerGstinId], references: [id], onDelete: Restrict)
-  lineItems      InvoiceLineItem[]
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  order             Order             @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerGstinRec    OrganizationGstin @relation(fields: [sellerGstinId], references: [id], onDelete: Restrict)
+  // SetNull, unlike sellerGstinRec: the invoice carries its own dispatch
+  // snapshot, so this FK is a pointer, not the record.
+  dispatchWarehouse Warehouse?        @relation("InvoiceDispatchWarehouse", fields: [dispatchWarehouseId], references: [id], onDelete: SetNull)
+  lineItems         InvoiceLineItem[]
 
   @@unique([organizationId, invoiceNumber])
   // NOTE (not expressible in Prisma): a PARTIAL unique index
@@ -1443,6 +1479,7 @@ model Invoice {
   @@index([organizationId])
   @@index([orderId])
   @@index([sellerGstinId])
+  @@index([dispatchWarehouseId])
   @@index([financialYear])
   @@index([invoiceDate])
   @@index([status])
@@ -1450,32 +1487,32 @@ model Invoice {
 }
 
 model InvoiceLineItem {
-  id              String   @id @default(cuid())
-  invoiceId       String   @map("invoice_id")
-  orderLineItemId String?  @map("order_line_item_id") // Traceability to original line item
+  id              String        @id @default(cuid())
+  invoiceId       String        @map("invoice_id")
+  orderLineItemId String?       @map("order_line_item_id") // Traceability to original line item
   description     String // Product name + variant title
   /// NULLABLE since Phase 2. It was NOT NULL, so a product without an HSN got the
   /// invented literal '0000' written onto a statutory document. Readers must treat
   /// BOTH null and '0000' as missing — the pre-existing '0000' rows sit on issued
   /// invoices and are deliberately not rewritten.
-  hsnCode         String?  @map("hsn_code") // HSN/SAC code
+  hsnCode         String?       @map("hsn_code") // HSN/SAC code
   /// Snapshotted at issue time, like every other statutory value here.
   unitOfMeasure   String?       @map("unit_of_measure")
   supplyType      GstSupplyType @default(TAXABLE) @map("supply_type")
   quantity        Int
-  unitPrice       Decimal  @map("unit_price") @db.Decimal(12, 2)
-  discount        Decimal  @default(0) @db.Decimal(12, 2)
-  taxableValue    Decimal  @map("taxable_value") @db.Decimal(12, 2) // (unitPrice * qty) - discount
-  gstRate         Decimal  @map("gst_rate") @db.Decimal(5, 2) // Full GST % (e.g. 18.00)
-  cgstRate        Decimal  @default(0) @map("cgst_rate") @db.Decimal(5, 2)
-  cgstAmount      Decimal  @default(0) @map("cgst_amount") @db.Decimal(12, 2)
-  sgstRate        Decimal  @default(0) @map("sgst_rate") @db.Decimal(5, 2)
-  sgstAmount      Decimal  @default(0) @map("sgst_amount") @db.Decimal(12, 2)
-  igstRate        Decimal  @default(0) @map("igst_rate") @db.Decimal(5, 2)
-  igstAmount      Decimal  @default(0) @map("igst_amount") @db.Decimal(12, 2)
-  totalTax        Decimal  @default(0) @map("total_tax") @db.Decimal(12, 2)
-  totalAmount     Decimal  @map("total_amount") @db.Decimal(12, 2)
-  createdAt       DateTime @default(now()) @map("created_at")
+  unitPrice       Decimal       @map("unit_price") @db.Decimal(12, 2)
+  discount        Decimal       @default(0) @db.Decimal(12, 2)
+  taxableValue    Decimal       @map("taxable_value") @db.Decimal(12, 2) // (unitPrice * qty) - discount
+  gstRate         Decimal       @map("gst_rate") @db.Decimal(5, 2) // Full GST % (e.g. 18.00)
+  cgstRate        Decimal       @default(0) @map("cgst_rate") @db.Decimal(5, 2)
+  cgstAmount      Decimal       @default(0) @map("cgst_amount") @db.Decimal(12, 2)
+  sgstRate        Decimal       @default(0) @map("sgst_rate") @db.Decimal(5, 2)
+  sgstAmount      Decimal       @default(0) @map("sgst_amount") @db.Decimal(12, 2)
+  igstRate        Decimal       @default(0) @map("igst_rate") @db.Decimal(5, 2)
+  igstAmount      Decimal       @default(0) @map("igst_amount") @db.Decimal(12, 2)
+  totalTax        Decimal       @default(0) @map("total_tax") @db.Decimal(12, 2)
+  totalAmount     Decimal       @map("total_amount") @db.Decimal(12, 2)
+  createdAt       DateTime      @default(now()) @map("created_at")
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 

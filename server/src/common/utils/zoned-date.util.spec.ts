@@ -1,6 +1,7 @@
 import {
   getFinancialYear,
   gstPeriodRange,
+  gstQuarterForMonth,
   isValidFinancialYear,
   isValidTimeZone,
   resolveGstTimeZone,
@@ -139,5 +140,42 @@ describe('isValidTimeZone', () => {
     expect(isValidTimeZone('Asia/Kolkata')).toBe(true);
     expect(isValidTimeZone('Mars/Olympus')).toBe(false);
     expect(isValidTimeZone('')).toBe(false);
+  });
+});
+
+describe('gstQuarterForMonth', () => {
+  it('maps months to FINANCIAL-year quarters, not calendar ones', () => {
+    // April starts the financial year, so Q1 is Apr-Jun and Q4 is Jan-Mar.
+    expect(gstQuarterForMonth('04')).toBe('Q1');
+    expect(gstQuarterForMonth('06')).toBe('Q1');
+    expect(gstQuarterForMonth('07')).toBe('Q2');
+    expect(gstQuarterForMonth('09')).toBe('Q2');
+    expect(gstQuarterForMonth('10')).toBe('Q3');
+    expect(gstQuarterForMonth('12')).toBe('Q3');
+    expect(gstQuarterForMonth('01')).toBe('Q4');
+    expect(gstQuarterForMonth('03')).toBe('Q4');
+  });
+
+  it('agrees with gstPeriodRange — a month always sits inside its own quarter', () => {
+    // The lock relies on this: a June invoice must be recognised as falling in
+    // a filed Q1, so the two functions cannot drift apart.
+    for (const month of ['04', '06', '07', '11', '01', '03']) {
+      const monthRange = gstPeriodRange('2026-27', month, 'Asia/Kolkata');
+      const quarterRange = gstPeriodRange(
+        '2026-27',
+        gstQuarterForMonth(month),
+        'Asia/Kolkata',
+      );
+      expect(monthRange.from.getTime()).toBeGreaterThanOrEqual(
+        quarterRange.from.getTime(),
+      );
+      expect(monthRange.toExclusive.getTime()).toBeLessThanOrEqual(
+        quarterRange.toExclusive.getTime(),
+      );
+    }
+  });
+
+  it('rejects a month it cannot place', () => {
+    expect(() => gstQuarterForMonth('13')).toThrow();
   });
 });

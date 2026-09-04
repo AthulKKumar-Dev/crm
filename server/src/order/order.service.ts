@@ -17,6 +17,7 @@ import {
   Prisma,
 } from '@prisma/client';
 import { resolvePlaceOfSupply } from '../gst/place-of-supply.util';
+import { singleDistinct } from '../channel/single-distinct.util';
 import {
   sellerStateForSupply,
   type SellerRegistrations,
@@ -329,6 +330,10 @@ export class OrderService {
         },
         channel: {
           select: { id: true, name: true, platform: true },
+        },
+        // Named so the detail rail can show where the goods left from.
+        dispatchWarehouse: {
+          select: { id: true, name: true, code: true },
         },
         lineItems: {
           include: {
@@ -904,6 +909,30 @@ export class OrderService {
         });
         const nextNumber = (last?.orderNumber ?? 1000) + 1;
 
+        // 6a. Where the goods leave from — ONLY when the operator said so.
+        //
+        // Deliberately no default-warehouse fallback here. `Order.dispatch
+        // WarehouseId` records a FACT (an operator's explicit choice, or
+        // Shopify's real location assignment), and the invoice treats it as an
+        // assertion: a warehouse registered under a different GSTIN than the
+        // one issuing the invoice is refused outright. Stamping the org default
+        // would turn the app's own guess into that assertion and refuse
+        // ordinary sales — a supply into a state where the merchant holds a
+        // second registration resolves that seller GSTIN, which the default
+        // warehouse need have nothing to do with (fixture S5).
+        //
+        // With nothing stamped, the invoice falls back to the default itself,
+        // where the same contradiction is silently dropped instead of fatal.
+        let dispatchWarehouseId: string | null = null;
+        if (dto.warehouseId) {
+          const picked = await tx.warehouse.findFirst({
+            where: { id: dto.warehouseId, organizationId: orgId, isActive: true },
+            select: { id: true },
+          });
+          if (!picked) throw new NotFoundException('Warehouse not found');
+          dispatchWarehouseId = picked.id;
+        }
+
         // 7. Create the order with line items in a nested write.
         const now = new Date();
         const order = await tx.order.create({
@@ -939,6 +968,7 @@ export class OrderService {
             // back instead of re-deriving and possibly disagreeing.
             placeOfSupplyCode: sellerGstin ? placeOfSupplyCode : null,
             gstType: sellerGstin ? resolvedGstType : null,
+            dispatchWarehouseId,
             // Unit prices are pre-tax and the tax is on the lines — the same
             // convention a Shopify order with `taxes_included: false` carries,
             // so the push and the eventual rebadge agree on every total.
@@ -2962,6 +2992,19 @@ export class OrderService {
         }),
       );
 
+      // Where this shipment leaves from, when every fulfilment order taking
+      // part agrees. A split across locations has no single origin, so nothing
+      // is stamped rather than picking one arbitrarily.
+      const dispatchLocationId = singleDistinct(
+        fulfillable
+          .filter((fo) => grouped.has(fo.id))
+          .map((fo) =>
+            fo.assignedLocation?.location?.id
+              ? ShopifyGraphqlClient.extractId(fo.assignedLocation.location.id)
+              : null,
+          ),
+      );
+
       const result = await this.graphql.request<
         FulfillmentCreateResponse,
         FulfillmentCreateVariables
@@ -3065,6 +3108,26 @@ export class OrderService {
         }
 
         await this.refreshOrderFulfillmentStatus(tx, orderId);
+
+        // First-write-only stamp of the dispatch point (see
+        // ShopifySyncService.stampDispatchWarehouse for the same rule): an
+        // order already invoiced must keep the origin its invoice snapshotted.
+        if (dispatchLocationId) {
+          const dispatchWarehouse = await tx.warehouse.findFirst({
+            where: {
+              organizationId: orgId,
+              shopifyLocationId: dispatchLocationId,
+              isActive: true,
+            },
+            select: { id: true },
+          });
+          if (dispatchWarehouse) {
+            await tx.order.updateMany({
+              where: { id: orderId, organizationId: orgId, dispatchWarehouseId: null },
+              data: { dispatchWarehouseId: dispatchWarehouse.id },
+            });
+          }
+        }
 
         // Record a local OrderFulfillment so it appears in the vendor's
         // shipments and can be marked delivered; lineItemIds attributes it.

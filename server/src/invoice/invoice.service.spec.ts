@@ -130,7 +130,9 @@ describe('InvoiceService.getGstReturn', () => {
     // 2500 × 100.00 and 2500 × 18.00, exactly.
     expect(result.totals.totalTaxable).toBe(250_000);
     expect(result.totals.totalIgst).toBe(45_000);
-    expect(prisma.invoice.findMany).toHaveBeenCalledTimes(3);
+    // Three fold pages, plus one lean read for Table 13 (documents issued),
+    // which must also count CANCELLED invoices the fold deliberately excludes.
+    expect(prisma.invoice.findMany).toHaveBeenCalledTimes(4);
   });
 
   it('orders by a unique column, so pages cannot skip or repeat rows', async () => {
@@ -150,7 +152,8 @@ describe('InvoiceService.getGstReturn', () => {
 
     await service.getGstReturn('org1', query);
 
-    expect(prisma.invoice.findMany).toHaveBeenCalledTimes(1);
+    // One fold page (short, so no second) plus the Table 13 read.
+    expect(prisma.invoice.findMany).toHaveBeenCalledTimes(2);
   });
 
   it('filters on the timezone-anchored window, NOT the stored financialYear', async () => {

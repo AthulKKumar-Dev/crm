@@ -11,6 +11,14 @@ import {
 } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
 import { EmptyState } from "~/components/app/empty-state";
 import { QueryErrorState } from "~/components/app/query-error-state";
 import { TableSkeleton } from "~/components/app/table-skeleton";
@@ -25,7 +33,187 @@ import {
   useCreateWarehouseMutation,
   useUpdateWarehouseMutation,
 } from "~/hooks/use-inventory-mutations";
-import type { Warehouse } from "~/types/api";
+import type { OrganizationGstin, Warehouse } from "~/types/api";
+
+/** The canonical address shape the server and `lib/address.ts` both read. */
+type WarehouseAddress = {
+  address1?: string;
+  address2?: string;
+  city?: string;
+  zip?: string;
+  province?: string;
+  stateCode?: string;
+};
+
+const NO_GSTIN = "none";
+
+/**
+ * Address + GST registration for a warehouse.
+ *
+ * A warehouse is a place of business, so this is deliberately NOT the
+ * order-create address form: that one collects a person (names, phone,
+ * country_code) and would write the wrong keys. `province` and `stateCode` are
+ * always written together — the server reads the code, `readAddress` renders
+ * the name.
+ */
+function WarehousePlaceFields({
+  address,
+  onAddressChange,
+  gstinId,
+  onGstinChange,
+  apobDeclared,
+  onApobDeclaredChange,
+}: {
+  address: WarehouseAddress;
+  onAddressChange: (patch: WarehouseAddress) => void;
+  gstinId: string | null;
+  onGstinChange: (next: string | null) => void;
+  apobDeclared: boolean;
+  onApobDeclaredChange: (next: boolean) => void;
+}) {
+  const states = useIndianStates();
+  const gstins = useGstins();
+  const activeGstins = (gstins.data ?? []).filter((g: OrganizationGstin) => g.isActive);
+  const selected = activeGstins.find((g: OrganizationGstin) => g.id === gstinId) ?? null;
+
+  // Advisory only — the server is authoritative and refuses the save. Showing
+  // it here means the merchant learns before submitting, not after.
+  const stateMismatch =
+    selected && address.stateCode && selected.stateCode !== address.stateCode
+      ? `This address is in ${address.province || address.stateCode}, but the registration is for ${selected.stateName}. A place of business in another state needs its own GSTIN.`
+      : null;
+
+  const field =
+    "mt-1 w-full rounded-lg border bg-white dark:bg-gray-800 px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c]";
+  const label = "text-[10px] font-medium text-gray-600 dark:text-gray-400";
+
+  return (
+    <div className="space-y-3 border-t pt-4">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+        Place of business — printed on invoices as “Dispatch from”
+      </p>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <label className={label}>Address line 1</label>
+          <input
+            value={address.address1 ?? ""}
+            onChange={(e) => onAddressChange({ address1: e.target.value })}
+            placeholder="Building, street"
+            className={field}
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <label className={label}>Address line 2</label>
+          <input
+            value={address.address2 ?? ""}
+            onChange={(e) => onAddressChange({ address2: e.target.value })}
+            placeholder="Area, landmark (optional)"
+            className={field}
+          />
+        </div>
+        <div>
+          <label className={label}>City</label>
+          <input
+            value={address.city ?? ""}
+            onChange={(e) => onAddressChange({ city: e.target.value })}
+            placeholder="City"
+            className={field}
+          />
+        </div>
+        <div>
+          <label className={label}>PIN code</label>
+          <input
+            value={address.zip ?? ""}
+            onChange={(e) => onAddressChange({ zip: e.target.value })}
+            placeholder="6-digit PIN"
+            className={field}
+          />
+        </div>
+        <div className="sm:col-span-2">
+          <label className={label}>State</label>
+          <Select
+            value={address.stateCode ?? ""}
+            onValueChange={(code) => {
+              const state = (states.data ?? []).find((s) => s.code === code);
+              onAddressChange({ stateCode: code, province: state?.name ?? "" });
+            }}
+          >
+            <SelectTrigger className="mt-1 h-9 text-xs">
+              <SelectValue placeholder="Select state" />
+            </SelectTrigger>
+            <SelectContent>
+              {(states.data ?? []).map((s) => (
+                <SelectItem key={s.code} value={s.code} className="text-xs">
+                  {s.code} - {s.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      {activeGstins.length > 0 && (
+        <div>
+          <label className={label}>GST registration</label>
+          <Select
+            value={gstinId ?? NO_GSTIN}
+            onValueChange={(next) => onGstinChange(next === NO_GSTIN ? null : next)}
+          >
+            <SelectTrigger className="mt-1 h-9 text-xs">
+              <SelectValue placeholder="Not linked" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={NO_GSTIN} className="text-xs">
+                Not linked
+              </SelectItem>
+              {activeGstins.map((g: OrganizationGstin) => (
+                <SelectItem key={g.id} value={g.id} className="text-xs">
+                  {g.gstin} — {g.stateName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            Makes this an additional place of business of that registration.
+          </p>
+        </div>
+      )}
+
+      {stateMismatch && (
+        <p className="rounded-md bg-red-50 px-3 py-2 text-[11px] text-red-700">{stateMismatch}</p>
+      )}
+
+      {gstinId && (
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-0.5 accent-[#CEF17B]"
+            checked={apobDeclared}
+            onChange={(e) => onApobDeclaredChange(e.target.checked)}
+          />
+          <span className="text-[11px] text-gray-700 dark:text-gray-300">
+            Declared as an additional place of business on the GST portal
+            <span className="block text-muted-foreground">
+              A registration amendment you or your CA file on the portal — this app
+              cannot do it for you.
+            </span>
+          </span>
+        </label>
+      )}
+    </div>
+  );
+}
+
+/** Drop blank values so an untouched form stores nothing at all. */
+function cleanAddress(address: WarehouseAddress): WarehouseAddress | undefined {
+  const entries = Object.entries(address).filter(
+    ([, v]) => typeof v === "string" && v.trim().length > 0,
+  );
+  // `province` alone is an artefact of picking a state and clearing the rest.
+  if (entries.length === 0) return undefined;
+  return Object.fromEntries(entries) as WarehouseAddress;
+}
 
 /**
  * Warehouse management. Warehouses carrying a Shopify location id are mirrors
@@ -98,6 +286,7 @@ export default function WarehousesPage() {
                 <th className="px-3 py-2.5 font-medium">Warehouse</th>
                 <th className="px-3 py-2.5 font-medium">Code</th>
                 <th className="px-3 py-2.5 font-medium">Source</th>
+                <th className="px-3 py-2.5 font-medium">Registration</th>
                 <th className="px-3 py-2.5 text-right font-medium">Locations</th>
                 <th className="px-3 py-2.5 text-right font-medium">Stock lines</th>
                 <th className="px-3 py-2.5 font-medium">State</th>
@@ -137,6 +326,9 @@ function WarehouseRow({
   onGenerateGrid: () => void;
 }) {
   const update = useUpdateWarehouseMutation();
+  const gstins = useGstins();
+  const linked = (gstins.data ?? []).find((g: OrganizationGstin) => g.id === w.gstinId);
+  const gstinLabel = linked ? `${linked.stateName} · ${linked.gstin.slice(-4)}` : "Linked";
 
   return (
     <tr className="border-b last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50">
@@ -161,6 +353,20 @@ function WarehouseRow({
           </span>
         ) : (
           <span className="text-[11px] text-muted-foreground">Manual</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        {w.gstinId ? (
+          <span className="text-[11px] text-muted-foreground">
+            {gstinLabel}
+            {!w.apobDeclared && (
+              <span className="ml-1 rounded bg-amber-50 px-1 py-0.5 text-[10px] text-amber-700">
+                not declared
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="text-[11px] text-muted-foreground">Not linked</span>
         )}
       </td>
       <td className="px-3 py-2.5 text-right tabular-nums">{w.locationCount}</td>
@@ -198,6 +404,9 @@ function WarehouseRow({
 function CreateWarehouseDialog({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
+  const [address, setAddress] = useState<WarehouseAddress>({});
+  const [gstinId, setGstinId] = useState<string | null>(null);
+  const [apobDeclared, setApobDeclared] = useState(false);
   const create = useCreateWarehouseMutation();
 
   // Mirrors CreateWarehouseDto's ^[A-Z0-9]{1,8}$ — the code is the prefix of
@@ -245,11 +454,29 @@ function CreateWarehouseDialog({ onClose }: { onClose: () => void }) {
         <p className="rounded-md bg-gray-50 dark:bg-gray-800/50 px-3 py-2 text-[11px] text-muted-foreground">
           Location codes under this warehouse read {code || "WH2"}-A01-S02-B03.
         </p>
+
+        <WarehousePlaceFields
+          address={address}
+          onAddressChange={(patch) => setAddress((prev) => ({ ...prev, ...patch }))}
+          gstinId={gstinId}
+          onGstinChange={setGstinId}
+          apobDeclared={apobDeclared}
+          onApobDeclaredChange={setApobDeclared}
+        />
       </div>
       <DialogFooter
         confirmLabel="Create warehouse"
         onConfirm={() =>
-          create.mutate({ name: name.trim(), code }, { onSuccess: () => onClose() })
+          create.mutate(
+            {
+              name: name.trim(),
+              code,
+              address: cleanAddress(address),
+              gstinId,
+              apobDeclared,
+            },
+            { onSuccess: () => onClose() },
+          )
         }
         onClose={onClose}
         pending={create.isPending}
@@ -267,6 +494,11 @@ function EditWarehouseDialog({
   onClose: () => void;
 }) {
   const [name, setName] = useState(w.name);
+  const [address, setAddress] = useState<WarehouseAddress>(
+    (w.address ?? {}) as WarehouseAddress,
+  );
+  const [gstinId, setGstinId] = useState<string | null>(w.gstinId);
+  const [apobDeclared, setApobDeclared] = useState(w.apobDeclared);
   const update = useUpdateWarehouseMutation();
   const isShopify = !!w.shopifyLocationId;
 
@@ -287,9 +519,19 @@ function EditWarehouseDialog({
           <p className="rounded-md bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
             This warehouse mirrors Shopify location {w.shopifyLocationId}. Its active
             state follows that location on every sync, so deactivate it in Shopify
-            rather than here.
+            rather than here. The address below was seeded from Shopify once and is
+            yours to edit — syncing never overwrites it.
           </p>
         )}
+
+        <WarehousePlaceFields
+          address={address}
+          onAddressChange={(patch) => setAddress((prev) => ({ ...prev, ...patch }))}
+          gstinId={gstinId}
+          onGstinChange={setGstinId}
+          apobDeclared={apobDeclared}
+          onApobDeclaredChange={setApobDeclared}
+        />
 
         {!w.isDefault && (
           <label className="flex items-center gap-2">
@@ -316,7 +558,16 @@ function EditWarehouseDialog({
         confirmLabel="Save"
         onConfirm={() =>
           update.mutate(
-            { id: w.id, data: { name: name.trim() } },
+            {
+              id: w.id,
+              data: {
+                name: name.trim(),
+                address: cleanAddress(address),
+                // null unlinks; the server distinguishes it from undefined.
+                gstinId,
+                apobDeclared,
+              },
+            },
             { onSuccess: () => onClose() },
           )
         }

@@ -81,9 +81,20 @@ export default function InvoicePrintPage() {
   const sellerAddress = readAddress(
     invoice.sellerAddress as Record<string, unknown> | null,
   );
+  // "Dispatch from" is shown ONLY when the goods left from somewhere other
+  // than the registered address. Printing it when the two are the same would
+  // add a line to every invoice that says nothing — and most merchants ship
+  // from their principal place of business.
+  const dispatchAddress = readAddress(
+    invoice.dispatchAddress as Record<string, unknown> | null,
+  );
   const buyerAddress = readAddress(
     invoice.buyerAddress as Record<string, unknown> | null,
   );
+  const showDispatch =
+    !!invoice.dispatchName &&
+    dispatchAddress.lines.length > 0 &&
+    dispatchAddress.lines.join("|") !== sellerAddress.lines.join("|");
 
   return (
     <>
@@ -173,6 +184,19 @@ export default function InvoicePrintPage() {
             )}
           </Block>
         </div>
+
+        {showDispatch && (
+          <div className="mt-3">
+            <Block title="Dispatch from">
+              <p className="font-semibold">{invoice.dispatchName}</p>
+              {dispatchAddress.lines.map((line) => (
+                <p key={line} className="text-[11px]">
+                  {line}
+                </p>
+              ))}
+            </Block>
+          </div>
+        )}
 
         {/* Place of supply */}
         <div className="mt-3 rounded-md border bg-gray-50 px-3 py-2 text-[11px]">

@@ -1192,6 +1192,9 @@ export interface OrderDetail extends Order {
    */
   invoiceError?: string | null;
   invoiceErrorAt?: string | null;
+  /** Warehouse the goods left from, when one was recorded. */
+  dispatchWarehouseId?: string | null;
+  dispatchWarehouse?: { id: string; name: string; code: string } | null;
   /** The order's live (non-cancelled) GST invoice — at most one, enforced by
    *  a partial unique index server-side. Empty array when not invoiced. */
   invoices?: Pick<
@@ -1279,6 +1282,8 @@ export interface CreateOfflineOrderRequest {
   customer: OfflineCustomerInput;
   lineItems: OfflineLineItemInput[];
   sellerGstinId?: string;
+  /** Warehouse the goods leave from; omitted lets the invoice fall back. */
+  warehouseId?: string;
   placeOfSupplyCode?: string;
   paymentMethod: OfflinePaymentMethod;
   note?: string;
@@ -2089,6 +2094,15 @@ export interface InvoiceDetail extends Invoice {
   sellerAddress: Record<string, unknown> | null;
   sellerStateCode: string;
   sellerStateName: string;
+  /**
+   * Additional place of business the goods left from. All null when they left
+   * from the registered address, or the org does not track warehouses — the
+   * print and detail views then render no dispatch block at all.
+   */
+  dispatchWarehouseId: string | null;
+  dispatchName: string | null;
+  dispatchAddress: Record<string, unknown> | null;
+  dispatchStateCode: string | null;
   buyerAddress: Record<string, unknown> | null;
   buyerStateCode: string;
   buyerStateName: string;
@@ -2104,6 +2118,8 @@ export interface CreateInvoiceRequest {
   buyerGstin?: string;
   placeOfSupplyCode?: string;
   notes?: string;
+  /** Additional place of business the goods left from. */
+  dispatchWarehouseId?: string;
   /**
    * Whether tax is payable by the RECIPIENT under reverse charge.
    *
@@ -2327,6 +2343,12 @@ export interface InvoiceStats {
    */
   invoicesMissingHsn: number;
   /**
+   * Issued invoices dispatched from a warehouse linked to no GST registration.
+   * Every place of business invoicing under a GSTIN must be declared under that
+   * registration on the portal — a warning, never a block.
+   */
+  invoicesFromUnlinkedWarehouse: number;
+  /**
    * Refunded orders whose invoice has not been credited.
    *
    * Credit notes existed but nothing surfaced the need, so a refunded sale sat
@@ -2343,6 +2365,12 @@ export interface GstReturnParams {
   period: string;
   returnType?: "GSTR1" | "GSTR3B";
   sellerGstinId?: string;
+  /**
+   * REFERENCE VIEW ONLY. Narrows the figures to one dispatch warehouse so a
+   * merchant can see what a branch contributed. A GST return is filed per
+   * GSTIN and has no warehouse dimension — never file from a scoped view.
+   */
+  dispatchWarehouseId?: string;
 }
 
 // ─── GST Return Types ───────────────────────────────────────────────────────
@@ -2361,6 +2389,8 @@ export interface Gstr1B2bEntry {
     placeOfSupply: string | null;
     placeOfSupplyName: string | null;
     gstType: GstType;
+    /** True puts the invoice in table 4B rather than 4A. */
+    reverseCharge: boolean;
     subtotal: number;
     cgst: number;
     sgst: number;
@@ -2370,6 +2400,21 @@ export interface Gstr1B2bEntry {
   }>;
   totalTaxable: number;
   totalTax: number;
+}
+
+/** One row of GSTR-1 Table 13 — documents issued. */
+export interface Gstr1DocumentSeriesRow {
+  nature: string;
+  series: string;
+  financialYear: string;
+  from: string;
+  to: string;
+  /** Span of serials (to − from + 1). */
+  total: number;
+  /** Documents actually present; differs from `total` only when serials are missing. */
+  documents: number;
+  cancelled: number;
+  netIssued: number;
 }
 
 /** A B2C state-wise summary in GSTR-1. */
@@ -2386,6 +2431,11 @@ export interface Gstr1B2cSummary {
 
 /** One GSTR-1 Table 12 row — keyed by HSN AND rate, with a UQC. */
 export interface Gstr1HsnSummary {
+  /**
+   * Which HSN tab this row belongs to. The portal has split Table 12 into
+   * HSN-B2B and HSN-B2C since the May-2025 return period.
+   */
+  recipientType: "B2B" | "B2C";
   /** Null when the product carries no HSN. Rendered as a warning, never a code. */
   hsnCode: string | null;
   description: string;
@@ -2466,6 +2516,15 @@ export interface GstReturnGstr1 {
    */
   b2cSummary: Gstr1B2cSummary[];
   hsnSummary: Gstr1HsnSummary[];
+  /**
+   * Table 13 — documents issued. Absent on GSTR-3B, and on any response from a
+   * server that predates it.
+   */
+  documentsIssued?: {
+    rows: Gstr1DocumentSeriesRow[];
+    /** Invoice numbers that carried no readable serial. */
+    unparsed: number;
+  };
   /** Table 8 — nil-rated, exempted and non-GST outward supplies. */
   nilRated: Gstr1NilRatedRow[];
   /** Table 9B — credit notes against earlier invoices (CDNR / CDNUR). */
@@ -2513,6 +2572,18 @@ export interface Gstr3bInterStateRow {
 /** Full GSTR-3B return data. */
 export interface GstReturnGstr3B {
   outwardSupplies: Gstr3bOutwardSupply[];
+  /**
+   * OUTWARD supplies the recipient pays tax on (GSTR-1 table 4B). Excluded
+   * from 3.1(a), 3.2 and tax payable, because the portal's own 3.1(a) is built
+   * from GSTR-1 tables that omit 4B.
+   */
+  outwardReverseCharge?: {
+    invoiceCount: number;
+    taxableValue: number;
+    tax: number;
+    /** Non-zero almost always means a mis-flagged invoice — RCM runs B2B. */
+    unregisteredRecipients: number;
+  };
   /**
    * 3.1(b), (c) and (e) — taxable value only, since none carries tax.
    * Before supplies were classified, every line landed in 3.1(a) and these
@@ -2646,6 +2717,10 @@ export interface Warehouse {
   code: string;
   shopifyLocationId: string | null;
   address: Record<string, unknown> | null;
+  /** GST registration this warehouse is an additional place of business of. */
+  gstinId: string | null;
+  /** Merchant's own confirmation that the APOB is declared on the GST portal. */
+  apobDeclared: boolean;
   isDefault: boolean;
   isActive: boolean;
   locationCount: number;
@@ -2833,12 +2908,17 @@ export interface CreateWarehouseRequest {
   name: string;
   code: string;
   address?: Record<string, unknown>;
+  gstinId?: string | null;
+  apobDeclared?: boolean;
   isDefault?: boolean;
 }
 
 export interface UpdateWarehouseRequest {
   name?: string;
   address?: Record<string, unknown>;
+  /** null unlinks the registration; omit to leave it unchanged. */
+  gstinId?: string | null;
+  apobDeclared?: boolean;
   isDefault?: boolean;
   isActive?: boolean;
 }

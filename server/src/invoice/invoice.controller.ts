@@ -55,6 +55,7 @@ export class InvoiceController {
   @Get('gst-return/export/csv')
   async exportGstReturnCsv(
     @OrgId() orgId: string,
+    @CurrentUser() user: JwtPayload,
     @Query() query: QueryGstReturnDto,
     @Res() res: Response,
   ) {
@@ -72,6 +73,7 @@ export class InvoiceController {
     const sections = await this.invoiceService.getGstReturnExportData(
       orgId,
       query,
+      user,
     );
     const csv = renderCsvSections(sections);
 
@@ -116,6 +118,9 @@ export class InvoiceController {
         'shipping',
         'grandTotal',
         'status',
+        // Last on purpose: appending keeps every existing column position
+        // stable for anyone with a saved import mapping.
+        'dispatchFrom',
       ],
     });
     const csv = parser.parse(data);

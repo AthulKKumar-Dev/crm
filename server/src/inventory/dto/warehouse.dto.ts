@@ -27,6 +27,17 @@ export class CreateWarehouseDto {
   @IsObject()
   address?: Record<string, unknown>;
 
+  // GST registration this warehouse operates under — it becomes an ADDITIONAL
+  // PLACE OF BUSINESS of that GSTIN. The address must resolve to the same
+  // state; WarehouseService enforces it.
+  @IsOptional()
+  @IsString()
+  gstinId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  apobDeclared?: boolean;
+
   @IsOptional()
   @IsBoolean()
   isDefault?: boolean;
@@ -41,6 +52,16 @@ export class UpdateWarehouseDto {
   @IsOptional()
   @IsObject()
   address?: Record<string, unknown>;
+
+  // Null unlinks. `@IsOptional()` skips validation for null as well as
+  // undefined, so the two stay distinguishable: undefined = leave alone.
+  @IsOptional()
+  @IsString()
+  gstinId?: string | null;
+
+  @IsOptional()
+  @IsBoolean()
+  apobDeclared?: boolean;
 
   @IsOptional()
   @IsBoolean()

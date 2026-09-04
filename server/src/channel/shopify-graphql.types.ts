@@ -697,6 +697,41 @@ export const ORDER_FULFILLMENT_ORDERS_QUERY = /* GraphQL */ `
   }
 `;
 
+// ─── Fulfilment locations only ──────────────────────────────────────────────
+// Answers one question — which location(s) is this order assigned to ship from
+// — for stamping Order.dispatchWarehouseId before auto-invoicing.
+//
+// Deliberately NOT ORDER_ALL_FULFILLMENT_ORDERS_QUERY: that one drags
+// lineItems(first: 100) per fulfilment order, and this runs on the paid-order
+// path of every warehousing org. Shopify assigns fulfilment orders to a
+// location at order creation, so the answer is already knowable at PAID time.
+
+export interface OrderFulfillmentLocationNode {
+  status: FulfillmentOrderStatus;
+  assignedLocation: { location: { id: string } | null } | null;
+}
+
+export interface OrderFulfillmentLocationsResponse {
+  order: {
+    fulfillmentOrders: { nodes: OrderFulfillmentLocationNode[] };
+  } | null;
+}
+
+export const ORDER_FULFILLMENT_LOCATIONS_QUERY = /* GraphQL */ `
+  query OrderFulfillmentLocations($id: ID!) {
+    order(id: $id) {
+      fulfillmentOrders(first: 25) {
+        nodes {
+          status
+          assignedLocation {
+            location { id }
+          }
+        }
+      }
+    }
+  }
+`;
+
 // Same shape as ORDER_FULFILLMENT_ORDERS_QUERY but WITHOUT the OPEN/IN_PROGRESS
 // filter, so callers can act on fulfilment orders in any status — e.g. release a
 // hold on an ON_HOLD fulfilment order, which the filtered query would hide.
@@ -1669,6 +1704,20 @@ export interface ShopifyLocationNode {
   name: string;
   isActive: boolean;
   isPrimary: boolean;
+  // Seeds the mirrored warehouse's address once, when it has none. A warehouse
+  // is a GST place of business and an invoice must be able to print where the
+  // goods left from; there is no other source for that address.
+  address: {
+    address1: string | null;
+    address2: string | null;
+    city: string | null;
+    province: string | null;
+    provinceCode: string | null;
+    zip: string | null;
+    country: string | null;
+    countryCode: string | null;
+    phone: string | null;
+  } | null;
 }
 
 export interface LocationsResponse {
@@ -1690,6 +1739,17 @@ export const LOCATIONS_QUERY = /* GraphQL */ `
         name
         isActive
         isPrimary
+        address {
+          address1
+          address2
+          city
+          province
+          provinceCode
+          zip
+          country
+          countryCode
+          phone
+        }
       }
     }
   }

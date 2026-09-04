@@ -1,4 +1,6 @@
-import { ArrowRight, Download, Loader2 } from "lucide-react";
+import { ArrowRight, Download, Loader2, Lock, LockOpen } from "lucide-react";
+
+import type { GstFiling } from "~/types/api";
 
 import { Button } from "~/components/ui/button";
 import { Card } from "~/components/ui/card";
@@ -27,6 +29,17 @@ interface GstFilingSidebarProps {
   onSwitchReturn: (next: ReturnType) => void;
   onDownloadCsv: () => void;
   isDownloading?: boolean;
+  /** The filing covering this period and registration, if any. */
+  filing?: GstFiling | null;
+  /** Whether this user may lock or reopen a period. */
+  canFile?: boolean;
+  onMarkFiled?: () => void;
+  onReopen?: () => void;
+  /**
+   * True while a warehouse scope narrows the figures. Filing is hidden then:
+   * a warehouse view is management information, not a return.
+   */
+  scoped?: boolean;
 }
 
 /** Countdown phrasing that stays honest once the deadline has passed. */
@@ -52,6 +65,11 @@ export function GstFilingSidebar({
   onSwitchReturn,
   onDownloadCsv,
   isDownloading,
+  filing,
+  canFile,
+  onMarkFiled,
+  onReopen,
+  scoped,
 }: GstFilingSidebarProps) {
   const dueDate = returnDueDate(financialYear, period, returnType);
   const daysLeft = dueDate ? daysUntil(dueDate) : null;
@@ -91,6 +109,21 @@ export function GstFilingSidebar({
             ))}
           </dl>
 
+          {filing && (
+            <div className="flex items-start gap-2 rounded-lg bg-brand-foreground/10 px-3 py-2">
+              <Lock className="mt-0.5 size-3.5 shrink-0 text-brand-foreground" />
+              <p className="text-caption text-brand-foreground">
+                <span className="font-semibold">Filed</span>{" "}
+                {new Date(filing.filedAt).toLocaleDateString("en-IN")}
+                {filing.arn && (
+                  <span className="block font-mono text-micro text-brand-foreground/80">
+                    ARN {filing.arn}
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             <Button
               variant="brand"
@@ -107,8 +140,23 @@ export function GstFilingSidebar({
               disabled={isDownloading}
             >
               {isDownloading ? <Loader2 className="animate-spin" /> : <Download />}
-              Download CSV
+              {scoped ? "Download CSV (warehouse view)" : "Download CSV"}
             </Button>
+            {/* Hidden while scoped to a warehouse — those figures are not a
+                return, so offering to file them would be wrong. */}
+            {canFile && !scoped && (
+              filing ? (
+                <Button variant="outline" size="sm" onClick={onReopen}>
+                  <LockOpen />
+                  Reopen period
+                </Button>
+              ) : (
+                <Button variant="outline" size="sm" onClick={onMarkFiled}>
+                  <Lock />
+                  Mark as filed
+                </Button>
+              )
+            )}
           </div>
         </div>
       </Card>

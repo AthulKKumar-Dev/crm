@@ -16,7 +16,10 @@ export const COMMON_UQC = [
   { code: "PCS", label: "PCS — Pieces" },
   { code: "KGS", label: "KGS — Kilograms" },
   { code: "GMS", label: "GMS — Grams" },
-  { code: "LTR", label: "LTR — Litres" },
+  // KLR, not LTR: "LTR" is not a portal UQC. Offering it made the settings
+  // save 400 outright, and on a product form it saved but was then silently
+  // discarded at invoice time in favour of the org default.
+  { code: "KLR", label: "KLR — Kilolitres" },
   { code: "MLT", label: "MLT — Millilitres" },
   { code: "MTR", label: "MTR — Metres" },
   { code: "SQF", label: "SQF — Square feet" },

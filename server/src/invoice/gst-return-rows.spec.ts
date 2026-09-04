@@ -196,6 +196,7 @@ const gstr1: Gstr1Return = {
         {
           invoiceNumber: 'INV-2025-26/000001',
           invoiceDate: new Date('2025-04-10T00:00:00.000Z'),
+          reverseCharge: false,
           placeOfSupply: '29',
           placeOfSupplyName: 'Karnataka',
           gstType: GstType.IGST,
@@ -259,6 +260,7 @@ const gstr1: Gstr1Return = {
   ],
   hsnSummary: [
     {
+      recipientType: 'B2C' as const,
       hsnCode: '6109',
       description: 'Cotton Shirt',
       uqc: 'PCS',
@@ -271,6 +273,7 @@ const gstr1: Gstr1Return = {
       igst: 450,
     },
     {
+      recipientType: 'B2C' as const,
       hsnCode: null,
       description: 'Unclassified Item',
       uqc: 'NOS',
@@ -319,14 +322,74 @@ describe('buildGstr1Sections', () => {
     // 9B splits into CDNR and CDNUR, matching the form.
     expect(titles[4]).toContain('9B');
     expect(titles[5]).toContain('9B');
-    expect(titles[6]).toContain('12 —');
+    // Table 12 splits into HSN-B2B and HSN-B2C, as the portal has reported it
+    // since the May-2025 period. Both are emitted even when one is empty.
+    expect(titles[6]).toBe('12 — HSN summary (B2B)');
+    expect(titles[7]).toBe('12 — HSN summary (B2C)');
+    // Table 13 only appears when the service attached it; this fixture has none.
+    expect(titles).toHaveLength(8);
+  });
+
+  it('emits Table 13 only when documents issued were attached', () => {
+    expect(
+      buildGstr1Sections(gstr1).some((s) => s.title.startsWith('13')),
+    ).toBe(false);
+
+    const withDocs = buildGstr1Sections({
+      ...gstr1,
+      documentsIssued: {
+        unparsed: 0,
+        rows: [
+          {
+            nature: 'Invoices for outward supply',
+            series: 'INV',
+            financialYear: '26-27',
+            from: '000001',
+            to: '000003',
+            total: 3,
+            documents: 3,
+            cancelled: 1,
+            netIssued: 2,
+          },
+        ],
+      },
+    });
+
+    const section = find(withDocs, '13');
+    expect(section.headers).toContain('Sr. No. from');
+    expect(section.rows[0]).toEqual([
+      'Invoices for outward supply',
+      'INV',
+      '26-27',
+      '000001',
+      '000003',
+      3,
+      3,
+      1,
+      2,
+    ]);
+  });
+
+  it('routes HSN rows to the tab matching their recipient type', () => {
+    const sections = buildGstr1Sections({
+      ...gstr1,
+      hsnSummary: [
+        { ...gstr1.hsnSummary[0], recipientType: 'B2B' as const },
+        gstr1.hsnSummary[1],
+      ],
+    });
+
+    expect(find(sections, '12 — HSN summary (B2B)').rows).toHaveLength(1);
+    expect(find(sections, '12 — HSN summary (B2B)').rows[0][0]).toBe('6109');
+    expect(find(sections, '12 — HSN summary (B2C)').rows).toHaveLength(1);
+    expect(find(sections, '12 — HSN summary (B2C)').rows[0][0]).toBe('MISSING');
   });
 
   it('gives Table 12 the UQC and rate columns it legally requires', () => {
     // These could not exist in the old shared 12-column row — there was no
     // spare column, and the quantity was already being smuggled into
     // `grandTotal` as a formatted string.
-    const section = find(buildGstr1Sections(gstr1), '12');
+    const section = find(buildGstr1Sections(gstr1), '12 — HSN summary (B2C)');
 
     expect(section.headers).toContain('UQC');
     expect(section.headers).toContain('Rate');
@@ -348,7 +411,7 @@ describe('buildGstr1Sections', () => {
   it('names a missing HSN instead of inventing one or leaving it blank', () => {
     // The old code wrote the literal '0000', which is not a valid HSN and went
     // onto a statutory document. A blank would read as an export bug.
-    const section = find(buildGstr1Sections(gstr1), '12');
+    const section = find(buildGstr1Sections(gstr1), '12 — HSN summary (B2C)');
 
     expect(section.rows[1][0]).toBe('MISSING');
     expect(section.rows.some((r) => r[0] === '0000')).toBe(false);

@@ -14,6 +14,8 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { GstSupplyType, ProductStatus } from '@prisma/client';
+import { IsGstRateSlab } from '../../gst/validators/is-gst-rate-slab.validator';
+import { IsUqc } from '../../gst/validators/is-uqc.validator';
 import { CreateVariantDto } from './variant.dto';
 import { ProductOptionDto } from './option.dto';
 
@@ -50,10 +52,13 @@ export class CreateProductDto {
   @IsString()
   hsnCode?: string;
 
+  // Slab-enforced, like the variant override. `@Min(0) @Max(28)` accepted any
+  // value in range — 7.5% would reach a statutory invoice and land in a
+  // GSTR-3B rate bucket matching no slab on the form.
   @IsOptional()
   @IsNumber()
   @Min(0)
-  @Max(28)
+  @IsGstRateSlab()
   gstRate?: number;
 
   /**
@@ -63,6 +68,7 @@ export class CreateProductDto {
   @IsOptional()
   @IsString()
   @MaxLength(10)
+  @IsUqc()
   unitOfMeasure?: string;
 
   @IsOptional()

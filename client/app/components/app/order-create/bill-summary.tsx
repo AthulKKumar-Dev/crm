@@ -1,12 +1,15 @@
 import { formatCurrency } from "~/lib/utils";
 import type { CartLine } from "./order-cart";
-import type { OfflinePaymentMethod } from "~/types/api";
+import type { OfflinePaymentMethod, Warehouse } from "~/types/api";
 
 export function BillSummary({
   lines,
   currency,
   paymentMethod,
   onPaymentMethodChange,
+  warehouses,
+  warehouseId,
+  onWarehouseChange,
   note,
   onNoteChange,
   isSubmitting,
@@ -26,6 +29,10 @@ export function BillSummary({
   currency: string;
   paymentMethod: OfflinePaymentMethod;
   onPaymentMethodChange: (m: OfflinePaymentMethod) => void;
+  /** Active warehouses; the picker only appears when there is a choice. */
+  warehouses?: Warehouse[];
+  warehouseId?: string;
+  onWarehouseChange?: (id: string) => void;
   note: string;
   onNoteChange: (n: string) => void;
   isSubmitting: boolean;
@@ -79,6 +86,29 @@ export function BillSummary({
       </div>
 
       <div className="space-y-2">
+        {/* Only asked when the merchant actually has branches to choose
+            between. With one warehouse the answer is never in doubt, and the
+            invoice resolves the default on its own. */}
+        {warehouses && warehouses.length > 1 && onWarehouseChange && (
+          <label className="block">
+            <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
+              Dispatch from
+            </span>
+            <select
+              value={warehouseId ?? ""}
+              onChange={(e) => onWarehouseChange(e.target.value)}
+              className="mt-1 h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-800 px-2 text-xs focus:outline-none focus:ring-1 focus:ring-[#CEF17B]/60"
+            >
+              <option value="">Default warehouse</option>
+              {warehouses.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name} · {w.code}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+
         <label className="block">
           <span className="text-[10px] font-medium text-gray-600 dark:text-gray-400">
             Payment method

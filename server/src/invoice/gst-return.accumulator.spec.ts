@@ -656,6 +656,26 @@ describe('Gstr1Accumulator — Table 12 and Table 8', () => {
     expect(out.totals.linesMissingHsn).toBe(2);
   });
 
+  it('keys HSN rows by recipient type, so the B2B and B2C tabs never merge', () => {
+    // The portal has reported Table 12 as two tabs since the May-2025 period,
+    // each reconciling to its own supplies. The same product sold to a
+    // registered and an unregistered buyer is therefore two rows, not one.
+    const acc = new Gstr1Accumulator({ b2cLargeThreshold: 100000 });
+    acc.addInvoice(
+      invoice({ buyerGstin: '29AABCU9603R1ZM', buyerName: 'Acme' }),
+    );
+    acc.addInvoice(invoice({ buyerGstin: null }));
+
+    const rows = acc.finish().hsnSummary.filter((h) => h.hsnCode === '6109');
+
+    expect(rows).toHaveLength(2);
+    // B2B sorts first, so a reader sees the registered side of the table first.
+    expect(rows.map((r) => r.recipientType)).toEqual(['B2B', 'B2C']);
+    // Neither row absorbed the other's value.
+    expect(rows[0].taxableValue).toBe(1000);
+    expect(rows[1].taxableValue).toBe(1000);
+  });
+
   it('splits nil-rated, exempt and non-GST into Table 8, by buyer and border', () => {
     const acc = new Gstr1Accumulator({ b2cLargeThreshold: 100000 });
     acc.addInvoice(
@@ -790,6 +810,95 @@ describe('Gstr3bAccumulator — 3.1(b)(c)(e)', () => {
  * subtracts them. Storing negatives would double-negate the moment anything
  * else summed the column.
  */
+describe('Gstr3bAccumulator — outward reverse charge', () => {
+  const rcmInvoice = (over = {}) =>
+    invoice({
+      reverseCharge: true,
+      buyerGstin: '29AABCU9603R1ZM',
+      buyerName: 'Acme',
+      ...over,
+    });
+
+  it('keeps a reverse-charge supply out of 3.1(a), 3.2 and tax payable', () => {
+    // The portal builds 3.1(a) from GSTR-1 tables that EXCLUDE 4B: the
+    // supplier owes nothing, and the recipient declares the same tax in their
+    // own 3.1(d). Leaving it here would declare one tax twice and ask this
+    // merchant to pay what the law puts on someone else.
+    const acc = new Gstr3bAccumulator();
+    acc.addInvoice(rcmInvoice());
+
+    const out = acc.finish();
+
+    expect(out.outwardSupplies).toEqual([]);
+    expect(out.taxPayable.total).toBe(0);
+    expect(out.interState.invoiceCount).toBe(0);
+    expect(out.outwardReverseCharge).toMatchObject({
+      invoiceCount: 1,
+      taxableValue: 1000,
+      tax: 180,
+    });
+  });
+
+  it('leaves an ordinary invoice in 3.1(a) alongside it', () => {
+    const acc = new Gstr3bAccumulator();
+    acc.addInvoice(rcmInvoice());
+    acc.addInvoice(invoice());
+
+    const out = acc.finish();
+
+    expect(out.outwardSupplies).toHaveLength(1);
+    expect(out.outwardSupplies[0].taxableValue).toBe(1000);
+    expect(out.taxPayable.igst).toBe(180);
+    expect(out.outwardReverseCharge!.taxableValue).toBe(1000);
+  });
+
+  it('still reports an exempt line on a reverse-charge invoice in 3.1(c)', () => {
+    // A nil-rated or exempt line carries no tax for anyone, so who would have
+    // paid it does not change where it is reported. Only the taxable component
+    // moves out of 3.1(a).
+    const acc = new Gstr3bAccumulator();
+    acc.addInvoice(
+      rcmInvoice({
+        lineItems: [
+          line({ supplyType: GstSupplyType.EXEMPT, taxableValue: '500.00', igstAmount: '0.00', totalTax: '0.00' }),
+          line(),
+        ],
+      }),
+    );
+
+    const out = acc.finish();
+
+    expect(out.otherSupplies.nilRatedExempt).toBe(500);
+    // Only the taxable line moved to the reverse-charge bucket.
+    expect(out.outwardReverseCharge!.taxableValue).toBe(1000);
+    expect(out.outwardSupplies).toEqual([]);
+  });
+
+  it('nets a credit note against the reverse-charge bucket, not tax payable', () => {
+    const acc = new Gstr3bAccumulator();
+    acc.addInvoice(rcmInvoice());
+    acc.addInvoice(rcmInvoice({ status: InvoiceStatus.CREDIT_NOTE }));
+
+    const out = acc.finish();
+
+    expect(out.outwardReverseCharge).toMatchObject({
+      invoiceCount: 0,
+      taxableValue: 0,
+      tax: 0,
+    });
+    expect(out.taxPayable.total).toBe(0);
+  });
+
+  it('counts a reverse-charge invoice with no buyer GSTIN as suspect', () => {
+    // Reverse charge on outward supplies runs B2B; an unregistered recipient
+    // is almost certainly a mis-flag, so it is surfaced rather than guessed at.
+    const acc = new Gstr3bAccumulator();
+    acc.addInvoice(rcmInvoice({ buyerGstin: null }));
+
+    expect(acc.finish().outwardReverseCharge!.unregisteredRecipients).toBe(1);
+  });
+});
+
 describe('Gstr1Accumulator — credit notes', () => {
   const creditNote = (overrides: Partial<ReturnInvoice> = {}) =>
     invoice({
