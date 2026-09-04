@@ -36,6 +36,7 @@ import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { SkuGeneratorService } from '../inventory/sku-generator.service';
+import { normalizeUqc } from '../gst/constants/uqc';
 import {
   type IImageStorage,
   IMAGE_STORAGE,
@@ -414,39 +415,6 @@ export class ProductService {
     };
   }
 
-  // ─── UPDATE GST FIELDS ───
-  async updateGst(
-    id: string,
-    orgId: string,
-    dto: { hsnCode?: string; gstRate?: number },
-    vendorScope?: string,
-  ) {
-    const product = await this.prisma.product.findFirst({
-      where: { id, organizationId: orgId, deletedAt: null },
-    });
-    if (!product) throw new NotFoundException('Product not found');
-
-    // GST/HSN are tax fields — vendors may never edit them (matches update()).
-    if (vendorScope) {
-      throw new ForbiddenException('Vendors cannot edit tax fields.');
-    }
-
-    const updated = await this.prisma.product.update({
-      where: { id },
-      data: {
-        ...(dto.hsnCode !== undefined && { hsnCode: dto.hsnCode }),
-        ...(dto.gstRate !== undefined && { gstRate: dto.gstRate }),
-      },
-      include: {
-        variants: true,
-        images: { orderBy: { position: 'asc' }, take: 1 },
-      },
-    });
-
-    await this.markOutOfSyncIfNeeded(id);
-    return updated;
-  }
-
   private getPriceRange(variants: Array<{ price: any }>) {
     if (variants.length === 0) return { min: '0', max: '0' };
     const prices = variants.map((v) => parseFloat(String(v.price)));
@@ -520,7 +488,9 @@ export class ProductService {
           bodyHtml: dto.bodyHtml ?? null,
           hsnCode: dto.hsnCode ?? null,
           gstRate: dto.gstRate ?? null,
-          unitOfMeasure: dto.unitOfMeasure || null,
+          // Canonicalised, like variantGstOverride: a lowercase "nos" stored raw
+          // reads as "no UQC set" at invoice time and silently falls back.
+          unitOfMeasure: normalizeUqc(dto.unitOfMeasure),
           ...(dto.supplyType ? { supplyType: dto.supplyType } : {}),
           options: hasMulti
             ? (dto.options as unknown as Prisma.InputJsonValue)
@@ -696,7 +666,7 @@ export class ProductService {
     if (v.hsnCode !== undefined) out.hsnCode = v.hsnCode?.trim() || null;
     if (v.gstRate !== undefined) out.gstRate = v.gstRate;
     if (v.unitOfMeasure !== undefined)
-      out.unitOfMeasure = v.unitOfMeasure?.trim().toUpperCase() || null;
+      out.unitOfMeasure = normalizeUqc(v.unitOfMeasure);
     if (v.supplyType !== undefined) out.supplyType = v.supplyType;
     return out;
   }
@@ -796,7 +766,7 @@ export class ProductService {
       if (!isVendor && dto.gstRate !== undefined)
         productPatch.gstRate = dto.gstRate;
       if (!isVendor && dto.unitOfMeasure !== undefined)
-        productPatch.unitOfMeasure = dto.unitOfMeasure || null;
+        productPatch.unitOfMeasure = normalizeUqc(dto.unitOfMeasure);
       if (!isVendor && dto.supplyType !== undefined)
         productPatch.supplyType = dto.supplyType;
       if (dto.publishedAt !== undefined) {

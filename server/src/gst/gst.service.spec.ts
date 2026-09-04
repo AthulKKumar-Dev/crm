@@ -52,6 +52,11 @@ function build(rows: Array<Record<string, unknown>> = []) {
         return Promise.resolve(found ?? null);
       }),
     },
+    // Deactivating a registration also detaches the warehouses declared as its
+    // additional places of business, in the same transaction.
+    warehouse: {
+      updateMany: jest.fn(() => Promise.resolve({ count: 0 })),
+    },
   };
   const prisma = {
     organizationGstin: {

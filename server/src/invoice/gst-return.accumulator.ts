@@ -92,6 +92,11 @@ export interface ReturnInvoice {
   placeOfSupply: string | null;
   placeOfSupplyName: string | null;
   gstType: GstType;
+  /**
+   * Tax payable by the RECIPIENT (Rule 46(p)). Optional so existing fixtures
+   * and the untyped service cast keep compiling; absent means forward charge.
+   */
+  reverseCharge?: boolean;
   subtotal: unknown;
   totalCgst: unknown;
   totalSgst: unknown;
@@ -107,6 +112,8 @@ export interface Gstr1B2bInvoiceRow {
   placeOfSupply: string | null;
   placeOfSupplyName: string | null;
   gstType: GstType;
+  /** True puts this invoice in table 4B rather than 4A. */
+  reverseCharge: boolean;
   subtotal: number;
   cgst: number;
   sgst: number;
@@ -138,6 +145,14 @@ export interface Gstr1B2csRow {
 }
 
 export interface Gstr1HsnRow {
+  /**
+   * Which HSN tab this row belongs to.
+   *
+   * From the May-2025 return period the portal splits Table 12 into HSN-B2B
+   * and HSN-B2C, each reconciling to its own supplies. One merged table is
+   * rejected, so the split has to exist in the data, not only in the render.
+   */
+  recipientType: 'B2B' | 'B2C';
   /** Null when the product carries no HSN. Rendered as a warning, never as a code. */
   hsnCode: string | null;
   description: string;
@@ -150,6 +165,16 @@ export interface Gstr1HsnRow {
   sgst: number;
   igst: number;
 }
+
+/**
+ * GSTR-1 Table 13 — documents issued.
+ *
+ * Optional because it is not produced by the accumulator: serial ranges must
+ * include CANCELLED invoices, which the return's fold excludes by design. The
+ * service attaches it after folding.
+ */
+import type { DocumentSeriesSummary } from './document-series.util';
+export type { DocumentSeriesSummary };
 
 /** One row of GSTR-1 Table 8 — supplies attracting no tax. */
 export interface Gstr1NilRatedRow {
@@ -208,8 +233,13 @@ export interface Gstr1Return {
     totalIgst: number;
     totalTax: number;
   }>;
-  /** Table 12 — by HSN AND rate, with a UQC. */
+  /** Table 12 — by recipient type, HSN, rate and UQC. */
   hsnSummary: Gstr1HsnRow[];
+  /**
+   * Table 13 — documents issued. Attached by the service after folding, since
+   * serial ranges must count CANCELLED invoices that the fold excludes.
+   */
+  documentsIssued?: DocumentSeriesSummary;
   /** Table 8 — nil-rated, exempted and non-GST outward supplies. */
   nilRated: Gstr1NilRatedRow[];
   /** Table 9B — credit notes against earlier invoices (CDNR / CDNUR). */
@@ -268,6 +298,27 @@ export interface Gstr3bReturn {
       totalTaxable: number;
       totalIgst: number;
     }>;
+  };
+  /**
+   * OUTWARD supplies on which the recipient pays the tax (GSTR-1 table 4B).
+   *
+   * Excluded from `outwardSupplies` (3.1(a)), from `interState` (3.2) and from
+   * `taxPayable`, because the portal's system-computed 3.1(a) is built from
+   * GSTR-1 tables 4A/4C/5/6C/7/9/10/11 and omits 4B: the supplier owes nothing,
+   * and the recipient declares the same tax in their own 3.1(d). Reported here
+   * so the figure is visible rather than silently dropped.
+   *
+   * Distinct from `reverseCharge` below, which is INWARD.
+   */
+  outwardReverseCharge?: {
+    invoiceCount: number;
+    taxableValue: number;
+    tax: number;
+    /**
+     * How many carried no buyer GSTIN. Reverse charge on outward supplies runs
+     * B2B, so a non-zero count almost certainly means a mis-flagged invoice.
+     */
+    unregisteredRecipients: number;
   };
   /**
    * 3.1(d) and 4(A)(3) — inward supplies on which the RECIPIENT pays the tax.
@@ -443,6 +494,7 @@ export class Gstr1Accumulator {
   private readonly hsn = new Map<
     string,
     {
+      recipientType: 'B2B' | 'B2C';
       hsnCode: string | null;
       /**
        * Taxable value per distinct product description in this group, so the
@@ -561,6 +613,9 @@ export class Gstr1Accumulator {
         placeOfSupply: invoice.placeOfSupply,
         placeOfSupplyName: invoice.placeOfSupplyName,
         gstType: invoice.gstType,
+        // The offline utility's B2B sheet carries this column, and it is what
+        // separates table 4B (tax paid by the recipient) from 4A.
+        reverseCharge: invoice.reverseCharge === true,
         subtotal: toMoney(subtotal),
         cgst: toMoney(cgst),
         sgst: toMoney(sgst),
@@ -657,11 +712,15 @@ export class Gstr1Accumulator {
 
       const uqc = item.unitOfMeasure?.trim() || 'NOS';
 
-      // Table 12 is keyed by HSN AND rate AND unit — one code sold at two rates
-      // is two statutory rows, and merging them produced a row whose tax could
-      // not be derived from its taxable value.
-      const hsnKey = `${hsnCode ?? ''}|${uqc}|${rate}`;
+      // Table 12 is keyed by RECIPIENT TYPE and HSN AND rate AND unit — one
+      // code sold at two rates is two statutory rows, and merging them produced
+      // a row whose tax could not be derived from its taxable value. The
+      // recipient type leads because the portal reports B2B and B2C as separate
+      // tables, each reconciling to its own supplies.
+      const recipientType: 'B2B' | 'B2C' = isRegistered ? 'B2B' : 'B2C';
+      const hsnKey = `${recipientType}|${hsnCode ?? ''}|${uqc}|${rate}`;
       const row = this.hsn.get(hsnKey) ?? {
+        recipientType,
         hsnCode,
         descriptions: new Map<string, Prisma.Decimal>(),
         descriptionOverflow: 0,
@@ -822,6 +881,7 @@ export class Gstr1Accumulator {
       })),
       hsnSummary: Array.from(this.hsn.values())
         .map((row) => ({
+          recipientType: row.recipientType,
           hsnCode: row.hsnCode,
           description: describeHsnGroup(row.descriptions, row.descriptionOverflow),
           uqc: row.uqc,
@@ -833,10 +893,15 @@ export class Gstr1Accumulator {
           sgst: toMoney(row.sgst),
           igst: toMoney(row.igst),
         }))
+        // B2B first, then by code, rate and unit. `uqc` is in the sort because
+        // it is in the key: without it two rows differing only by unit kept
+        // insertion order and the table read as unsorted.
         .sort(
           (a, b) =>
+            a.recipientType.localeCompare(b.recipientType) ||
             (a.hsnCode ?? '').localeCompare(b.hsnCode ?? '') ||
-            a.gstRate - b.gstRate,
+            a.gstRate - b.gstRate ||
+            a.uqc.localeCompare(b.uqc),
         ),
       // Emitted in statutory order, and only for rows that carry a value —
       // four permanently-zero rows would read as filed figures.
@@ -912,9 +977,27 @@ export class Gstr3bAccumulator {
   private payableIgst = ZERO;
   private payableTotal = ZERO;
 
+  private rcmCount = 0;
+  private rcmTaxable = ZERO;
+  private rcmTax = ZERO;
+  private rcmUnregistered = 0;
+
   addInvoice(invoice: ReturnInvoice): void {
     const subtotal = dec(invoice.subtotal);
     const igst = dec(invoice.totalIgst);
+
+    // Outward supplies on which the RECIPIENT pays the tax.
+    //
+    // These belong in GSTR-1 table 4B, and the portal's system-computed
+    // GSTR-3B builds 3.1(a) from 4A/4C/5/6C/7/9/10/11 — deliberately EXCLUDING
+    // 4B, because the supplier owes nothing on them; the recipient declares
+    // the same tax in their own 3.1(d). Leaving them in 3.1(a) and in tax
+    // payable therefore declares tax twice across two returns and asks this
+    // merchant to pay tax the law puts on someone else.
+    //
+    // They are reported separately instead, so the figure is visible rather
+    // than silently dropped.
+    const rcm = invoice.reverseCharge === true;
 
     // 3.1(a) and tax payable are reported NET of credit notes on the form, so a
     // credit note subtracts everywhere an invoice adds. `sign` keeps that in
@@ -924,10 +1007,12 @@ export class Gstr3bAccumulator {
     const signed = (value: Prisma.Decimal) =>
       isCreditNote ? value.negated() : value;
 
-    this.payableCgst = this.payableCgst.plus(signed(dec(invoice.totalCgst)));
-    this.payableSgst = this.payableSgst.plus(signed(dec(invoice.totalSgst)));
-    this.payableIgst = this.payableIgst.plus(signed(igst));
-    this.payableTotal = this.payableTotal.plus(signed(dec(invoice.totalTax)));
+    if (!rcm) {
+      this.payableCgst = this.payableCgst.plus(signed(dec(invoice.totalCgst)));
+      this.payableSgst = this.payableSgst.plus(signed(dec(invoice.totalSgst)));
+      this.payableIgst = this.payableIgst.plus(signed(igst));
+      this.payableTotal = this.payableTotal.plus(signed(dec(invoice.totalTax)));
+    }
 
     for (const item of invoice.lineItems ?? []) {
       const rate = dec(item.gstRate).toNumber();
@@ -951,6 +1036,16 @@ export class Gstr3bAccumulator {
           break;
       }
 
+      // The switch above stays UNGATED for reverse charge: a nil-rated or
+      // exempt line carries no tax for anyone, so who would have paid it does
+      // not change where it is reported. Only the taxable component moves.
+      if (rcm) {
+        if (item.supplyType === GstSupplyType.TAXABLE) {
+          this.rcmTaxable = this.rcmTaxable.plus(signed(taxable));
+        }
+        continue;
+      }
+
       const existing = this.rates.get(rate) ?? {
         taxable: ZERO,
         cgst: ZERO,
@@ -964,6 +1059,18 @@ export class Gstr3bAccumulator {
       existing.igst = existing.igst.plus(signed(dec(item.igstAmount)));
 
       this.rates.set(rate, existing);
+    }
+
+    if (rcm) {
+      this.rcmCount += sign;
+      this.rcmTax = this.rcmTax.plus(signed(dec(invoice.totalTax)));
+      // An RCM supply to an unregistered buyer is almost certainly a
+      // mis-flag — reverse charge on outward supplies runs B2B. Counted so
+      // the UI can say so rather than guess.
+      if (!invoice.buyerGstin) this.rcmUnregistered += sign;
+      // 3.2 is a memo OF 3.1(a); a memo cannot report supplies its parent
+      // excludes, so the inter-state aggregate is skipped too.
+      return;
     }
 
     if (invoice.gstType !== GstType.IGST) return;
@@ -1031,6 +1138,12 @@ export class Gstr3bAccumulator {
       // computed from a sales fold. Emitting the empty shape keeps the payload
       // one object rather than making every caller merge two.
       reverseCharge: { taxableValue: 0, igst: 0, entriesWithUnknownTax: 0 },
+      outwardReverseCharge: {
+        invoiceCount: this.rcmCount,
+        taxableValue: toMoney(this.rcmTaxable),
+        tax: toMoney(this.rcmTax),
+        unregisteredRecipients: this.rcmUnregistered,
+      },
       taxPayable: {
         cgst: toMoney(this.payableCgst),
         sgst: toMoney(this.payableSgst),

@@ -32,11 +32,13 @@ import {
   Gstr1B2clPanel,
   Gstr1B2csPanel,
   Gstr1HsnPanel,
+  Gstr1DocumentsPanel,
   Gstr1NilRatedPanel,
   Gstr1CreditNotePanel,
 } from "~/components/app/gstr1-panels";
 import {
   Gstr3bOutwardPanel,
+  Gstr3bOutwardReverseChargePanel,
   Gstr3bOtherSuppliesPanel,
   Gstr3bInterStatePanel,
 } from "~/components/app/gstr3b-panels";
@@ -50,10 +52,20 @@ import { QueryErrorState } from "~/components/app/query-error-state";
 import { useRefundsPendingCredit } from "~/hooks/use-invoice-queries";
 import { DismissibleWarning } from "~/components/app/dismissible-warning";
 import { InwardSuppliesPanel } from "~/components/app/inward-supplies-panel";
-import { useInvoices, useInvoiceStats, useGstReturn } from "~/hooks/use-invoice-queries";
+import {
+  useInvoices,
+  useInvoiceStats,
+  useGstReturn,
+  useGstFilings,
+} from "~/hooks/use-invoice-queries";
 import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useGstins } from "~/hooks/use-gst-queries";
+import { useWarehouses } from "~/hooks/use-inventory-queries";
+import {
+  MarkFiledDialog,
+  ReopenPeriodDialog,
+} from "~/components/app/mark-filed-dialog";
 import { useDebounced } from "~/hooks/use-debounced";
 import { invoiceService } from "~/services/invoice.service";
 import { downloadBlob } from "~/lib/download-blob";
@@ -72,6 +84,7 @@ import {
 import type {
   RefundPendingCredit,
   InvoiceDetail,
+  GstFiling,
   GstReturnGstr1,
   GstReturnGstr3B,
   Invoice,
@@ -177,6 +190,9 @@ export default function InvoicesPage() {
   const dateFrom = searchParams.get("from") ?? "";
   const dateTo = searchParams.get("to") ?? "";
   const sellerGstinId = searchParams.get("gstin") ?? "";
+  // Reference-only lens over the return. Kept in the URL like every other
+  // filter so a scoped view is shareable and survives a reload.
+  const warehouseScopeId = searchParams.get("warehouse") ?? "";
   const selectedInvoiceId = searchParams.get("invoice");
 
   // Search stays local so typing is instant; only the debounced value reaches
@@ -207,6 +223,27 @@ export default function InvoicesPage() {
   // single-registration org has nothing to filter by.
   const { data: gstins = [] } = useGstins();
   const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  // Which periods are locked. Keyed by FY so switching year refetches.
+  const filings = useGstFilings(financialYear);
+  const [markingFiled, setMarkingFiled] = useState(false);
+  const [reopening, setReopening] = useState<GstFiling | null>(null);
+
+  // A filing covers one registration, one period and one return. `?? null` on
+  // both sides so "filed for all registrations" matches the unscoped view.
+  const currentFiling =
+    (filings.data ?? []).find(
+      (f) =>
+        f.financialYear === financialYear &&
+        f.period.toUpperCase() === period.toUpperCase() &&
+        f.returnType === returnType &&
+        (f.sellerGstinId ?? null) === (sellerGstinId || null),
+    ) ?? null;
+
+  const warehouses = useWarehouses();
+  const activeWarehouses = (warehouses.data ?? []).filter((w) => w.isActive);
+  const scopedWarehouse =
+    activeWarehouses.find((w) => w.id === warehouseScopeId) ?? null;
 
   /**
    * Patch the URL. `null` deletes a key so it stops appearing in the address
@@ -274,6 +311,8 @@ export default function InvoicesPage() {
           // A multi-registration org files ONE RETURN PER GSTIN. Omitting this
           // produced a merged return that matched no return they actually file.
           sellerGstinId: sellerGstinId || undefined,
+          // Reference view only — never a filing. See the banner below.
+          dispatchWarehouseId: warehouseScopeId || undefined,
         }
       : null,
   );
@@ -425,6 +464,31 @@ export default function InvoicesPage() {
               {activeGstins.map((gstin: OrganizationGstin) => (
                 <SelectItem key={gstin.id} value={gstin.id} className="text-caption">
                   {gstin.gstin} — {gstin.stateName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        {/* Reference lens, filing tab only. A GST return has no warehouse
+            dimension — see the strip below the picker. */}
+        {tab === "filing" && activeWarehouses.length > 1 && (
+          <Select
+            value={warehouseScopeId || "all"}
+            onValueChange={(next) =>
+              patchParams({ warehouse: next === "all" ? null : next })
+            }
+          >
+            <SelectTrigger className="h-8 w-45 text-caption" aria-label="Dispatch warehouse">
+              <SelectValue placeholder="All warehouses" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all" className="text-caption">
+                All warehouses
+              </SelectItem>
+              {activeWarehouses.map((w) => (
+                <SelectItem key={w.id} value={w.id} className="text-caption">
+                  {w.name} · {w.code}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -799,6 +863,40 @@ export default function InvoicesPage() {
               </p>
             </DismissibleWarning>
           )}
+          {scopedWarehouse && (
+            <div className="flex items-start gap-2 rounded-xl bg-warning-subtle px-5 py-3">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
+              <p className="text-caption">
+                <strong className="font-semibold">
+                  Showing only sales dispatched from {scopedWarehouse.name}.
+                </strong>{" "}
+                For your reference — a GST return is filed per GSTIN, not per
+                warehouse, and the portal has no field for one. Clear the
+                warehouse filter before using these figures to file.
+              </p>
+            </div>
+          )}
+          {stats && stats.invoicesFromUnlinkedWarehouse > 0 && (
+            <DismissibleWarning
+              id="unlinked-warehouse"
+              scope={org?.id}
+              signature={stats.invoicesFromUnlinkedWarehouse}
+              label="invoices dispatched from a warehouse with no GST registration"
+            >
+              <p>
+                <strong className="font-semibold">
+                  {stats.invoicesFromUnlinkedWarehouse}{" "}
+                  {stats.invoicesFromUnlinkedWarehouse === 1
+                    ? "invoice was"
+                    : "invoices were"}{" "}
+                  issued from a warehouse that is not linked to a GST registration.
+                </strong>{" "}
+                Every place of business you invoice from must be declared under a
+                registration on the GST portal. Link each warehouse in Products →
+                Inventory → Warehouses.
+              </p>
+            </DismissibleWarning>
+          )}
           {activeGstins.length > 1 && !sellerGstinId && (
             <div className="flex items-start gap-2 rounded-xl bg-warning-subtle px-5 py-3">
               <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
@@ -909,6 +1007,11 @@ export default function InvoicesPage() {
                   : []
               }
               onSwitchReturn={(next) => patchParams({ return: next })}
+              filing={currentFiling}
+              canFile={canIssue}
+              scoped={!!warehouseScopeId}
+              onMarkFiled={() => setMarkingFiled(true)}
+              onReopen={() => setReopening(currentFiling)}
               isDownloading={downloading === "return"}
               onDownloadCsv={() =>
                 download(
@@ -919,6 +1022,7 @@ export default function InvoicesPage() {
                       period,
                       returnType,
                       sellerGstinId: sellerGstinId || undefined,
+                      dispatchWarehouseId: warehouseScopeId || undefined,
                     }),
                   `${returnType}-${financialYear}-${period}.csv`,
                   "Could not download the return. Please try again.",
@@ -928,6 +1032,25 @@ export default function InvoicesPage() {
           </div>
         </div>
       )}
+
+      <MarkFiledDialog
+        open={markingFiled}
+        onClose={() => setMarkingFiled(false)}
+        financialYear={financialYear}
+        period={period}
+        periodLabel={periodLabel}
+        returnType={returnType}
+        sellerGstinId={sellerGstinId || undefined}
+        gstinLabel={
+          activeGstins.find((g: OrganizationGstin) => g.id === sellerGstinId)
+            ?.gstin ?? "all registrations"
+        }
+      />
+      <ReopenPeriodDialog
+        filing={reopening}
+        periodLabel={periodLabel}
+        onClose={() => setReopening(null)}
+      />
 
       <InvoiceDetailDialog
         invoiceId={selectedInvoiceId}
@@ -1051,6 +1174,7 @@ function Gstr1View({
       <Gstr1HsnPanel data={data} currency={currency} />
       <Gstr1CreditNotePanel data={data} currency={currency} />
       <Gstr1NilRatedPanel data={data} currency={currency} />
+      <Gstr1DocumentsPanel data={data} currency={currency} />
     </>
   );
 }
@@ -1092,6 +1216,7 @@ function Gstr3bView({
         ]}
       />
       <Gstr3bOutwardPanel data={data} currency={currency} />
+      <Gstr3bOutwardReverseChargePanel data={data} currency={currency} />
       <Gstr3bOtherSuppliesPanel data={data} currency={currency} />
       <Gstr3bInterStatePanel data={data} currency={currency} />
     </>

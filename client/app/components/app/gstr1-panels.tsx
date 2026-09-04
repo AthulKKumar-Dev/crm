@@ -167,6 +167,17 @@ export function Gstr1B2bPanel({ data, currency }: PanelProps) {
                             </TableCell>
                             <TableCell className="text-right text-micro text-muted-foreground">
                               {inv.gstType === "IGST" ? "Inter" : "Intra"}
+                              {/* Table 4B rather than 4A — the recipient pays
+                                  this tax, so it is excluded from GSTR-3B
+                                  3.1(a) and from tax payable. */}
+                              {inv.reverseCharge && (
+                                <span
+                                  className="ml-1 rounded bg-warning-subtle px-1 py-0.5 text-[10px] font-medium text-warning-strong"
+                                  title="Reverse charge — tax payable by the recipient (table 4B)"
+                                >
+                                  RCM
+                                </span>
+                              )}
                             </TableCell>
                             <TableCell className="text-right text-micro tabular-nums">
                               {formatCurrency(inv.subtotal, currency, {
@@ -402,19 +413,131 @@ export function Gstr1NilRatedPanel({ data, currency }: PanelProps) {
  * requires the rate, the UQC, the total value and the tax split, and one code
  * sold at two rates is two statutory rows.
  */
+/**
+ * Table 13 — documents issued. Mandatory in GSTR-1 whenever outward supplies
+ * are reported, and derived entirely from the invoice numbers: there is no
+ * sequence column, so the serial range IS the record.
+ */
+export function Gstr1DocumentsPanel({ data }: PanelProps) {
+  const summary = data.documentsIssued;
+  if (!summary) return null;
+
+  const gaps = summary.rows.filter((r) => r.total !== r.documents);
+
+  return (
+    <SectionCard
+      title="13 · Documents issued"
+      description="Serial ranges per series, with cancellations"
+    >
+      {(gaps.length > 0 || summary.unparsed > 0) && (
+        <div className="flex items-start gap-2 border-b bg-warning-subtle px-5 py-3">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warning" />
+          <p className="text-caption">
+            {gaps.length > 0 && (
+              <>
+                <strong className="font-semibold">
+                  {gaps.length === 1 ? "A series has" : `${gaps.length} series have`}{" "}
+                  fewer documents than its serial range covers.
+                </strong>{" "}
+                Either numbers are genuinely missing, or you are viewing one
+                GSTIN while the numbering series runs across the whole business.{" "}
+              </>
+            )}
+            {summary.unparsed > 0 && (
+              <>
+                {summary.unparsed} invoice number
+                {summary.unparsed === 1 ? "" : "s"} could not be read as a
+                series and serial, so {summary.unparsed === 1 ? "it is" : "they are"}{" "}
+                not counted here.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
+      {summary.rows.length === 0 ? (
+        <p className="px-5 py-8 text-center text-caption text-muted-foreground">
+          No documents issued in this period.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Nature</TableHead>
+                <TableHead>Series</TableHead>
+                <TableHead>From</TableHead>
+                <TableHead>To</TableHead>
+                <TableHead className="text-right">Total</TableHead>
+                <TableHead className="text-right">Cancelled</TableHead>
+                <TableHead className="text-right">Net issued</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {summary.rows.map((row) => (
+                <TableRow key={`${row.series}-${row.financialYear}`}>
+                  <TableCell className="text-caption">{row.nature}</TableCell>
+                  <TableCell className="font-mono text-caption">
+                    {row.series}
+                    <span className="ml-1 text-micro text-muted-foreground">
+                      {row.financialYear}
+                    </span>
+                  </TableCell>
+                  <TableCell className="font-mono text-caption">{row.from}</TableCell>
+                  <TableCell className="font-mono text-caption">{row.to}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.total}
+                    {row.total !== row.documents && (
+                      <span
+                        className="ml-1 text-micro text-warning"
+                        title={`${row.documents} documents present in this view`}
+                      >
+                        ({row.documents})
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.cancelled}
+                  </TableCell>
+                  <TableCell className="text-right font-medium tabular-nums">
+                    {row.netIssued}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 export function Gstr1HsnPanel({ data, currency }: PanelProps) {
   const [expanded, setExpanded] = useState(false);
 
   const missing = data.totals?.linesMissingHsn ?? 0;
   const total = data.hsnSummary.reduce((sum, r) => sum + r.taxableValue, 0);
-  const rows = expanded
-    ? data.hsnSummary
-    : data.hsnSummary.slice(0, COLLAPSED_ROWS);
+
+  // The portal reports Table 12 as two tabs, each reconciling to its own
+  // supplies. Collapsing is applied PER GROUP, not across the merged array —
+  // otherwise a long B2B list would hide the B2C table entirely.
+  const b2b = data.hsnSummary.filter((r) => r.recipientType === "B2B");
+  const b2c = data.hsnSummary.filter((r) => r.recipientType !== "B2B");
+  const groups = [
+    { label: "B2B — registered buyers", rows: b2b },
+    { label: "B2C — unregistered buyers", rows: b2c },
+  ].filter((g) => g.rows.length > 0);
+  const visible = (rows: typeof data.hsnSummary) =>
+    expanded ? rows : rows.slice(0, COLLAPSED_ROWS);
+  const hiddenCount = groups.reduce(
+    (sum, g) => sum + Math.max(g.rows.length - COLLAPSED_ROWS, 0),
+    0,
+  );
 
   return (
     <SectionCard
       title="12 · HSN summary"
-      description="By HSN code and rate"
+      description="B2B and B2C, by HSN code and rate"
       action={<SectionTotal amount={total} currency={currency} />}
     >
       {missing > 0 && (
@@ -454,8 +577,19 @@ export function Gstr1HsnPanel({ data, currency }: PanelProps) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((row, i) => (
-                  <TableRow key={`${row.hsnCode ?? "none"}-${row.gstRate}-${i}`}>
+                {groups.flatMap((group) => [
+                  // A labelled divider rather than two tables: the columns are
+                  // identical, and one header row keeps them comparable.
+                  <TableRow key={`head-${group.label}`} className="bg-muted/40">
+                    <TableCell
+                      colSpan={6}
+                      className="py-1.5 text-micro font-semibold uppercase tracking-wider text-muted-foreground"
+                    >
+                      {group.label}
+                    </TableCell>
+                  </TableRow>,
+                  ...visible(group.rows).map((row, i) => (
+                  <TableRow key={`${group.label}-${row.hsnCode ?? "none"}-${row.uqc}-${row.gstRate}-${i}`}>
                     <TableCell className="font-mono text-caption">
                       {row.hsnCode ?? (
                         <span className="font-sans text-warning">Missing</span>
@@ -495,13 +629,14 @@ export function Gstr1HsnPanel({ data, currency }: PanelProps) {
                       />
                     </TableCell>
                   </TableRow>
-                ))}
+                  )),
+                ])}
               </TableBody>
             </Table>
           </div>
           <ShowAllButton
             expanded={expanded}
-            hiddenCount={data.hsnSummary.length - COLLAPSED_ROWS}
+            hiddenCount={hiddenCount}
             noun="rows"
             onToggle={() => setExpanded((v) => !v)}
           />

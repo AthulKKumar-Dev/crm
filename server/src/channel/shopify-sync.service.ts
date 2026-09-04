@@ -82,7 +82,10 @@ import {
     COLLECTION_PRODUCTS_QUERY,
     CollectionProductsResponse,
     PageInfo,
+    ORDER_FULFILLMENT_LOCATIONS_QUERY,
+    OrderFulfillmentLocationsResponse,
 } from './shopify-graphql.types';
+import { singleDistinct } from './single-distinct.util';
 import { parseProductSettings } from '../organization-settings/schemas/product-settings.schema';
 
 const GRAPHQL_PAGE_SIZE = 50;
@@ -2097,6 +2100,20 @@ export class ShopifySyncService {
                 variantByExternalId,
                 productByExternalId,
             });
+
+            // Stamp where the goods left from, when the payload says so
+            // unambiguously. Done HERE rather than inside writeOrderChildren
+            // because that helper is handed no orgId, and the stamp must be
+            // tenant-scoped. `transformGraphqlOrder` emits no location_id, so
+            // the bulk/backfill path never reaches this — by design.
+            const fulfilmentLocationId = singleDistinct(
+                (so.fulfillments ?? []).map((f: any) =>
+                    f?.location_id != null ? String(f.location_id) : null,
+                ),
+            );
+            if (fulfilmentLocationId) {
+                await this.stampDispatchWarehouse(tx, orgId, orderId, fulfilmentLocationId);
+            }
         }, { timeout: 20000 });
 
         // AFTER the commit, never inside it. `InvoiceService.create` opens its
@@ -2105,7 +2122,103 @@ export class ShopifySyncService {
         // numbering retry and let an invoice failure abort the order write. The
         // order landing is the thing that must not be lost.
         if (opts.live && becamePaidOrderId) {
+            // Resolve the dispatch point BEFORE invoicing: the invoice
+            // snapshots it, and a stamp that lands afterwards would leave the
+            // document without a dispatch block for ever.
+            await this.ensureDispatchWarehouseFromShopify(orgId, becamePaidOrderId);
             await this.maybeAutoInvoice(orgId, becamePaidOrderId);
+        }
+    }
+
+    /**
+     * Point an order at the warehouse mirroring a Shopify location.
+     *
+     * FIRST WRITE ONLY (`dispatchWarehouseId: null` in the where): a later sync
+     * must never move the dispatch point of an order that has already been
+     * invoiced, or the invoice and the order would disagree about where the
+     * goods left from. Silently does nothing when the location is not mirrored
+     * as an active warehouse.
+     */
+    private async stampDispatchWarehouse(
+        tx: Prisma.TransactionClient,
+        orgId: string,
+        orderId: string,
+        shopifyLocationId: string,
+    ): Promise<void> {
+        const warehouse = await tx.warehouse.findFirst({
+            where: { organizationId: orgId, shopifyLocationId, isActive: true },
+            select: { id: true },
+        });
+        if (!warehouse) return;
+
+        await tx.order.updateMany({
+            where: { id: orderId, organizationId: orgId, dispatchWarehouseId: null },
+            data: { dispatchWarehouseId: warehouse.id },
+        });
+    }
+
+    /**
+     * Ask Shopify which location an order is assigned to ship from, and stamp
+     * it — the pre-step to auto-invoicing.
+     *
+     * Shopify assigns fulfilment orders to a location when the order is
+     * created, so this is answerable at PAID time, long before anything ships.
+     * Costs one lean GraphQL call, and only for orgs that actually mirror
+     * Shopify locations as warehouses.
+     *
+     * NEVER THROWS. A dispatch address is a nicety; the invoice is not. Any
+     * failure here is logged and the invoice proceeds without the block.
+     */
+    private async ensureDispatchWarehouseFromShopify(
+        orgId: string,
+        orderId: string,
+    ): Promise<void> {
+        try {
+            const order = await this.prisma.order.findFirst({
+                where: { id: orderId, organizationId: orgId },
+                select: { dispatchWarehouseId: true, externalId: true, channelId: true },
+            });
+            if (!order || order.dispatchWarehouseId) return;
+
+            // Legacy orgs mirror no locations; skip before spending an API call.
+            const mapped = await this.prisma.warehouse.count({
+                where: {
+                    organizationId: orgId,
+                    shopifyLocationId: { not: null },
+                    isActive: true,
+                },
+            });
+            if (mapped === 0) return;
+
+            const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(
+                order.channelId,
+            );
+            const res = await this.graphql.request<OrderFulfillmentLocationsResponse>(
+                { shopDomain, accessToken: token },
+                ORDER_FULFILLMENT_LOCATIONS_QUERY,
+                { id: ShopifyGraphqlClient.toGid('Order', order.externalId) },
+            );
+
+            const locationId = singleDistinct(
+                (res.order?.fulfillmentOrders.nodes ?? [])
+                    // A cancelled or closed fulfilment order says nothing about
+                    // where this sale actually ships from.
+                    .filter((fo) => fo.status !== 'CANCELLED' && fo.status !== 'CLOSED')
+                    .map((fo) =>
+                        fo.assignedLocation?.location?.id
+                            ? ShopifyGraphqlClient.extractId(fo.assignedLocation.location.id)
+                            : null,
+                    ),
+            );
+            if (!locationId) return;
+
+            await this.stampDispatchWarehouse(this.prisma, orgId, orderId, locationId);
+        } catch (error) {
+            this.logger.warn(
+                `Could not resolve dispatch warehouse for order ${orderId}: ${
+                    error instanceof Error ? error.message : String(error)
+                }`,
+            );
         }
     }
 

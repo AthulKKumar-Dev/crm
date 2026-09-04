@@ -7,6 +7,7 @@ import {
 import { LocationType, Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { warehouseGstinMismatch } from './warehouse-gstin.util';
 import {
   BulkLocationsDto,
   CreateWarehouseDto,
@@ -31,6 +32,8 @@ export class WarehouseService {
       code: w.code,
       shopifyLocationId: w.shopifyLocationId,
       address: w.address,
+      gstinId: w.gstinId,
+      apobDeclared: w.apobDeclared,
       isDefault: w.isDefault,
       isActive: w.isActive,
       locationCount: w._count.locations,
@@ -39,7 +42,27 @@ export class WarehouseService {
     }));
   }
 
+  /**
+   * Resolve a GST registration the caller wants to link, scoped to the org.
+   * Only ACTIVE registrations are linkable: linking to one the merchant has
+   * retired would put a dead GSTIN on the dispatch block of future invoices.
+   */
+  private async resolveGstinLink(orgId: string, gstinId: string) {
+    const gstin = await this.prisma.organizationGstin.findFirst({
+      where: { id: gstinId, organizationId: orgId, isActive: true },
+      select: { id: true, stateCode: true, stateName: true },
+    });
+    if (!gstin) throw new NotFoundException('GSTIN registration not found');
+    return gstin;
+  }
+
   async create(orgId: string, dto: CreateWarehouseDto) {
+    if (dto.gstinId) {
+      const gstin = await this.resolveGstinLink(orgId, dto.gstinId);
+      const mismatch = warehouseGstinMismatch(dto.address, gstin);
+      if (mismatch) throw new BadRequestException(mismatch);
+    }
+
     const count = await this.prisma.warehouse.count({
       where: { organizationId: orgId },
     });
@@ -60,6 +83,8 @@ export class WarehouseService {
             name: dto.name,
             code: dto.code,
             address: (dto.address ?? undefined) as Prisma.InputJsonValue | undefined,
+            gstinId: dto.gstinId ?? null,
+            apobDeclared: dto.apobDeclared ?? false,
             isDefault: makeDefault,
           },
         });
@@ -89,6 +114,19 @@ export class WarehouseService {
       );
     }
 
+    // Validate the EFFECTIVE pair, not just what this request carries.
+    // Checking only `dto` would let an address edit slip past a registration
+    // linked earlier (and vice versa), leaving a stored cross-state link that
+    // no single request ever declared.
+    const nextAddress = dto.address ?? warehouse.address;
+    const nextGstinId =
+      dto.gstinId === undefined ? warehouse.gstinId : dto.gstinId;
+    if (nextGstinId) {
+      const gstin = await this.resolveGstinLink(orgId, nextGstinId);
+      const mismatch = warehouseGstinMismatch(nextAddress, gstin);
+      if (mismatch) throw new BadRequestException(mismatch);
+    }
+
     return this.prisma.$transaction(async (tx) => {
       if (dto.isDefault === true && !warehouse.isDefault) {
         await tx.warehouse.updateMany({
@@ -101,6 +139,8 @@ export class WarehouseService {
         data: {
           name: dto.name,
           address: (dto.address ?? undefined) as Prisma.InputJsonValue | undefined,
+          gstinId: dto.gstinId === undefined ? undefined : dto.gstinId,
+          apobDeclared: dto.apobDeclared,
           isDefault: dto.isDefault === true ? true : undefined,
           isActive: dto.isActive,
         },

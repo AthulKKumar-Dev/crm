@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
+import { useWarehouses } from "~/hooks/use-inventory-queries";
 import { useCreateInvoiceMutation } from "~/hooks/use-invoice-mutations";
 import { formatCurrency } from "~/lib/utils";
 import type { OrderDetail, OrganizationGstin } from "~/types/api";
@@ -75,8 +76,18 @@ export function GenerateInvoiceDialog({
   const [placeOfSupplyCode, setPlaceOfSupplyCode] = useState("");
   const [notes, setNotes] = useState("");
   const [reverseCharge, setReverseCharge] = useState(false);
+  const [dispatchWarehouseId, setDispatchWarehouseId] = useState("");
 
   const activeGstins = gstins.filter((g: OrganizationGstin) => g.isActive);
+
+  // A warehouse linked to a DIFFERENT registration than the chosen seller
+  // GSTIN would be refused by the server, so it is not offered. Unlinked
+  // warehouses stay eligible — they assert nothing to contradict.
+  const warehouses = useWarehouses();
+  const dispatchOptions = (warehouses.data ?? []).filter(
+    (w) =>
+      w.isActive && (!sellerGstinId || !w.gstinId || w.gstinId === sellerGstinId),
+  );
 
   const buyerGstinInvalid = buyerGstin !== "" && !GSTIN_PATTERN.test(buyerGstin);
 
@@ -100,6 +111,7 @@ export function GenerateInvoiceDialog({
         placeOfSupplyCode: placeOfSupplyCode || undefined,
         notes: notes.trim() || undefined,
         reverseCharge: reverseCharge || undefined,
+        dispatchWarehouseId: dispatchWarehouseId || undefined,
       },
       { onSuccess: () => onClose() },
     );
@@ -186,6 +198,36 @@ export function GenerateInvoiceDialog({
               </SelectContent>
             </Select>
           </div>
+
+          {/* Only worth asking when there is a choice to make. The list is
+              filtered to warehouses compatible with the chosen seller GSTIN,
+              because the server refuses an explicit cross-registration pick
+              outright — better to not offer it than to explain the 400. */}
+          {dispatchOptions.length > 1 && (
+            <div>
+              <label
+                htmlFor="dispatch-warehouse"
+                className="text-micro font-medium text-muted-foreground"
+              >
+                Dispatch from (optional)
+              </label>
+              <Select
+                value={dispatchWarehouseId}
+                onValueChange={setDispatchWarehouseId}
+              >
+                <SelectTrigger id="dispatch-warehouse" className="mt-1 h-9 text-caption">
+                  <SelectValue placeholder="Auto — the order's warehouse, else the default" />
+                </SelectTrigger>
+                <SelectContent>
+                  {dispatchOptions.map((w) => (
+                    <SelectItem key={w.id} value={w.id} className="text-caption">
+                      {w.name} · {w.code}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
 
           <div>
             <label

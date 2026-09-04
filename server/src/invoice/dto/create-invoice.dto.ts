@@ -42,4 +42,12 @@ export class CreateInvoiceDto {
   @IsOptional()
   @IsBoolean()
   reverseCharge?: boolean;
+
+  /**
+   * Additional place of business the goods left from. Omitted falls back to
+   * the warehouse the order was stamped with, then the org's default.
+   */
+  @IsOptional()
+  @IsString()
+  dispatchWarehouseId?: string;
 }

@@ -8,6 +8,7 @@ import { ProductPicker, type CartLineSeed } from "./product-picker";
 import { OrderCart, type CartLine } from "./order-cart";
 import { BillSummary } from "./bill-summary";
 import { AddressFields, cleanAddress } from "./address-fields";
+import { useWarehouses } from "~/hooks/use-inventory-queries";
 import type {
   CreateOfflineOrderRequest,
   CreateDraftOrderRequest,
@@ -48,6 +49,9 @@ export function OfflineOrderForm({
   const [lines, setLines] = useState<CartLine[]>([]);
   const [paymentMethod, setPaymentMethod] =
     useState<OfflinePaymentMethod>("CASH");
+  const [warehouseId, setWarehouseId] = useState("");
+  const warehouses = useWarehouses();
+  const activeWarehouses = (warehouses.data ?? []).filter((w) => w.isActive);
   const [note, setNote] = useState("");
   const [shipTo, setShipTo] = useState<OrderAddressInput>({});
   const [billSame, setBillSame] = useState(true);
@@ -148,6 +152,7 @@ export function OfflineOrderForm({
         unitPriceOverride: l.unitPrice,
       })),
       paymentMethod,
+      warehouseId: warehouseId || undefined,
       note: note || undefined,
       ...buildAddresses(),
     };
@@ -261,6 +266,9 @@ export function OfflineOrderForm({
             currency={currency}
             paymentMethod={paymentMethod}
             onPaymentMethodChange={setPaymentMethod}
+            warehouses={activeWarehouses}
+            warehouseId={warehouseId}
+            onWarehouseChange={setWarehouseId}
             note={note}
             onNoteChange={setNote}
             isSubmitting={createOrder.isPending}

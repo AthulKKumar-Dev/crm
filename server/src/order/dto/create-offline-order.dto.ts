@@ -69,6 +69,14 @@ export class CreateOfflineOrderDto {
 
   @IsOptional() @IsString() sellerGstinId?: string;
 
+  /**
+   * Warehouse the goods leave from — an additional place of business of the
+   * seller's GST registration. Omitted falls back to the org's default
+   * warehouse (and to nothing at all when the org does not use warehousing).
+   * Snapshotted onto the invoice as "Dispatch From".
+   */
+  @IsOptional() @IsString() warehouseId?: string;
+
   @IsOptional()
   @IsString()
   @Length(2, 2, { message: 'Place of supply code must be exactly 2 digits' })

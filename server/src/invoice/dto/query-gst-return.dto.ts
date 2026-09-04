@@ -28,4 +28,16 @@ export class QueryGstReturnDto {
   @IsOptional()
   @IsString()
   sellerGstinId?: string; // Filter by specific GSTIN for multi-state
+
+  /**
+   * REFERENCE VIEW ONLY. Narrows the return to invoices dispatched from one
+   * warehouse, so a merchant can see what a branch contributed.
+   *
+   * A GST return is filed PER GSTIN and has no warehouse dimension — there is
+   * no such field on the portal. A scoped view is management information, never
+   * a filing, which is why `markFiled` does not accept this parameter.
+   */
+  @IsOptional()
+  @IsString()
+  dispatchWarehouseId?: string;
 }

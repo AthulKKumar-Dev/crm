@@ -331,9 +331,15 @@ function OwnerOrderDetail({ id }: { id: string }) {
                   reference is not stored anywhere. */}
               <MetaRow label="Payment ref" value={DASH} mono />
               <MetaRow label="Owner" value={ownerName ?? DASH} />
-              {/* Nothing order-side links to a Warehouse: StockReservation and
-                  PickTask carry orderId + warehouseId but are never written. */}
-              <MetaRow label="Warehouse" value={DASH} />
+              {/* Recorded only when it is a FACT — an operator's explicit
+                  choice on an offline sale, or Shopify's own fulfilment
+                  location. The invoice falls back to the default warehouse
+                  itself, so a dash here does not mean the invoice has no
+                  dispatch block. */}
+              <MetaRow
+                label="Dispatch warehouse"
+                value={order.dispatchWarehouse?.name ?? DASH}
+              />
               <MetaRow label="Weight" value={weightLabel ?? DASH} />
               {paymentMethod && <MetaRow label="Payment method" value={paymentMethod} />}
               {order.placeOfSupplyCode && (

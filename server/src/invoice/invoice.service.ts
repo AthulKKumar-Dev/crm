@@ -41,6 +41,7 @@ import {
 } from '../gst/place-of-supply.util';
 import {
   getFinancialYear,
+  gstQuarterForMonth,
   gstPeriodRange,
   INDIA_TZ,
   resolveGstTimeZone,
@@ -55,6 +56,7 @@ import {
   type Gstr3bReturn,
   type ReturnInvoice,
 } from './gst-return.accumulator';
+import { summarizeDocumentSeries } from './document-series.util';
 import {
   buildGstr1Sections,
   buildGstr3bSections,
@@ -262,6 +264,7 @@ export class InvoiceService {
       placeOfSupplyCode?: string;
       notes?: string;
       reverseCharge?: boolean;
+      dispatchWarehouseId?: string;
     },
   ) {
     // 1. Fetch the order with line items and customer
@@ -368,6 +371,15 @@ export class InvoiceService {
         'No GSTIN registration found. Please add a GSTIN in Settings → Tax & GST.',
       );
     }
+
+    // 3b. Resolve where the goods left from, for the "Dispatch From" snapshot.
+    const dispatchWarehouse = await this.resolveDispatchWarehouse(
+      tx,
+      orgId,
+      dto.dispatchWarehouseId,
+      order.dispatchWarehouseId,
+      sellerGstin.id,
+    );
 
     // 4. Determine place of supply. Prefers the code the order was taxed with;
     //    the seller's state is the over-the-counter fallback for walk-ins.
@@ -570,6 +582,7 @@ export class InvoiceService {
       tx,
       orgId,
       invoiceDate,
+      sellerGstin.id,
       this.gstTimeZone(orgId, org),
       'Issuing an invoice',
     );
@@ -627,6 +640,14 @@ export class InvoiceService {
         sellerAddress: sellerGstin.address ?? undefined,
         sellerStateCode: sellerGstin.stateCode,
         sellerStateName: sellerGstin.stateName,
+        // Dispatch-from snapshot (additional place of business). All null when
+        // the goods left from the registered address, or the org does not use
+        // warehousing — the print and detail views render nothing in that case.
+        dispatchWarehouseId: dispatchWarehouse?.id ?? null,
+        dispatchName: dispatchWarehouse?.name ?? null,
+        dispatchAddress:
+          (dispatchWarehouse?.address as Prisma.InputJsonValue | undefined) ?? undefined,
+        dispatchStateCode: dispatchWarehouse?.stateCode ?? null,
         // Buyer snapshot
         buyerName,
         buyerGstin,
@@ -901,7 +922,8 @@ export class InvoiceService {
     // a credit note, which is additive and leaves a trail.
     const target = await this.prisma.invoice.findFirst({
       where: { id, organizationId: orgId },
-      select: { invoiceDate: true, status: true },
+      // sellerGstinId: the lock is per registration, so it has to be read here.
+      select: { invoiceDate: true, status: true, sellerGstinId: true },
     });
     if (target && target.status !== InvoiceStatus.CANCELLED) {
       const org = await this.prisma.organization.findUnique({
@@ -912,6 +934,7 @@ export class InvoiceService {
         this.prisma,
         orgId,
         target.invoiceDate,
+        target.sellerGstinId,
         this.gstTimeZone(orgId, org),
         'Cancelling this invoice',
       );
@@ -959,6 +982,7 @@ export class InvoiceService {
     client: Prisma.TransactionClient | PrismaService,
     orgId: string,
     invoiceDate: Date,
+    sellerGstinId: string,
     timeZone: string,
     action: string,
   ): Promise<void> {
@@ -966,14 +990,28 @@ export class InvoiceService {
     const month = String(zonedParts(invoiceDate, timeZone).month).padStart(2, '0');
 
     const filing = await client.gstFiling.findFirst({
-      where: { organizationId: orgId, financialYear, period: month },
-      select: { returnType: true, filedAt: true, arn: true },
+      where: {
+        organizationId: orgId,
+        financialYear,
+        // A quarterly filer records the period as "Q1", while every document is
+        // dated to a MONTH. Matching only the month meant a quarterly filing
+        // locked nothing at all — the row existed and was never consulted.
+        period: { in: [month, gstQuarterForMonth(month)] },
+        // A filing covers ONE registration. Locking a Karnataka document
+        // because the Maharashtra return went in freezes a business that files
+        // each state on its own schedule. A filing recorded against no
+        // particular GSTIN (sellerGstinId null) covers them all.
+        OR: [{ sellerGstinId: null }, { sellerGstinId }],
+      },
+      select: { returnType: true, period: true, filedAt: true, arn: true },
     });
 
     if (!filing) return;
 
+    // returnType is deliberately NOT part of the predicate: whichever return
+    // went in, the underlying documents for that period are now on record.
     throw new ConflictException(
-      `${action} is not allowed: ${filing.returnType} for ${month}/${financialYear} was ` +
+      `${action} is not allowed: ${filing.returnType} for ${filing.period}/${financialYear} was ` +
         `filed on ${filing.filedAt.toISOString().split('T')[0]}` +
         `${filing.arn ? ` (ARN ${filing.arn})` : ''}. ` +
         `Raise a credit note instead — a filed period cannot be edited.`,
@@ -987,13 +1025,21 @@ export class InvoiceService {
       select: { timezone: true, gstEnabled: true },
     });
 
+    // Canonicalised to upper case. GST_PERIOD_REGEX accepts "q1" as well as
+    // "Q1", and a stored lower-case period would never match the lock's
+    // `period IN (month, quarter)` predicate — the row would exist and lock
+    // nothing, which is the worst of both outcomes.
+    const period = dto.period.toUpperCase();
+
     // Snapshot what was filed, so a later recomputation can be COMPARED with
     // what actually went to the government rather than silently replacing it.
     const totals = (await this.getGstReturn(orgId, {
       financialYear: dto.financialYear,
-      period: dto.period,
+      period,
       returnType: dto.returnType,
       sellerGstinId: dto.sellerGstinId,
+      // Deliberately NOT warehouse-scoped: a filing covers a GSTIN's whole
+      // period. MarkFiledDto carries no warehouse field for the same reason.
     })) as { totals?: unknown; taxPayable?: unknown };
 
     // findFirst + create/update rather than upsert: `sellerGstinId` is
@@ -1004,7 +1050,7 @@ export class InvoiceService {
       where: {
         organizationId: orgId,
         financialYear: dto.financialYear,
-        period: dto.period,
+        period,
         returnType: dto.returnType,
         sellerGstinId: dto.sellerGstinId ?? null,
       },
@@ -1012,9 +1058,19 @@ export class InvoiceService {
     });
 
     if (existing) {
+      // Re-filing REPLACES the snapshot, and re-stamps who filed and when.
+      // Updating only the ARN left the stored figures describing an earlier
+      // state of the period — so a merchant who corrected something and filed
+      // again had a record that matched neither what they sent nor what the
+      // system now holds.
       return this.prisma.gstFiling.update({
         where: { id: existing.id },
-        data: { arn: dto.arn ?? null },
+        data: {
+          arn: dto.arn ?? null,
+          filedAt: new Date(),
+          filedById: userId ?? null,
+          totals: (totals.totals ?? totals.taxPayable ?? {}) as Prisma.InputJsonValue,
+        },
       });
     }
 
@@ -1022,7 +1078,7 @@ export class InvoiceService {
       data: {
         organizationId: orgId,
         financialYear: dto.financialYear,
-        period: dto.period,
+        period,
         returnType: dto.returnType,
         sellerGstinId: dto.sellerGstinId ?? null,
         filedById: userId ?? null,
@@ -1233,7 +1289,14 @@ export class InvoiceService {
     // original invoice sits in. Crediting a filed month is exactly the
     // supported correction, which is why the ORIGINAL's period is not checked.
     const noteDate = new Date();
-    await this.assertPeriodOpen(tx, orgId, noteDate, timeZone, 'Raising a credit note');
+    await this.assertPeriodOpen(
+      tx,
+      orgId,
+      noteDate,
+      original.sellerGstinId,
+      timeZone,
+      'Raising a credit note',
+    );
 
     const alreadyCredited = await tx.invoice.aggregate({
       where: {
@@ -1323,6 +1386,13 @@ export class InvoiceService {
         sellerAddress: original.sellerAddress ?? undefined,
         sellerStateCode: original.sellerStateCode,
         sellerStateName: original.sellerStateName,
+        // Dispatch block copied too: a credit note reverses a specific supply,
+        // and must describe the same movement of goods the invoice did.
+        dispatchWarehouseId: original.dispatchWarehouseId,
+        dispatchName: original.dispatchName,
+        dispatchAddress:
+          (original.dispatchAddress as Prisma.InputJsonValue | null) ?? undefined,
+        dispatchStateCode: original.dispatchStateCode,
         buyerName: original.buyerName,
         buyerGstin: original.buyerGstin,
         buyerAddress: original.buyerAddress ?? undefined,
@@ -1400,6 +1470,11 @@ export class InvoiceService {
         lt: dateRange.toExclusive,
       },
       ...(query.sellerGstinId && { sellerGstinId: query.sellerGstinId }),
+      // Reference view only — see QueryGstReturnDto.dispatchWarehouseId. The
+      // accumulators are untouched; the fold simply sees fewer invoices.
+      ...(query.dispatchWarehouseId && {
+        dispatchWarehouseId: query.dispatchWarehouseId,
+      }),
     };
 
     const isGstr3b = query.returnType === GstReturnType.GSTR3B;
@@ -1423,6 +1498,36 @@ export class InvoiceService {
     );
 
     const result = accumulator.finish();
+
+    // GSTR-1 Table 13 — documents issued. Read separately from the fold and
+    // AFTER it, for two reasons: it must include CANCELLED invoices (which the
+    // return's own `where` excludes by design, since a cancelled document
+    // reports no supply but still consumes a serial), and it needs only three
+    // scalar columns rather than the full invoice with its line items.
+    if (!isGstr3b) {
+      const documents = await this.prisma.invoice.findMany({
+        where: {
+          ...where,
+          status: {
+            in: [
+              InvoiceStatus.ISSUED,
+              InvoiceStatus.CANCELLED,
+              InvoiceStatus.CREDIT_NOTE,
+            ],
+          },
+        },
+        select: { invoiceNumber: true, status: true, creditNoteForId: true },
+        orderBy: { id: 'asc' },
+        take: GST_RETURN_INVOICE_CAP + 1,
+      });
+      if (documents.length > GST_RETURN_INVOICE_CAP) {
+        throw new PayloadTooLargeException(
+          `This period holds more than ${GST_RETURN_INVOICE_CAP} documents. Narrow the period or filter by GSTIN.`,
+        );
+      }
+      (result as Gstr1Return).documentsIssued =
+        summarizeDocumentSeries(documents);
+    }
 
     // GSTR-3B 3.1(d) and 4(A)(3) — inward supplies on which the RECIPIENT pays
     // the tax. Read here rather than folded into the accumulator because that
@@ -1618,6 +1723,7 @@ export class InvoiceService {
       uninvoicedPaidOrders,
       taxMismatches,
       invoicesMissingHsn,
+      invoicesFromUnlinkedWarehouse,
       refundsNeedingCreditNoteRows,
     ] = await Promise.all([
       this.prisma.invoice.aggregate({
@@ -1673,6 +1779,22 @@ export class InvoiceService {
       // until this is zero. Backed by invoices_org_hsn_missing_idx.
       this.prisma.invoice.count({
         where: { ...scope, status: InvoiceStatus.ISSUED, hsnMissing: true },
+      }),
+      // Invoices dispatched from a warehouse that belongs to no GST
+      // registration. Every place of business invoicing under a GSTIN has to be
+      // declared under that registration on the portal, so an unlinked one is a
+      // compliance gap the merchant should close before filing.
+      //
+      // A WARNING, not a block: an org that has warehouses but has not linked
+      // them yet would otherwise be unable to invoice at all from the day this
+      // shipped. Orgs that do not use warehousing never see it.
+      this.prisma.invoice.count({
+        where: {
+          ...scope,
+          status: InvoiceStatus.ISSUED,
+          dispatchWarehouseId: { not: null },
+          dispatchWarehouse: { gstinId: null },
+        },
       }),
       // Refunded orders whose invoice has NOT been credited.
       //
@@ -1753,6 +1875,7 @@ export class InvoiceService {
       uninvoicedPaidOrders,
       taxMismatches,
       invoicesMissingHsn,
+      invoicesFromUnlinkedWarehouse,
       refundsNeedingCreditNote: Number(
         refundsNeedingCreditNoteRows[0]?.count ?? 0,
       ),
@@ -1822,6 +1945,9 @@ export class InvoiceService {
       shipping: inv.shippingCharge.toString(),
       grandTotal: inv.grandTotal.toString(),
       status: inv.status,
+      // Appended AFTER status so existing column positions do not shift for
+      // anyone with a saved import mapping.
+      dispatchFrom: inv.dispatchName ?? '',
     }));
   }
 
@@ -1837,12 +1963,60 @@ export class InvoiceService {
   async getGstReturnExportData(
     orgId: string,
     query: QueryGstReturnDto,
+    actor?: { email?: string },
   ): Promise<CsvSection[]> {
     const returnData = await this.getGstReturn(orgId, query);
 
-    return query.returnType === GstReturnType.GSTR3B
-      ? buildGstr3bSections(returnData as Gstr3bReturn)
-      : buildGstr1Sections(returnData as Gstr1Return);
+    const sections =
+      query.returnType === GstReturnType.GSTR3B
+        ? buildGstr3bSections(returnData as Gstr3bReturn)
+        : buildGstr1Sections(returnData as Gstr1Return);
+
+    // Provenance block, first. A filing pack has to say which registration and
+    // period it covers, when it was produced and by whom — otherwise two
+    // exports of the same period, taken before and after a correction, are
+    // indistinguishable once they are sitting in the accountant's folder.
+    const [gstin, warehouse] = await Promise.all([
+      query.sellerGstinId
+        ? this.prisma.organizationGstin.findFirst({
+            where: { id: query.sellerGstinId, organizationId: orgId },
+            select: { gstin: true, stateName: true },
+          })
+        : null,
+      query.dispatchWarehouseId
+        ? this.prisma.warehouse.findFirst({
+            where: { id: query.dispatchWarehouseId, organizationId: orgId },
+            select: { name: true, code: true },
+          })
+        : null,
+    ]);
+
+    const metadata: CsvSection = {
+      title: 'Return metadata',
+      headers: ['Field', 'Value'],
+      rows: [
+        ['Return', query.returnType ?? GstReturnType.GSTR1],
+        [
+          'GSTIN',
+          gstin ? `${gstin.gstin} (${gstin.stateName})` : 'All registrations',
+        ],
+        ['Financial year', query.financialYear],
+        ['Period', query.period],
+        ['Generated at', new Date().toISOString()],
+        ['Generated by', actor?.email ?? 'Unknown'],
+      ],
+    };
+
+    // Only when scoped — a line saying "All warehouses" on every other export
+    // would imply the return HAS a warehouse dimension, which it does not.
+    if (warehouse) {
+      metadata.rows.push([
+        'Warehouse scope',
+        `${warehouse.name} (${warehouse.code}) — REFERENCE ONLY, not a filing`,
+      ]);
+    }
+
+    return [metadata, ...sections];
   }
 
   /**
@@ -1869,6 +2043,104 @@ export class InvoiceService {
     }
 
     return timeZone;
+  }
+
+  // ─── HELPER: Resolve the dispatch warehouse ───
+  /**
+   * Which additional place of business the goods left from, for the invoice's
+   * "Dispatch From" snapshot. Returns null when the org does not track
+   * warehouses, or when no defensible answer exists.
+   *
+   * Three tiers, and the STRICTNESS DIFFERS BY TIER on purpose:
+   *
+   *   1. An explicitly chosen warehouse, and
+   *   2. the warehouse the order was actually stamped with
+   *      — are ASSERTIONS. If either is registered under a different GSTIN
+   *      than the one issuing this invoice, that is a statutory error on a
+   *      document, so it throws rather than quietly dropping the block.
+   *
+   *   3. The org's default warehouse is only a GUESS. A multi-registration org
+   *      selling into a state where it is separately registered resolves a
+   *      seller GSTIN that its default warehouse may have nothing to do with;
+   *      refusing the invoice over the app's own fallback would block ordinary
+   *      sales. A guess that contradicts the seller is discarded, not fatal.
+   *
+   * The order-stamped tier deliberately does NOT require `isActive`: it records
+   * where the goods actually went out from, and a warehouse retired afterwards
+   * does not retroactively change that.
+   */
+  private async resolveDispatchWarehouse(
+    tx: Prisma.TransactionClient,
+    orgId: string,
+    explicitId: string | undefined,
+    orderStampedId: string | null,
+    sellerGstinId: string,
+  ): Promise<{
+    id: string;
+    name: string;
+    address: unknown;
+    stateCode: string | null;
+  } | null> {
+    const select = {
+      id: true,
+      name: true,
+      address: true,
+      gstinId: true,
+      gstin: { select: { stateCode: true } },
+    } as const;
+
+    const shape = (w: {
+      id: string;
+      name: string;
+      address: unknown;
+      gstin: { stateCode: string } | null;
+    }) => ({
+      id: w.id,
+      name: w.name,
+      address: w.address,
+      // The address is the primary source; the linked registration's state is
+      // the fallback for a warehouse whose address was never filled in.
+      stateCode: extractStateFromAddress(w.address) ?? w.gstin?.stateCode ?? null,
+    });
+
+    const assertSameRegistration = (w: { name: string; gstinId: string | null }) => {
+      if (w.gstinId && w.gstinId !== sellerGstinId) {
+        throw new BadRequestException(
+          `Dispatch warehouse "${w.name}" is registered under a different GSTIN ` +
+            'than the seller GSTIN on this invoice. Pick another dispatch ' +
+            'warehouse, or change the seller GSTIN.',
+        );
+      }
+    };
+
+    if (explicitId) {
+      const warehouse = await tx.warehouse.findFirst({
+        where: { id: explicitId, organizationId: orgId, isActive: true },
+        select,
+      });
+      if (!warehouse) throw new NotFoundException('Warehouse not found');
+      assertSameRegistration(warehouse);
+      return shape(warehouse);
+    }
+
+    if (orderStampedId) {
+      const warehouse = await tx.warehouse.findFirst({
+        where: { id: orderStampedId, organizationId: orgId },
+        select,
+      });
+      if (warehouse) {
+        assertSameRegistration(warehouse);
+        return shape(warehouse);
+      }
+    }
+
+    const fallback = await tx.warehouse.findFirst({
+      where: { organizationId: orgId, isDefault: true, isActive: true },
+      select,
+    });
+    if (!fallback) return null;
+    if (fallback.gstinId && fallback.gstinId !== sellerGstinId) return null;
+    return shape(fallback);
   }
 
   // ─── HELPER: Resolve place of supply ───

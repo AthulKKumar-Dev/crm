@@ -249,6 +249,18 @@ function InvoiceBody({
             {invoice.buyerStateName} ({invoice.buyerStateCode})
           </p>
         </div>
+
+        {/* Only when the goods left from somewhere other than the registered
+            address — otherwise it repeats the seller block. */}
+        {invoice.dispatchName && (
+          <div>
+            <FieldLabel>Dispatch from</FieldLabel>
+            <p className="text-caption font-semibold text-foreground">
+              {invoice.dispatchName}
+            </p>
+            <AddressLines address={invoice.dispatchAddress} />
+          </div>
+        )}
       </div>
 
       {/* Place of supply */}

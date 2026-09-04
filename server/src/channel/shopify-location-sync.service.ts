@@ -4,6 +4,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { ShopifyGraphqlClient , ShopifyAuthResolver } from './shopify-graphql.client';
 import { ShopifyOAuthService } from './shopify-oauth.service';
+import { extractStateFromAddress } from '../gst/place-of-supply.util';
+import { toWarehouseAddress } from './shopify-location-address.util';
 import {
   LOCATIONS_QUERY,
   LocationsResponse,
@@ -105,6 +107,13 @@ export class ShopifyLocationSyncService {
    * an org that enabled warehousing before multi-location has a hand-named
    * "Main Warehouse" already mapped to the primary location, and silently
    * renaming it out from under them would be a surprise, not a sync.
+   *
+   * The address and the GSTIN link follow the same rule with one relaxation:
+   * they are FILLED WHEN ABSENT and never overwritten. Fill-if-null rather
+   * than fill-on-create because `InventoryService.enable()` creates "Main
+   * Warehouse" with no address at all — it is matched or adopted here, never
+   * created, so create-only would permanently strand the single warehouse most
+   * merchants actually have.
    */
   async syncLocations(
     channelId: string,
@@ -140,8 +149,46 @@ export class ShopifyLocationSyncService {
 
       const existing = await this.prisma.warehouse.findMany({
         where: { organizationId: orgId },
-        select: { id: true, code: true, shopifyLocationId: true, isDefault: true },
+        select: {
+          id: true,
+          code: true,
+          shopifyLocationId: true,
+          isDefault: true,
+          address: true,
+          gstinId: true,
+        },
       });
+
+      // Auto-link only when there is exactly ONE active registration and the
+      // location's state matches it. With several registrations the choice is
+      // the merchant's — a wrong guess would put the wrong GSTIN on a dispatch
+      // block, which is worse than leaving it unlinked.
+      const activeGstins = await this.prisma.organizationGstin.findMany({
+        where: { organizationId: orgId, isActive: true },
+        select: { id: true, stateCode: true },
+      });
+      const soleGstin = activeGstins.length === 1 ? activeGstins[0] : null;
+
+      /** Fields to fill on a warehouse that is missing them; never overwrites. */
+      const enrichment = (
+        node: ShopifyLocationNode,
+        current?: { address: unknown; gstinId: string | null },
+      ): { address?: Prisma.InputJsonValue; gstinId?: string } => {
+        const patch: { address?: Prisma.InputJsonValue; gstinId?: string } = {};
+        const address = toWarehouseAddress(node.address);
+        if (address && current?.address == null) {
+          patch.address = address as Prisma.InputJsonValue;
+        }
+        const effectiveAddress = current?.address ?? address;
+        if (
+          soleGstin &&
+          current?.gstinId == null &&
+          extractStateFromAddress(effectiveAddress) === soleGstin.stateCode
+        ) {
+          patch.gstinId = soleGstin.id;
+        }
+        return patch;
+      };
       const byLocation = new Map(
         existing
           .filter((w) => w.shopifyLocationId)
@@ -185,7 +232,7 @@ export class ShopifyLocationSyncService {
         if (match) {
           await this.prisma.warehouse.update({
             where: { id: match.id },
-            data: { isActive: node.isActive },
+            data: { isActive: node.isActive, ...enrichment(node, match) },
           });
         } else if (locationId === primaryLocationId && adoptable) {
           // Link the org's pre-existing warehouse to the primary location
@@ -193,7 +240,11 @@ export class ShopifyLocationSyncService {
           // gains the mapping it should have had at enable time.
           await this.prisma.warehouse.update({
             where: { id: adoptable.id },
-            data: { shopifyLocationId: locationId, isActive: node.isActive },
+            data: {
+              shopifyLocationId: locationId,
+              isActive: node.isActive,
+              ...enrichment(node, adoptable),
+            },
           });
           // Seed the lookup so the default-settle pass below resolves it.
           byLocation.set(locationId, { ...adoptable, shopifyLocationId: locationId });
@@ -211,6 +262,7 @@ export class ShopifyLocationSyncService {
                 code,
                 shopifyLocationId: locationId,
                 isActive: node.isActive,
+                ...enrichment(node),
                 // Default is settled in one pass below — creating with false
                 // keeps the one-default partial unique satisfied throughout.
                 isDefault: false,

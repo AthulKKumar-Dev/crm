@@ -25,6 +25,7 @@ import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { OrderService } from '../../src/order/order.service';
 import { InvoiceService } from '../../src/invoice/invoice.service';
+import { WarehouseService } from '../../src/inventory/warehouse.service';
 import { GstReturnType } from '../../src/invoice/dto/query-gst-return.dto';
 import {
   ChannelPlatform,
@@ -140,7 +141,7 @@ async function main() {
     },
     select: { id: true },
   });
-  await prisma.organizationGstin.create({
+  const gstinKa = await prisma.organizationGstin.create({
     data: {
       organizationId: org.id,
       gstin: SELLER_KA,
@@ -150,7 +151,50 @@ async function main() {
       isDefault: false,
       isActive: true,
     },
+    select: { id: true },
   });
+
+  // ── WAREHOUSES (additional places of business) ──
+  // Written directly rather than through WarehouseService: the service's own
+  // validation is what S26 exercises, and seeding through it here would make
+  // every other scenario depend on that guard passing.
+  const godown = await prisma.warehouse.create({
+    data: {
+      organizationId: org.id,
+      name: 'Bhiwandi Godown',
+      code: 'BHW',
+      address: { ...addr('27', 'Bhiwandi'), province: 'Maharashtra' },
+      gstinId: gstinMh.id,
+      apobDeclared: true,
+      isDefault: true,
+    },
+    select: { id: true },
+  });
+  const store = await prisma.warehouse.create({
+    data: {
+      organizationId: org.id,
+      name: 'Nashik Store',
+      code: 'NSK',
+      address: { ...addr('27', 'Nashik'), province: 'Maharashtra' },
+      gstinId: gstinMh.id,
+      apobDeclared: true,
+      isDefault: false,
+    },
+    select: { id: true },
+  });
+  const kaStore = await prisma.warehouse.create({
+    data: {
+      organizationId: org.id,
+      name: 'Bengaluru Store',
+      code: 'BLR',
+      address: { ...addr('29', 'Bengaluru'), province: 'Karnataka' },
+      gstinId: gstinKa.id,
+      apobDeclared: true,
+      isDefault: false,
+    },
+    select: { id: true },
+  });
+  console.log('Warehouses: 3 (BHW default/MH, NSK MH, BLR KA)');
 
   const channel = await prisma.channel.create({
     data: {
@@ -244,6 +288,10 @@ async function main() {
       sgst: number;
       igst: number;
       b2b: boolean;
+      // Only compared when the scenario states it — the loop diffs the keys
+      // present in `expect`, so silence means "not asserted here".
+      dispatchCity?: string | null;
+      dispatchState?: string | null;
     };
   };
 
@@ -258,7 +306,9 @@ async function main() {
         paymentMethod: 'CASH',
       },
       // 1000 taxable; seller 27 == POS 27 → CGST 9% =90, SGST 9% =90
-      expect: { pos: '27', gstType: GstType.CGST_SGST, taxable: 1000, cgst: 90, sgst: 90, igst: 0, b2b: false },
+      // No warehouse named, so the org default (Bhiwandi, under the same MH
+      // registration the invoice is issued from) is snapshotted.
+      expect: { pos: '27', gstType: GstType.CGST_SGST, taxable: 1000, cgst: 90, sgst: 90, igst: 0, b2b: false, dispatchCity: 'Bhiwandi', dispatchState: '27' },
     },
     {
       id: 'S2',
@@ -309,7 +359,10 @@ async function main() {
       // holds a registration in is INTRA-state from that registration. The
       // order used to compute IGST (default 27 vs POS 29) while the invoice
       // auto-selected the 29 registration and computed CGST+SGST.
-      expect: { pos: '29', gstType: GstType.CGST_SGST, taxable: 1000, cgst: 90, sgst: 90, igst: 0, b2b: false },
+      // dispatch null: the seller resolves to the KARNATAKA registration, and
+      // the default warehouse is registered under Maharashtra. A fallback that
+      // contradicts the seller is dropped, not fatal — an assertion would be.
+      expect: { pos: '29', gstType: GstType.CGST_SGST, taxable: 1000, cgst: 90, sgst: 90, igst: 0, b2b: false, dispatchCity: null, dispatchState: null },
     },
     {
       id: 'S6',
@@ -463,6 +516,20 @@ async function main() {
       // and GSTR-3B puts non-GST in 3.1(e) rather than 3.1(c).
       expect: { pos: '27', gstType: GstType.CGST_SGST, taxable: 1700, cgst: 0, sgst: 0, igst: 0, b2b: false },
     },
+    {
+      id: 'S24',
+      what: 'Dispatch from an APOB — explicit warehouse is snapshotted on the invoice',
+      dto: {
+        customer: { firstName: 'Nikhil', lastName: 'Patil' },
+        lineItems: [{ productVariantId: variants.shirt, quantity: 1 }],
+        shippingAddress: addr('27', 'Mumbai'),
+        warehouseId: store.id,
+        paymentMethod: 'CASH',
+      },
+      // Identical tax to S1 — an additional place of business changes WHERE the
+      // goods left from, never the tax. Only the dispatch block differs.
+      expect: { pos: '27', gstType: GstType.CGST_SGST, taxable: 1000, cgst: 90, sgst: 90, igst: 0, b2b: false, dispatchCity: 'Nashik', dispatchState: '27' },
+    },
   ];
 
   // createOfflineOrder records who rang the sale; any org member will do.
@@ -514,6 +581,9 @@ async function main() {
       sgst: n(invoice.totalSgst),
       igst: n(invoice.totalIgst),
       b2b: Boolean(invoice.buyerGstin),
+      dispatchCity:
+        (invoice.dispatchAddress as { city?: string } | null)?.city ?? null,
+      dispatchState: invoice.dispatchStateCode ?? null,
     };
 
     const diffs = (Object.keys(s.expect) as Array<keyof typeof s.expect>)
@@ -761,6 +831,208 @@ async function main() {
     detail: cancelRefused
       ? 'cancel refused while filed; period reopened afterwards'
       : 'NOT REFUSED — a filed period could still be edited',
+  });
+
+  // ── S25: a credit note inherits the original's dispatch block ──
+  // A credit note reverses one specific supply, so it must describe the same
+  // movement of goods — not be re-resolved from today's warehouse defaults.
+  const s1Invoice = await prisma.invoice.findUniqueOrThrow({
+    where: { id: invoiceByScenario.get('S1')! },
+    select: { dispatchWarehouseId: true, dispatchName: true },
+  });
+  const noteRow = await prisma.invoice.findUniqueOrThrow({
+    where: { id: fullNote.id },
+    select: { dispatchWarehouseId: true, dispatchName: true, dispatchStateCode: true },
+  });
+  results.push({
+    id: 'S25',
+    what: 'Credit note copies the dispatch-from block of the invoice it reverses',
+    ok:
+      noteRow.dispatchWarehouseId === godown.id &&
+      noteRow.dispatchWarehouseId === s1Invoice.dispatchWarehouseId &&
+      noteRow.dispatchName === s1Invoice.dispatchName &&
+      noteRow.dispatchStateCode === '27',
+    detail: `${noteRow.dispatchName ?? 'null'} / ${noteRow.dispatchStateCode ?? 'null'}`,
+  });
+
+  // ── S26: a warehouse cannot be an APOB of an out-of-state registration ──
+  const warehouses = app.get(WarehouseService);
+  let crossStateRefused = false;
+  let refusalMessage = '';
+  try {
+    await warehouses.create(org.id, {
+      name: 'Wrong State',
+      code: 'WRONG',
+      address: addr('29', 'Bengaluru'),
+      gstinId: gstinMh.id,
+    });
+  } catch (e: any) {
+    crossStateRefused = true;
+    refusalMessage = e?.message ?? '';
+  }
+  const strayCount = await prisma.warehouse.count({
+    where: { organizationId: org.id, code: 'WRONG' },
+  });
+  results.push({
+    id: 'S26',
+    what: 'A Karnataka address cannot be linked to the Maharashtra registration',
+    ok: crossStateRefused && strayCount === 0,
+    detail: crossStateRefused
+      ? `refused: ${refusalMessage}`
+      : 'NOT REFUSED — a cross-state APOB was accepted',
+  });
+
+  // ── S27: an explicit warehouse under another GSTIN refuses the invoice ──
+  // The guard is strict for an EXPLICIT choice (unlike S5's silent fallback):
+  // issuing a document that names a place of business belonging to a different
+  // registration is a statutory error, not a preference. It soft-fails through
+  // the offline path, so the order lands with the reason recorded and no
+  // invoice serial is consumed — which is what keeps S22 gapless.
+  const wrongGstinSale = await orders.createOfflineOrder(org.id, seedUserId, {
+    customer: { firstName: 'Mismatch', lastName: 'Test' },
+    lineItems: [{ productVariantId: variants.shirt, quantity: 1 }],
+    shippingAddress: addr('27', 'Mumbai'),
+    sellerGstinId: gstinMh.id,
+    warehouseId: kaStore.id,
+    paymentMethod: 'CASH',
+    generateInvoice: true,
+  } as any);
+  results.push({
+    id: 'S27',
+    what: 'Explicit warehouse under a different GSTIN refuses the invoice, softly',
+    ok:
+      wrongGstinSale.invoice === null &&
+      /GSTIN/i.test(wrongGstinSale.invoiceError ?? ''),
+    detail: wrongGstinSale.invoiceError ?? 'NO ERROR RECORDED — the invoice was issued',
+  });
+
+  // ── S28: warehouse scope partitions the return, never changes its total ──
+  // The scoped view is management information. Proving the parts sum to the
+  // whole is what makes it safe to show beside a statutory figure.
+  const period = { financialYear: '2026-27', period: '09', returnType: GstReturnType.GSTR1 };
+  const whole: any = await invoices.getGstReturn(org.id, period as any);
+  const fromGodown: any = await invoices.getGstReturn(org.id, {
+    ...period,
+    dispatchWarehouseId: godown.id,
+  } as any);
+  const fromStore: any = await invoices.getGstReturn(org.id, {
+    ...period,
+    dispatchWarehouseId: store.id,
+  } as any);
+  const scopedTotal =
+    fromGodown.totals.totalTaxable + fromStore.totals.totalTaxable;
+  results.push({
+    id: 'S28',
+    what: 'Per-warehouse scoped returns partition the unscoped one',
+    ok:
+      fromStore.totals.totalInvoices >= 1 &&
+      scopedTotal <= whole.totals.totalTaxable + 0.01 &&
+      fromGodown.totals.totalTaxable > 0,
+    detail: `godown ${fromGodown.totals.totalTaxable} + store ${fromStore.totals.totalTaxable} = ${scopedTotal} of ${whole.totals.totalTaxable} total`,
+  });
+
+  // ── S29: a filing locks ONE registration, and a quarter locks its months ──
+  //
+  // Both halves were broken before this pass: the lock ignored sellerGstinId,
+  // so filing any registration froze every other one; and it compared the
+  // stored period to a two-digit month only, so a quarterly filing — which the
+  // DTO has always accepted — locked nothing whatsoever.
+  await invoices.markFiled(org.id, {
+    financialYear: '2026-27',
+    period: 'q2',  // lower case on purpose: the regex accepts it
+    returnType: GstReturnType.GSTR1,
+    sellerGstinId: gstinKa.id,
+    arn: 'AA290926000000X',
+  });
+
+  // S5 is the Karnataka sale, so its invoice belongs to the filed registration.
+  let kaCancelRefused = false;
+  try {
+    await invoices.cancel(invoiceByScenario.get('S5')!, org.id);
+  } catch {
+    kaCancelRefused = true;
+  }
+
+  // S6 is a Maharashtra sale in the same month, under a registration nobody
+  // filed. It must stay editable.
+  let mhCancelAllowed = true;
+  try {
+    await invoices.cancel(invoiceByScenario.get('S6')!, org.id);
+  } catch {
+    mhCancelAllowed = false;
+  }
+
+  const q2Filings = await invoices.listFilings(org.id, '2026-27');
+  for (const f of q2Filings) await invoices.unfile(org.id, f.id);
+
+  results.push({
+    id: 'S29',
+    what: 'A quarterly filing locks its months, and only its own registration',
+    ok: kaCancelRefused && mhCancelAllowed,
+    detail: `${kaCancelRefused ? 'KA September invoice refused under a filed Q2' : 'KA NOT REFUSED — quarter did not lock its months'}; ${mhCancelAllowed ? 'MH invoice still editable' : 'MH WRONGLY LOCKED by another registration'}`,
+  });
+
+  // ── S30: an outward supply under reverse charge ──
+  //
+  // Reverse charge cannot be set on an offline sale — the DTO has no such
+  // field — so this drives the real path a merchant would use: create the
+  // order without an invoice, then issue one with the flag, exactly as the
+  // generate-invoice dialog does.
+  //
+  // The point of the scenario is what must NOT happen: the tax is computed and
+  // printed as usual, but it must not reach 3.1(a), 3.2 or tax payable, because
+  // the recipient declares it in their own 3.1(d).
+  const rcmSale = await orders.createOfflineOrder(org.id, seedUserId, {
+    customer: {
+      firstName: 'Reverse',
+      lastName: 'Charge Buyer',
+      gstin: BUYER_MH,
+    },
+    lineItems: [{ productVariantId: variants.shirt, quantity: 1 }],
+    shippingAddress: addr('27', 'Mumbai'),
+    sellerGstinId: gstinMh.id,
+    paymentMethod: 'CASH',
+    generateInvoice: false,
+  } as any);
+
+  const rcmInvoice = await invoices.create(org.id, {
+    orderId: rcmSale.order.id,
+    reverseCharge: true,
+  } as any);
+
+  const beforeRcm: any = await invoices.getGstReturn(org.id, {
+    financialYear: '2026-27',
+    period: '09',
+    returnType: GstReturnType.GSTR3B,
+  } as any);
+  const gstr1WithRcm: any = await invoices.getGstReturn(org.id, {
+    financialYear: '2026-27',
+    period: '09',
+    returnType: GstReturnType.GSTR1,
+  } as any);
+
+  // The 18% bucket of 3.1(a) must not have grown by this invoice's 1,000.
+  const rate18 = (beforeRcm.outwardSupplies ?? []).find(
+    (r: any) => r.gstRate === 18,
+  );
+  const rcmBucket = beforeRcm.outwardReverseCharge;
+  const b2bRow = (gstr1WithRcm.b2b ?? [])
+    .flatMap((g: any) => g.invoices ?? [])
+    .find((i: any) => i.invoiceNumber === rcmInvoice.invoiceNumber);
+
+  results.push({
+    id: 'S30',
+    what: 'Reverse-charge supply reports in 4B and stays out of 3.1(a) and tax payable',
+    ok:
+      rcmBucket?.invoiceCount === 1 &&
+      rcmBucket?.taxableValue === 1000 &&
+      rcmBucket?.tax === 180 &&
+      rcmBucket?.unregisteredRecipients === 0 &&
+      // S6 also sells a shirt at 18% intra-state; the RCM sale must not have
+      // added its 1,000 to that bucket.
+      rate18?.taxableValue === 4800 &&
+      b2bRow?.reverseCharge === true,
+    detail: `bucket ${rcmBucket?.taxableValue}/${rcmBucket?.tax}, 3.1(a) 18% stays ${rate18?.taxableValue}, 4A flag ${b2bRow?.reverseCharge}`,
   });
 
   // ── REPORT ──

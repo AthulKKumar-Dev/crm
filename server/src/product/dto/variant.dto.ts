@@ -19,6 +19,7 @@ import {
 import { Type } from 'class-transformer';
 import { GstSupplyType } from '@prisma/client';
 import { IsGstRateSlab } from '../../gst/validators/is-gst-rate-slab.validator';
+import { IsUqc } from '../../gst/validators/is-uqc.validator';
 
 export const WEIGHT_UNITS = ['g', 'kg', 'oz', 'lb'] as const;
 export type WeightUnit = (typeof WEIGHT_UNITS)[number];
@@ -115,6 +116,7 @@ export class CreateVariantDto {
   @IsOptional()
   @IsString()
   @MaxLength(10)
+  @IsUqc()
   unitOfMeasure?: string | null;
 
   @IsOptional()
@@ -225,6 +227,7 @@ export class UpdateVariantDto {
   @IsOptional()
   @IsString()
   @MaxLength(10)
+  @IsUqc()
   unitOfMeasure?: string | null;
 
   @IsOptional()

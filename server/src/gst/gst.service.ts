@@ -232,6 +232,17 @@ export class GstService {
         data: { isActive: false, isDefault: false },
       });
 
+      // Detach any warehouses declared as additional places of business under
+      // this registration. They are only linkable while the registration is
+      // active, and the invoice's dispatch guard refuses a warehouse whose
+      // GSTIN differs from the invoice's seller — so a merchant who retires
+      // GSTIN A and registers B in the same state would otherwise be blocked
+      // on every explicit dispatch until each warehouse was re-linked by hand.
+      await tx.warehouse.updateMany({
+        where: { organizationId: orgId, gstinId: id },
+        data: { gstinId: null, apobDeclared: false },
+      });
+
       // Removing the default would otherwise leave the org with none, and
       // invoice seller selection falls back to nothing. Promote the oldest
       // surviving registration so there is always exactly one default while

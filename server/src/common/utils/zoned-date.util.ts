@@ -258,6 +258,27 @@ export function gstPeriodRange(
 
 // ─── VALIDATION ───
 //
+/**
+ * The FY quarter a calendar month falls in — "04" → "Q1".
+ *
+ * The financial year starts in April, so this is NOT the calendar quarter:
+ * April–June is Q1 and January–March is Q4. Uses the same FY-month indexing as
+ * `gstPeriodRange` above, so a quarter resolved here always contains the month
+ * it was resolved from.
+ *
+ * Exists because a period can be FILED quarterly and still be EDITED by a
+ * document dated to one of its months: the lock has to recognise that a June
+ * invoice sits inside a filed Q1.
+ */
+export function gstQuarterForMonth(month: string): string {
+  const calendarMonth = parseInt(month, 10);
+  if (!(calendarMonth >= 1 && calendarMonth <= 12)) {
+    throw new Error(`Invalid period: ${month}`);
+  }
+  const fyMonthIndex = (calendarMonth - 4 + 12) % 12;
+  return `Q${Math.floor(fyMonthIndex / 3) + 1}`;
+}
+
 // `gstPeriodRange` throws a bare `Error` for a malformed financial year or
 // period, which NestJS surfaces as a 500. These predicates let the DTO layer
 // reject the same values as a 400 before they ever reach the date math.

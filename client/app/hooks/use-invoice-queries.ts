@@ -13,6 +13,8 @@ export const invoiceKeys = {
     [...invoiceKeys.all, "stats", params] as const,
   gstReturn: (params: GstReturnParams) =>
     [...invoiceKeys.all, "gst-return", params] as const,
+  filings: (financialYear?: string) =>
+    [...invoiceKeys.all, "filings", financialYear] as const,
 };
 
 /** Fetch a paginated list of invoices with optional filters. */
@@ -38,6 +40,19 @@ export function useGstReturn(params: GstReturnParams | null) {
     queryKey: invoiceKeys.gstReturn(params!),
     queryFn: () => invoiceService.getGstReturn(params!),
     enabled: !!params?.financialYear && !!params?.period,
+  });
+}
+
+/**
+ * Which periods have been filed, and are therefore locked.
+ *
+ * Nested under `invoiceKeys.all`, so the mark-filed and reopen mutations
+ * already invalidate it along with everything else the lock affects.
+ */
+export function useGstFilings(financialYear?: string) {
+  return useQuery({
+    queryKey: invoiceKeys.filings(financialYear),
+    queryFn: () => invoiceService.listFilings(financialYear),
   });
 }
 

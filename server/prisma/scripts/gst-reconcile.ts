@@ -259,17 +259,48 @@ async function main() {
   console.log('');
   console.log('GSTR-1 vs GSTR-3B');
   console.log('-'.repeat(70));
+  // Reverse-charge supplies are the ONE legitimate reason these two disagree.
+  // GSTR-1 reports every outward supply, table 4B included; GSTR-3B's tax
+  // payable excludes 4B because the recipient pays that tax in their own
+  // 3.1(d). Comparing the raw totals would report a false break every time a
+  // merchant issues a reverse-charge invoice — so the RCM tax is added back to
+  // the 3B side before comparing, which still catches a real drift of any
+  // other kind.
+  const rcm = gstr3b.outwardReverseCharge;
+  const rcmTax = round2(Number(rcm?.tax ?? 0));
+  const rcmSplit = await prisma.$queryRawUnsafe<Array<{ cgst: string; sgst: string; igst: string }>>(
+    `SELECT COALESCE(SUM(total_cgst),0)::text AS cgst,
+            COALESCE(SUM(total_sgst),0)::text AS sgst,
+            COALESCE(SUM(total_igst),0)::text AS igst
+       FROM invoices
+      WHERE organization_id = $1
+        AND reverse_charge = true
+        AND status IN ('ISSUED','CREDIT_NOTE')
+        AND invoice_date >= $2 AND invoice_date < $3`,
+    orgId,
+    from,
+    toExclusive,
+  );
+  const rcmCgst = round2(Number(rcmSplit[0]?.cgst ?? 0));
+  const rcmSgst = round2(Number(rcmSplit[0]?.sgst ?? 0));
+  const rcmIgst = round2(Number(rcmSplit[0]?.igst ?? 0));
+
   const pairs: Array<[string, number, number]> = [
-    ['CGST', gstr1.totals.totalCgst, gstr3b.taxPayable.cgst],
-    ['SGST', gstr1.totals.totalSgst, gstr3b.taxPayable.sgst],
-    ['IGST', gstr1.totals.totalIgst, gstr3b.taxPayable.igst],
-    ['Total tax', gstr1.totals.totalTax, gstr3b.taxPayable.total],
+    ['CGST', gstr1.totals.totalCgst, round2(gstr3b.taxPayable.cgst + rcmCgst)],
+    ['SGST', gstr1.totals.totalSgst, round2(gstr3b.taxPayable.sgst + rcmSgst)],
+    ['IGST', gstr1.totals.totalIgst, round2(gstr3b.taxPayable.igst + rcmIgst)],
+    ['Total tax', gstr1.totals.totalTax, round2(gstr3b.taxPayable.total + rcmTax)],
   ];
   for (const [label, a, b] of pairs) {
-    const ok = a === b;
+    const ok = Math.abs(a - b) < 0.01;
     if (!ok) failures += 1;
     console.log(
       `${pad(label, 16)}${padL(money(a), 16)}${padL(money(b), 16)}${padL('', 16)}   ${ok ? 'yes' : 'NO'}`,
+    );
+  }
+  if (rcmTax > 0) {
+    console.log(
+      `${pad('  incl. reverse charge', 24)}${padL(money(rcmTax), 12)} added back to 3B (payable by the recipient)`,
     );
   }
 
@@ -326,6 +357,59 @@ async function main() {
   console.log(
     `${pad('Table 12 vs gross', 24)}${padL(money(hsnTaxable), 18)} vs gross    ${padL(money(gstr1.totals.grossTaxable), 12)}   ${hsnOk ? 'yes' : 'NO'}`,
   );
+
+  // The B2B and B2C halves of Table 12 must each tie to their own supplies.
+  // The combined check above would still pass if a row landed on the wrong
+  // tab — which is precisely the error the May-2025 split makes possible, and
+  // precisely what the portal rejects.
+  const hsnRows = gstr1.hsnSummary ?? [];
+  const sumWhere = (side: string) =>
+    round2(
+      hsnRows
+        .filter((h: any) => h.recipientType === side)
+        .reduce((s: number, h: any) => s + Number(h.taxableValue || 0), 0),
+    );
+
+  // 4A is invoice-wise and gross; HSN-B2B is line-wise and gross. Both derive
+  // from the same invoices, so the identity is exact, not approximate.
+  const b2bInvoiceTaxable = round2(
+    (gstr1.b2b ?? []).reduce(
+      (s: number, g: any) => s + Number(g.totalTaxable || 0),
+      0,
+    ),
+  );
+  const hsnB2bOk = Math.abs(sumWhere('B2B') - b2bInvoiceTaxable) < 0.01;
+  if (!hsnB2bOk) failures += 1;
+  console.log(
+    `${pad('HSN-B2B vs table 4A', 24)}${padL(money(sumWhere('B2B')), 18)} vs 4A       ${padL(money(b2bInvoiceTaxable), 12)}   ${hsnB2bOk ? 'yes' : 'NO'}`,
+  );
+
+  const hsnB2cOk = Math.abs(sumWhere('B2C') - b2cRollup) < 0.01;
+  if (!hsnB2cOk) failures += 1;
+  console.log(
+    `${pad('HSN-B2C vs roll-up', 24)}${padL(money(sumWhere('B2C')), 18)} vs roll-up ${padL(money(b2cRollup), 14)}   ${hsnB2cOk ? 'yes' : 'NO'}`,
+  );
+
+  // Table 13: the serial span must be explained by documents actually present.
+  // A shortfall is either a real gap in a statutory run, or the effect of
+  // scoping to one GSTIN while the series runs org-wide — this harness is
+  // unscoped, so here it can only be the former.
+  const docSeries = gstr1.documentsIssued;
+  if (docSeries) {
+    const gaps = (docSeries.rows ?? []).filter(
+      (r: any) => r.total !== r.documents,
+    );
+    const docsOk = gaps.length === 0 && docSeries.unparsed === 0;
+    if (!docsOk) failures += 1;
+    const detail = gaps.length
+      ? gaps
+          .map((r: any) => `${r.series}: span ${r.total} vs ${r.documents} present`)
+          .join(', ')
+      : `${(docSeries.rows ?? []).length} series, all gapless`;
+    console.log(
+      `${pad('Table 13 documents', 24)}${padL(detail, 46)}   ${docsOk ? 'yes' : 'NO'}`,
+    );
+  }
 
   const cnDbCount = Number(db.credit_note_count);
   const cnApiCount = gstr1.totals.creditNoteCount ?? 0;

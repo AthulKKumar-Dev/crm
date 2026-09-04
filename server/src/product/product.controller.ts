@@ -32,7 +32,6 @@ import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
-import { UpdateProductGstDto } from './dto/update-product-gst.dto';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import {
@@ -303,20 +302,11 @@ export class ProductController {
     return this.productService.findOne(id, user.orgId!, vendorScopeFor(user));
   }
 
-  @Patch(':id/gst')
-  updateGst(
-    @Param('id') id: string,
-    @CurrentUser() user: JwtPayload,
-    @Body() dto: UpdateProductGstDto,
-  ) {
-    return this.productService.updateGst(
-      id,
-      user.orgId!,
-      dto,
-      vendorScopeFor(user),
-    );
-  }
-
+  // NOTE: there is no `PATCH :id/gst`. It existed, accepted only hsnCode and
+  // gstRate, was never called by any client, and drifted to a different
+  // validation set than the route the UI actually uses. `PATCH :id` writes all
+  // four GST fields (hsnCode, gstRate, unitOfMeasure, supplyType) under one
+  // set of rules.
   @Patch(':id')
   @AllowVendor()
   update(
