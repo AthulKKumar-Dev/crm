@@ -9,6 +9,7 @@ import type {
   UpdateOrderSettingsRequest,
   UpdateTaxSettingsRequest,
   UpdateInventorySettingsRequest,
+  UpdateStoreProfileSettingsRequest,
 } from "~/types/api";
 
 /**
@@ -175,6 +176,35 @@ export function useUpdateTaxSettingsMutation() {
     },
     onSuccess: () => {
       toast.success("Tax settings updated.");
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: settingsKeys.all });
+    },
+  });
+}
+
+/**
+ * PATCH /organization/settings/store-profile - merge-patch the store profile.
+ *
+ * No optimistic update, unlike its four siblings, and that is deliberate: this
+ * domain is a form with a Save button, not a row of toggles. The fields are
+ * local state until the user submits, so there is no on-screen control racing
+ * the request that an optimistic write would need to keep in sync - and
+ * rolling back a whole form on error would discard what the user typed.
+ *
+ * Role-gated server-side (@Roles(...ORG_MANAGERS)), so a VIEWER or AGENT gets
+ * a 403 that handleMutationError surfaces.
+ */
+export function useUpdateStoreProfileSettingsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: UpdateStoreProfileSettingsRequest) =>
+      organizationSettingsService.updateStoreProfileSettings(data),
+    onError: (error) => {
+      handleMutationError(error, "Failed to update store profile.");
+    },
+    onSuccess: () => {
+      toast.success("Store profile updated.");
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: settingsKeys.all });

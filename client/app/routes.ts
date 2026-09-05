@@ -33,6 +33,9 @@ export default [
     route("orders/customers/:id", "routes/app/orders/customers/$id.tsx"),
     route("orders/invoices", "routes/app/orders/invoices.tsx"),
     route("orders/invoices/:id/print", "routes/app/orders/invoices/print.tsx"),
+    // Batch package slips, N-up. Static "slips" outranks ":id", and ending in
+    // /print is what makes the app layout render it chrome-free.
+    route("orders/slips/print", "routes/app/orders/slips-print.tsx"),
     route("orders/:id", "routes/app/orders/$id.tsx"),
     route("orders/:id/packing-slip", "routes/app/orders/packing-slip.tsx"),
     route("orders/:id/pick-slip", "routes/app/orders/pick-slip.tsx"),

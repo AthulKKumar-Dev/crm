@@ -144,6 +144,13 @@ export function selectFulfillableFos<T extends { status: string }>(fos: T[]): T[
 /** Matches `fulfillmentOrders(first: 25)` in both FO queries — neither paginates. */
 const FULFILLMENT_ORDER_PAGE_SIZE = 25;
 
+/**
+ * Ceiling on one batch package-slip print job. Lower than the label route's
+ * 200 because a slip carries an address block and its line items, not a
+ * barcode — and 100 slips is already 25 A4 sheets in one print dialog.
+ */
+const MAX_SLIP_ORDERS = 100;
+
 /** The window a comparison reports on, plus the one immediately before it. */
 interface ComparisonPeriods {
   currentStart: Date;
@@ -720,6 +727,60 @@ export class OrderService {
         change: this.calcChange(sold.current, sold.previous),
       },
     };
+  }
+
+  /**
+   * Print payload for the batch package-slip route — many orders at once.
+   *
+   * `findAll` cannot serve this: its list projection carries neither
+   * `lineItems` nor `shippingAddress`, which are the two things a slip is
+   * mostly made of. `findOne` has them but is one order per round trip, and a
+   * 100-parcel print run would be 100 requests.
+   *
+   * The shape is deliberately the same subset of `findOne`'s output that the
+   * per-order slip already renders — including BOTH `createdAt` and
+   * `externalCreatedAt`, since the slip prefers the external one — so a single
+   * `<PackageSlip>` component renders identically from either source.
+   *
+   * Ordered by `orderNumber` so a printed stack comes out in a predictable
+   * sequence regardless of the order the ids arrived in.
+   */
+  async getSlipData(orgId: string, orderIds: string[]) {
+    if (orderIds.length === 0) return [];
+
+    const orders = await this.prisma.order.findMany({
+      where: {
+        // Cap in the service, like `InventoryService.getLabelData`. 100 slips
+        // is already 25 A4 sheets; past that the browser's print dialog is the
+        // real bottleneck, not the query.
+        id: { in: orderIds.slice(0, MAX_SLIP_ORDERS) },
+        organizationId: orgId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        name: true,
+        note: true,
+        createdAt: true,
+        externalCreatedAt: true,
+        shippingAddress: true,
+        customer: {
+          select: { firstName: true, lastName: true, email: true, phone: true },
+        },
+        lineItems: {
+          select: {
+            id: true,
+            title: true,
+            variantTitle: true,
+            sku: true,
+            quantity: true,
+          },
+        },
+      },
+      orderBy: { orderNumber: 'asc' },
+    });
+
+    return orders;
   }
 
   async getExportData(orgId: string, query: QueryOrdersDto) {
@@ -2196,7 +2257,18 @@ export class OrderService {
    * but `createFulfillment` can recover it from the line item ID). For
    * manual orders it just lists local line items not yet marked fulfilled.
    */
-  async listFulfillableLineItems(orderId: string, orgId: string) {
+  /**
+   * What is still shippable on an order. For a VENDOR this is narrowed to their
+   * own lines: the dialog this feeds sits on orders that routinely carry several
+   * vendors, and an unscoped list showed each of them everyone else's titles,
+   * SKUs and quantities. The write paths were never exposed — `createFulfillment`
+   * asserts ownership — but the read leaked all the same.
+   */
+  async listFulfillableLineItems(
+    orderId: string,
+    orgId: string,
+    vendorScope?: string,
+  ) {
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (order.channel.platform === ChannelPlatform.SHOPIFY) {
@@ -2210,24 +2282,43 @@ export class OrderService {
         { id: ShopifyGraphqlClient.toGid('Order', order.externalId) },
       );
       const fos = resp.order?.fulfillmentOrders.nodes ?? [];
+
+      // Shopify knows nothing about our vendor column, so resolve the vendor's
+      // lines locally and match on the Shopify line-item id they mirror.
+      let visible: Set<string> | null = null;
+      if (vendorScope) {
+        const mine = await this.prisma.orderLineItem.findMany({
+          where: { orderId, vendor: vendorScope },
+          select: { externalId: true },
+        });
+        visible = new Set(mine.map((l) => l.externalId));
+      }
+      const keep = (shopifyLineId: string) => !visible || visible.has(shopifyLineId);
+
       return {
         source: 'shopify' as const,
-        fulfillmentOrders: fos.map((fo) => ({
-          id: fo.id,
-          status: fo.status,
-          locationName: fo.assignedLocation?.name ?? null,
-          lineItems: fo.lineItems.nodes.map((li) => ({
+        fulfillmentOrders: fos
+          .map((fo) => ({
+            id: fo.id,
+            status: fo.status,
+            locationName: fo.assignedLocation?.name ?? null,
+            lineItems: fo.lineItems.nodes
+              .filter((li) => keep(ShopifyGraphqlClient.extractId(li.lineItem.id)))
+              .map((li) => ({
             // `lineItemId` is the OrderLineItem numeric ID; that's what the
             // create-fulfillment endpoint accepts. The internal FO line item
             // ID is resolved server-side from it.
-            lineItemId: ShopifyGraphqlClient.extractId(li.lineItem.id),
-            title: li.lineItem.title,
-            variantTitle: li.lineItem.variantTitle,
-            sku: li.lineItem.sku,
-            remainingQuantity: li.remainingQuantity,
-            totalQuantity: li.totalQuantity,
-          })),
-        })),
+                lineItemId: ShopifyGraphqlClient.extractId(li.lineItem.id),
+                title: li.lineItem.title,
+                variantTitle: li.lineItem.variantTitle,
+                sku: li.lineItem.sku,
+                remainingQuantity: li.remainingQuantity,
+                totalQuantity: li.totalQuantity,
+              })),
+          }))
+          // A fulfilment order holding none of this vendor's lines would
+          // otherwise render as an empty group in the dialog.
+          .filter((fo) => fo.lineItems.length > 0),
       };
     }
 
@@ -2240,7 +2331,7 @@ export class OrderService {
     // Fulfil dialog on a manual order came up empty and offline orders could not
     // be fulfilled at all.
     const allLines = await this.prisma.orderLineItem.findMany({
-      where: { orderId },
+      where: { orderId, ...(vendorScope ? { vendor: vendorScope } : {}) },
       orderBy: { createdAt: 'asc' },
     });
     const lineItems = allLines.filter((li) => li.quantity - li.fulfilledQuantity > 0);

@@ -5,6 +5,7 @@ import type {
   OrderDetail,
   OrderFulfillment,
   OrderListParams,
+  OrderSlipData,
   OrderStatsResponse,
   AdjacentOrders,
   DashboardQueryParams,
@@ -34,6 +35,19 @@ export const orderService = {
 
   adjacent: (id: string) =>
     apiClient.get<AdjacentOrders>(`/orders/${id}/adjacent`).then((response) => response.data),
+
+  /**
+   * Package-slip payload for many orders in one request, for the batch print
+   * route. Ids go as one comma-separated param, matching
+   * `inventoryService.labelData`. The server caps the batch at 100 and orders
+   * the result by order number, so a printed stack comes out predictably.
+   */
+  slipData: (orderIds: string[]) =>
+    apiClient
+      .get<OrderSlipData[]>("/orders/slips/data", {
+        params: { orderIds: orderIds.join(",") },
+      })
+      .then((response) => response.data),
 
   stats: (params?: DashboardQueryParams) =>
     apiClient.get<OrderStatsResponse>("/orders/stats", { params }).then((response) => response.data),

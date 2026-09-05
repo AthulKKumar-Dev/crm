@@ -3,7 +3,10 @@ import { Link, useParams } from "react-router";
 import { ArrowLeft, Package, Printer } from "lucide-react";
 import { useOrder } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import type { VendorShipTo } from "~/types/api";
+import { useSlipStore } from "~/hooks/use-slip-store";
+import { PackageSlipSheet } from "~/components/app/package-slip-sheet";
+import { SLIP_DEFAULT_LAYOUT, SLIP_DEFAULT_PAPER_ID } from "~/lib/slip-stock";
+import type { OrderSlipData, VendorShipTo } from "~/types/api";
 
 /** Loose shape covering both the vendor projection and the full owner order. */
 type SlipOrder = {
@@ -44,12 +47,12 @@ type SlipOptions = {
   note: string;
 };
 
-function defaultOptions(variant: "packing" | "pick"): SlipOptions {
+function defaultOptions(): SlipOptions {
   return {
     company: true,
     companyName: "Collabo",
-    shipTo: variant === "packing",
-    images: variant === "packing",
+    shipTo: false,
+    images: false,
     sku: true,
     summary: true,
     fromAddress: "",
@@ -103,47 +106,85 @@ function resolveShipTo(order: SlipOrder): SlipAddress | null {
     : null;
 }
 
-/** Multi-line street/city/country block, or an em dash when empty. */
-function AddressLines({ a }: { a: SlipAddress | null }) {
-  if (!a || !(a.address1 || a.address2 || a.city || a.province || a.zip || a.country)) {
-    return <p className="value">—</p>;
+/**
+ * Print-friendly order paperwork.
+ *
+ * Two genuinely different documents behind one entry point, so this only
+ * dispatches — each variant is its own component with its own hooks, which
+ * keeps the hook order unconditional.
+ *
+ * `packing` is the branded PACKAGE SLIP that goes on the parcel, and it shares
+ * every pixel of its layout and all of its stock handling with the batch print
+ * route. `pick` is the warehouse's own tick-list and is deliberately unchanged.
+ */
+export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
+  return variant === "packing" ? <PackingSlipView /> : <PickSlipView />;
+}
+
+/**
+ * One order's package slip, on any of the supported stocks.
+ *
+ * Renders `PackageSlipSheet` with a single-order array, so printing one parcel
+ * and printing a 100-parcel batch go through exactly the same layout, paging
+ * and print CSS. Its own localStorage key: the stock you want for one urgent
+ * parcel is usually not the stock you want for the day's batch.
+ */
+function PackingSlipView() {
+  const { id } = useParams<{ id: string }>();
+  const { data, isLoading, isError } = useOrder(id);
+  const { store, isLoading: storeLoading } = useSlipStore();
+
+  if (isError) {
+    return (
+      <div className="p-8 text-sm text-red-700">
+        Could not load this order. Go back and try again.
+      </div>
+    );
   }
+
+  if (isLoading || storeLoading || !data) {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
+        Loading slip…
+      </div>
+    );
+  }
+
   return (
-    <p className="value">
-      {a.address1}
-      {a.address2 ? `, ${a.address2}` : ""}
-      <br />
-      {a.city}
-      {a.province ? `, ${a.province}` : ""}
-      {a.zip ? ` – ${a.zip}` : ""}
-      <br />
-      {a.country}
-    </p>
+    <PackageSlipSheet
+      orders={[data as unknown as OrderSlipData]}
+      store={store}
+      storageKey="package-slip-single-opts"
+      defaultPaperId={SLIP_DEFAULT_PAPER_ID}
+      defaultLayout={SLIP_DEFAULT_LAYOUT}
+      backTo={`/orders/${id}`}
+    />
   );
 }
 
 /**
- * Print-friendly packing / pick slip with a (non-printed) customization bar.
- * Works for both the vendor projection and the full owner order. Toggle choices
- * persist in localStorage so the layout sticks between prints.
+ * The pick slip — the warehouse's tick-list, one order per A4.
+ *
+ * Unchanged: this is an internal document, not something a customer sees, and
+ * it has no reason to follow the package slip's stock model.
  */
-export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
+function PickSlipView() {
   const { id } = useParams<{ id: string }>();
   const { data, isLoading } = useOrder(id);
   const order = data as unknown as SlipOrder | undefined;
   const { data: org } = useCurrentOrg();
 
-  const storageKey = `slip-opts-${variant}`;
+  const storageKey = "slip-opts-pick";
   const [opts, setOpts] = useState<SlipOptions>(() => {
     if (typeof window !== "undefined") {
       try {
         const saved = window.localStorage.getItem(storageKey);
-        if (saved) return { ...defaultOptions(variant), ...JSON.parse(saved) };
+        if (saved) return { ...defaultOptions(), ...JSON.parse(saved) };
       } catch {
         /* ignore malformed storage */
       }
     }
-    return defaultOptions(variant);
+    return defaultOptions();
   });
 
   useEffect(() => {
@@ -164,7 +205,6 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
     );
   }
 
-  const title = variant === "packing" ? "Packing Slip" : "Pick Slip";
   const dateStr = new Date(order.externalCreatedAt ?? order.createdAt ?? "").toLocaleDateString(
     "en-IN",
     { day: "2-digit", month: "long", year: "numeric" },
@@ -175,16 +215,12 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
 
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-950">
-      {variant === "packing" ? (
-        <style>{PACKING_CSS}</style>
-      ) : (
-        <style>{`@media print {
-          @page { size: A4; margin: 14mm; }
-          body { background: #fff !important; }
-          .no-print { display: none !important; }
-          .slip-paper { box-shadow: none !important; margin: 0 !important; max-width: none !important; }
-        }`}</style>
-      )}
+      <style>{`@media print {
+        @page { size: A4; margin: 14mm; }
+        body { background: #fff !important; }
+        .no-print { display: none !important; }
+        .slip-paper { box-shadow: none !important; margin: 0 !important; max-width: none !important; }
+      }`}</style>
 
       {/* Customization bar — never printed */}
       <div className="no-print sticky top-0 z-10 border-b bg-white/95 backdrop-blur dark:bg-gray-900/95">
@@ -198,9 +234,7 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
             </Link>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <Toggle label="Company header" checked={opts.company} onChange={(v) => set({ company: v })} />
-              {variant === "pick" && (
-                <Toggle label="Ship to" checked={opts.shipTo} onChange={(v) => set({ shipTo: v })} />
-              )}
+              <Toggle label="Ship to" checked={opts.shipTo} onChange={(v) => set({ shipTo: v })} />
               <Toggle label="Images" checked={opts.images} onChange={(v) => set({ images: v })} />
               <Toggle label="SKU" checked={opts.sku} onChange={(v) => set({ sku: v })} />
               <Toggle label="Summary" checked={opts.summary} onChange={(v) => set({ summary: v })} />
@@ -219,14 +253,12 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
               placeholder="Company name"
               className="rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
             />
-            {variant === "pick" && (
-              <input
-                value={opts.fromAddress}
-                onChange={(e) => set({ fromAddress: e.target.value })}
-                placeholder="From / return address (optional)"
-                className="rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
-              />
-            )}
+            <input
+              value={opts.fromAddress}
+              onChange={(e) => set({ fromAddress: e.target.value })}
+              placeholder="From / return address (optional)"
+              className="rounded-lg border bg-white px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-[#cdff8c] dark:bg-gray-800"
+            />
             <input
               value={opts.note}
               onChange={(e) => set({ note: e.target.value })}
@@ -237,174 +269,21 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
         </div>
       </div>
 
-      {variant === "packing" ? (
-        <PackingSlipBody
-          order={order}
-          opts={opts}
-          dateStr={dateStr}
-          ship={ship}
-          orgName={org?.name}
-          orgWebsite={org?.website}
-          totalUnits={totalUnits}
-        />
-      ) : (
-        <PickSlipBody
-          order={order}
-          opts={opts}
-          orgLogo={org?.logo}
-          orgWebsite={org?.website}
-          title={title}
-          dateStr={dateStr}
-          ship={ship}
-          totalUnits={totalUnits}
-        />
-      )}
+      <PickSlipBody
+        order={order}
+        opts={opts}
+        orgLogo={org?.logo}
+        orgWebsite={org?.website}
+        title="Pick Slip"
+        dateStr={dateStr}
+        ship={ship}
+        totalUnits={totalUnits}
+      />
     </div>
   );
 }
 
-/** The Courier/boxed packing-slip layout (ported from the Shopify Liquid template). */
-function PackingSlipBody({
-  order,
-  opts,
-  dateStr,
-  ship,
-  orgName,
-  orgWebsite,
-  totalUnits,
-}: {
-  order: SlipOrder;
-  opts: SlipOptions;
-  dateStr: string;
-  ship: SlipAddress | null;
-  orgName?: string | null;
-  orgWebsite?: string | null;
-  totalUnits: number;
-}) {
-  const storeName = (opts.companyName || orgName || "Collabo").toUpperCase();
-  const billing = resolveAddress(order.billingAddress);
-  const customerName =
-    [order.customer?.firstName, order.customer?.lastName].filter(Boolean).join(" ") ||
-    ship?.name ||
-    "—";
-  const customerEmail = order.email ?? order.customer?.email ?? "—";
-  const hasNote = Boolean(order.note || opts.note);
-
-  return (
-    <div className="packing-slip">
-      <div className="box">
-        {/* TOP ROW: STORE NAME | ORDER # */}
-        <div className="row top-row">
-          <div className="col col-center store-name">{opts.company ? storeName : ""}</div>
-          <div className="col col-right">ORDER {order.name}</div>
-        </div>
-
-        <div className="row sub-row">
-          <div className="col col-center"></div>
-          <div className="col col-right">Date: {dateStr}</div>
-        </div>
-
-        <div className="divider"></div>
-
-        {/* CUSTOMER / SHIPPING / BILLING */}
-        <div className="row headings-row">
-          <div className="col col-third">CUSTOMER DETAILS</div>
-          <div className="col col-third">SHIPPING ADDRESS</div>
-          <div className="col col-third">BILLING ADDRESS</div>
-        </div>
-
-        <div className="row details-row">
-          <div className="col col-third">
-            <p>
-              <span className="label">Name</span>: <span className="value">{customerName}</span>
-            </p>
-            <p>
-              <span className="label">Email</span>: <span className="value">{customerEmail}</span>
-            </p>
-          </div>
-
-          <div className="col col-third">
-            <p className="label">Address</p>
-            <AddressLines a={ship} />
-            <p className="label">Phone</p>
-            <p className="value">{ship?.phone ?? "—"}</p>
-          </div>
-
-          <div className="col col-third">
-            <p className="label">Address</p>
-            <AddressLines a={billing} />
-            <p className="label">Phone</p>
-            <p className="value">{billing?.phone ?? "—"}</p>
-          </div>
-        </div>
-
-        <div className="divider"></div>
-
-        {/* ITEMS TABLE */}
-        <div className="row items-header-row">
-          {opts.images && <div className="col item-image-col">IMAGE</div>}
-          <div className="col item-name-col">PRODUCT NAME</div>
-          {opts.sku && <div className="col item-sku-col">SKU</div>}
-          <div className="col item-qty-col">QTY</div>
-        </div>
-
-        <div className="divider thin"></div>
-
-        {order.lineItems.map((li) => (
-          <div className="row item-row" key={li.id}>
-            {opts.images && (
-              <div className="col item-image-col">
-                {li.imageUrl ? (
-                  <img className="item-image" src={li.imageUrl} alt={li.title} width={40} height={40} />
-                ) : (
-                  <div className="item-image-placeholder">
-                    <Package size={16} />
-                  </div>
-                )}
-              </div>
-            )}
-            <div className="col item-name-col">
-              {li.title}
-              {li.variantTitle && li.variantTitle !== "Default Title" && (
-                <span className="item-variant"> ({li.variantTitle})</span>
-              )}
-            </div>
-            {opts.sku && <div className="col item-sku-col">{li.sku ?? "—"}</div>}
-            <div className="col item-qty-col">{li.quantity}</div>
-          </div>
-        ))}
-
-        {opts.summary && (
-          <div className="row summary-row">
-            Lines: {order.lineItems.length} &nbsp;·&nbsp; Total units: {totalUnits}
-          </div>
-        )}
-
-        <div className="divider"></div>
-
-        {/* NOTES */}
-        {hasNote && (
-          <>
-            <div className="row note-row">
-              <span className="label">Customer Note / Delivery Instructions</span>
-              {order.note && <p className="value">{order.note}</p>}
-              {opts.note && <p className="value">{opts.note}</p>}
-            </div>
-            <div className="divider"></div>
-          </>
-        )}
-
-        {/* FOOTER */}
-        <div className="row footer-row">
-          <div className="col col-left">Thank you for choosing {opts.companyName || orgName || "Collabo"}</div>
-          <div className="col col-right">{orgWebsite}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** The original clean slip layout, kept for the pick variant. */
+/** The clean slip layout used by the pick variant. */
 function PickSlipBody({
   order,
   opts,
@@ -543,277 +422,6 @@ function PickSlipBody({
     </div>
   );
 }
-
-/** CSS ported from the user-supplied Shopify Liquid packing-slip template. */
-const PACKING_CSS = `
-.packing-slip, .packing-slip *{
-  box-sizing:border-box;
-}
-
-@page{
-  size:A4;
-  margin:0;
-}
-
-.packing-slip{
-  width:700px;
-  max-width:100%;
-  margin:0 auto;
-  padding:20px;
-  background:#fff;
-  font-family:"Courier New", Courier, monospace;
-  font-size:12px;
-  color:#111;
-}
-
-.packing-slip .box{
-  border:2px solid #000;
-  padding:18px;
-}
-
-/*=========================
-ROWS
-=========================*/
-
-.packing-slip .row{
-  display:flex;
-  width:100%;
-  padding:6px 0;
-}
-
-.packing-slip .col{
-  flex:1;
-  min-width:0;
-}
-
-.packing-slip .col-left{
-  text-align:left;
-}
-
-.packing-slip .col-center{
-  flex:2;
-}
-
-.packing-slip .col-right{
-  text-align:right;
-}
-
-.packing-slip .col-third{
-  flex:1;
-  width:33.333%;
-  min-width:0;
-  padding-right:20px;
-  overflow:hidden;
-}
-
-/*=========================
-HEADER
-=========================*/
-
-.packing-slip .top-row{
-  align-items:center;
-}
-
-.packing-slip .store-name{
-  flex:1;
-  text-align:left;
-  font-size:18px;
-  font-weight:bold;
-  letter-spacing:2px;
-}
-
-.packing-slip .sub-row{
-  color:#555;
-}
-
-/*=========================
-DIVIDERS
-=========================*/
-
-.packing-slip .divider{
-  margin:12px 0;
-  border-top:1px solid #000;
-}
-
-.packing-slip .divider.thin{
-  margin:8px 0;
-  border-top:1px solid #000;
-}
-
-/*=========================
-HEADINGS
-=========================*/
-
-.packing-slip .headings-row{
-  font-weight:bold;
-  letter-spacing:1px;
-}
-
-.packing-slip .details-row{
-  display:flex;
-  align-items:flex-start;
-  padding-top:4px;
-}
-
-.packing-slip .details-row .col-third{
-  flex:1;
-  min-width:0;
-}
-
-.packing-slip .label{
-  margin:4px 0 2px;
-  font-weight:bold;
-  color:#000;
-}
-
-.packing-slip .value{
-  margin:0 0 8px;
-  color:#333;
-  line-height:1.5;
-  white-space:normal;
-  overflow-wrap:anywhere;
-  word-break:break-word;
-}
-
-.packing-slip .details-row p{
-  margin:0 0 6px;
-}
-
-/*=========================
-PRODUCT TABLE
-=========================*/
-
-.packing-slip .items-header-row{
-  font-weight:bold;
-  letter-spacing:1px;
-}
-
-.packing-slip .item-image-col{
-  width:55px;
-  min-width:55px;
-  flex:none;
-}
-
-.packing-slip .item-name-col{
-  flex:2;
-  padding-right:12px;
-}
-
-.packing-slip .item-sku-col{
-  width:90px;
-  min-width:90px;
-  flex:none;
-  text-align:left;
-}
-
-.packing-slip .item-qty-col{
-  width:60px;
-  min-width:60px;
-  flex:none;
-  text-align:left;
-}
-
-.packing-slip .item-row{
-  display:flex;
-  align-items:center;
-  padding:10px 0;
-  border-bottom:1px solid #ddd;
-}
-
-.packing-slip .item-image{
-  display:block;
-  border:none;
-  width:40px;
-  height:40px;
-  object-fit:cover;
-}
-
-.packing-slip .item-image-placeholder{
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  width:40px;
-  height:40px;
-  border:1px solid #ddd;
-  color:#999;
-}
-
-.packing-slip .item-variant{
-  color:#666;
-  font-size:11px;
-}
-
-.packing-slip .summary-row{
-  justify-content:flex-end;
-  color:#555;
-}
-
-.packing-slip .notice-row{
-  color:#555;
-  font-style:italic;
-}
-
-/*=========================
-NOTES
-=========================*/
-
-.packing-slip .note-row{
-  display:block;
-  padding:6px 0;
-}
-
-.packing-slip .note-row .label{
-  display:block;
-  font-weight:bold;
-  margin-bottom:6px;
-}
-
-/*=========================
-FOOTER
-=========================*/
-
-.packing-slip .footer-row{
-  display:flex;
-  align-items:center;
-  padding-top:10px;
-}
-
-.packing-slip .footer-row .col-right{
-  text-align:right;
-}
-
-/*=========================
-SCREEN PREVIEW
-=========================*/
-
-@media screen{
-  .packing-slip{
-    margin:24px auto;
-    box-shadow:0 1px 2px rgba(0,0,0,0.08);
-  }
-}
-
-/*=========================
-PRINT
-=========================*/
-
-@media print{
-  body{
-    background:#fff !important;
-  }
-
-  .no-print{
-    display:none !important;
-  }
-
-  .packing-slip{
-    width:100%;
-    padding:10px;
-    margin:0;
-    box-shadow:none;
-  }
-}
-`;
 
 function Toggle({
   label,

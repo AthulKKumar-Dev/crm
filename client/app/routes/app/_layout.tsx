@@ -19,6 +19,10 @@ const VENDOR_DENIED_PREFIXES = [
   "/orders/drafts",
   "/orders/customers",
   "/orders/invoices",
+  // A package slip prints the customer's full postal address. The server's
+  // /orders/slips/data has no @AllowVendor for the same reason; this stops a
+  // vendor reaching a page that would only 403.
+  "/orders/slips",
   "/products/inventory",
 ];
 

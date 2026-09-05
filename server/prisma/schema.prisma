@@ -352,6 +352,10 @@ model OrganizationSettings {
   orderSettings     Json?    @map("order_settings") @db.JsonB
   inventorySettings Json?    @map("inventory_settings") @db.JsonB
   taxSettings       Json?    @map("tax_settings") @db.JsonB
+  /// The merchant's own business identity — trading name, address, support
+  /// phone / WhatsApp / email, website, logo URL. Read by the package slip's
+  /// "From" block; `Organization` has no address or contact columns at all.
+  storeProfileSettings Json? @map("store_profile_settings") @db.JsonB
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

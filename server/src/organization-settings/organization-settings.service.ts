@@ -25,6 +25,12 @@ import {
   parseTaxSettings,
   TaxSettingsSchema,
 } from './schemas/tax-settings.schema';
+import {
+  StoreProfileSettings,
+  UpdateStoreProfileSettingsInput,
+  parseStoreProfileSettings,
+  StoreProfileSettingsSchema,
+} from './schemas/store-profile-settings.schema';
 
 /**
  * Resolves and persists per-org settings. Each domain (product, order, …)
@@ -49,6 +55,7 @@ export class OrganizationSettingsService {
     orderSettings: OrderSettings;
     inventorySettings: InventorySettings;
     taxSettings: TaxSettings;
+    storeProfileSettings: StoreProfileSettings;
   }> {
     this.assertOrgId(orgId);
     const row = await this.prisma.organizationSettings.findUnique({
@@ -59,7 +66,37 @@ export class OrganizationSettingsService {
       orderSettings: parseOrderSettings(row?.orderSettings ?? null),
       inventorySettings: parseInventorySettings(row?.inventorySettings ?? null),
       taxSettings: parseTaxSettings(row?.taxSettings ?? null),
+      storeProfileSettings: parseStoreProfileSettings(
+        row?.storeProfileSettings ?? null,
+      ),
     };
+  }
+
+  /**
+   * Read just the store profile. Convenience for the package-slip print path,
+   * which needs the From block and contact row on every render.
+   */
+  async getStoreProfileSettings(orgId: string): Promise<StoreProfileSettings> {
+    this.assertOrgId(orgId);
+    const row = await this.prisma.organizationSettings.findUnique({
+      where: { organizationId: orgId },
+      select: { storeProfileSettings: true },
+    });
+    return parseStoreProfileSettings(row?.storeProfileSettings ?? null);
+  }
+
+  /** Merge-patch the store profile; validate via Zod before write. */
+  async updateStoreProfileSettings(
+    orgId: string,
+    patch: UpdateStoreProfileSettingsInput,
+  ): Promise<StoreProfileSettings> {
+    this.assertOrgId(orgId);
+    const current = await this.getStoreProfileSettings(orgId);
+    const next = StoreProfileSettingsSchema.parse({ ...current, ...patch });
+    await this.upsert(orgId, {
+      storeProfileSettings: next as Prisma.InputJsonValue,
+    });
+    return next;
   }
 
   /** Read just product settings. Convenience for the product-creation hot path. */

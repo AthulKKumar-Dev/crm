@@ -11,6 +11,8 @@ import { UpdateInventorySettingsSchema } from './schemas/inventory-settings.sche
 import { UpdateTaxSettingsSchema } from './schemas/tax-settings.schema';
 import type { UpdateTaxSettingsInput } from './schemas/tax-settings.schema';
 import type { UpdateInventorySettingsInput } from './schemas/inventory-settings.schema';
+import { UpdateStoreProfileSettingsSchema } from './schemas/store-profile-settings.schema';
+import type { UpdateStoreProfileSettingsInput } from './schemas/store-profile-settings.schema';
 import { Roles, ORG_MANAGERS } from '../auth/decorators/roles.decorator';
 
 /**
@@ -95,5 +97,20 @@ export class OrganizationSettingsController {
     body: UpdateInventorySettingsInput,
   ) {
     return this.service.updateInventorySettings(user.orgId!, body);
+  }
+
+  // PATCH /api/v1/organization/settings/store-profile
+  // Role-gated: this is the business identity printed on outgoing paperwork —
+  // the return address on every parcel, and the support contacts a customer is
+  // told to use. Letting an AGENT/VIEWER rewrite it would let them redirect
+  // returns or support traffic, which is squarely an ORG_MANAGERS concern.
+  @Patch('store-profile')
+  @Roles(...ORG_MANAGERS)
+  updateStoreProfile(
+    @CurrentUser() user: JwtPayload,
+    @Body(new ZodValidationPipe(UpdateStoreProfileSettingsSchema))
+    body: UpdateStoreProfileSettingsInput,
+  ) {
+    return this.service.updateStoreProfileSettings(user.orgId!, body);
   }
 }
