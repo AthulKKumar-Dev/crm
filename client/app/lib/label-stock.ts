@@ -15,7 +15,20 @@
  */
 
 export type StockKind = "roll" | "sheet";
-export type PresetGroup = "primary" | "more" | "jewellery" | "sheet" | "custom";
+/**
+ * `single` and `thermal` are used only by the package-slip stock (`slip-stock.ts`), which
+ * resolves against this same engine but its own preset table. The label route
+ * filters its `<optgroup>`s by explicit group name, so a member it does not
+ * name simply never appears there.
+ */
+export type PresetGroup =
+  | "primary"
+  | "more"
+  | "jewellery"
+  | "sheet"
+  | "single"
+  | "thermal"
+  | "custom";
 
 /**
  * A printable region inside the media. Jewellery stock is NOT fully printable —
@@ -292,8 +305,11 @@ export const DEFAULT_CUSTOM: CustomStock = {
   paddingMm: 2,
 };
 
-export function findPreset(id: string): LabelPreset | undefined {
-  return LABEL_PRESETS.find((p) => p.id === id);
+export function findPreset(
+  id: string,
+  presets: LabelPreset[] = LABEL_PRESETS,
+): LabelPreset | undefined {
+  return presets.find((p) => p.id === id);
 }
 
 /** Clamp custom input to something that can physically produce a page. */
@@ -324,8 +340,14 @@ function sanitizeCustom(c: CustomStock): CustomStock {
 export function resolveProfile(opts: {
   presetId: string;
   custom: CustomStock;
+  /**
+   * Preset table to resolve against. Defaults to the product-label stock, so
+   * every existing caller is unchanged; `slip-stock.ts` passes its own table
+   * to reuse this resolver without its sizes leaking into the label picker.
+   */
+  presets?: LabelPreset[];
 }): ResolvedProfile {
-  const preset = findPreset(opts.presetId);
+  const preset = findPreset(opts.presetId, opts.presets ?? LABEL_PRESETS);
 
   let base: Omit<LabelPreset, "id" | "label" | "group" | "defaultDpi">;
   let id: string;

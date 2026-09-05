@@ -9,6 +9,8 @@ import type {
   UpdateProductSettingsRequest,
   UpdateOrderSettingsRequest,
   UpdateInventorySettingsRequest,
+  StoreProfileSettings,
+  UpdateStoreProfileSettingsRequest,
 } from "~/types/api";
 
 /**
@@ -43,5 +45,10 @@ export const organizationSettingsService = {
   updateInventorySettings: (data: UpdateInventorySettingsRequest) =>
     apiClient
       .patch<InventorySettings>("/organization/settings/inventory", data)
+      .then((response) => response.data),
+
+  updateStoreProfileSettings: (data: UpdateStoreProfileSettingsRequest) =>
+    apiClient
+      .patch<StoreProfileSettings>("/organization/settings/store-profile", data)
       .then((response) => response.data),
 };

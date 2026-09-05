@@ -10,6 +10,7 @@ export const orderKeys = {
   stats: (params?: DashboardQueryParams) => [...orderKeys.all, "stats", params] as const,
   fulfillable: (id: string) => [...orderKeys.all, "fulfillable", id] as const,
   adjacent: (id: string) => [...orderKeys.all, "adjacent", id] as const,
+  slipData: (ids: string[]) => [...orderKeys.all, "slip-data", ids] as const,
 };
 
 /** Fetch a paginated list of orders with optional filters. */

@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package,
-  Target, Box, Plus,
+  Target, Box, Plus, Printer,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Button } from "~/components/ui/button";
@@ -66,6 +66,7 @@ export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [dateRange, setDateRange] = useState("all");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
@@ -93,6 +94,35 @@ export default function OrdersPage() {
   const orders = data?.data ?? [];
   const meta = data?.meta;
   const totalPages = meta?.totalPages ?? 1;
+
+  // Selection is cleared whenever the visible rows change. Printing slips for
+  // orders that scrolled out of view is unrecoverable — you only find out at
+  // the printer — so the selection never outlives the page it was made on.
+  // Same reasoning as the inventory label picker.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [currentPage, debouncedSearch, dateRange]);
+
+  function toggleRow(orderId: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(orderId)) next.delete(orderId);
+      else next.add(orderId);
+      return next;
+    });
+  }
+
+  function toggleAllOnPage() {
+    setSelectedIds((prev) => {
+      const allSelected = orders.length > 0 && orders.every((o) => prev.has(o.id));
+      return allSelected ? new Set() : new Set(orders.map((o) => o.id));
+    });
+  }
+
+  const slipHref =
+    selectedIds.size > 0
+      ? `/orders/slips/print?orderIds=${[...selectedIds].join(",")}`
+      : null;
 
   function handleSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
     setSearchQuery(event.target.value);
@@ -219,15 +249,28 @@ export default function OrdersPage() {
         title="All Orders"
         description="Keep track of recent order data and others information."
         action={
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="search"
-              placeholder="Search here..."
-              value={searchQuery}
-              onChange={handleSearchChange}
-              className="h-8 w-48 rounded-lg border border-input bg-transparent pl-8 pr-3 text-caption placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand/50"
-            />
+          <div className="flex items-center gap-2">
+            {/* Opens in a new tab so the selection and scroll position survive
+                the print job — the operator comes straight back to the list to
+                pick the next batch. */}
+            {slipHref && (
+              <Button asChild variant="outline" size="action">
+                <Link to={slipHref} target="_blank" rel="noreferrer">
+                  <Printer className="size-3.5" />
+                  Print package slips ({selectedIds.size})
+                </Link>
+              </Button>
+            )}
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="search"
+                placeholder="Search here..."
+                value={searchQuery}
+                onChange={handleSearchChange}
+                className="h-8 w-48 rounded-lg border border-input bg-transparent pl-8 pr-3 text-caption placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand/50"
+              />
+            </div>
           </div>
         }
       >
@@ -261,6 +304,9 @@ export default function OrdersPage() {
               currency={orgCurrency}
               showCustomerName
               gstEnabled={gstEnabled}
+              selectedIds={selectedIds}
+              onToggleRow={toggleRow}
+              onToggleAll={toggleAllOnPage}
             />
           </div>
         )}

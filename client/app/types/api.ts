@@ -1203,6 +1203,42 @@ export interface OrderDetail extends Order {
   >[];
 }
 
+/**
+ * One order's worth of package-slip content, from GET /orders/slips/data.
+ *
+ * Deliberately the subset of `OrderDetail` that a slip renders, so
+ * `<PackageSlip>` takes this type and the per-order route can hand it a full
+ * `OrderDetail` unchanged — `OrderDetail` structurally satisfies it. Keep the
+ * two in step: widening this without widening the server's `select` gives the
+ * batch route `undefined` where the per-order route has a value.
+ *
+ * Both date fields are present because the slip prints `externalCreatedAt`
+ * when there is one (the date the order was placed on the channel) and falls
+ * back to `createdAt`.
+ */
+export interface OrderSlipData {
+  id: string;
+  /** Display order number, hash included — "#1201". */
+  name: string;
+  createdAt: string;
+  externalCreatedAt?: string | null;
+  note?: string | null;
+  shippingAddress?: Record<string, unknown> | null;
+  customer?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    email?: string | null;
+    phone?: string | null;
+  } | null;
+  lineItems: Array<{
+    id: string;
+    title: string;
+    variantTitle: string | null;
+    sku: string | null;
+    quantity: number;
+  }>;
+}
+
 /** Query parameters for the order list endpoint. */
 /** Neighbours of one order in the newest-first list, for the detail page rail. */
 export interface AdjacentOrders {
@@ -1484,13 +1520,47 @@ export interface TaxSettings {
   invoicePrefix: string;
 }
 
+/**
+ * The merchant's own business identity — the "From" block and contact row on a
+ * package slip.
+ *
+ * Lives here rather than on `OrgResponse` because `Organization` has no
+ * address, phone or email columns at all; this is a settings domain
+ * (`store_profile_settings` JSONB). Every field defaults to `""` server-side,
+ * and blank means "fall back" — to `Organization.name` / `.website`, or for
+ * the address, to the order's dispatch warehouse and then the default GSTIN.
+ *
+ * Address keys are the app's canonical set, so `readAddress()` reads this
+ * directly.
+ */
+export interface StoreProfileSettings {
+  storeName: string;
+  address1: string;
+  address2: string;
+  city: string;
+  province: string;
+  zip: string;
+  country: string;
+  supportPhone: string;
+  /** Often different from `supportPhone`; the slip prints both. */
+  whatsappPhone: string;
+  supportEmail: string;
+  website: string;
+  /** Absolute URL — there is no upload pipeline for this yet. */
+  logoUrl: string;
+}
+
 /** Response from GET /organization/settings — every domain returned together. */
 export interface OrganizationSettingsResponse {
   productSettings: ProductSettings;
   orderSettings: OrderSettings;
   inventorySettings: InventorySettings;
   taxSettings: TaxSettings;
+  storeProfileSettings: StoreProfileSettings;
 }
+
+/** Patch payload for PATCH /organization/settings/store-profile. */
+export type UpdateStoreProfileSettingsRequest = Partial<StoreProfileSettings>;
 
 /** Patch payload for PATCH /organization/settings/products. */
 export type UpdateProductSettingsRequest = Partial<ProductSettings>;

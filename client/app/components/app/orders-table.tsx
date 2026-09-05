@@ -55,16 +55,60 @@ interface OrdersTableProps {
   onViewDetail?: (orderId: string) => void;
   gstEnabled?: boolean;
   variant?: "compact" | "default";
+  /**
+   * Row selection, for bulk actions. All three are optional and are read as a
+   * set: omit them and the checkbox column does not render at all, so the
+   * dashboard's compact usage and the vendor page are untouched.
+   */
+  selectedIds?: Set<string>;
+  onToggleRow?: (orderId: string) => void;
+  onToggleAll?: () => void;
+}
+
+/**
+ * Select-all checkbox for the page of rows.
+ *
+ * `indeterminate` is a DOM property with no HTML attribute, so React cannot
+ * set it declaratively — it has to be written through a ref.
+ */
+function SelectAllCheckbox({
+  checked,
+  indeterminate,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <input
+      type="checkbox"
+      className="accent-[#CEF17B]"
+      checked={checked}
+      ref={(el) => {
+        if (el) el.indeterminate = indeterminate;
+      }}
+      onChange={onChange}
+      aria-label="Select all orders on this page"
+    />
+  );
 }
 
 /** Renders a data table of orders with financial/fulfillment status badges and row-level actions.
  *  Row click navigates to /orders/:id. Cells with their own click handlers
  *  (checkbox, dropdown menu) stop propagation. */
-export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, gstEnabled = false, variant = "default" }: OrdersTableProps) {
+export function OrdersTable({ orders, currency, showCustomerName = false, onViewDetail, gstEnabled = false, variant = "default", selectedIds, onToggleRow, onToggleAll }: OrdersTableProps) {
   // Mirrors ORG_MANAGERS — the tier that may issue a GST invoice.
   const { role } = useCurrentRole();
   const canManage = role === "OWNER" || role === "ADMIN" || role === "MANAGER";
   const navigate = useNavigate();
+
+  const selectable = Boolean(selectedIds && onToggleRow);
+  // Scoped to the rows currently on screen, not the whole result set — "select
+  // all" cannot mean rows the user cannot see.
+  const allOnPageSelected =
+    orders.length > 0 && orders.every((o) => selectedIds?.has(o.id));
+  const someOnPageSelected = orders.some((o) => selectedIds?.has(o.id));
 
   if (variant === "compact") {
     return (
@@ -139,13 +183,22 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
     // hook). Top-level hooks like `useSyncOrderMutation` are not called here.
     <Table>
       <TableHeader>
-        {/* No select-all column: the checkboxes here were uncontrolled inputs
-            with no state and no bulk action to feed, so "select all" ticked one
-            box and nothing happened. Removed rather than left as an affordance
-            for something the app cannot do. `products.tsx` has a working
-            selection pattern (`selectedIds` + `BulkActionBar`) to copy if order
-            bulk actions are ever added. */}
+        {/* The checkbox column renders only when the caller passes selection
+            props. It used to be uncontrolled inputs with no state and no bulk
+            action behind them; it is now driven by the orders page, which
+            feeds the batch package-slip print. */}
         <TableRow className="hover:bg-transparent">
+          {selectable && (
+            <TableHead className="w-10">
+              {onToggleAll && (
+                <SelectAllCheckbox
+                  checked={allOnPageSelected}
+                  indeterminate={someOnPageSelected && !allOnPageSelected}
+                  onChange={onToggleAll}
+                />
+              )}
+            </TableHead>
+          )}
           <TableHead>Order</TableHead>
           <TableHead>Items</TableHead>
           {showCustomerName && <TableHead>Customer</TableHead>}
@@ -169,6 +222,19 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
               }
             }}
           >
+            {selectable && (
+              // stopPropagation so ticking a box does not also navigate to the
+              // order, which the row's own onClick would otherwise do.
+              <TableCell onClick={(e) => e.stopPropagation()}>
+                <input
+                  type="checkbox"
+                  className="accent-[#CEF17B]"
+                  checked={selectedIds!.has(order.id)}
+                  onChange={() => onToggleRow!(order.id)}
+                  aria-label={`Select order ${order.name}`}
+                />
+              </TableCell>
+            )}
             <TableCell className="font-medium text-gray-900 dark:text-gray-100">
               {order.financialStatus === "PAID" && (
                 <span className="mr-1.5 inline-block size-4 rounded-full bg-[#CEF17B]/30 text-[#084734] text-center text-[10px] leading-4">✓</span>

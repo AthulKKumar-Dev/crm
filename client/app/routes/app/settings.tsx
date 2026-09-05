@@ -10,7 +10,7 @@ import {
   Building2, Lock, Bell, CreditCard, Palette, Users, Shield, Smartphone,
   Check, ChevronRight, AlertTriangle, Loader2, Plus, X, Mail, Trash2,
   Sun, Moon, Monitor, Receipt, Star, MapPin, Package, ShoppingBag, Layers,
-  Pencil,
+  Pencil, Store,
 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -44,6 +44,7 @@ import {
   OrderSettingsTab,
 } from "~/components/app/settings/sync-settings-tab";
 import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-tab";
+import { StoreProfileTab } from "~/components/app/settings/store-profile-tab";
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
 import { formatCurrency } from "~/lib/utils";
 import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse, Warehouse } from "~/types/api";
@@ -60,6 +61,7 @@ export function meta() {
 
 const TABS = [
   { id: "general", label: "General", icon: Building2 },
+  { id: "store-profile", label: "Store Profile", icon: Store },
   { id: "products", label: "Products", icon: Package },
   { id: "orders", label: "Orders", icon: ShoppingBag },
   { id: "channels", label: "Channels", icon: Layers },
@@ -1989,6 +1991,8 @@ export default function SettingsPage() {
           )}
 
           {/* ─── PRODUCT SETTINGS ─── */}
+          {activeTab === "store-profile" && <StoreProfileTab />}
+
           {activeTab === "products" && <ProductSettingsTab />}
 
           {/* ─── ORDER SETTINGS ─── */}

@@ -93,6 +93,25 @@ export class OrderController {
     res.send(JSON.stringify(report, null, 2));
   }
 
+  // GET /api/v1/orders/slips/data?orderIds=a,b,c
+  // Print payload for the batch package-slip route. MUST stay above the ':id'
+  // route — Nest matches in declaration order, so below it "slips" would be
+  // read as an order id.
+  //
+  // Comma-separated ids in one query param, matching GET /inventory/labels/data
+  // (no DTO; the parse is three lines and a DTO would only add indirection).
+  // No @AllowVendor: a slip carries the customer's full postal address, which
+  // vendors have no business printing.
+  @Get('slips/data')
+  @Roles(...ORG_OPERATORS)
+  getSlipData(@CurrentUser() user: JwtPayload, @Query('orderIds') orderIds?: string) {
+    const ids = (orderIds ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return this.orderService.getSlipData(user.orgId!, ids);
+  }
+
   // GET /api/v1/orders/:id
   @Get(':id')
   @AllowVendor()
@@ -180,10 +199,18 @@ export class OrderController {
   // Reads what is left to ship, and only the fulfilment UI consumes it. The
   // RolesGuard is allow-by-default, so without a decorator this was open to
   // every member including VIEWER — match the endpoint it feeds.
+  // Deliberately NO @AllowVendor(): VendorAccessGuard keeps this closed to
+  // vendors, whose fulfil UI reads their lines from findOneForVendor instead.
+  // The scope is still threaded below so that opening it later cannot leak
+  // another vendor's lines by omission.
   @Get(':id/fulfillable-line-items')
   @Roles(...ORG_OPERATORS_AND_VENDORS)
   fulfillableLineItems(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
-    return this.orderService.listFulfillableLineItems(id, user.orgId!);
+    return this.orderService.listFulfillableLineItems(
+      id,
+      user.orgId!,
+      vendorScopeFor(user),
+    );
   }
 
   // POST /api/v1/orders/:id/fulfillments
