@@ -630,7 +630,29 @@ export class ProductService {
       return created;
     });
 
-    // Give every new variant a scannable barcode before anything can push.
+    // Give every new variant a SKU, then a scannable barcode, before anything
+    // can push.
+    //
+    // The SKU is minted for the same reason the barcode below it is: a code
+    // the merchant never had to ask for. Until this existed, barcodes appeared
+    // by themselves and SKUs did not, so the Inventory screen carried a
+    // permanent "Generate all missing SKUs" button that nobody could interpret.
+    // The generator only fills gaps (`loadTargets` defaults to `missing-sku`),
+    // so a SKU supplied in the create payload survives untouched.
+    //
+    // SKU first: both draw from one `claimSequence` run, so the two codes for
+    // a variant read consecutively rather than interleaved with its siblings'.
+    try {
+      await this.skuGenerator.generateSkus(orgId, {
+        variantIds: product.variants.map((v) => v.id),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for new product ${product.id}: ${(err as Error).message}`,
+      );
+    }
+
+    // Then the barcode.
     //
     // Labels are printed from `barcode`, falling back to `sku` — and the SKU
     // shape ({PREFIX}-{PRODUCTCODE}-{SEQ}-{OPTIONS}) needs ~48 mm of label, so
@@ -1126,9 +1148,17 @@ export class ProductService {
       return row;
     });
 
-    // Same reasoning as create(): a variant without a barcode cannot be
-    // labelled on small stock, and the SKU is too long to stand in for one.
-    // No-ops when the caller supplied a barcode (the generator only fills gaps).
+    // Same reasoning as create(): both codes arrive with the variant rather
+    // than from a button the merchant has to find. Each no-ops when the caller
+    // supplied that code — the generator only fills gaps.
+    try {
+      await this.skuGenerator.generateSkus(orgId, { variantIds: [created.id] });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for new variant ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     try {
       await this.skuGenerator.generateBarcodes(orgId, {
         variantIds: [created.id],
@@ -1242,6 +1272,16 @@ export class ProductService {
       referenceType: 'manual',
       warehouseId: dto.warehouseId,
     });
+
+    // Turning tracking ON is a creation event as far as stock is concerned:
+    // `ensureStockRows` skips untracked variants, so a variant that has always
+    // been untracked has no row anywhere. Without this it would stay invisible
+    // on the Inventory screen — no row to list, no Adjust control, no way to
+    // ever give it stock — which is the state that made products permanently
+    // unsellable before. Idempotent, so flipping the switch twice is harmless.
+    if (dto.trackQuantity === true && variant.trackQuantity === false) {
+      await this.inventoryLedger.ensureStockRows(this.prisma, orgId, [updated]);
+    }
 
     await this.markOutOfSyncIfNeeded(variant.product.id);
     // A stock change has to reach Shopify: the pull treats Shopify as
@@ -2226,7 +2266,15 @@ export class ProductService {
             organizationId: orgId,
             externalId: `manual_${randomUUID()}`,
             title: v.title,
-            sku: v.sku,
+            // Never clone the SKU either, for a stronger reason than the
+            // barcode below: a SKU is the merchant's OWN identifier for one
+            // item, so two products sharing one is never meaningful — and
+            // `assertCodeFree` enforces exactly that uniqueness on every other
+            // write path. This path skipped it, so duplicating a product used
+            // to mint a guaranteed collision that the scan resolver
+            // (`findFirst` over sku and barcode alike) would resolve
+            // arbitrarily. A fresh SKU is generated below.
+            sku: null,
             // Never clone a barcode we minted — that guarantees a duplicate,
             // and with no DB unique constraint the scan resolver (findFirst)
             // would silently pick whichever row Postgres returned. The copy is
@@ -2285,10 +2333,28 @@ export class ProductService {
       'product_duplicate',
       created.id,
     );
+    // ...and give them a stock row, or a warehousing org gets a variant whose
+    // cached quantity says N while no location holds any of it — invisible on
+    // the Inventory screen, and unsellable until something else moves it.
+    await this.inventoryLedger.ensureStockRows(
+      this.prisma,
+      orgId,
+      created.variants,
+    );
 
-    // Replace the generated barcodes deliberately dropped above with fresh
-    // ones, so the copy is labellable immediately instead of inheriting the
-    // original's code.
+    // Replace the SKU and the generated barcode deliberately dropped above
+    // with fresh ones, so the copy is identifiable and labellable immediately
+    // instead of inheriting — and colliding with — the original's codes.
+    try {
+      await this.skuGenerator.generateSkus(orgId, {
+        variantIds: created.variants.map((v) => v.id),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for duplicated product ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     try {
       await this.skuGenerator.generateBarcodes(orgId, {
         variantIds: created.variants.map((v) => v.id),
@@ -2596,6 +2662,13 @@ export class ProductService {
       'initial',
       'csv_import',
       created.id,
+    );
+    // Same reason as `duplicate`: without a stock row the imported quantity
+    // exists only as a cache nothing backs.
+    await this.inventoryLedger.ensureStockRows(
+      this.prisma,
+      orgId,
+      created.variants,
     );
     return created;
   }
