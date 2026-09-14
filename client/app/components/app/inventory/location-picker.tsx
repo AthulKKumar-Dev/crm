@@ -155,9 +155,13 @@ export function LocationPicker({
                       {city ?? location.code}
                     </span>
                   </span>
-                  <span className="shrink-0 whitespace-nowrap pt-0.5 text-micro tabular-nums text-muted-foreground">
-                    {location.unitsAvailable.toLocaleString()} units
-                  </span>
+                  {/* An API older than this client omits the figure. Hide it
+                      rather than print a false "0 units" or crash the route. */}
+                  {typeof location.unitsAvailable === "number" && (
+                    <span className="shrink-0 whitespace-nowrap pt-0.5 text-micro tabular-nums text-muted-foreground">
+                      {location.unitsAvailable.toLocaleString()} units
+                    </span>
+                  )}
                 </button>
               );
             })
