@@ -1,6 +1,7 @@
 import {
   isNoopPlan,
   planOptionReconcile,
+  withAllOptionValues,
   RemoteOption,
 } from './product-options-reconcile.util';
 
@@ -155,5 +156,50 @@ describe('planOptionReconcile', () => {
       ],
     );
     expect(isNoopPlan(plan)).toBe(true);
+  });
+});
+
+describe('option values Shopify already holds', () => {
+  // Prod, Test Fleece Hoodie 2026-09-18: a failed push left "xl" on Shopify's
+  // Size option with no variant. `values` omits it, `optionValues` does not;
+  // re-adding it failed every retry with "Option value already exists".
+  it('does not re-add a value that exists only in optionValues', () => {
+    const live = withAllOptionValues([
+      {
+        id: gid(1),
+        name: 'Size',
+        position: 1,
+        values: ['Small', 'Medium', 'Large'],
+        optionValues: [
+          { name: 'Small' },
+          { name: 'Medium' },
+          { name: 'Large' },
+          { name: 'xl' },
+        ],
+      },
+    ]);
+    const plan = planOptionReconcile(
+      [{ name: 'Size', values: ['Small', 'Medium', 'Large', 'xl', 'xxl'] }],
+      live,
+    );
+    expect(plan.valuesToAdd).toEqual([
+      { optionId: gid(1), optionName: 'Size', values: [{ name: 'xxl' }] },
+    ]);
+  });
+
+  it('treats values differing only in case or whitespace as the same', () => {
+    const plan = planOptionReconcile(
+      [{ name: 'Size', values: ['m', ' L ', 'S'] }],
+      remote(['Size', ['M', 'L', 'S']]),
+    );
+    expect(isNoopPlan(plan)).toBe(true);
+  });
+
+  it('never sends the same value twice in one add', () => {
+    const plan = planOptionReconcile(
+      [{ name: 'Size', values: ['S', 'XL', 'xl', 'XL '] }],
+      remote(['Size', ['S']]),
+    );
+    expect(plan.valuesToAdd[0].values).toEqual([{ name: 'XL' }]);
   });
 });

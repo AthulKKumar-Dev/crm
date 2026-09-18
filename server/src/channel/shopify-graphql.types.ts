@@ -1977,7 +1977,10 @@ export interface ShopifyLiveOption {
   id: string;
   name: string;
   position: number;
+  /** Only values that have a variant. Use `optionValues` for the full list. */
   values: string[];
+  /** Every value, including ones with no variant (`hasVariants: false`). */
+  optionValues?: Array<{ name: string }>;
 }
 
 export interface ShopifyLiveVariantOptions {
@@ -1999,7 +2002,7 @@ export const PRODUCT_OPTIONS_QUERY = /* GraphQL */ `
   query ProductOptionsForPush($id: ID!) {
     product(id: $id) {
       id
-      options { id name position values }
+      options { id name position values optionValues { name } }
       variants(first: 100) {
         nodes {
           id
@@ -2030,7 +2033,7 @@ export const PRODUCT_OPTIONS_CREATE_MUTATION = /* GraphQL */ `
     productOptionsCreate(productId: $productId, options: $options, variantStrategy: $variantStrategy) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id
@@ -2065,7 +2068,7 @@ export const PRODUCT_OPTION_UPDATE_MUTATION = /* GraphQL */ `
     ) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
       }
       userErrors { field message code }
     }
@@ -2092,7 +2095,7 @@ export const PRODUCT_OPTIONS_DELETE_MUTATION = /* GraphQL */ `
       deletedOptionsIds
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id
@@ -2117,7 +2120,7 @@ export const PRODUCT_OPTIONS_REORDER_MUTATION = /* GraphQL */ `
     productOptionsReorder(productId: $productId, options: $options) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id

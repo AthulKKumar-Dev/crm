@@ -57,6 +57,30 @@ export interface OptionReconcilePlan {
   remoteIsPlaceholder: boolean;
 }
 
+/**
+ * Shopify's `ProductOption.values` lists only values that have a variant. A
+ * value added to an option whose variant was never created (a push that
+ * failed between productOptionUpdate and the variant create) still exists,
+ * and re-adding it is rejected with "Option value already exists" — forever,
+ * since every retry re-plans the same add. So fold in `optionValues`, which
+ * lists every value.
+ */
+export function withAllOptionValues<
+  T extends { values: string[]; optionValues?: Array<{ name: string }> | null },
+>(options: T[]): T[] {
+  return options.map((o) => {
+    const all = new Set(o.values);
+    for (const v of o.optionValues ?? []) all.add(v.name);
+    return { ...o, values: [...all] };
+  });
+}
+
+/** Shopify treats option values that differ only in case or surrounding
+ *  whitespace as the same value. */
+function valueKey(v: string): string {
+  return v.trim().toLocaleLowerCase();
+}
+
 export function isPlaceholderRemoteOptions(remote: RemoteOption[]): boolean {
   return (
     remote.length === 1 &&
@@ -90,7 +114,16 @@ export function planOptionReconcile(
   for (const o of local) {
     const r = remoteByName.get(o.name);
     if (!r) continue;
-    const missing = o.values.filter((v) => !r.values.includes(v));
+    // Keyed, and deduped by key, so one add never carries a value Shopify
+    // will call a duplicate — of an existing value or of another in the add.
+    const seen = new Set(r.values.map(valueKey));
+    const missing: string[] = [];
+    for (const v of o.values) {
+      const key = valueKey(v);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      missing.push(v);
+    }
     if (missing.length > 0) {
       valuesToAdd.push({
         optionId: r.id,

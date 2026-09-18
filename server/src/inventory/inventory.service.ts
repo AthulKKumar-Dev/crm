@@ -274,12 +274,24 @@ export class InventoryService {
       where.available = { gt: 0, lte: org?.lowStockThreshold ?? 10 };
     }
 
-    const orderBy: Prisma.StockLevelOrderByWithRelationInput =
-      query.sortBy === 'sku'
-        ? { variant: { sku: query.sortOrder ?? 'asc' } }
+    // Default matches Shopify's inventory list: product title A→Z, a
+    // product's variants in their own position order. The trailing id keeps
+    // pages stable when titles tie — without it rows can repeat or vanish
+    // across page boundaries.
+    const byProduct: Prisma.StockLevelOrderByWithRelationInput[] = [
+      { variant: { product: { title: query.sortOrder ?? 'asc' } } },
+      { variant: { position: 'asc' } },
+    ];
+    const orderBy: Prisma.StockLevelOrderByWithRelationInput[] = [
+      ...(query.sortBy === 'sku'
+        ? [{ variant: { sku: query.sortOrder ?? 'asc' } }]
         : query.sortBy === 'updatedAt'
-          ? { updatedAt: query.sortOrder ?? 'desc' }
-          : { available: query.sortOrder ?? 'asc' };
+          ? [{ updatedAt: query.sortOrder ?? 'desc' }]
+          : query.sortBy === 'available' || query.sortBy === 'onHand'
+            ? [{ available: query.sortOrder ?? 'asc' }]
+            : byProduct),
+      { id: 'asc' },
+    ];
 
     const [rows, total] = await Promise.all([
       this.prisma.stockLevel.findMany({
