@@ -2906,7 +2906,7 @@ export interface StockListParams {
   warehouseId?: string;
   q?: string;
   stockFilter?: "low" | "out" | "oversold";
-  sortBy?: "available" | "onHand" | "updatedAt" | "sku";
+  sortBy?: "product" | "available" | "onHand" | "updatedAt" | "sku";
   sortOrder?: "asc" | "desc";
 }
 

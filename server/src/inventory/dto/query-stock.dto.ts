@@ -40,7 +40,7 @@ export class QueryStockDto {
   stockFilter?: string;
 
   @IsOptional()
-  @IsIn(['available', 'onHand', 'updatedAt', 'sku'])
+  @IsIn(['product', 'available', 'onHand', 'updatedAt', 'sku'])
   sortBy?: string;
 
   @IsOptional()

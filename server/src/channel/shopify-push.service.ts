@@ -51,6 +51,7 @@ import {
   isPlaceholderRemoteOptions,
   LocalOption,
   planOptionReconcile,
+  withAllOptionValues,
 } from './product-options-reconcile.util';
 import { DEFAULT_VARIANT_TITLE } from '../product/variant-title.util';
 
@@ -1684,7 +1685,7 @@ export class ShopifyPushService {
         `Shopify product ${product.externalId} no longer exists — cannot push local edits`,
       );
     }
-    let remoteOptions: ShopifyLiveOption[] = snapshot.product.options;
+    let remoteOptions: ShopifyLiveOption[] = withAllOptionValues(snapshot.product.options);
     let remoteVariants: ShopifyLiveVariantOptions[] = snapshot.product.variants.nodes;
     const adopt = (
       p:
@@ -1693,7 +1694,7 @@ export class ShopifyPushService {
         | undefined,
     ) => {
       if (!p) return;
-      remoteOptions = p.options;
+      remoteOptions = withAllOptionValues(p.options);
       remoteVariants = p.variants.nodes;
     };
 
@@ -1771,7 +1772,7 @@ export class ShopifyPushService {
           `productOptionUpdate "${add.optionName}" ${ctx}`,
         );
         if (res.productOptionUpdate?.product) {
-          remoteOptions = res.productOptionUpdate.product.options;
+          remoteOptions = withAllOptionValues(res.productOptionUpdate.product.options);
         }
         this.logger.log(
           `Added value(s) ${add.values.map((v) => `"${v.name}"`).join(', ')} to option "${add.optionName}" on ${ctx}.`,
