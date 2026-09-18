@@ -33,6 +33,9 @@ import {
   ShopifyLiveVariantOptions,
   INVENTORY_SET_QUANTITIES_MUTATION,
   InventorySetQuantitiesResponse,
+  INVENTORY_ACTIVATE_MUTATION,
+  InventoryActivateResponse,
+  ShopifyUserError,
   VARIANT_INVENTORY_ITEM_QUERY,
   VariantInventoryItemResponse,
   ORDER_FULFILLMENT_ORDERS_QUERY,
@@ -100,6 +103,15 @@ export function isStalePendingSync(
   if (!sync.queuedAt) return true;
   const at = Date.parse(sync.queuedAt);
   return !Number.isFinite(at) || now - at > STALE_PENDING_SYNC_MS;
+}
+
+/** inventorySetQuantities rejected a write because the item is not stocked
+ *  at that location. Message fallback covers responses without `code`. */
+export function isNotStockedError(e: ShopifyUserError): boolean {
+  return (
+    e.code === 'ITEM_NOT_STOCKED_AT_LOCATION' ||
+    /not stocked at the location/i.test(e.message)
+  );
 }
 
 /**
@@ -1397,26 +1409,52 @@ export class ShopifyPushService {
     return perLocation;
   }
 
-  /** Set absolute available quantities in one mutation. Best-effort — a
-   *  failure is logged and never aborts the push. */
+  /**
+   * Set absolute available quantities in one mutation. Best-effort — a
+   * failure is logged and never aborts the push.
+   *
+   * A write to a location the item is not stocked at is rejected by Shopify,
+   * and the CRM stocks it there the moment a mapped warehouse holds a row for
+   * it. So on ITEM_NOT_STOCKED_AT_LOCATION the pair is activated at that
+   * location (with its quantity, in the same call) and the rest re-sent once.
+   * A zero for an unstocked pair is dropped instead: "not stocked" already
+   * reads as zero, and activating would plant empty levels at every location.
+   */
   private async setInventoryQuantities(
     auth: ShopifyAuthContext,
     quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }>,
   ): Promise<void> {
     try {
-      const res = await this.graphql.request<InventorySetQuantitiesResponse>(
-        auth,
-        INVENTORY_SET_QUANTITIES_MUTATION,
-        {
-          input: {
-            name: 'available',
-            reason: 'correction',
-            ignoreCompareQuantity: true,
-            quantities,
-          },
-        },
-      );
-      const errors = res.inventorySetQuantities?.userErrors ?? [];
+      let errors = await this.sendInventoryQuantities(auth, quantities);
+
+      const unstocked = errors.filter(isNotStockedError);
+      if (unstocked.length > 0) {
+        // Shopify reports the offending write as field ['input','quantities','<i>',…].
+        // If any index is unreadable, treat every write as a candidate —
+        // activating an already-stocked pair is a no-op.
+        const indexes = unstocked.map((e) => Number(e.field?.[2]));
+        const precise = indexes.every((i) => Number.isInteger(i) && quantities[i]);
+        const candidates = precise ? new Set(indexes) : new Set(quantities.map((_, i) => i));
+
+        const handled = new Set<number>();
+        for (const i of candidates) {
+          const q = quantities[i];
+          // Only a write KNOWN to be unstocked may be dropped as zero; in the
+          // imprecise case a zero may be a real write to a stocked location.
+          if (q.quantity <= 0) {
+            if (precise) handled.add(i);
+            continue;
+          }
+          if (await this.activateInventoryAt(auth, q)) handled.add(i);
+        }
+
+        const remaining = quantities.filter((_, i) => !handled.has(i));
+        errors = remaining.length > 0
+          ? await this.sendInventoryQuantities(auth, remaining)
+          : [];
+        quantities = remaining;
+      }
+
       if (errors.length > 0) {
         // Logged at ERROR, not WARN: a rejected push leaves Shopify holding a
         // number the CRM believes it changed, and the two only reconverge on
@@ -1437,6 +1475,49 @@ export class ShopifyPushService {
         `Inventory update failed for ${quantities.length} quantity write(s): ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  private async sendInventoryQuantities(
+    auth: ShopifyAuthContext,
+    quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }>,
+  ): Promise<ShopifyUserError[]> {
+    const res = await this.graphql.request<InventorySetQuantitiesResponse>(
+      auth,
+      INVENTORY_SET_QUANTITIES_MUTATION,
+      {
+        input: {
+          name: 'available',
+          reason: 'correction',
+          ignoreCompareQuantity: true,
+          quantities,
+        },
+      },
+    );
+    return res.inventorySetQuantities?.userErrors ?? [];
+  }
+
+  /** Stock an item at a location with its available quantity. True on success. */
+  private async activateInventoryAt(
+    auth: ShopifyAuthContext,
+    q: { inventoryItemId: string; locationId: string; quantity: number },
+  ): Promise<boolean> {
+    const res = await this.graphql.request<InventoryActivateResponse>(
+      auth,
+      INVENTORY_ACTIVATE_MUTATION,
+      { inventoryItemId: q.inventoryItemId, locationId: q.locationId, available: q.quantity },
+    );
+    const errors = res.inventoryActivate?.userErrors ?? [];
+    if (errors.length > 0 || !res.inventoryActivate?.inventoryLevel) {
+      this.logger.warn(
+        `inventoryActivate failed for ${q.inventoryItemId} at ${q.locationId}: ` +
+        (errors.map((e) => e.message).join('; ') || 'no inventory level returned'),
+      );
+      return false;
+    }
+    this.logger.log(
+      `Activated ${q.inventoryItemId} at ${q.locationId} with available=${q.quantity}`,
+    );
+    return true;
   }
 
   /**

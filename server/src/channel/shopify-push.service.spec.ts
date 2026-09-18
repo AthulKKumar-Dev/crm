@@ -5,7 +5,11 @@ import {
   readStoredTaxLines,
   STALE_PENDING_SYNC_MS,
 } from './shopify-push.service';
-import { ORDER_CREATE_MUTATION } from './shopify-graphql.types';
+import {
+  INVENTORY_ACTIVATE_MUTATION,
+  INVENTORY_SET_QUANTITIES_MUTATION,
+  ORDER_CREATE_MUTATION,
+} from './shopify-graphql.types';
 
 /**
  * `pushOrder` is the only code that turns a CRM counter sale into a real
@@ -363,5 +367,71 @@ describe('ShopifyPushService — catalogue prices on push', () => {
         'shop',
       ),
     ).rejects.toThrow(/exchange rate unavailable/i);
+  });
+});
+
+describe('ShopifyPushService — inventory write to an unstocked location', () => {
+  const A = { inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: 'gid://shopify/Location/87452614708', quantity: 5 };
+  const B = { inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: 'gid://shopify/Location/84967948340', quantity: 7 };
+  const auth = { shopDomain: 'collabo-test.myshopify.com', accessToken: 'tok' };
+  const notStocked = (i: number) => ({
+    field: ['input', 'quantities', String(i), 'locationId'],
+    message: 'The specified inventory item is not stocked at the location.',
+    code: 'ITEM_NOT_STOCKED_AT_LOCATION',
+  });
+
+  function withResponses(firstErrors: unknown[]) {
+    const { service, graphql } = build(null);
+    let setCalls = 0;
+    graphql.request.mockImplementation(async (_a: unknown, query: string) => {
+      if (query === INVENTORY_ACTIVATE_MUTATION) {
+        return { inventoryActivate: { inventoryLevel: { id: 'lvl' }, userErrors: [] } };
+      }
+      if (query === INVENTORY_SET_QUANTITIES_MUTATION) {
+        setCalls += 1;
+        return {
+          inventorySetQuantities: {
+            inventoryAdjustmentGroup: setCalls === 1 ? null : { createdAt: 'now' },
+            userErrors: setCalls === 1 ? firstErrors : [],
+          },
+        };
+      }
+      return {};
+    });
+    const calls = (q: string) => graphql.request.mock.calls.filter((c) => c[1] === q);
+    return { service, calls };
+  }
+
+  it('activates the unstocked pair with its quantity and re-sends only the rest', async () => {
+    const { service, calls } = withResponses([notStocked(1)]);
+    await (service as any).setInventoryQuantities(auth, [A, B]);
+
+    const activations = calls(INVENTORY_ACTIVATE_MUTATION);
+    expect(activations).toHaveLength(1);
+    expect(activations[0][2]).toEqual({
+      inventoryItemId: B.inventoryItemId,
+      locationId: B.locationId,
+      available: 7,
+    });
+    const sets = calls(INVENTORY_SET_QUANTITIES_MUTATION);
+    expect(sets).toHaveLength(2);
+    expect((sets[1][2] as any).input.quantities).toEqual([A]);
+  });
+
+  it('drops a zero for an unstocked pair instead of activating it', async () => {
+    const { service, calls } = withResponses([notStocked(1)]);
+    await (service as any).setInventoryQuantities(auth, [A, { ...B, quantity: 0 }]);
+
+    expect(calls(INVENTORY_ACTIVATE_MUTATION)).toHaveLength(0);
+    const sets = calls(INVENTORY_SET_QUANTITIES_MUTATION);
+    expect((sets[1][2] as any).input.quantities).toEqual([A]);
+  });
+
+  it('leaves unrelated errors alone (no activation, no retry)', async () => {
+    const { service, calls } = withResponses([{ field: null, message: 'Something else' }]);
+    await (service as any).setInventoryQuantities(auth, [A, B]);
+
+    expect(calls(INVENTORY_ACTIVATE_MUTATION)).toHaveLength(0);
+    expect(calls(INVENTORY_SET_QUANTITIES_MUTATION)).toHaveLength(1);
   });
 });
