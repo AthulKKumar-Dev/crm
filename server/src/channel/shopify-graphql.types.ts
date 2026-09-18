@@ -2144,6 +2144,31 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
     inventorySetQuantities(input: $input) {
       inventoryAdjustmentGroup { createdAt }
+      userErrors { field message code }
+    }
+  }
+`;
+
+// ─── inventoryActivate ──────────────────────────────────────────────────────
+// Stocks an inventory item at a location (and optionally sets its available
+// quantity). inventorySetQuantities rejects a write to a location the item is
+// not stocked at, so a push to a newly mapped location has to activate first.
+
+export interface InventoryActivateResponse {
+  inventoryActivate: {
+    inventoryLevel: { id: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const INVENTORY_ACTIVATE_MUTATION = /* GraphQL */ `
+  mutation InventoryActivate($inventoryItemId: ID!, $locationId: ID!, $available: Int) {
+    inventoryActivate(
+      inventoryItemId: $inventoryItemId
+      locationId: $locationId
+      available: $available
+    ) {
+      inventoryLevel { id }
       userErrors { field message }
     }
   }
