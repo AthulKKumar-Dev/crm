@@ -1,14 +1,7 @@
 import { Outlet } from "react-router";
-import { Leaf, ShoppingCart, Users, BarChart3, MessageSquare } from "lucide-react";
 import { GuestGuard } from "~/components/guards/guest-guard";
 import { BrandCarousel } from "~/components/app/auth/brand-carousel";
-
-const FEATURES = [
-  { icon: ShoppingCart, text: "Manage orders across every channel" },
-  { icon: Users, text: "Unified customer profiles & history" },
-  { icon: BarChart3, text: "Real-time analytics & reports" },
-  { icon: MessageSquare, text: "Centralised conversation inbox" },
-];
+import { BrandLogo } from "~/components/app/brand-logo";
 
 /**
  * Shared layout for all authentication pages (login, signup, verify, etc.).
@@ -27,15 +20,8 @@ export default function AuthLayout() {
 
         {/* ── Right form panel ─────────────────────────────────── */}
         <div className="flex flex-1 flex-col items-center justify-center px-6 py-6">
-          {/* Mobile logo */}
-          <div className="mb-8 flex items-center gap-2 lg:hidden">
-            <div className="flex size-8 items-center justify-center rounded-xl bg-[#CEF17B]">
-              <Leaf className="size-4 text-gray-900" />
-            </div>
-            <span className="text-base font-bold text-gray-900">Collabo</span>
-          </div>
-
           <div className="w-full max-w-[400px]">
+            <BrandLogo variant="color" className="mb-8 h-8" />
             <Outlet />
           </div>
 

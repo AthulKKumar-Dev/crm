@@ -76,7 +76,7 @@ text colour — at runtime, with no build error. Add a role to `app.css` **and**
 
 ## Font roles
 
-`font-sans` (Geist) · `font-heading` · `font-display` (Baumans — wordmark only) ·
+`font-sans` (Geist) · `font-heading` · (the product wordmark is an image — `<BrandLogo>` in `components/app/brand-logo.tsx` — not a font) ·
 `font-mono` (print receipts, tabular figures)
 
 Renaming a font or colour token leaves the old class silently inert — Tailwind emits

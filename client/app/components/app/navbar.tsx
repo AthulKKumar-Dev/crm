@@ -14,7 +14,6 @@ import {
   ChevronDown,
   LogOut,
   User,
-  Leaf,
   Receipt,
   ShieldCheck,
   ArrowLeftRight,
@@ -36,6 +35,7 @@ import {
   DropdownMenuLabel,
 } from "~/components/ui/dropdown-menu";
 import { cn } from "~/lib/utils";
+import { BrandLogo } from "~/components/app/brand-logo";
 import { useAuthStore } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
@@ -219,11 +219,8 @@ export function Navbar() {
       <div className="mx-auto flex h-[72px] max-w-screen-xl items-center justify-between px-6">
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
-        <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
-          {/* <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
-            <Leaf className="size-4 text-gray-900" />
-          </div> */}
-          <span className="font-display text-stat text-brand-strong">collabo</span>
+        <Link to="/dashboard" className="flex shrink-0 items-center">
+          <BrandLogo className="h-7" />
         </Link>
 
         {/* ── Nav — pill container ─────────────────────────────── */}

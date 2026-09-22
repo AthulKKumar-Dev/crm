@@ -62,6 +62,41 @@ export class EmailService implements OnModuleInit {
         return `${this.fromName} <${this.fromEmail}>`;
     }
 
+    /** Absolute URL of the product wordmark, served by the frontend (PNG: Outlook cannot render WebP). */
+    private get logoUrl(): string {
+        return `${this.frontendUrl.replace(/\/$/, '')}/brand/collabo-wordmark.png`;
+    }
+
+    /** Wraps a message body in the branded shell: wordmark header, card, footer. */
+    private layout(body: string): string {
+        return `
+            <div style="margin: 0; padding: 32px 16px; background: #f1f7fa; font-family: 'Segoe UI', Helvetica, Arial, sans-serif; color: #111827;">
+                <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width: 480px; margin: 0 auto;">
+                    <tr>
+                        <td style="padding: 0 0 24px 0;">
+                            <img src="${this.logoUrl}" width="140" alt="Collabo" style="display: block; width: 140px; height: auto; border: 0;" />
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="background: #ffffff; border-radius: 16px; padding: 32px; font-size: 15px; line-height: 1.55;">
+                            ${body}
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 24px 0 0 0; font-size: 12px; color: #9ca3af; text-align: center;">
+                            &copy; ${new Date().getFullYear()} Collabo Digital Network
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        `;
+    }
+
+    /** Primary call-to-action, matching the app's ink-fill / lime-text brand button. */
+    private button(href: string, label: string): string {
+        return `<a href="${href}" style="display: inline-block; padding: 12px 24px; background: #000000; color: #CEF17B; font-weight: 600; text-decoration: none; border-radius: 9999px;">${label}</a>`;
+    }
+
     private htmlToText(html: string): string {
         return html
             .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -115,13 +150,13 @@ export class EmailService implements OnModuleInit {
             {
                 to: email,
                 subject: 'Your verification code',
-                html: `
-                    <h2>Verify your email</h2>
+                html: this.layout(`
+                    <h2 style="margin: 0 0 12px 0; font-size: 22px;">Verify your email</h2>
                     <p>Your verification code is:</p>
                     <h1 style="font-size: 32px; letter-spacing: 8px; text-align: center; padding: 16px; background: #f3f4f6; border-radius: 8px;">${code}</h1>
                     <p>This code expires in 10 minutes.</p>
                     <p>If you didn't create an account, you can safely ignore this email.</p>
-                `,
+                `),
             },
             'verification',
         );
@@ -139,13 +174,13 @@ export class EmailService implements OnModuleInit {
             {
                 to: email,
                 subject: 'Reset your password',
-                html: `
-                    <h2>Reset your password</h2>
+                html: this.layout(`
+                    <h2 style="margin: 0 0 12px 0; font-size: 22px;">Reset your password</h2>
                     <p>Click the button below to reset your password:</p>
-                    <a href="${resetLink}" style="display: inline-block; padding: 12px 24px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px;">Reset Password</a>
+                    ${this.button(resetLink, 'Reset Password')}
                     <p>This link expires in 1 hour.</p>
                     <p>If you didn't request this, you can safely ignore this email.</p>
-                `,
+                `),
             },
             'password-reset',
         );
@@ -163,13 +198,13 @@ export class EmailService implements OnModuleInit {
             {
                 to: email,
                 subject: `You're invited to join ${orgName}`,
-                html: `
-                    <h2>You've been invited!</h2>
+                html: this.layout(`
+                    <h2 style="margin: 0 0 12px 0; font-size: 22px;">You've been invited!</h2>
                     <p>You've been invited to join <strong>${orgName}</strong>.</p>
-                    <a href="${inviteLink}" style="display: inline-block; padding: 12px 24px; background: #2563eb; color: white; text-decoration: none; border-radius: 6px;">Accept Invite</a>
+                    ${this.button(inviteLink, 'Accept Invite')}
                     <p>This invite expires in 7 days.</p>
                     <p>If you don't recognize this organization, you can safely ignore this email.</p>
-                `,
+                `),
             },
             'team-invite',
         );
