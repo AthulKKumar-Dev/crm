@@ -45,7 +45,7 @@ import { ShopifyPushService, isStalePendingSync } from '../channel/shopify-push.
 /// two apart; `attempts` is not incremented because nothing ran.
 const QUEUE_UNAVAILABLE_ERROR =
   'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
-import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
+import { ShopifyGraphqlClient, ShopifyGraphqlError } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
@@ -60,6 +60,9 @@ import {
   uniqueViolationTargets,
 } from '../common/utils/serialization-retry.util';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
+import { normalizeTrackingUrl } from './tracking-url.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -67,7 +70,6 @@ import {
   FulfillmentCreateVariables,
   FulfillmentTrackingInfoUpdateResponse,
   FulfillmentTrackingInfoUpdateVariables,
-  MailingAddressInput,
   OrderCancelResponse,
   OrderCancelVariables,
   OrderCapturableTransactionsResponse,
@@ -1073,6 +1075,20 @@ export class OrderService {
         // 2. Resolve customer (existing by id/email/phone, else create).
         const customer = await this.resolveCustomer(tx, orgId, channel.id, dto);
 
+        // 2b. Remember where this customer's goods go, so picking them on the
+        //     next order pre-fills it. Fill-if-empty: a saved address (e.g.
+        //     Shopify's default) is never overwritten by one order's.
+        const deliveredTo = dto.shippingAddress ?? dto.billingAddress;
+        if (deliveredTo && customer.defaultAddress == null) {
+          await tx.customer.update({
+            where: { id: customer.id },
+            data: {
+              defaultAddress: deliveredTo as Prisma.InputJsonValue,
+              addresses: [deliveredTo] as Prisma.InputJsonValue,
+            },
+          });
+        }
+
         // 3. Fetch variants — used for line-item snapshots, tax math, AND
         //    inventory gating (Phase 2: trackQuantity / continueSellingWhenOutOfStock).
         const variants = await tx.productVariant.findMany({
@@ -1958,7 +1974,12 @@ export class OrderService {
 
     if (input.phone) {
       const byPhone = await tx.customer.findFirst({
-        where: { organizationId: orgId, phone: input.phone },
+        where: {
+          organizationId: orgId,
+          // Matches the E.164 the form now sends AND the as-typed form older
+          // customers were saved under — see phoneLookupVariants.
+          phone: { in: phoneLookupVariants(input.phone, countryCodeOf(input.address)) },
+        },
       });
       if (byPhone) {
         return this.fillMissingCustomerFields(tx, byPhone, input);
@@ -2000,6 +2021,7 @@ export class OrderService {
       lastName: string | null;
       gstin: string | null;
       billingStateCode: string | null;
+      defaultAddress: Prisma.JsonValue | null;
     },
     input: CreateOfflineOrderDto['customer'],
   ) {
@@ -2054,7 +2076,8 @@ export class OrderService {
       if (dto.tags !== undefined) input.tags = dto.tags;
       if (dto.note !== undefined) input.note = dto.note;
       if (dto.shippingAddress !== undefined) {
-        input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
+        const shopifyAddress = toShopifyAddress(dto.shippingAddress, defaultCountryFor(order.currency));
+        if (shopifyAddress) input.shippingAddress = shopifyAddress;
       }
       const result = await this.graphql.request<OrderUpdateResponse, OrderUpdateVariables>(
         { shopDomain, accessToken: token },
@@ -3483,6 +3506,8 @@ export class OrderService {
     dto: CreateFulfillmentDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    if (dto.tracking) dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3951,6 +3976,8 @@ export class OrderService {
     dto: UpdateTrackingDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3968,26 +3995,36 @@ export class OrderService {
 
     if (isShopifyFulfillment) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
-      const result = await this.graphql.request<
-        FulfillmentTrackingInfoUpdateResponse,
-        FulfillmentTrackingInfoUpdateVariables
-      >(
-        { shopDomain, accessToken: token },
-        FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
-        {
-          fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
-          trackingInfoInput: {
-            number: dto.tracking.number ?? null,
-            url: dto.tracking.url ?? null,
-            company: dto.tracking.company ?? null,
+      // Same treatment as createFulfillment: Shopify refusing the input is the
+      // merchant's to fix, so surface it as a 400 rather than an opaque 500.
+      // Transport/auth failures are left alone — those are genuinely ours.
+      try {
+        const result = await this.graphql.request<
+          FulfillmentTrackingInfoUpdateResponse,
+          FulfillmentTrackingInfoUpdateVariables
+        >(
+          { shopDomain, accessToken: token },
+          FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+          {
+            fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
+            trackingInfoInput: {
+              number: dto.tracking.number ?? null,
+              url: dto.tracking.url ?? null,
+              company: dto.tracking.company ?? null,
+            },
+            notifyCustomer: dto.notifyCustomer ?? true,
           },
-          notifyCustomer: dto.notifyCustomer ?? true,
-        },
-      );
-      ShopifyGraphqlClient.throwIfUserErrors(
-        result.fulfillmentTrackingInfoUpdate.userErrors,
-        'fulfillmentTrackingInfoUpdate',
-      );
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          result.fulfillmentTrackingInfoUpdate.userErrors,
+          'fulfillmentTrackingInfoUpdate',
+        );
+      } catch (e) {
+        if (!(e instanceof ShopifyGraphqlError) || e.code !== 'GRAPHQL_ERROR') throw e;
+        const detail = e.message.replace(/^(fulfillmentTrackingInfoUpdate|GraphQL errors): /, '');
+        this.logger.warn(`fulfillmentTrackingInfoUpdate rejected for order ${orderId}: ${detail}`);
+        throw new BadRequestException(`Shopify rejected this tracking update: ${detail}`);
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -4193,32 +4230,4 @@ export class OrderService {
     return order;
   }
 
-  /**
-   * Map an arbitrary address object (accepts both REST snake_case and the
-   * camelCase shape Shopify GraphQL expects) into a MailingAddressInput.
-   * Unknown fields fall through; the merchant DB stores addresses as raw
-   * JSON so we tolerate variation.
-   */
-  private toShopifyAddress(addr: Record<string, unknown>): MailingAddressInput {
-    const pick = (...keys: string[]): string | null => {
-      for (const k of keys) {
-        const v = addr[k];
-        if (typeof v === 'string') return v;
-      }
-      return null;
-    };
-    return {
-      address1: pick('address1'),
-      address2: pick('address2'),
-      city: pick('city'),
-      province: pick('province'),
-      country: pick('country'),
-      countryCode: pick('countryCode', 'country_code'),
-      zip: pick('zip'),
-      firstName: pick('firstName', 'first_name'),
-      lastName: pick('lastName', 'last_name'),
-      phone: pick('phone'),
-      company: pick('company'),
-    };
-  }
 }

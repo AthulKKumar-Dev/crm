@@ -1,5 +1,6 @@
 import { motion, type Variants } from "framer-motion";
-import { Mail, Camera, Leaf } from "lucide-react";
+import { Mail, Camera } from "lucide-react";
+import { BrandLogo } from "~/components/app/brand-logo";
 import ShopifyIcon from "~/assests/icon/shopifyIcon";
 import WhatsappIcon from "~/assests/icon/whatsappIcon";
 import MailIcon from "~/assests/icon/mailIcon";
@@ -122,7 +123,7 @@ export function UnifiedCommerceIllustration() {
                 variants={hubPop}
                 className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-1.5 rounded-full bg-[#CEF17B] px-3 py-1.5 shadow-lg shadow-[#CEF17B]/30 ring-2 ring-white/20"
             >
-                <span className=" font-display text-caption font-bold text-brand-forest">collabo</span>
+                <BrandLogo variant="forest" className="h-3" />
             </motion.div>
         </motion.div>
     );

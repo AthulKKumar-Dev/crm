@@ -38,6 +38,7 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { calcMargin, cn, formatCurrency } from "~/lib/utils";
 import { formatDate, formatDateTime } from "~/lib/format-date";
 import { handleMutationError } from "~/lib/handle-mutation-error";
+import { canSyncProduct, productSyncActionTitle } from "~/lib/product-shopify-sync";
 import {
   newOptionUid,
   normalizeProductOptions,
@@ -50,6 +51,7 @@ import {
   toGstRateOption,
   toInputNumber,
   toNullableNumber,
+  VARIANT_DRAFT_KEYS,
   type VariantDraft,
 } from "~/lib/variant-draft";
 import { VariantOptionsCard } from "~/components/app/product-variants/variant-options-card";
@@ -94,6 +96,7 @@ import {
   BreadcrumbSeparator,
 } from "~/components/ui/breadcrumb";
 import { Button } from "~/components/ui/button";
+import { Tip } from "~/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -367,6 +370,51 @@ export default function ProductDetailPage() {
     // re-sync after a save happens in handleSaveProduct.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product?.id, hydrateFormFromProduct]);
+
+  // Server-side writes to the SAME product (Create SKU, stock adjustments)
+  // still have to reach fields the merchant hasn't touched. Without this the
+  // variant table kept showing the pre-refetch empty SKU — "Create SKU did
+  // nothing" — and the next page Save sent that stale "" back as sku: null,
+  // erasing the SKU the server had just minted. Only untouched fields move
+  // (draft === baseline), so in-progress edits are never overwritten.
+  useEffect(() => {
+    if (!product || hydratedProductId !== product.id) return;
+    const base = baselineRef.current;
+    if (!base) return;
+
+    const server = buildVariantDrafts(product.variants ?? []);
+    const nextDrafts = { ...variantDrafts };
+    const nextBaseline = { ...base.variantDrafts };
+    let changed = false;
+    for (const [variantId, fresh] of Object.entries(server)) {
+      const draft = variantDrafts[variantId];
+      const was = base.variantDrafts[variantId];
+      // Rows with no draft already render straight from the variant.
+      if (!draft || !was) continue;
+      for (const key of VARIANT_DRAFT_KEYS) {
+        if (draft[key] === was[key] && was[key] !== fresh[key]) {
+          nextDrafts[variantId] = { ...nextDrafts[variantId], [key]: fresh[key] };
+          nextBaseline[variantId] = { ...nextBaseline[variantId], [key]: fresh[key] };
+          changed = true;
+        }
+      }
+    }
+
+    // Simple products edit the default variant's SKU on Overview.
+    const serverSku = product.variants?.[0]?.sku ?? "";
+    const skuUntouched = sku === base.sku && base.sku !== serverSku;
+    if (skuUntouched) setSku(serverSku);
+
+    if (!changed && !skuUntouched) return;
+    baselineRef.current = {
+      ...base,
+      variantDrafts: nextBaseline,
+      ...(skuUntouched ? { sku: serverSku } : {}),
+    };
+    if (changed) setVariantDrafts(nextDrafts);
+    // Keyed on the product payload only; the drafts are read from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product, hydratedProductId]);
 
   useEffect(() => {
     const images =
@@ -950,11 +998,14 @@ export default function ProductDetailPage() {
                     CRM (Manual)
                   </span>
                 ) : (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300">
-                    <Check className="size-3" />
-                    Synced from {product.channel?.platform}
+                  // Source only — the sync state is its own pill below. This
+                  // used to read "Synced from SHOPIFY" in green even while the
+                  // product had unpushed edits or a failed push.
+                  <span className="inline-flex items-center rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] font-medium text-gray-700 dark:text-gray-300">
+                    From {product.channel?.platform === "SHOPIFY" ? "Shopify" : product.channel?.platform}
                   </span>
                 )}
+                <ShopifySyncStatusPill sync={sync} />
                 {product.status === "DRAFT" && product.publishedAt && new Date(product.publishedAt) > new Date() && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                     <Calendar className="size-3" />
@@ -973,6 +1024,13 @@ export default function ProductDetailPage() {
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* Independent of Save on purpose: saving never pushes, so a
+              merchant can keep an edit CRM-only for as long as they want. */}
+          <ProductSyncHeaderAction
+            product={product}
+            sync={sync}
+            hasUnsavedChanges={isProductDirty || isSaving}
+          />
           {isProductDirty && (
             <>
               <Button
@@ -1632,11 +1690,9 @@ export default function ProductDetailPage() {
                   <DescRow label="Variants" value={String(product.variants.length)} />
                 </dl>
               </Section>
-              {sync && (
-                <Section title="Shopify Sync">
-                  <ShopifySyncCard sync={sync} productId={product.id} />
-                </Section>
-              )}
+              <Section title="Shopify Sync">
+                <ShopifySyncCard sync={sync} />
+              </Section>
             </>
           )}
 
@@ -1886,37 +1942,139 @@ export default function ProductDetailPage() {
   );
 }
 
-function ShopifySyncCard({
+const PILL_BASE =
+  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium";
+
+/** Title-row pill for the states that need attention; nothing otherwise. */
+function ShopifySyncStatusPill({
   sync,
-  productId,
 }: {
-  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error">;
-  productId: string;
+  sync: Pick<ProductShopifySync, "status" | "error"> | null;
+}) {
+  if (sync?.status === "OUT_OF_SYNC") {
+    return (
+      <span
+        title="Saved edits haven't been pushed to Shopify yet"
+        className={cn(PILL_BASE, "bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Out of sync
+      </span>
+    );
+  }
+  if (sync?.status === "FAILED") {
+    return (
+      <span
+        title={`Shopify sync failed: ${sync.error ?? "unknown"}`}
+        className={cn(PILL_BASE, "bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Sync failed
+      </span>
+    );
+  }
+  return null;
+}
+
+/**
+ * Header counterpart of the list row's cloud icon (same visibility rule via
+ * canSyncProduct). Sync pushes the SAVED product, so it is disabled while the
+ * page holds unsaved edits — otherwise the merchant would think those went to
+ * Shopify too. Save stays a separate button that never pushes.
+ */
+function ProductSyncHeaderAction({
+  product,
+  sync,
+  hasUnsavedChanges,
+}: {
+  product: { id: string; channel?: { platform: string } | null };
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId"> | null;
+  hasUnsavedChanges: boolean;
 }) {
   const syncMutation = useSyncProductMutation();
-  // Same action as the list page's cloud icon. The card used to tell the
-  // merchant to "click Sync to Shopify" while the only button lived on the
-  // list — so an out-of-sync product had no way to push from its own page.
-  const syncButton = (
-    <button
+
+  if (sync?.status === "PENDING") {
+    return (
+      <Button type="button" variant="outline" size="action" disabled>
+        <Loader2 className="size-3.5 animate-spin" />
+        Syncing…
+      </Button>
+    );
+  }
+
+  if (!canSyncProduct(product, sync)) {
+    return (
+      <span
+        title={
+          sync?.shopifyProductId
+            ? `Shopify product ID: ${sync.shopifyProductId}`
+            : "Synced to Shopify"
+        }
+        className={cn(PILL_BASE, "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300")}
+      >
+        <Check className="size-3" />
+        Synced to Shopify
+      </span>
+    );
+  }
+
+  const button = (
+    <Button
       type="button"
-      disabled={syncMutation.isPending}
-      onClick={() => syncMutation.mutate(productId)}
-      className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+      variant="outline"
+      size="action"
+      disabled={hasUnsavedChanges || syncMutation.isPending}
+      onClick={() => syncMutation.mutate(product.id)}
     >
       {syncMutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />
       ) : (
         <UploadCloud className="size-3.5" />
       )}
-      {sync.status === "FAILED" ? "Retry sync" : "Sync to Shopify"}
-    </button>
+      {sync?.status === "FAILED" ? "Retry sync" : "Sync to Shopify"}
+    </Button>
   );
 
+  // A disabled <button> swallows pointer events, so the tooltip hangs off a
+  // focusable wrapper instead.
+  return (
+    <Tip
+      text={
+        hasUnsavedChanges
+          ? "Save your changes first — Sync pushes the saved product"
+          : productSyncActionTitle(sync)
+      }
+      side="bottom"
+    >
+      <span tabIndex={hasUnsavedChanges ? 0 : -1} className="inline-flex">
+        {button}
+      </span>
+    </Tip>
+  );
+}
+
+/** Channels tab: status only — the single sync action lives in the header. */
+function ShopifySyncCard({
+  sync,
+}: {
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error"> | null;
+}) {
+  if (!sync) {
+    return (
+      <div className="space-y-2 text-xs">
+        <span className={cn(PILL_BASE, "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300")}>
+          Not synced yet
+        </span>
+        <p className="text-[10px] text-muted-foreground">
+          Use Sync to Shopify at the top of the page to push this product.
+        </p>
+      </div>
+    );
+  }
   if (sync.status === "SYNCED") {
     return (
       <div className="space-y-2 text-xs">
-        <span className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300">
+        <span className={cn(PILL_BASE, "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300")}>
           <Check className="size-3" />
           Synced
         </span>
@@ -1930,7 +2088,7 @@ function ShopifySyncCard({
   }
   if (sync.status === "PENDING") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+      <span className={cn(PILL_BASE, "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300")}>
         <Loader2 className="size-3 animate-spin" />
         Syncing
       </span>
@@ -1939,25 +2097,17 @@ function ShopifySyncCard({
   if (sync.status === "OUT_OF_SYNC") {
     return (
       <div className="space-y-2 text-xs">
-        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="size-3" />
-          Out of sync
-        </span>
+        <ShopifySyncStatusPill sync={sync} />
         <p className="text-[10px] text-muted-foreground">
-          Local edits haven't been pushed yet.
+          Saved edits haven't been pushed yet. Use Sync to Shopify at the top of the page.
         </p>
-        {syncButton}
       </div>
     );
   }
   return (
     <div className="space-y-2 text-xs">
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">
-        <AlertTriangle className="size-3" />
-        Sync failed
-      </span>
+      <ShopifySyncStatusPill sync={sync} />
       {sync.error && <p className="text-[10px] text-red-700 dark:text-red-400">{sync.error}</p>}
-      {syncButton}
     </div>
   );
 }

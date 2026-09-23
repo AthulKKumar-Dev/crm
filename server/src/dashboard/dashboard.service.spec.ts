@@ -166,6 +166,20 @@ describe('DashboardService.getSalesAndProfit', () => {
       expect(days).toBeLessThan(30);
     });
 
+    it('anchors the 7-day range to the start of a day', async () => {
+      const { service } = build();
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+      const from = new Date(period.from);
+
+      expect(period.label).toBe('Last 7 days');
+      expect(from.getUTCHours()).toBe(0);
+      expect(from.getUTCMinutes()).toBe(0);
+      // 7 daily buckets: 6 whole days plus today, still in progress.
+      const days = (new Date(period.to).getTime() - from.getTime()) / 86_400_000;
+      expect(days).toBeGreaterThanOrEqual(6);
+      expect(days).toBeLessThan(7);
+    });
+
     it('buckets in the organization timezone, not the server one', async () => {
       // Deployments run UTC, so an IST merchant's late-evening sales otherwise
       // file into the previous month.

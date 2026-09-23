@@ -302,7 +302,9 @@ export default function DraftDetailPage() {
             completeDraft.mutate(payload, {
               onSuccess: (result) => {
                 setShowComplete(false);
-                navigate(`/orders/${result.order.id}`);
+                // No order yet = completed in Shopify, still syncing; the
+                // Orders list is where it lands.
+                navigate(result.order ? `/orders/${result.order.id}` : "/orders");
               },
             })
           }

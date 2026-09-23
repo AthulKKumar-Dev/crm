@@ -2,6 +2,8 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { countryCodeOf, normalizePhone } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from './shopify-address.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -140,6 +142,71 @@ export function readStoredTaxLines(value: Prisma.JsonValue | null | undefined): 
     out.push({ title, rate, price });
   }
   return out;
+}
+
+/**
+ * The customer phone as `orderCreate` will accept it: E.164, or null.
+ *
+ * Shopify rejects the WHOLE order ("Order Phone is invalid") for anything
+ * else, and the CRM stored phones as typed — a counter sale's "9847586793"
+ * with no country code failed every retry. The country comes from the order's
+ * address; a counter sale usually has none, and an INR order is an Indian
+ * sale. `raw` is kept so the caller can tell "no phone" from "unusable phone".
+ */
+export function shopifyOrderPhone(order: {
+  currency: string;
+  shippingAddress?: Prisma.JsonValue | null;
+  billingAddress?: Prisma.JsonValue | null;
+  customer?: { phone: string | null } | null;
+}): { raw: string | null; e164: string | null } {
+  const raw = order.customer?.phone?.trim() || null;
+  if (!raw) return { raw: null, e164: null };
+  const country =
+    countryCodeOf(order.shippingAddress) ??
+    countryCodeOf(order.billingAddress) ??
+    (order.currency?.toUpperCase() === 'INR' ? 'IN' : null);
+  return { raw, e164: normalizePhone(raw, country) };
+}
+
+/**
+ * The `orderCreate` customer block.
+ *
+ * A customer that came from Shopify is associated by GID. A CRM customer used
+ * to ride only as the order's email/phone, so Shopify created a NAMELESS
+ * customer for it — and that nameless customer echoed back over the CRM
+ * row's name ("Guest order"). `toUpsert` carries the name.
+ *
+ * `toUpsert` needs an `id` or `email` — Shopify rejects the whole order with
+ * a phone alone ("requires at least one of id, email"), whatever its docs say
+ * about matching on phone. It also errors on a phone that clashes with
+ * another customer's, so the upsert keys on the email only and the phone
+ * stays on the order. Without an email there is no block, as before; the
+ * CRM keeps its own buyer on the echo either way (see `crmBuyerOf` in the
+ * sync service).
+ */
+export function shopifyOrderCustomer(
+  customer: {
+    externalId: string | null;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  } | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!customer) return undefined;
+  const externalId = customer.externalId;
+  if (externalId && !externalId.startsWith('manual_') && /^\d+$/.test(externalId)) {
+    return { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', externalId) } };
+  }
+
+  const email = customer.email?.trim() || null;
+  if (!email) return undefined;
+  return {
+    toUpsert: {
+      email,
+      ...(customer.firstName?.trim() && { firstName: customer.firstName.trim() }),
+      ...(customer.lastName?.trim() && { lastName: customer.lastName.trim() }),
+    },
+  };
 }
 
 /**
@@ -289,22 +356,31 @@ export class ShopifyPushService {
         : { title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title, ...base };
     });
 
-    // Customers originally synced from Shopify are associated by GID so no
-    // duplicate is created; manual customers ride as email/phone on the order.
-    const customerExternalId = order.customer?.externalId;
-    const customerBlock =
-      customerExternalId && !customerExternalId.startsWith('manual_') && /^\d+$/.test(customerExternalId)
-        ? { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', customerExternalId) } }
-        : undefined;
-
     const grandTotal = order.totalPrice.toString();
+
+    // A phone Shopify can't parse must not block the sale reaching Shopify —
+    // send the order without it. The number itself stays out of the log.
+    const phone = shopifyOrderPhone(order);
+    if (phone.raw && !phone.e164) {
+      this.logger.warn(
+        `Order ${order.name} (${orderId}): customer phone is not a valid number — pushed without it`,
+      );
+    }
+
+    const customerBlock = shopifyOrderCustomer(order.customer);
+    // The delivery/billing address the merchant entered. Never sent before,
+    // so every pushed counter sale reached Shopify with no address.
+    const shippingAddress = toShopifyAddress(order.shippingAddress, defaultCountryFor(order.currency));
+    const billingAddress = toShopifyAddress(order.billingAddress ?? order.shippingAddress, defaultCountryFor(order.currency));
 
     const orderInput: Record<string, unknown> = {
       currency,
       // Line prices are pre-tax; the tax rides on `taxLines` above.
       taxesIncluded: false,
       email: order.customer?.email ?? undefined,
-      phone: order.customer?.phone ?? undefined,
+      phone: phone.e164 ?? undefined,
+      ...(shippingAddress && { shippingAddress }),
+      ...(billingAddress && { billingAddress }),
       note: order.note ?? undefined,
       tags: ['offline', 'collabo-crm', 'pos'],
       sourceName: 'collabo-crm',

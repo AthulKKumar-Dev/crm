@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCreateOfflineOrderMutation } from "~/hooks/use-order-mutations";
@@ -8,7 +8,9 @@ import { ProductPicker, type CartLineSeed } from "./product-picker";
 import { OrderCart, type CartLine } from "./order-cart";
 import { BillSummary } from "./bill-summary";
 import { AddressFields, cleanAddress } from "./address-fields";
+import { isPhoneValidOrEmpty } from "~/components/app/phone-input";
 import { useSelectedLocation } from "~/hooks/use-selected-location";
+import { useCustomer } from "~/hooks/use-customer-queries";
 import type {
   CreateOfflineOrderRequest,
   CreateDraftOrderRequest,
@@ -63,6 +65,42 @@ export function OfflineOrderForm({
   const [billSame, setBillSame] = useState(true);
   const [billTo, setBillTo] = useState<OrderAddressInput>({});
 
+  // Picking an existing customer pre-fills the delivery address from what the
+  // CRM already knows (saved address, else their last order's). Only into an
+  // EMPTY form — an address the merchant typed is never overwritten; they get
+  // a "Use saved address" link instead.
+  const { data: pickedCustomer } = useCustomer(customer.customerId);
+  const savedAddress = customer.customerId ? pickedCustomer?.prefillAddress ?? null : null;
+  const [autofilled, setAutofilled] = useState<OrderAddressInput | null>(null);
+
+  useEffect(() => {
+    if (!savedAddress || cleanAddress(shipTo)) return;
+    setShipTo(savedAddress);
+    setAutofilled(savedAddress);
+    // Runs once per picked customer; `shipTo` is read, not a trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickedCustomer?.id, savedAddress]);
+
+  function handleCustomerChange(next: CustomerSelection) {
+    // Unpicking the customer takes their address with them — unless the
+    // merchant has edited it since, in which case it is theirs now.
+    if (!next.customerId && autofilled && shipTo === autofilled) {
+      setShipTo({});
+    }
+    setAutofilled(null);
+    setCustomer(next);
+  }
+
+  function applySavedAddress() {
+    if (!savedAddress) return;
+    setShipTo(savedAddress);
+    setAutofilled(savedAddress);
+  }
+
+  const customerName = pickedCustomer
+    ? `${pickedCustomer.firstName ?? ""} ${pickedCustomer.lastName ?? ""}`.trim()
+    : "";
+
   function addLine(seed: CartLineSeed) {
     setLines((prev) => {
       // If already in cart, bump quantity rather than duplicate.
@@ -114,9 +152,15 @@ export function OfflineOrderForm({
     !!(nc?.email || nc?.phone || nc?.firstName || nc?.lastName);
   const linesReady =
     lines.length > 0 && lines.every((l) => l.quantity > 0 && l.unitPrice >= 0);
+  // A phone Shopify can't parse fails the whole order push ("Order Phone is
+  // invalid"), so an invalid number blocks saving rather than being stored.
+  const phonesValid =
+    isPhoneValidOrEmpty(nc?.phone) &&
+    isPhoneValidOrEmpty(shipTo.phone) &&
+    (billSame || isPhoneValidOrEmpty(billTo.phone));
   // Stock is shown as an informational warning in the cart but does NOT block
   // submission — inventory tracking on offline orders is a follow-up task.
-  const canSubmit = customerReady && linesReady;
+  const canSubmit = customerReady && linesReady && phonesValid;
 
   // Build a hint so the disabled state isn't a mystery.
   let disabledReason: string | null = null;
@@ -127,6 +171,8 @@ export function OfflineOrderForm({
       "Pick a customer, or fill in a name / email / phone for a new one.";
   } else if (!linesReady) {
     disabledReason = "Add at least one product with a quantity of 1 or more.";
+  } else if (!phonesValid) {
+    disabledReason = "Fix the phone number before saving.";
   }
 
   function buildCustomerBlock(): OfflineCustomerInput {
@@ -214,7 +260,7 @@ export function OfflineOrderForm({
         >
           <CustomerPickerOrCreate
             value={customer}
-            onChange={setCustomer}
+            onChange={handleCustomerChange}
             currency={currency}
           />
         </Section>
@@ -242,6 +288,20 @@ export function OfflineOrderForm({
           title="Delivery address"
           subtitle="Leave blank for a counter sale. For a delivered order the state here sets the GST place of supply — a different state from yours means IGST instead of CGST + SGST."
         >
+          {autofilled && shipTo === autofilled ? (
+            <p className="mb-2 rounded-md bg-muted px-2 py-1.5 text-[10px] text-muted-foreground">
+              Filled from {customerName || "this customer"}'s saved address — edit it if this
+              order goes somewhere else.
+            </p>
+          ) : savedAddress && shipTo !== savedAddress ? (
+            <button
+              type="button"
+              onClick={applySavedAddress}
+              className="mb-2 text-[10px] font-medium text-info hover:underline"
+            >
+              Use {customerName || "this customer"}'s saved address
+            </button>
+          ) : null}
           <AddressFields value={shipTo} onChange={setShipTo} />
 
           <label className="mt-3 flex items-center gap-2 text-[11px] text-gray-700 dark:text-gray-300">

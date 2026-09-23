@@ -243,9 +243,9 @@ function deriveAvailability(
 /**
  * The expanding "EDITING …" panel under a variant row.
  *
- * Mount it with `key={variant.id}` — the draft is seeded by lazy initialiser
- * rather than an effect, so a background refetch can never re-seed over what
- * the merchant is typing.
+ * Mount it with `key={variant.id}` — the draft is seeded by lazy initialiser,
+ * and later refetches only refresh fields the merchant hasn't touched, so a
+ * background refetch can never overwrite what is being typed.
  */
 export function VariantInlineEditor({
   variant,
@@ -298,6 +298,24 @@ export function VariantInlineEditor({
     onDirtyChange(dirty);
     return () => onDirtyChange(false);
   }, [dirty, onDirtyChange]);
+
+  // A refetch of this variant (Create SKU, the save below, a stock adjustment)
+  // flows into every field the merchant hasn't touched — form === baseline —
+  // so the panel can stay open on fresh data instead of closing to force a
+  // re-seed. Touched fields keep what is being typed.
+  useEffect(() => {
+    const fresh = seedDraft(variant, undefined);
+    const stale = (Object.keys(FIELD_LABELS) as Array<keyof typeof FIELD_LABELS>).filter(
+      (key) => baseline[key] !== fresh[key] && form[key] === baseline[key],
+    );
+    if (stale.length === 0) return;
+    const patch = Object.fromEntries(stale.map((key) => [key, fresh[key]]));
+    setBaseline((prev) => ({ ...prev, ...patch }));
+    setForm((prev) => ({ ...prev, ...patch }));
+    // Only a new variant payload should trigger this; baseline/form are read
+    // from the same render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [variant]);
 
   const set = <K extends keyof VariantEditDraft>(key: K, value: VariantEditDraft[K]) =>
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -353,7 +371,9 @@ export function VariantInlineEditor({
         sku: form.sku,
         ...(warehousingEnabled ? {} : { inventoryQuantity: form.inventoryQuantity }),
       });
-      onCancel();
+      // Stay open: what was just saved is the new baseline. Closing here made
+      // every save collapse the row the merchant was working in.
+      setBaseline(form);
     } catch (error) {
       // Adjustments already applied stay applied — there is no undo endpoint,
       // and a compensating adjustment would write a ledger row that never
@@ -437,18 +457,10 @@ export function VariantInlineEditor({
                   size="sm"
                   className="h-9 shrink-0"
                   disabled={saving || generateSkus.isPending}
-                  onClick={() =>
-                    generateSkus.mutate(
-                      { variantIds: [variant.id] },
-                      {
-                        // The mutation writes straight to the row and already
-                        // invalidates the product queries, so close the panel
-                        // and let it reopen on fresh data rather than leaving
-                        // a stale empty field on screen.
-                        onSuccess: () => onCancel(),
-                      },
-                    )
-                  }
+                  // The mutation stays pending until the product refetch lands;
+                  // the minted SKU then arrives through the `variant` prop and
+                  // the refresh effect above, with the panel left open.
+                  onClick={() => generateSkus.mutate({ variantIds: [variant.id] })}
                 >
                   {generateSkus.isPending && (
                     <Loader2 className="size-3.5 animate-spin" />

@@ -271,7 +271,10 @@ function OwnerOrderDetail({ id }: { id: string }) {
 
       <div className="flex gap-4">
         {/* ── Left rail: order meta ─────────────────────────────────────── */}
-        <aside className="flex flex-1 flex-col gap-4.5 rounded-xl bg-card p-4">
+        {/* Sticky like the right rail. It runs taller than short screens, so
+            cap it to the viewport and let it scroll itself — otherwise its
+            bottom (metadata) would be unreachable while pinned. */}
+        <aside className="flex flex-1 flex-col gap-4.5 rounded-xl bg-card p-4 lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto">
           {/* Header */}
           <div className="flex flex-col gap-2">
             <h1 className="text-subhead text-foreground">{order.name}</h1>
@@ -585,7 +588,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
             phone={phone}
           />
 
-          <InternalNote order={order} canEdit={canEdit} />
+          <InternalNote key={order.id} order={order} canEdit={canEdit} />
         </aside>
       </div>
 
@@ -1138,8 +1141,17 @@ function CustomerRail({
  */
 function InternalNote({ order, canEdit }: { order: OrderDetail; canEdit: boolean }) {
   const mutation = useUpdateOrderMutation(order.id);
-  const [note, setNote] = useState(order.note ?? "");
-  const dirty = note !== (order.note ?? "");
+  const serverNote = order.note ?? "";
+  const [note, setNote] = useState(serverNote);
+  const [baseline, setBaseline] = useState(serverNote);
+  // The server value moved (refetch, webhook, Edit dialog, our own save).
+  // Adopt it unless the user is mid-edit — otherwise a stale empty box makes
+  // "Save note" live and one click wipes the real note (on Shopify too).
+  if (serverNote !== baseline) {
+    if (note === baseline) setNote(serverNote);
+    setBaseline(serverNote);
+  }
+  const dirty = note !== serverNote;
 
   // Read-only roles still see the note — they just cannot write it. An empty
   // block would hide real order context from a VIEWER for no reason.

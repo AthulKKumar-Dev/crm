@@ -313,6 +313,7 @@ export class AnalyticsDashboardService {
   }
 
   private changeLabel(days: number): string {
+    if (days <= 7) return 'vs last 7 days';
     if (days <= 30) return 'vs last 30 days';
     if (days <= 182) return 'vs last 6 months';
     return 'vs last year';
