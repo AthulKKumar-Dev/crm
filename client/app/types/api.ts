@@ -1759,7 +1759,13 @@ export interface DraftOrderStats {
 /** Response from POST /draft-orders/:id/complete. */
 export interface CompleteDraftResponse {
   draftId: string;
-  order: OrderDetail;
+  /**
+   * Null when the draft was completed in Shopify and the order hasn't synced
+   * into the CRM yet — the server waits a few seconds for it, not forever.
+   */
+  order: OrderDetail | null;
+  /** Shopify's order name ("#1015") when completed via Shopify. */
+  shopifyOrderName?: string | null;
   invoice: InvoiceDetail | null;
   invoiceError: string | null;
 }

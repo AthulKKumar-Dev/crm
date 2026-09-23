@@ -72,7 +72,16 @@ export function useCompleteDraftOrderMutation(id: string) {
       queryClient.invalidateQueries({ queryKey: customerKeys.all });
       queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
       queryClient.invalidateQueries({ queryKey: productKeys.all });
-      if (result.invoiceError) {
+      if (!result.order) {
+        // Completed in Shopify, but its copy hasn't synced into the CRM yet.
+        // Reading `result.order.name` here threw, failed the mutation, and
+        // left the page frozen on the draft with the dialog still open.
+        toast.success(
+          `Draft completed in Shopify${
+            result.shopifyOrderName ? ` as ${result.shopifyOrderName}` : ""
+          }. It will appear in Orders in a few seconds.`,
+        );
+      } else if (result.invoiceError) {
         toast.success(
           `Draft completed as ${result.order.name}. Invoice skipped: ${result.invoiceError}`,
         );

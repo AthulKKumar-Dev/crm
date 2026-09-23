@@ -1248,6 +1248,37 @@ export class DraftOrderService {
   // ─── HELPERS ───
 
   /**
+   * How long `completeViaShopify` waits for the completed order to land.
+   * The webhook normally arrives in ~2 s; the request stays well inside the
+   * client's 30 s timeout. Static so tests can shorten it.
+   */
+  static LOCAL_ORDER_WAIT = { attempts: 12, intervalMs: 750 };
+
+  /** Poll for the local copy of a Shopify order; null if it hasn't arrived. */
+  private async waitForLocalOrder(
+    orgId: string,
+    shopifyChannelId: string,
+    shopifyOrderId: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const { attempts, intervalMs } = DraftOrderService.LOCAL_ORDER_WAIT;
+    for (let i = 0; i < attempts; i++) {
+      const order = await this.prisma.order.findFirst({
+        where: {
+          organizationId: orgId,
+          channelId: shopifyChannelId,
+          externalId: shopifyOrderId,
+        },
+        select: { id: true, name: true },
+      });
+      if (order) return order;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    }
+    return null;
+  }
+
+  /**
    * Resolve a customer for a draft: by id, then email, then phone, else
    * create. Trimmed-down copy of OrderService.resolveCustomer — drafts
    * don't require any one identifier (anonymous drafts are valid via the
@@ -1658,21 +1689,13 @@ export class DraftOrderService {
         );
       });
 
-    // Try to link to the locally-upserted order. The webhook usually
-    // arrives first; fall back to looking up by externalId.
-    let localOrder = null as
-      | { id: string; name: string }
-      | null;
-    if (shopifyOrderId) {
-      localOrder = await this.prisma.order.findFirst({
-        where: {
-          organizationId: orgId,
-          channelId: shopifyChannelId,
-          externalId: String(shopifyOrderId),
-        },
-        select: { id: true, name: true },
-      });
-    }
+    // The order reaches the CRM through the orders/create webhook (or the
+    // sync above) a moment AFTER draftOrderComplete returns — looking it up
+    // once, straight away, found nothing nearly every time, and the page had
+    // no order to open. Wait briefly for it; the caller still copes with null.
+    const localOrder = shopifyOrderId
+      ? await this.waitForLocalOrder(orgId, shopifyChannelId, String(shopifyOrderId))
+      : null;
 
     // Status was already flipped to COMPLETED by the atomic claim in
     // complete(); only link the local order when the sync/webhook has it.
