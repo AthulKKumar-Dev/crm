@@ -1688,7 +1688,7 @@ export class ShopifySyncService {
         // is one Shopify made up — often nameless — and resolving it here
         // swapped the real customer for a stub on every orders/* webhook,
         // leaving the order reading "Guest order".
-        const crmBuyer = await this.crmBuyerOf(channelId, orgId, externalId, so);
+        const { crmOrigin, customer: crmBuyer } = await this.crmOriginOf(channelId, orgId, externalId, so);
         if (crmBuyer) {
             customerId = crmBuyer.id;
             customerBillingStateCode = crmBuyer.billingStateCode;
@@ -1932,9 +1932,19 @@ export class ShopifySyncService {
 
         const gst = await this.gstContext(orgId);
 
-        const mergedShippingAddress = so.shipping_address ?? existing?.shippingAddress ?? null;
+        // A CRM-created order now sends its address to Shopify, which echoes
+        // it back in its own notation (`province_code`, no GST `stateCode`).
+        // The CRM's copy is the one the order was taxed and invoiced on, so it
+        // wins; Shopify's only fills an address the CRM never had. Orders
+        // Shopify created (incl. drafts completed there) take Shopify's.
+        const shippingFromShopify =
+            crmOrigin && existing?.shippingAddress ? null : so.shipping_address;
+        const billingFromShopify =
+            crmOrigin && existing?.billingAddress ? null : so.billing_address;
 
-        const mergedBillingAddress = so.billing_address ?? existing?.billingAddress ?? null;
+        const mergedShippingAddress = shippingFromShopify ?? existing?.shippingAddress ?? null;
+
+        const mergedBillingAddress = billingFromShopify ?? existing?.billingAddress ?? null;
 
         const placeOfSupplyCode = gst.enabled
 
@@ -2001,8 +2011,8 @@ export class ShopifySyncService {
             gstType: resolvedGstType,
             ...channelTaxPatch,
             ...(customerId ? { customerId } : {}),
-            ...(so.shipping_address ? { shippingAddress: so.shipping_address } : {}),
-            ...(so.billing_address ? { billingAddress: so.billing_address } : {}),
+            ...(shippingFromShopify ? { shippingAddress: shippingFromShopify } : {}),
+            ...(billingFromShopify ? { billingAddress: billingFromShopify } : {}),
         };
 
         // Set inside the transaction, acted on only AFTER it commits — see the
@@ -2915,15 +2925,16 @@ export class ShopifySyncService {
     }
 
     /**
-     * The customer of the CRM order this Shopify payload echoes, or null.
+     * Whether this Shopify payload echoes an order the CRM created, and that
+     * order's customer.
      *
      * Two ways an order is the CRM's: it was created offline and already
      * rebadged onto this Shopify identity (`metadata.source === 'offline'`),
      * or it is being rebadged right now (the payload carries the local id —
-     * see order-rebadge.util). Orders without a CRM customer return null and
-     * resolve Shopify's customer as before.
+     * see order-rebadge.util). For such an order the CRM's buyer and address
+     * win over the copies Shopify made of them.
      */
-    private async crmBuyerOf(channelId: string, orgId: string, externalId: string, so: any) {
+    private async crmOriginOf(channelId: string, orgId: string, externalId: string, so: any) {
         const select = {
             customer: { select: { id: true, billingStateCode: true, gstin: true } },
         } as const;
@@ -2936,19 +2947,24 @@ export class ShopifySyncService {
             },
             select,
         });
-        if (rebadged) return rebadged.customer;
+        if (rebadged) return { crmOrigin: true, customer: rebadged.customer };
 
+        // By id alone — NOT "still on the MANUAL channel". Shopify fires
+        // orders/create, orders/paid and orders/fulfilled together; a webhook
+        // that looked while another was mid-rebadge found the order neither
+        // rebadged yet nor still MANUAL, missed both checks, and let Shopify's
+        // copy of the address overwrite the CRM's. The id is the CRM's own
+        // (stamped by pushOrder), so it proves origin whatever the channel.
         const localOrderId = localOrderIdOf(so);
-        if (!localOrderId) return null;
-        const pushed = await this.prisma.order.findFirst({
-            where: {
-                id: localOrderId,
-                organizationId: orgId,
-                channel: { platform: ChannelPlatform.MANUAL },
-            },
-            select,
-        });
-        return pushed?.customer ?? null;
+        const pushed = localOrderId
+            ? await this.prisma.order.findFirst({
+                where: { id: localOrderId, organizationId: orgId },
+                select,
+            })
+            : null;
+        return pushed
+            ? { crmOrigin: true, customer: pushed.customer }
+            : { crmOrigin: false, customer: null };
     }
 
     /**

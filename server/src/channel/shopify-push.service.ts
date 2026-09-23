@@ -3,6 +3,7 @@ import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { countryCodeOf, normalizePhone } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from './shopify-address.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -367,6 +368,10 @@ export class ShopifyPushService {
     }
 
     const customerBlock = shopifyOrderCustomer(order.customer);
+    // The delivery/billing address the merchant entered. Never sent before,
+    // so every pushed counter sale reached Shopify with no address.
+    const shippingAddress = toShopifyAddress(order.shippingAddress, defaultCountryFor(order.currency));
+    const billingAddress = toShopifyAddress(order.billingAddress ?? order.shippingAddress, defaultCountryFor(order.currency));
 
     const orderInput: Record<string, unknown> = {
       currency,
@@ -374,6 +379,8 @@ export class ShopifyPushService {
       taxesIncluded: false,
       email: order.customer?.email ?? undefined,
       phone: phone.e164 ?? undefined,
+      ...(shippingAddress && { shippingAddress }),
+      ...(billingAddress && { billingAddress }),
       note: order.note ?? undefined,
       tags: ['offline', 'collabo-crm', 'pos'],
       sourceName: 'collabo-crm',

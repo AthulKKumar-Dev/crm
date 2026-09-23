@@ -26,6 +26,7 @@ import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { ShopifySyncService } from '../channel/shopify-sync.service';
 import { CRM_DRAFT_ATTRIBUTE } from '../channel/draft-rebadge.util';
+import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
 import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { displayVariantTitle } from '../product/variant-title.util';
@@ -1426,6 +1427,13 @@ export class DraftOrderService {
       // too, because draftOrderUpdate replaces the attribute list.
       customAttributes: [{ key: CRM_DRAFT_ATTRIBUTE, value: draftId }],
     };
+
+    // Without these a draft completed in Shopify became an order with no
+    // address — and that address-less order is what the CRM synced back.
+    const shippingAddress = toShopifyAddress(draft.shippingAddress, defaultCountryFor(draft.currency));
+    const billingAddress = toShopifyAddress(draft.billingAddress ?? draft.shippingAddress, defaultCountryFor(draft.currency));
+    if (shippingAddress) input.shippingAddress = shippingAddress;
+    if (billingAddress) input.billingAddress = billingAddress;
 
     // Attach the Shopify customer GID if we have one (so the draft on
     // Shopify is tied to the same customer record there).

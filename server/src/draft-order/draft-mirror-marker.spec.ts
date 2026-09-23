@@ -35,3 +35,38 @@ describe('DraftOrderService.buildShopifyInput', () => {
     expect(input.customAttributes).toEqual([{ key: CRM_DRAFT_ATTRIBUTE, value: 'draft_crm' }]);
   });
 });
+
+describe('DraftOrderService.buildShopifyInput — addresses', () => {
+  function build(addresses: { shippingAddress: unknown; billingAddress: unknown }) {
+    const prisma = {
+      draftOrder: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'draft_crm', note: null, tags: [], customerEmail: null, customer: null,
+          lineItems: [{ title: 'Widget', variantTitle: null, quantity: 1, price: '10', variant: null }],
+          ...addresses,
+        }),
+      },
+    };
+    const service = new DraftOrderService(
+      prisma as any, { toNumber: (v: unknown) => Number(v) } as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return (service as any).buildShopifyInput('draft_crm');
+  }
+
+  it('sends the draft address so the order it becomes in Shopify has one', async () => {
+    const input = await build({
+      shippingAddress: { address1: '7 Marine Drive', city: 'Kochi', stateCode: '32', country_code: 'IN' },
+      billingAddress: null,
+    });
+    const expected = { address1: '7 Marine Drive', city: 'Kochi', provinceCode: 'KL', countryCode: 'IN' };
+    expect(input.shippingAddress).toEqual(expected);
+    expect(input.billingAddress).toEqual(expected);
+  });
+
+  it('sends none for a draft without an address', async () => {
+    const input = await build({ shippingAddress: null, billingAddress: null });
+    expect(input).not.toHaveProperty('shippingAddress');
+    expect(input).not.toHaveProperty('billingAddress');
+  });
+});

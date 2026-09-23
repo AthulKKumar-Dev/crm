@@ -373,9 +373,13 @@ export interface MailingAddressInput {
   address1?: string | null;
   address2?: string | null;
   city?: string | null;
+  /** @deprecated in Admin API 2026-01 — send `provinceCode`. */
   province?: string | null;
+  /** @deprecated in Admin API 2026-01 — send `countryCode`. */
   country?: string | null;
   countryCode?: string | null;
+  /** ISO region code, e.g. "KL" (Kerala), "QC" (Quebec). */
+  provinceCode?: string | null;
   zip?: string | null;
   firstName?: string | null;
   lastName?: string | null;

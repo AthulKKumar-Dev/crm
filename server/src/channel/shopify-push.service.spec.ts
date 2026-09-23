@@ -534,3 +534,52 @@ describe('shopifyOrderCustomer', () => {
     });
   });
 });
+
+describe('ShopifyPushService.pushOrder — addresses', () => {
+  const kochi = {
+    first_name: 'Ana', last_name: 'Lee', address1: '7 Marine Drive', city: 'Kochi',
+    zip: '682031', stateCode: '32', province: 'Kerala', country_code: 'IN',
+  };
+
+  async function pushedInput(overrides: Record<string, unknown>) {
+    const { service, graphql } = build(offlineOrder(overrides));
+    await service.pushOrder(ORDER_ID, ORG);
+    return (graphql.request.mock.calls.find((c) => c[1] === ORDER_CREATE_MUTATION)![2] as any).order;
+  }
+
+  it('sends the delivery address, and uses it for billing when there is no separate one', async () => {
+    const input = await pushedInput({ shippingAddress: kochi, billingAddress: null });
+    const expected = {
+      firstName: 'Ana', lastName: 'Lee', address1: '7 Marine Drive', city: 'Kochi',
+      zip: '682031', provinceCode: 'KL', countryCode: 'IN',
+    };
+    expect(input.shippingAddress).toEqual(expected);
+    expect(input.billingAddress).toEqual(expected);
+  });
+
+  it('sends a separate billing address when there is one', async () => {
+    const input = await pushedInput({
+      shippingAddress: kochi,
+      billingAddress: { address1: '4 Park St', city: 'Kolkata', stateCode: '19' },
+    });
+    expect(input.billingAddress).toMatchObject({ address1: '4 Park St', provinceCode: 'WB' });
+  });
+
+  it('sends no address keys for a counter sale without one', async () => {
+    const input = await pushedInput({ shippingAddress: null, billingAddress: null });
+    expect(input).not.toHaveProperty('shippingAddress');
+    expect(input).not.toHaveProperty('billingAddress');
+  });
+});
+
+describe('ShopifyPushService.pushOrder — address without a country', () => {
+  it('sends India for an INR order so Shopify does not fall back to the store country', async () => {
+    const { service, graphql } = build(
+      offlineOrder({ shippingAddress: { address1: 'Ernakulam Kerala', city: 'Ernakulam', zip: '682509' }, billingAddress: null }),
+    );
+    await service.pushOrder(ORDER_ID, ORG);
+    const input = (graphql.request.mock.calls.find((c) => c[1] === ORDER_CREATE_MUTATION)![2] as any).order;
+    expect(input.shippingAddress.countryCode).toBe('IN');
+    expect(input.billingAddress.countryCode).toBe('IN');
+  });
+});

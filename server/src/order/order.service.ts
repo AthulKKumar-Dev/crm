@@ -61,6 +61,7 @@ import {
 } from '../common/utils/serialization-retry.util';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -68,7 +69,6 @@ import {
   FulfillmentCreateVariables,
   FulfillmentTrackingInfoUpdateResponse,
   FulfillmentTrackingInfoUpdateVariables,
-  MailingAddressInput,
   OrderCancelResponse,
   OrderCancelVariables,
   OrderCapturableTransactionsResponse,
@@ -2075,7 +2075,8 @@ export class OrderService {
       if (dto.tags !== undefined) input.tags = dto.tags;
       if (dto.note !== undefined) input.note = dto.note;
       if (dto.shippingAddress !== undefined) {
-        input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
+        const shopifyAddress = toShopifyAddress(dto.shippingAddress, defaultCountryFor(order.currency));
+        if (shopifyAddress) input.shippingAddress = shopifyAddress;
       }
       const result = await this.graphql.request<OrderUpdateResponse, OrderUpdateVariables>(
         { shopDomain, accessToken: token },
@@ -4214,32 +4215,4 @@ export class OrderService {
     return order;
   }
 
-  /**
-   * Map an arbitrary address object (accepts both REST snake_case and the
-   * camelCase shape Shopify GraphQL expects) into a MailingAddressInput.
-   * Unknown fields fall through; the merchant DB stores addresses as raw
-   * JSON so we tolerate variation.
-   */
-  private toShopifyAddress(addr: Record<string, unknown>): MailingAddressInput {
-    const pick = (...keys: string[]): string | null => {
-      for (const k of keys) {
-        const v = addr[k];
-        if (typeof v === 'string') return v;
-      }
-      return null;
-    };
-    return {
-      address1: pick('address1'),
-      address2: pick('address2'),
-      city: pick('city'),
-      province: pick('province'),
-      country: pick('country'),
-      countryCode: pick('countryCode', 'country_code'),
-      zip: pick('zip'),
-      firstName: pick('firstName', 'first_name'),
-      lastName: pick('lastName', 'last_name'),
-      phone: pick('phone'),
-      company: pick('company'),
-    };
-  }
 }
