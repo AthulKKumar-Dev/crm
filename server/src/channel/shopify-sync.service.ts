@@ -41,6 +41,7 @@ import { OrganizationSettingsService } from '../organization-settings/organizati
 import { FxRateService } from '../common/fx/fx-rate.service';
 import { becamePaid } from './order-paid-transition.util';
 import { CRM_SOURCE_NAME, carriesCrmMarker, isLocallyPushedPayload, localOrderIdOf } from './order-rebadge.util';
+import { localDraftIdOf } from './draft-rebadge.util';
 import {
     mapFulfilmentLines,
     shippedFromPayload,
@@ -2762,12 +2763,32 @@ export class ShopifySyncService {
                 | 'INVOICE_SENT'
                 | 'COMPLETED';
 
-        // Find the local row (if any) so we don't reset fields the merchant
-        // already filled (e.g. completedOrderId set by our completion flow).
-        const existing = await this.prisma.draftOrder.findUnique({
-            where: { channelId_externalId: { channelId, externalId } },
-            select: { id: true },
-        });
+        const existing = await this.findLocalDraft(channelId, orgId, externalId, sd);
+
+        if (existing?.deletedAt) {
+            // Deleted in the CRM — never resurrect it from an echo.
+            this.logger.log(`Draft ${externalId}: local row ${existing.id} is deleted; webhook ignored`);
+            return null;
+        }
+
+        // A draft the CRM created (MANUAL channel) and mirrored to Shopify.
+        // The CRM owns its lines, GST totals, name and customer; Shopify's
+        // echo would replace them with Shopify's own tax figures. Take only
+        // what Shopify is the source of truth for.
+        if (existing && existing.channelId !== channelId) {
+            return this.prisma.draftOrder.update({
+                where: { id: existing.id },
+                data: {
+                    externalId,
+                    // A late echo of an earlier push must not undo a completion.
+                    ...(existing.status !== 'COMPLETED' && { status }),
+                    invoiceUrl: sd.invoice_url ?? null,
+                    invoiceSentAt: sd.invoice_sent_at ? new Date(sd.invoice_sent_at) : null,
+                    ...(sd.completed_at && { completedAt: new Date(sd.completed_at) }),
+                    externalUpdatedAt: sd.updated_at ? new Date(sd.updated_at) : new Date(),
+                },
+            });
+        }
 
         const shared = {
             customerId,
@@ -2852,6 +2873,33 @@ export class ShopifySyncService {
         }
 
         return draft;
+    }
+
+    /**
+     * The local row a Shopify draft belongs to, soft-deleted rows included so
+     * the caller can skip them. Looked up by the CRM marker first — it is on
+     * the payload even when the webhook beats `mirrorCreateToShopify` writing
+     * the externalId back — then by externalId on ANY channel, because a CRM
+     * draft sits on the MANUAL channel, not this one. When an old duplicate
+     * on this channel also matches, the CRM-owned row wins.
+     */
+    private async findLocalDraft(channelId: string, orgId: string, externalId: string, sd: any) {
+        const select = { id: true, channelId: true, status: true, deletedAt: true } as const;
+
+        const markedId = localDraftIdOf(sd);
+        if (markedId) {
+            const marked = await this.prisma.draftOrder.findFirst({
+                where: { id: markedId, organizationId: orgId },
+                select,
+            });
+            if (marked) return marked;
+        }
+
+        const matches = await this.prisma.draftOrder.findMany({
+            where: { organizationId: orgId, externalId },
+            select,
+        });
+        return matches.find((d) => d.channelId !== channelId) ?? matches[0] ?? null;
     }
 
     async upsertCustomer(channelId: string, orgId: string, sc: any) {

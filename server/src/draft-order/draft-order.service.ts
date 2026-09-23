@@ -25,6 +25,7 @@ import { OrderService } from '../order/order.service';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { ShopifySyncService } from '../channel/shopify-sync.service';
+import { CRM_DRAFT_ATTRIBUTE } from '../channel/draft-rebadge.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { displayVariantTitle } from '../product/variant-title.util';
 import { DraftMirrorEnqueuer } from './draft-mirror.enqueuer';
@@ -1383,6 +1384,10 @@ export class DraftOrderService {
       note: draft.note,
       tags: draft.tags,
       email: draft.customerEmail ?? draft.customer?.email,
+      // Lets the draft_orders webhook find this row even before the
+      // externalId write lands — see draft-rebadge.util.ts. Sent on updates
+      // too, because draftOrderUpdate replaces the attribute list.
+      customAttributes: [{ key: CRM_DRAFT_ATTRIBUTE, value: draftId }],
     };
 
     // Attach the Shopify customer GID if we have one (so the draft on
