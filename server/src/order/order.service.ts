@@ -45,7 +45,7 @@ import { ShopifyPushService, isStalePendingSync } from '../channel/shopify-push.
 /// two apart; `attempts` is not incremented because nothing ran.
 const QUEUE_UNAVAILABLE_ERROR =
   'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
-import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
+import { ShopifyGraphqlClient, ShopifyGraphqlError } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
@@ -62,6 +62,7 @@ import {
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
 import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
+import { normalizeTrackingUrl } from './tracking-url.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -3505,6 +3506,8 @@ export class OrderService {
     dto: CreateFulfillmentDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    if (dto.tracking) dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3973,6 +3976,8 @@ export class OrderService {
     dto: UpdateTrackingDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3990,26 +3995,36 @@ export class OrderService {
 
     if (isShopifyFulfillment) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
-      const result = await this.graphql.request<
-        FulfillmentTrackingInfoUpdateResponse,
-        FulfillmentTrackingInfoUpdateVariables
-      >(
-        { shopDomain, accessToken: token },
-        FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
-        {
-          fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
-          trackingInfoInput: {
-            number: dto.tracking.number ?? null,
-            url: dto.tracking.url ?? null,
-            company: dto.tracking.company ?? null,
+      // Same treatment as createFulfillment: Shopify refusing the input is the
+      // merchant's to fix, so surface it as a 400 rather than an opaque 500.
+      // Transport/auth failures are left alone — those are genuinely ours.
+      try {
+        const result = await this.graphql.request<
+          FulfillmentTrackingInfoUpdateResponse,
+          FulfillmentTrackingInfoUpdateVariables
+        >(
+          { shopDomain, accessToken: token },
+          FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+          {
+            fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
+            trackingInfoInput: {
+              number: dto.tracking.number ?? null,
+              url: dto.tracking.url ?? null,
+              company: dto.tracking.company ?? null,
+            },
+            notifyCustomer: dto.notifyCustomer ?? true,
           },
-          notifyCustomer: dto.notifyCustomer ?? true,
-        },
-      );
-      ShopifyGraphqlClient.throwIfUserErrors(
-        result.fulfillmentTrackingInfoUpdate.userErrors,
-        'fulfillmentTrackingInfoUpdate',
-      );
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          result.fulfillmentTrackingInfoUpdate.userErrors,
+          'fulfillmentTrackingInfoUpdate',
+        );
+      } catch (e) {
+        if (!(e instanceof ShopifyGraphqlError) || e.code !== 'GRAPHQL_ERROR') throw e;
+        const detail = e.message.replace(/^(fulfillmentTrackingInfoUpdate|GraphQL errors): /, '');
+        this.logger.warn(`fulfillmentTrackingInfoUpdate rejected for order ${orderId}: ${detail}`);
+        throw new BadRequestException(`Shopify rejected this tracking update: ${detail}`);
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
