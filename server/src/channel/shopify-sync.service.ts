@@ -181,6 +181,34 @@ function channelTax(li: { tax_lines?: unknown }): {
 /** Short enough that a GSTIN edit mid-sync is picked up. */
 const GST_CONTEXT_TTL_MS = 60_000;
 
+/** Customer fields an empty Shopify value must not erase. */
+const IDENTITY_FIELDS = ['firstName', 'lastName', 'email', 'phone', 'note', 'addresses', 'defaultAddress'];
+
+/**
+ * Drop empty identity values before writing a Shopify customer onto an
+ * existing row.
+ *
+ * The CRM pushes drafts and orders with the buyer's email/phone but no name,
+ * so Shopify creates a NAMELESS customer; its `customers/create` echo then
+ * adopted the CRM row by email and wrote `first_name: null` over the name the
+ * merchant had typed — every such order read "Guest order". A real value from
+ * Shopify (a rename in Shopify admin) still flows through; only "nothing"
+ * is kept out.
+ */
+export function keepKnownIdentity<T extends Record<string, unknown>>(fields: T): Partial<T> {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(fields)) {
+        const empty =
+            value === null ||
+            value === undefined ||
+            (typeof value === 'string' && value.trim() === '') ||
+            (Array.isArray(value) && value.length === 0);
+        if (IDENTITY_FIELDS.includes(key) && empty) continue;
+        out[key] = value;
+    }
+    return out as Partial<T>;
+}
+
 @Injectable()
 export class ShopifySyncService {
     /** Per-org GST posture, shared across every upsertOrder in a sync run. */
@@ -1654,7 +1682,18 @@ export class ShopifySyncService {
         let customerBillingStateCode: string | null = null;
 
         let customerGstin: string | null = null;
-        if (so.customer?.id) {
+
+        // An order the CRM created keeps the buyer the CRM recorded. Shopify
+        // only ever got that buyer's email/phone, so the customer on its echo
+        // is one Shopify made up — often nameless — and resolving it here
+        // swapped the real customer for a stub on every orders/* webhook,
+        // leaving the order reading "Guest order".
+        const crmBuyer = await this.crmBuyerOf(channelId, orgId, externalId, so);
+        if (crmBuyer) {
+            customerId = crmBuyer.id;
+            customerBillingStateCode = crmBuyer.billingStateCode;
+            customerGstin = crmBuyer.gstin;
+        } else if (so.customer?.id) {
             const customer = await this.prisma.customer.findFirst({ where: { channelId, externalId: String(so.customer.id) } });
             // No row for this Shopify id, but one with the same email — a CRM
             // customer this order belongs to. Link it rather than inserting a
@@ -2876,6 +2915,43 @@ export class ShopifySyncService {
     }
 
     /**
+     * The customer of the CRM order this Shopify payload echoes, or null.
+     *
+     * Two ways an order is the CRM's: it was created offline and already
+     * rebadged onto this Shopify identity (`metadata.source === 'offline'`),
+     * or it is being rebadged right now (the payload carries the local id —
+     * see order-rebadge.util). Orders without a CRM customer return null and
+     * resolve Shopify's customer as before.
+     */
+    private async crmBuyerOf(channelId: string, orgId: string, externalId: string, so: any) {
+        const select = {
+            customer: { select: { id: true, billingStateCode: true, gstin: true } },
+        } as const;
+        const rebadged = await this.prisma.order.findFirst({
+            where: {
+                organizationId: orgId,
+                channelId,
+                externalId,
+                metadata: { path: ['source'], equals: 'offline' },
+            },
+            select,
+        });
+        if (rebadged) return rebadged.customer;
+
+        const localOrderId = localOrderIdOf(so);
+        if (!localOrderId) return null;
+        const pushed = await this.prisma.order.findFirst({
+            where: {
+                id: localOrderId,
+                organizationId: orgId,
+                channel: { platform: ChannelPlatform.MANUAL },
+            },
+            select,
+        });
+        return pushed?.customer ?? null;
+    }
+
+    /**
      * The local row a Shopify draft belongs to, soft-deleted rows included so
      * the caller can skip them. Looked up by the CRM marker first — it is on
      * the payload even when the webhook beats `mirrorCreateToShopify` writing
@@ -2993,10 +3069,10 @@ export class ShopifySyncService {
                     `Customer ${externalId} (row ${byIdentity.id}): Shopify email is already on row ${byEmail.id}; email left unchanged`,
                 );
             }
-            const { email: _email, ...withoutEmail } = updateFields;
+            const { email: _email, ...withoutEmail } = keepKnownIdentity(updateFields);
             return this.prisma.customer.update({
                 where: { id: byIdentity.id },
-                data: emailTaken ? withoutEmail : updateFields,
+                data: emailTaken ? withoutEmail : keepKnownIdentity(updateFields),
                 select: { id: true },
             });
         }
@@ -3008,7 +3084,7 @@ export class ShopifySyncService {
         if (byEmail) {
             const adopted = await this.prisma.customer.update({
                 where: { id: byEmail.id },
-                data: { channelId, externalId, ...updateFields },
+                data: { channelId, externalId, ...keepKnownIdentity(updateFields) },
                 select: { id: true },
             });
             this.logger.log(

@@ -168,6 +168,47 @@ export function shopifyOrderPhone(order: {
 }
 
 /**
+ * The `orderCreate` customer block.
+ *
+ * A customer that came from Shopify is associated by GID. A CRM customer used
+ * to ride only as the order's email/phone, so Shopify created a NAMELESS
+ * customer for it — and that nameless customer echoed back over the CRM
+ * row's name ("Guest order"). `toUpsert` carries the name.
+ *
+ * `toUpsert` needs an `id` or `email` — Shopify rejects the whole order with
+ * a phone alone ("requires at least one of id, email"), whatever its docs say
+ * about matching on phone. It also errors on a phone that clashes with
+ * another customer's, so the upsert keys on the email only and the phone
+ * stays on the order. Without an email there is no block, as before; the
+ * CRM keeps its own buyer on the echo either way (see `crmBuyerOf` in the
+ * sync service).
+ */
+export function shopifyOrderCustomer(
+  customer: {
+    externalId: string | null;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  } | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!customer) return undefined;
+  const externalId = customer.externalId;
+  if (externalId && !externalId.startsWith('manual_') && /^\d+$/.test(externalId)) {
+    return { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', externalId) } };
+  }
+
+  const email = customer.email?.trim() || null;
+  if (!email) return undefined;
+  return {
+    toUpsert: {
+      email,
+      ...(customer.firstName?.trim() && { firstName: customer.firstName.trim() }),
+      ...(customer.lastName?.trim() && { lastName: customer.lastName.trim() }),
+    },
+  };
+}
+
+/**
  * Pushes a locally-created (offline / in-store) order to the merchant's
  * connected Shopify store. Inventory is decremented automatically by Shopify
  * via `inventory_behaviour: 'decrement_obeying_policy'` — we do NOT make a
@@ -314,14 +355,6 @@ export class ShopifyPushService {
         : { title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title, ...base };
     });
 
-    // Customers originally synced from Shopify are associated by GID so no
-    // duplicate is created; manual customers ride as email/phone on the order.
-    const customerExternalId = order.customer?.externalId;
-    const customerBlock =
-      customerExternalId && !customerExternalId.startsWith('manual_') && /^\d+$/.test(customerExternalId)
-        ? { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', customerExternalId) } }
-        : undefined;
-
     const grandTotal = order.totalPrice.toString();
 
     // A phone Shopify can't parse must not block the sale reaching Shopify —
@@ -332,6 +365,8 @@ export class ShopifyPushService {
         `Order ${order.name} (${orderId}): customer phone is not a valid number — pushed without it`,
       );
     }
+
+    const customerBlock = shopifyOrderCustomer(order.customer);
 
     const orderInput: Record<string, unknown> = {
       currency,

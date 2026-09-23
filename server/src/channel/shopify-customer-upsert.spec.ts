@@ -159,3 +159,51 @@ describe('ShopifySyncService.upsertCustomer', () => {
     expect(prisma.customer.create).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ShopifySyncService.upsertCustomer — Shopify must not blank the CRM name', () => {
+  // What Shopify sends back for a customer it created from a pushed draft or
+  // order: the CRM sent only the email, so Shopify has no name.
+  const nameless = () => shopifyCustomer({ first_name: null, last_name: null, phone: null, note: null });
+
+  it('adopting a CRM customer keeps the name the merchant typed', async () => {
+    const { service, prisma } = build({ identity: [null], byEmail: [{ id: 'crm_row' }] });
+
+    await service.upsertCustomer(CHANNEL, ORG, nameless());
+
+    const { data } = prisma.customer.update.mock.calls[0][0] as any;
+    expect(data).toMatchObject({ channelId: CHANNEL, externalId: String(SHOPIFY_ID) });
+    for (const field of ['firstName', 'lastName', 'phone', 'note']) {
+      expect(data).not.toHaveProperty(field);
+    }
+  });
+
+  it('a later update with empty values keeps them too', async () => {
+    const { service, prisma } = build({ identity: [{ id: 'row_a' }], byEmail: [{ id: 'row_a' }] });
+
+    await service.upsertCustomer(CHANNEL, ORG, nameless());
+
+    const { data } = prisma.customer.update.mock.calls[0][0] as any;
+    expect(data).not.toHaveProperty('firstName');
+    expect(data).not.toHaveProperty('lastName');
+    expect(data.email).toBe('ana@example.com');
+  });
+
+  it('a real rename in Shopify admin still flows through', async () => {
+    const { service, prisma } = build({ identity: [{ id: 'row_a' }], byEmail: [{ id: 'row_a' }] });
+
+    await service.upsertCustomer(CHANNEL, ORG, shopifyCustomer({ first_name: 'Anna', last_name: 'Leigh' }));
+
+    const { data } = prisma.customer.update.mock.calls[0][0] as any;
+    expect(data).toMatchObject({ firstName: 'Anna', lastName: 'Leigh' });
+  });
+
+  it('non-identity fields (marketing consent, state) are still written', async () => {
+    const { service, prisma } = build({ identity: [{ id: 'row_a' }], byEmail: [{ id: 'row_a' }] });
+
+    await service.upsertCustomer(CHANNEL, ORG, nameless());
+
+    const { data } = prisma.customer.update.mock.calls[0][0] as any;
+    expect(data).toHaveProperty('acceptsMarketing');
+    expect(data).toHaveProperty('state');
+  });
+});

@@ -3,6 +3,7 @@ import {
   ShopifyPushService,
   isStalePendingSync,
   readStoredTaxLines,
+  shopifyOrderCustomer,
   shopifyOrderPhone,
   STALE_PENDING_SYNC_MS,
 } from './shopify-push.service';
@@ -180,9 +181,9 @@ describe('ShopifyPushService.pushOrder', () => {
       priceSet: { shopMoney: { amount: '50', currencyCode: 'INR' } },
     });
 
-    // Walk-in customer rides as phone; no toAssociate for a manual_ id. The
-    // phone was stored as typed and goes out as E.164 — Shopify rejects the
-    // whole order for a bare local number.
+    // Phone-only walk-in: no customer block (Shopify can't upsert without an
+    // email); the phone rides on the order. It was stored as typed and goes
+    // out as E.164 — Shopify rejects the whole order for a bare local number.
     expect(input.customer).toBeUndefined();
     expect(input.phone).toBe('+919847586793');
     expect(input.email).toBeUndefined();
@@ -490,5 +491,46 @@ describe('shopifyOrderPhone', () => {
     expect(shopifyOrderPhone(order(null))).toEqual({ raw: null, e164: null });
     expect(shopifyOrderPhone(order('  '))).toEqual({ raw: null, e164: null });
     expect(shopifyOrderPhone({ currency: 'INR', customer: null })).toEqual({ raw: null, e164: null });
+  });
+});
+
+describe('shopifyOrderCustomer', () => {
+  const crm = (over: Record<string, unknown> = {}) => ({
+    externalId: 'manual_abc',
+    email: 'ana@example.com',
+    firstName: 'Ana',
+    lastName: 'Lee',
+    ...over,
+  });
+
+  it('upserts a CRM customer by email WITH the name, so Shopify never holds a nameless copy', () => {
+    expect(shopifyOrderCustomer(crm())).toEqual({
+      toUpsert: { email: 'ana@example.com', firstName: 'Ana', lastName: 'Lee' },
+    });
+  });
+
+  it('never puts the phone in the upsert — a clash with another customer fails the whole order', () => {
+    const block = shopifyOrderCustomer(crm()) as any;
+    expect(block.toUpsert).not.toHaveProperty('phone');
+  });
+
+  it('sends no block without an email — Shopify rejects a phone-only upsert', () => {
+    // Live on collabo-test, 2026-09-23: "OrderCreateUpsertCustomerAttributesInput
+    // requires at least one of id, email" failed a phone-only walk-in's push.
+    expect(shopifyOrderCustomer(crm({ email: null }))).toBeUndefined();
+    expect(shopifyOrderCustomer(crm({ email: '  ' }))).toBeUndefined();
+    expect(shopifyOrderCustomer(null)).toBeUndefined();
+  });
+
+  it('omits blank name parts', () => {
+    expect(shopifyOrderCustomer(crm({ firstName: '  ', lastName: null }))).toEqual({
+      toUpsert: { email: 'ana@example.com' },
+    });
+  });
+
+  it('associates a customer that came from Shopify by GID, as before', () => {
+    expect(shopifyOrderCustomer(crm({ externalId: '7011860054246' }))).toEqual({
+      toAssociate: { id: 'gid://shopify/Customer/7011860054246' },
+    });
   });
 });
