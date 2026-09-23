@@ -1074,6 +1074,20 @@ export class OrderService {
         // 2. Resolve customer (existing by id/email/phone, else create).
         const customer = await this.resolveCustomer(tx, orgId, channel.id, dto);
 
+        // 2b. Remember where this customer's goods go, so picking them on the
+        //     next order pre-fills it. Fill-if-empty: a saved address (e.g.
+        //     Shopify's default) is never overwritten by one order's.
+        const deliveredTo = dto.shippingAddress ?? dto.billingAddress;
+        if (deliveredTo && customer.defaultAddress == null) {
+          await tx.customer.update({
+            where: { id: customer.id },
+            data: {
+              defaultAddress: deliveredTo as Prisma.InputJsonValue,
+              addresses: [deliveredTo] as Prisma.InputJsonValue,
+            },
+          });
+        }
+
         // 3. Fetch variants — used for line-item snapshots, tax math, AND
         //    inventory gating (Phase 2: trackQuantity / continueSellingWhenOutOfStock).
         const variants = await tx.productVariant.findMany({
@@ -2006,6 +2020,7 @@ export class OrderService {
       lastName: string | null;
       gstin: string | null;
       billingStateCode: string | null;
+      defaultAddress: Prisma.JsonValue | null;
     },
     input: CreateOfflineOrderDto['customer'],
   ) {

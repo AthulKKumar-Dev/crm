@@ -1860,6 +1860,12 @@ export interface CustomerDetail extends Customer {
   orders: CustomerOrderSummary[];
   /** Capped at the 20 most recent by the server. */
   activityLogs: CustomerActivityLog[];
+  /**
+   * What the order form pre-fills when this customer is picked: their saved
+   * address, else their last order's delivery address — normalised to the
+   * form's shape (GST `stateCode` resolved, phone in E.164). Null if none.
+   */
+  prefillAddress?: OrderAddressInput | null;
 }
 
 /** Query parameters for the customer list endpoint. */
