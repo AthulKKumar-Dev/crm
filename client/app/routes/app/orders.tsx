@@ -66,7 +66,8 @@ const STAT_CARDS: ReadonlyArray<{
 export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
-  const [dateRange, setDateRange] = useState("all");
+  // Opens on 7 days rather than All Time: all-time stats scan every order.
+  const [dateRange, setDateRange] = useState("7d");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data: org } = useCurrentOrg();

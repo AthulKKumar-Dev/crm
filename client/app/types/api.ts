@@ -1939,7 +1939,7 @@ export interface OrderStatsResponse {
 
 /** Query parameters for the dashboard overview endpoint. */
 /** Pre-canned windows offered by the dashboard's period selector. */
-export const DASHBOARD_RANGES = ["30d", "6m", "12m"] as const;
+export const DASHBOARD_RANGES = ["7d", "30d", "6m", "12m"] as const;
 export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
 
 export interface DashboardQueryParams {
