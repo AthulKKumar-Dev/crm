@@ -100,13 +100,19 @@ export function useGenerateSkusMutation() {
   return useMutation({
     mutationFn: (data: GenerateCodesRequest) => inventoryService.generateSkus(data),
     onSuccess: (res, variables) => {
-      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
-      queryClient.invalidateQueries({ queryKey: productKeys.all });
       const unchanged = unchangedCount(variables, res.generated);
       toast.success(
         `Generated ${res.generated} SKU${res.generated === 1 ? "" : "s"}` +
           (unchanged > 0 ? ` · ${unchanged} unchanged` : "") + ".",
       );
+      // Returned so the mutation stays pending until the refetch lands: the
+      // response carries counts, not codes, so the new SKU only reaches the
+      // screen via the product query — a "Create SKU" button that re-enabled
+      // on a still-empty field read as "nothing happened".
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: inventoryKeys.all }),
+        queryClient.invalidateQueries({ queryKey: productKeys.all }),
+      ]);
     },
     onError: (error) => handleMutationError(error, "Failed to generate SKUs."),
   });

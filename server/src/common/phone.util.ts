@@ -24,3 +24,31 @@ export function normalizePhone(raw: string | null | undefined, countryCode?: str
         return null;
     }
 }
+
+/**
+ * ISO-2 country of an address bag, or null. Addresses are untyped JSON:
+ * Shopify's `country_code`, or the same key written by the CRM address form.
+ */
+export function countryCodeOf(address: unknown): string | null {
+    if (!address || typeof address !== 'object') return null;
+    const a = address as Record<string, unknown>;
+    const code = a.country_code ?? a.countryCode;
+    return typeof code === 'string' && code.trim() ? code.trim().toUpperCase() : null;
+}
+
+/**
+ * Every stored form a phone may already exist under, for matching an
+ * existing customer. The order form now sends E.164 ("+919847586793") while
+ * older customers were saved as typed ("9847586793"), so an exact match on
+ * either would miss the other and create a duplicate customer.
+ */
+export function phoneLookupVariants(raw: string, countryCode?: string | null): string[] {
+    const variants = new Set<string>([raw]);
+    const e164 = normalizePhone(raw, countryCode);
+    if (e164) {
+        variants.add(e164);
+        const national = parsePhoneNumberFromString(e164)?.nationalNumber;
+        if (national) variants.add(String(national));
+    }
+    return [...variants];
+}

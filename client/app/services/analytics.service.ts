@@ -1,6 +1,6 @@
 import { apiClient } from "~/lib/api-client";
 
-export type AnalyticsRange = "30d" | "6m" | "12m";
+export type AnalyticsRange = "7d" | "30d" | "6m" | "12m";
 export type AnalyticsChannelFilter = "all" | "shopify" | "instagram" | "whatsapp";
 
 export interface AnalyticsQueryParams {

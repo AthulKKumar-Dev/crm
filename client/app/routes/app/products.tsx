@@ -26,6 +26,7 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { Tip } from "~/components/ui/tooltip";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { handleMutationError } from "~/lib/handle-mutation-error";
+import { canSyncProduct, productSyncActionTitle } from "~/lib/product-shopify-sync";
 import type { ProductStatus, ProductListParams, Product, ProductStatsResponse, StockStatus } from "~/types/api";
 import { Separator } from "~/components/ui/separator";
 import { Button } from "~/components/ui/button";
@@ -738,7 +739,7 @@ function ProductRowActions({
 
   // Sync button is hidden for fully-synced (no edits yet) products to reduce
   // noise; it reappears as soon as something needs pushing or has failed.
-  const showSyncButton = sync?.status !== "SYNCED" || !isSynced;
+  const showSyncButton = canSyncProduct(product, sync);
 
   return (
     <div className="inline-flex items-center gap-1">
@@ -746,13 +747,7 @@ function ProductRowActions({
       {showSyncButton && (
         <button
           type="button"
-          title={
-            sync?.status === "FAILED"
-              ? "Retry sync to Shopify"
-              : sync?.status === "OUT_OF_SYNC"
-                ? "Push local edits to Shopify"
-                : "Sync to Shopify"
-          }
+          title={productSyncActionTitle(sync)}
           disabled={syncMutation.isPending}
           onClick={() => syncMutation.mutate(product.id)}
           className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-[#084734] disabled:opacity-50"

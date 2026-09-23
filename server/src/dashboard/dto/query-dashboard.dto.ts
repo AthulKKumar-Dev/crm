@@ -1,7 +1,7 @@
 import { IsEnum, IsOptional, IsString } from 'class-validator';
 
 /// Mirrors ANALYTICS_RANGES so the two dashboards offer the same windows.
-export const DASHBOARD_RANGES = ['30d', '6m', '12m'] as const;
+export const DASHBOARD_RANGES = ['7d', '30d', '6m', '12m'] as const;
 export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
 
 export interface RangeWindow {
@@ -15,6 +15,7 @@ export interface RangeWindow {
 /// Single source of truth for how a range maps to a window and a bucket size.
 export function rangeToWindow(range: DashboardRange | undefined): RangeWindow {
     switch (range ?? '12m') {
+        case '7d': return { unit: 'day', buckets: 7, label: 'Last 7 days' };
         case '30d': return { unit: 'day', buckets: 30, label: 'Last 30 days' };
         case '6m': return { unit: 'month', buckets: 6, label: 'Last 6 months' };
         case '12m': return { unit: 'month', buckets: 12, label: 'Last 12 months' };

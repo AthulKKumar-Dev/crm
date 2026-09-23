@@ -25,6 +25,9 @@ import { OrderService } from '../order/order.service';
 import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { ShopifySyncService } from '../channel/shopify-sync.service';
+import { CRM_DRAFT_ATTRIBUTE } from '../channel/draft-rebadge.util';
+import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
+import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { displayVariantTitle } from '../product/variant-title.util';
 import { DraftMirrorEnqueuer } from './draft-mirror.enqueuer';
@@ -1246,6 +1249,37 @@ export class DraftOrderService {
   // ─── HELPERS ───
 
   /**
+   * How long `completeViaShopify` waits for the completed order to land.
+   * The webhook normally arrives in ~2 s; the request stays well inside the
+   * client's 30 s timeout. Static so tests can shorten it.
+   */
+  static LOCAL_ORDER_WAIT = { attempts: 12, intervalMs: 750 };
+
+  /** Poll for the local copy of a Shopify order; null if it hasn't arrived. */
+  private async waitForLocalOrder(
+    orgId: string,
+    shopifyChannelId: string,
+    shopifyOrderId: string,
+  ): Promise<{ id: string; name: string } | null> {
+    const { attempts, intervalMs } = DraftOrderService.LOCAL_ORDER_WAIT;
+    for (let i = 0; i < attempts; i++) {
+      const order = await this.prisma.order.findFirst({
+        where: {
+          organizationId: orgId,
+          channelId: shopifyChannelId,
+          externalId: shopifyOrderId,
+        },
+        select: { id: true, name: true },
+      });
+      if (order) return order;
+      if (i < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+    }
+    return null;
+  }
+
+  /**
    * Resolve a customer for a draft: by id, then email, then phone, else
    * create. Trimmed-down copy of OrderService.resolveCustomer — drafts
    * don't require any one identifier (anonymous drafts are valid via the
@@ -1272,7 +1306,12 @@ export class DraftOrderService {
     }
     if (input.phone) {
       const byPhone = await tx.customer.findFirst({
-        where: { organizationId: orgId, phone: input.phone },
+        where: {
+          organizationId: orgId,
+          // Matches the E.164 the form now sends AND the as-typed form older
+          // customers were saved under — see phoneLookupVariants.
+          phone: { in: phoneLookupVariants(input.phone, countryCodeOf(input.address)) },
+        },
       });
       if (byPhone) return byPhone;
     }
@@ -1383,7 +1422,18 @@ export class DraftOrderService {
       note: draft.note,
       tags: draft.tags,
       email: draft.customerEmail ?? draft.customer?.email,
+      // Lets the draft_orders webhook find this row even before the
+      // externalId write lands — see draft-rebadge.util.ts. Sent on updates
+      // too, because draftOrderUpdate replaces the attribute list.
+      customAttributes: [{ key: CRM_DRAFT_ATTRIBUTE, value: draftId }],
     };
+
+    // Without these a draft completed in Shopify became an order with no
+    // address — and that address-less order is what the CRM synced back.
+    const shippingAddress = toShopifyAddress(draft.shippingAddress, defaultCountryFor(draft.currency));
+    const billingAddress = toShopifyAddress(draft.billingAddress ?? draft.shippingAddress, defaultCountryFor(draft.currency));
+    if (shippingAddress) input.shippingAddress = shippingAddress;
+    if (billingAddress) input.billingAddress = billingAddress;
 
     // Attach the Shopify customer GID if we have one (so the draft on
     // Shopify is tied to the same customer record there).
@@ -1647,21 +1697,13 @@ export class DraftOrderService {
         );
       });
 
-    // Try to link to the locally-upserted order. The webhook usually
-    // arrives first; fall back to looking up by externalId.
-    let localOrder = null as
-      | { id: string; name: string }
-      | null;
-    if (shopifyOrderId) {
-      localOrder = await this.prisma.order.findFirst({
-        where: {
-          organizationId: orgId,
-          channelId: shopifyChannelId,
-          externalId: String(shopifyOrderId),
-        },
-        select: { id: true, name: true },
-      });
-    }
+    // The order reaches the CRM through the orders/create webhook (or the
+    // sync above) a moment AFTER draftOrderComplete returns — looking it up
+    // once, straight away, found nothing nearly every time, and the page had
+    // no order to open. Wait briefly for it; the caller still copes with null.
+    const localOrder = shopifyOrderId
+      ? await this.waitForLocalOrder(orgId, shopifyChannelId, String(shopifyOrderId))
+      : null;
 
     // Status was already flipped to COMPLETED by the atomic claim in
     // complete(); only link the local order when the sync/webhook has it.
