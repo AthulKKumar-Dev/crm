@@ -51,6 +51,7 @@ import {
   toGstRateOption,
   toInputNumber,
   toNullableNumber,
+  VARIANT_DRAFT_KEYS,
   type VariantDraft,
 } from "~/lib/variant-draft";
 import { VariantOptionsCard } from "~/components/app/product-variants/variant-options-card";
@@ -369,6 +370,51 @@ export default function ProductDetailPage() {
     // re-sync after a save happens in handleSaveProduct.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product?.id, hydrateFormFromProduct]);
+
+  // Server-side writes to the SAME product (Create SKU, stock adjustments)
+  // still have to reach fields the merchant hasn't touched. Without this the
+  // variant table kept showing the pre-refetch empty SKU — "Create SKU did
+  // nothing" — and the next page Save sent that stale "" back as sku: null,
+  // erasing the SKU the server had just minted. Only untouched fields move
+  // (draft === baseline), so in-progress edits are never overwritten.
+  useEffect(() => {
+    if (!product || hydratedProductId !== product.id) return;
+    const base = baselineRef.current;
+    if (!base) return;
+
+    const server = buildVariantDrafts(product.variants ?? []);
+    const nextDrafts = { ...variantDrafts };
+    const nextBaseline = { ...base.variantDrafts };
+    let changed = false;
+    for (const [variantId, fresh] of Object.entries(server)) {
+      const draft = variantDrafts[variantId];
+      const was = base.variantDrafts[variantId];
+      // Rows with no draft already render straight from the variant.
+      if (!draft || !was) continue;
+      for (const key of VARIANT_DRAFT_KEYS) {
+        if (draft[key] === was[key] && was[key] !== fresh[key]) {
+          nextDrafts[variantId] = { ...nextDrafts[variantId], [key]: fresh[key] };
+          nextBaseline[variantId] = { ...nextBaseline[variantId], [key]: fresh[key] };
+          changed = true;
+        }
+      }
+    }
+
+    // Simple products edit the default variant's SKU on Overview.
+    const serverSku = product.variants?.[0]?.sku ?? "";
+    const skuUntouched = sku === base.sku && base.sku !== serverSku;
+    if (skuUntouched) setSku(serverSku);
+
+    if (!changed && !skuUntouched) return;
+    baselineRef.current = {
+      ...base,
+      variantDrafts: nextBaseline,
+      ...(skuUntouched ? { sku: serverSku } : {}),
+    };
+    if (changed) setVariantDrafts(nextDrafts);
+    // Keyed on the product payload only; the drafts are read from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product, hydratedProductId]);
 
   useEffect(() => {
     const images =
