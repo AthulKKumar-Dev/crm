@@ -1655,10 +1655,21 @@ export class ShopifySyncService {
         let customerGstin: string | null = null;
         if (so.customer?.id) {
             const customer = await this.prisma.customer.findFirst({ where: { channelId, externalId: String(so.customer.id) } });
-            if (customer) {
-                customerId = customer.id;
-                customerBillingStateCode = customer.billingStateCode;
-                customerGstin = customer.gstin;
+            // No row for this Shopify id, but one with the same email — a CRM
+            // customer this order belongs to. Link it rather than inserting a
+            // stub that is bound to fail the (organizationId, email) unique
+            // (and log a `prisma:error` doing so); the customers sync pass
+            // adopts it fully.
+            const byEmail = !customer && so.customer.email
+                ? await this.prisma.customer.findUnique({
+                    where: { organizationId_email: { organizationId: orgId, email: so.customer.email } },
+                })
+                : null;
+            const found = customer ?? byEmail;
+            if (found) {
+                customerId = found.id;
+                customerBillingStateCode = found.billingStateCode;
+                customerGstin = found.gstin;
             } else {
                 try {
                     const stub = await this.prisma.customer.create({
@@ -2864,44 +2875,23 @@ export class ShopifySyncService {
             // internalNotes, segments are still NOT overwritten (CRM-only fields).
         };
 
+        const write = () => this.writeShopifyCustomer(
+            channelId, orgId, externalId, sc.email || null, updateFields,
+            sc.created_at ? new Date(sc.created_at) : null,
+        );
+
         let customer: { id: string };
         try {
-            customer = await this.prisma.customer.upsert({
-                where: { channelId_externalId: { channelId, externalId } },
-                create: {
-                    organizationId: orgId, channelId, externalId,
-                    ...updateFields,
-                    externalCreatedAt: sc.created_at ? new Date(sc.created_at) : null,
-                },
-                update: updateFields,
-                select: { id: true },
-            });
+            customer = await write();
         } catch (err) {
-            // Customer also has a unique (organizationId, email). A row with
-            // this email can already exist under a DIFFERENT (channel,
-            // externalId) identity — e.g. the store was reconnected as a new
-            // channel, or Shopify holds two customer records sharing an email
-            // (guest checkout / merged accounts). Adopt that row: re-point it
-            // to the current identity and update its fields, preserving all
-            // CRM-side data attached to it.
+            // Lost a race: the webhook and a full sync (or two webhooks) both
+            // saw no row and both inserted. One retry re-reads, and now finds,
+            // the row the other writer created.
             if (
                 err instanceof Prisma.PrismaClientKnownRequestError &&
-                err.code === 'P2002' &&
-                sc.email
+                err.code === 'P2002'
             ) {
-                const existing = await this.prisma.customer.findFirst({
-                    where: { organizationId: orgId, email: sc.email },
-                    select: { id: true },
-                });
-                if (!existing) throw err;
-                customer = await this.prisma.customer.update({
-                    where: { id: existing.id },
-                    data: { channelId, externalId, ...updateFields },
-                    select: { id: true },
-                });
-                this.logger.log(
-                    `Customer ${externalId} adopted existing row ${existing.id} by email match`,
-                );
+                customer = await write();
             } else {
                 throw err;
             }
@@ -2911,6 +2901,81 @@ export class ShopifySyncService {
         // Failures here must not fail the whole customer sync.
         await this.loyalty.recomputeForCustomer(customer.id, orgId).catch((err) => {
             this.logger.warn(`Loyalty recompute failed for customer ${customer.id}: ${err?.message ?? err}`);
+        });
+    }
+
+    /**
+     * Customer has two uniques — (channelId, externalId) and (organizationId,
+     * email) — so both are read up front rather than letting an upsert trip
+     * over the second. Tripping was "handled", but Prisma prints every failed
+     * query, so each CRM customer echoed back by Shopify logged a scary
+     * `prisma:error`; and when the identity row already existed, the fallback
+     * re-pointed the email row onto an identity another row still held and
+     * failed a second time, uncaught.
+     */
+    private async writeShopifyCustomer(
+        channelId: string,
+        orgId: string,
+        externalId: string,
+        email: string | null,
+        updateFields: Record<string, unknown>,
+        externalCreatedAt: Date | null,
+    ): Promise<{ id: string }> {
+        const [byIdentity, byEmail] = await Promise.all([
+            this.prisma.customer.findUnique({
+                where: { channelId_externalId: { channelId, externalId } },
+                select: { id: true },
+            }),
+            email
+                ? this.prisma.customer.findUnique({
+                    where: { organizationId_email: { organizationId: orgId, email } },
+                    select: { id: true },
+                })
+                : null,
+        ]);
+
+        if (byIdentity) {
+            // The Shopify customer changed their email to one another CRM
+            // customer already holds. Two rows cannot share an email, and
+            // merging customers is not a call a sync should make — keep this
+            // row's current email and update everything else.
+            const emailTaken = byEmail != null && byEmail.id !== byIdentity.id;
+            if (emailTaken) {
+                this.logger.warn(
+                    `Customer ${externalId} (row ${byIdentity.id}): Shopify email is already on row ${byEmail.id}; email left unchanged`,
+                );
+            }
+            const { email: _email, ...withoutEmail } = updateFields;
+            return this.prisma.customer.update({
+                where: { id: byIdentity.id },
+                data: emailTaken ? withoutEmail : updateFields,
+                select: { id: true },
+            });
+        }
+
+        // A row with this email exists under a different identity — a CRM
+        // customer pushed to Shopify coming back via customers/create, or the
+        // store reconnected as a new channel. Adopt it: re-point it to this
+        // identity, keeping all CRM-side data attached to it.
+        if (byEmail) {
+            const adopted = await this.prisma.customer.update({
+                where: { id: byEmail.id },
+                data: { channelId, externalId, ...updateFields },
+                select: { id: true },
+            });
+            this.logger.log(
+                `Customer ${externalId} adopted existing row ${byEmail.id} by email match`,
+            );
+            return adopted;
+        }
+
+        return this.prisma.customer.create({
+            data: {
+                organizationId: orgId, channelId, externalId,
+                ...updateFields,
+                externalCreatedAt,
+            },
+            select: { id: true },
         });
     }
 
