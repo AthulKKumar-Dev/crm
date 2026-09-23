@@ -3,6 +3,7 @@ import {
   ShopifyPushService,
   isStalePendingSync,
   readStoredTaxLines,
+  shopifyOrderPhone,
   STALE_PENDING_SYNC_MS,
 } from './shopify-push.service';
 import {
@@ -179,9 +180,11 @@ describe('ShopifyPushService.pushOrder', () => {
       priceSet: { shopMoney: { amount: '50', currencyCode: 'INR' } },
     });
 
-    // Walk-in customer rides as phone; no toAssociate for a manual_ id.
+    // Walk-in customer rides as phone; no toAssociate for a manual_ id. The
+    // phone was stored as typed and goes out as E.164 — Shopify rejects the
+    // whole order for a bare local number.
     expect(input.customer).toBeUndefined();
-    expect(input.phone).toBe('9847586793');
+    expect(input.phone).toBe('+919847586793');
     expect(input.email).toBeUndefined();
 
     expect(input.transactions).toEqual([
@@ -254,6 +257,22 @@ describe('ShopifyPushService.pushOrder', () => {
       error: 'No connected Shopify channel.',
       attempts: 0,
     });
+  });
+
+  it('pushes the order without a phone Shopify would reject, instead of failing it', async () => {
+    const { service, graphql, prisma } = build(
+      offlineOrder({ customer: { externalId: 'manual_x', email: null, phone: '12345' } }),
+    );
+    const warn = jest.spyOn((service as any).logger, 'warn').mockImplementation(() => undefined);
+
+    await service.pushOrder(ORDER_ID, ORG);
+
+    const input = (graphql.request.mock.calls.find((c) => c[1] === ORDER_CREATE_MUTATION)![2] as any).order;
+    expect(input.phone).toBeUndefined();
+    expect(lastSyncPatch(prisma)).toMatchObject({ status: 'SYNCED' });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('#M1001'));
+    // The number itself stays out of the log.
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('12345');
   });
 
   it('surfaces orderCreate userErrors so BullMQ retries and nothing is recorded as synced', async () => {
@@ -433,5 +452,43 @@ describe('ShopifyPushService — inventory write to an unstocked location', () =
 
     expect(calls(INVENTORY_ACTIVATE_MUTATION)).toHaveLength(0);
     expect(calls(INVENTORY_SET_QUANTITIES_MUTATION)).toHaveLength(1);
+  });
+});
+
+describe('shopifyOrderPhone', () => {
+  const order = (phone: string | null, extra: Record<string, unknown> = {}) => ({
+    currency: 'INR',
+    shippingAddress: null,
+    billingAddress: null,
+    customer: { phone },
+    ...extra,
+  });
+
+  it('adds +91 to a bare Indian number on an INR counter sale with no address', () => {
+    expect(shopifyOrderPhone(order('9847586793'))).toEqual({ raw: '9847586793', e164: '+919847586793' });
+    expect(shopifyOrderPhone(order('98475 86793')).e164).toBe('+919847586793');
+  });
+
+  it("takes the country from the order's address before the currency", () => {
+    const us = order('(201) 555-0123', { shippingAddress: { country_code: 'US' } });
+    expect(shopifyOrderPhone(us).e164).toBe('+12015550123');
+    const billOnly = order('(201) 555-0123', { billingAddress: { country_code: 'us' } });
+    expect(shopifyOrderPhone(billOnly).e164).toBe('+12015550123');
+  });
+
+  it('passes an E.164 number through, whatever the order currency', () => {
+    expect(shopifyOrderPhone(order('+447911123456', { currency: 'USD' })).e164).toBe('+447911123456');
+  });
+
+  it('returns no e164 for a number it cannot make valid, but keeps the raw value', () => {
+    expect(shopifyOrderPhone(order('12345'))).toEqual({ raw: '12345', e164: null });
+    // Bare local number and no way to tell the country.
+    expect(shopifyOrderPhone(order('2015550123', { currency: 'USD' })).e164).toBeNull();
+  });
+
+  it('is empty when the customer has no phone', () => {
+    expect(shopifyOrderPhone(order(null))).toEqual({ raw: null, e164: null });
+    expect(shopifyOrderPhone(order('  '))).toEqual({ raw: null, e164: null });
+    expect(shopifyOrderPhone({ currency: 'INR', customer: null })).toEqual({ raw: null, e164: null });
   });
 });

@@ -60,6 +60,7 @@ import {
   uniqueViolationTargets,
 } from '../common/utils/serialization-retry.util';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -1958,7 +1959,12 @@ export class OrderService {
 
     if (input.phone) {
       const byPhone = await tx.customer.findFirst({
-        where: { organizationId: orgId, phone: input.phone },
+        where: {
+          organizationId: orgId,
+          // Matches the E.164 the form now sends AND the as-typed form older
+          // customers were saved under — see phoneLookupVariants.
+          phone: { in: phoneLookupVariants(input.phone, countryCodeOf(input.address)) },
+        },
       });
       if (byPhone) {
         return this.fillMissingCustomerFields(tx, byPhone, input);

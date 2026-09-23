@@ -26,6 +26,7 @@ import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { ShopifySyncService } from '../channel/shopify-sync.service';
 import { CRM_DRAFT_ATTRIBUTE } from '../channel/draft-rebadge.util';
+import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { displayVariantTitle } from '../product/variant-title.util';
 import { DraftMirrorEnqueuer } from './draft-mirror.enqueuer';
@@ -1273,7 +1274,12 @@ export class DraftOrderService {
     }
     if (input.phone) {
       const byPhone = await tx.customer.findFirst({
-        where: { organizationId: orgId, phone: input.phone },
+        where: {
+          organizationId: orgId,
+          // Matches the E.164 the form now sends AND the as-typed form older
+          // customers were saved under — see phoneLookupVariants.
+          phone: { in: phoneLookupVariants(input.phone, countryCodeOf(input.address)) },
+        },
       });
       if (byPhone) return byPhone;
     }

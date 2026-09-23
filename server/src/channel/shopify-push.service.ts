@@ -2,6 +2,7 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { countryCodeOf, normalizePhone } from '../common/phone.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
@@ -140,6 +141,30 @@ export function readStoredTaxLines(value: Prisma.JsonValue | null | undefined): 
     out.push({ title, rate, price });
   }
   return out;
+}
+
+/**
+ * The customer phone as `orderCreate` will accept it: E.164, or null.
+ *
+ * Shopify rejects the WHOLE order ("Order Phone is invalid") for anything
+ * else, and the CRM stored phones as typed — a counter sale's "9847586793"
+ * with no country code failed every retry. The country comes from the order's
+ * address; a counter sale usually has none, and an INR order is an Indian
+ * sale. `raw` is kept so the caller can tell "no phone" from "unusable phone".
+ */
+export function shopifyOrderPhone(order: {
+  currency: string;
+  shippingAddress?: Prisma.JsonValue | null;
+  billingAddress?: Prisma.JsonValue | null;
+  customer?: { phone: string | null } | null;
+}): { raw: string | null; e164: string | null } {
+  const raw = order.customer?.phone?.trim() || null;
+  if (!raw) return { raw: null, e164: null };
+  const country =
+    countryCodeOf(order.shippingAddress) ??
+    countryCodeOf(order.billingAddress) ??
+    (order.currency?.toUpperCase() === 'INR' ? 'IN' : null);
+  return { raw, e164: normalizePhone(raw, country) };
 }
 
 /**
@@ -299,12 +324,21 @@ export class ShopifyPushService {
 
     const grandTotal = order.totalPrice.toString();
 
+    // A phone Shopify can't parse must not block the sale reaching Shopify —
+    // send the order without it. The number itself stays out of the log.
+    const phone = shopifyOrderPhone(order);
+    if (phone.raw && !phone.e164) {
+      this.logger.warn(
+        `Order ${order.name} (${orderId}): customer phone is not a valid number — pushed without it`,
+      );
+    }
+
     const orderInput: Record<string, unknown> = {
       currency,
       // Line prices are pre-tax; the tax rides on `taxLines` above.
       taxesIncluded: false,
       email: order.customer?.email ?? undefined,
-      phone: order.customer?.phone ?? undefined,
+      phone: phone.e164 ?? undefined,
       note: order.note ?? undefined,
       tags: ['offline', 'collabo-crm', 'pos'],
       sourceName: 'collabo-crm',

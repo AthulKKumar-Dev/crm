@@ -7,6 +7,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import type { OrderAddressInput } from "~/types/api";
+import { PhoneInput } from "~/components/app/phone-input";
 
 /**
  * Address capture for offline orders and drafts.
@@ -98,10 +99,10 @@ export function AddressFields({
       </div>
 
       <div className="col-span-2">
-        <Field
+        <PhoneInput
           label="Phone (optional)"
-          value={value.phone ?? ""}
-          onChange={(v) => patch({ phone: v || undefined })}
+          value={value.phone}
+          onChange={(v) => patch({ phone: v })}
         />
       </div>
     </div>

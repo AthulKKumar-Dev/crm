@@ -8,6 +8,7 @@ import { ProductPicker, type CartLineSeed } from "./product-picker";
 import { OrderCart, type CartLine } from "./order-cart";
 import { BillSummary } from "./bill-summary";
 import { AddressFields, cleanAddress } from "./address-fields";
+import { isPhoneValidOrEmpty } from "~/components/app/phone-input";
 import { useSelectedLocation } from "~/hooks/use-selected-location";
 import type {
   CreateOfflineOrderRequest,
@@ -114,9 +115,15 @@ export function OfflineOrderForm({
     !!(nc?.email || nc?.phone || nc?.firstName || nc?.lastName);
   const linesReady =
     lines.length > 0 && lines.every((l) => l.quantity > 0 && l.unitPrice >= 0);
+  // A phone Shopify can't parse fails the whole order push ("Order Phone is
+  // invalid"), so an invalid number blocks saving rather than being stored.
+  const phonesValid =
+    isPhoneValidOrEmpty(nc?.phone) &&
+    isPhoneValidOrEmpty(shipTo.phone) &&
+    (billSame || isPhoneValidOrEmpty(billTo.phone));
   // Stock is shown as an informational warning in the cart but does NOT block
   // submission — inventory tracking on offline orders is a follow-up task.
-  const canSubmit = customerReady && linesReady;
+  const canSubmit = customerReady && linesReady && phonesValid;
 
   // Build a hint so the disabled state isn't a mystery.
   let disabledReason: string | null = null;
@@ -127,6 +134,8 @@ export function OfflineOrderForm({
       "Pick a customer, or fill in a name / email / phone for a new one.";
   } else if (!linesReady) {
     disabledReason = "Add at least one product with a quantity of 1 or more.";
+  } else if (!phonesValid) {
+    disabledReason = "Fix the phone number before saving.";
   }
 
   function buildCustomerBlock(): OfflineCustomerInput {
