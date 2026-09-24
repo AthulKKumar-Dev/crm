@@ -334,7 +334,8 @@ function EditOrderDialog({
       .map((t) => t.trim())
       .filter(Boolean);
     mutation.mutate(
-      { tags, note: note || undefined },
+      // Send note only when changed, but send "" so a note can be cleared.
+      { tags, ...(note !== (order.note ?? "") ? { note } : {}) },
       { onSuccess: () => onClose() },
     );
   }

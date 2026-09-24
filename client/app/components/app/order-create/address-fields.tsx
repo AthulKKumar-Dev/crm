@@ -7,6 +7,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import type { OrderAddressInput } from "~/types/api";
+import { PhoneInput } from "~/components/app/phone-input";
 
 /**
  * Address capture for offline orders and drafts.
@@ -98,10 +99,10 @@ export function AddressFields({
       </div>
 
       <div className="col-span-2">
-        <Field
+        <PhoneInput
           label="Phone (optional)"
-          value={value.phone ?? ""}
-          onChange={(v) => patch({ phone: v || undefined })}
+          value={value.phone}
+          onChange={(v) => patch({ phone: v })}
         />
       </div>
     </div>
@@ -120,7 +121,16 @@ export function cleanAddress(
   const filled = Object.values(a).some(
     (v) => typeof v === "string" && v.trim().length > 0,
   );
-  return filled ? a : undefined;
+  if (!filled) return undefined;
+  // This form only captures Indian addresses (its state list is India's), but
+  // the country was set only when a state was picked. An address sent without
+  // one took Shopify's STORE country — "United States" on a US store — and
+  // came back as a foreign address, taxed as an export (place of supply 96).
+  // An address that already names its country (e.g. autofilled from Shopify)
+  // keeps it.
+  return a.country_code || a.country
+    ? a
+    : { ...a, country: "India", country_code: "IN" };
 }
 
 function Field({

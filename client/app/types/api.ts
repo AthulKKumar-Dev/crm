@@ -1759,7 +1759,13 @@ export interface DraftOrderStats {
 /** Response from POST /draft-orders/:id/complete. */
 export interface CompleteDraftResponse {
   draftId: string;
-  order: OrderDetail;
+  /**
+   * Null when the draft was completed in Shopify and the order hasn't synced
+   * into the CRM yet — the server waits a few seconds for it, not forever.
+   */
+  order: OrderDetail | null;
+  /** Shopify's order name ("#1015") when completed via Shopify. */
+  shopifyOrderName?: string | null;
   invoice: InvoiceDetail | null;
   invoiceError: string | null;
 }
@@ -1854,6 +1860,12 @@ export interface CustomerDetail extends Customer {
   orders: CustomerOrderSummary[];
   /** Capped at the 20 most recent by the server. */
   activityLogs: CustomerActivityLog[];
+  /**
+   * What the order form pre-fills when this customer is picked: their saved
+   * address, else their last order's delivery address — normalised to the
+   * form's shape (GST `stateCode` resolved, phone in E.164). Null if none.
+   */
+  prefillAddress?: OrderAddressInput | null;
 }
 
 /** Query parameters for the customer list endpoint. */
@@ -1939,7 +1951,7 @@ export interface OrderStatsResponse {
 
 /** Query parameters for the dashboard overview endpoint. */
 /** Pre-canned windows offered by the dashboard's period selector. */
-export const DASHBOARD_RANGES = ["30d", "6m", "12m"] as const;
+export const DASHBOARD_RANGES = ["7d", "30d", "6m", "12m"] as const;
 export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
 
 export interface DashboardQueryParams {

@@ -17,7 +17,12 @@ import { useAuthStore } from "~/stores/auth.store";
 import { useEffect, useRef } from "react";
 import "./app.css";
 
-export const links: Route.LinksFunction = () => [];
+export const links: Route.LinksFunction = () => [
+  { rel: "icon", href: "/favicon.ico", sizes: "32x32" },
+  { rel: "icon", type: "image/png", href: "/brand/favicon-32.png", sizes: "32x32" },
+  { rel: "icon", type: "image/png", href: "/brand/icon-192.png", sizes: "192x192" },
+  { rel: "apple-touch-icon", href: "/brand/apple-touch-icon.png", sizes: "180x180" },
+];
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (

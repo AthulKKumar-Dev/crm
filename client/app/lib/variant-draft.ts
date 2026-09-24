@@ -14,6 +14,13 @@ export type VariantDraft = {
   sku: string;
 };
 
+export const VARIANT_DRAFT_KEYS = [
+  "price",
+  "cost",
+  "inventoryQuantity",
+  "sku",
+] as const satisfies ReadonlyArray<keyof VariantDraft>;
+
 export function toInputNumber(value: number | string | null | undefined): string {
   if (value == null || value === "") return "";
   const n = typeof value === "string" ? Number(value) : value;

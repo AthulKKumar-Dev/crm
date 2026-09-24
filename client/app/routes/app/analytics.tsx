@@ -39,7 +39,7 @@ export function meta() {
  * filters return an empty-but-valid shape until their pipelines land.
  */
 export default function AnalyticsPage() {
-  const [range, setRange] = useState<AnalyticsRange>("30d");
+  const [range, setRange] = useState<AnalyticsRange>("7d");
   const [channel, setChannel] = useState<AnalyticsChannelFilter>("all");
 
   const { data, isLoading, isFetching, isError, refetch } = useAnalyticsDashboard({ range, channel });
@@ -85,6 +85,7 @@ export default function AnalyticsPage() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="7d">Last 7 days</SelectItem>
               <SelectItem value="30d">Last 30 days</SelectItem>
               <SelectItem value="6m">Last 6 months</SelectItem>
               <SelectItem value="12m">Last 12 months</SelectItem>
@@ -190,7 +191,9 @@ export default function AnalyticsPage() {
               Cart, Checkout &amp; Orders Over Time
             </p>
             <p className="text-xs text-muted-foreground">
-              {range === "30d"
+              {range === "7d"
+                ? "Daily trends over the past 7 days"
+                : range === "30d"
                 ? "Daily trends over the past 30 days"
                 : range === "6m"
                   ? "Monthly trends over the past 6 months"

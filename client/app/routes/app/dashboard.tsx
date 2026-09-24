@@ -47,6 +47,7 @@ export function meta() {
 }
 
 const RANGE_OPTIONS: ReadonlyArray<{ value: DashboardRange; label: string }> = [
+  { value: "7d", label: "Last 7 days" },
   { value: "30d", label: "Last 30 days" },
   { value: "6m", label: "Last 6 months" },
   { value: "12m", label: "Last 12 months" },
@@ -56,7 +57,8 @@ export default function DashboardPage() {
   // One window for the whole page. Total Sales used to be an all-time figure
   // sitting beside a chart hard-coded to a rolling 12 months, so the two could
   // never be reconciled and neither said which period it covered.
-  const [range, setRange] = useState<DashboardRange>("12m");
+  // Opens on 7 days: the narrowest window is the cheapest first load.
+  const [range, setRange] = useState<DashboardRange>("7d");
   const params: DashboardQueryParams = { range };
 
   const { data: dashboard, isLoading } = useDashboard(params);
