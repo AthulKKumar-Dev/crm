@@ -3,6 +3,8 @@ import { ValidationPipe } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
+import { constants as zlibConstants } from 'node:zlib';
 import { ConfigService } from '@nestjs/config';
 
 import { AppModule } from './app.module';
@@ -25,6 +27,20 @@ async function bootstrap() {
   }));
   app.use(cookieParser());
 
+  // Response compression lives here, not in Caddy: only the DigitalOcean
+  // deploy has a proxy in front, while the single-container compose, Render
+  // and Railway shapes hit Node directly. Caddy passes an already-encoded
+  // response through untouched, so nothing is compressed twice.
+  // Brotli quality is pinned because zlib's default (11) is tuned for
+  // static assets and is far too slow for per-request JSON.
+  app.use(
+    compression({
+      threshold: 1024, // webhook acks, pixel hits and health checks stay raw
+      level: 6,
+      brotli: { params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } },
+    }),
+  );
+
   // Must precede route handling. `rawBody: true` above still captures the
   // untouched buffer the Shopify HMAC check needs — up to this same limit.
   app.useBodyParser('json', { limit: REQUEST_BODY_LIMIT });
@@ -40,6 +56,7 @@ async function bootstrap() {
         origin: config.get<string>('frontendUrl'),
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        maxAge: 86400,
       });
     }
   });
