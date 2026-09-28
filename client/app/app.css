@@ -319,6 +319,6 @@ html.dark { color-scheme: dark; }
 /* ── Product wordmark as a mask ─ the artwork's alpha channel becomes the shape,
       the element's background becomes the colour (see components/app/brand-logo.tsx). */
 .brand-logo-mask {
-  -webkit-mask: url(/brand/collabo-wordmark.webp) center / contain no-repeat;
-  mask: url(/brand/collabo-wordmark.webp) center / contain no-repeat;
+  -webkit-mask: url(/brand/collabo-wordmark.webp?v=2) center / contain no-repeat;
+  mask: url(/brand/collabo-wordmark.webp?v=2) center / contain no-repeat;
 }

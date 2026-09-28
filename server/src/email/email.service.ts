@@ -62,9 +62,12 @@ export class EmailService implements OnModuleInit {
         return `${this.fromName} <${this.fromEmail}>`;
     }
 
-    /** Absolute URL of the product wordmark, served by the frontend (PNG: Outlook cannot render WebP). */
+    /**
+     * Absolute URL of the product wordmark, served by the frontend (PNG: Outlook cannot render WebP).
+     * `?v=` busts mail-client image caches; bump it together with client brand-logo.tsx when the artwork changes.
+     */
     private get logoUrl(): string {
-        return `${this.frontendUrl.replace(/\/$/, '')}/brand/collabo-wordmark.png`;
+        return `${this.frontendUrl.replace(/\/$/, '')}/brand/collabo-wordmark.png?v=2`;
     }
 
     /** Wraps a message body in the branded shell: wordmark header, card, footer. */
