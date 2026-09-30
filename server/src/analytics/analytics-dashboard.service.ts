@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import { ChannelPlatform, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import {
+  attachProductImages,
+  type ProductImageCandidate,
+} from './product-image-match.util';
+import {
   AnalyticsChannelFilter,
   QueryAnalyticsDto,
   rangeToDays,
@@ -35,12 +39,18 @@ export interface DashboardPageRow {
 export interface DashboardProductRow {
   title: string;
   addToCarts: number;
+  /** First product image, so the merchant can recognise the row at a glance. */
+  image: string | null;
 }
 
 export interface DashboardViewedProductRow {
   title: string;
   views: number;
+  image: string | null;
 }
+
+/** A top-list row before its image is attached. */
+type ProductTally<T> = T & { productId?: string };
 
 export interface AnalyticsDashboard {
   stats: DashboardStat[];
@@ -63,7 +73,8 @@ interface MetricBlob {
   checkoutsStartedFromWebhook?: number;
   orders?: number;
   byPage?: Array<{ path: string; title: string | null; views: number }>;
-  byProduct?: Array<{ productTitle: string; productViews?: number; addToCarts?: number }>;
+  /** `productId` (Shopify, numeric) only on snapshots written since it was kept. */
+  byProduct?: Array<{ productTitle: string; productId?: string; productViews?: number; addToCarts?: number }>;
 }
 
 const MONTH_NAMES = [
@@ -136,6 +147,10 @@ export class AnalyticsDashboardService {
           .toISOString()
         : null;
 
+    const viewed = this.topViewedProducts(currentMetrics);
+    const added = this.topAddedToCart(currentMetrics);
+    const candidates = await this.imageCandidates(orgId, [...viewed, ...added]);
+
     return {
       stats: [
         this.stat('totalAddToCart', 'Total Add to Cart', cur.addToCart, prev.addToCart, changeLabel),
@@ -143,8 +158,8 @@ export class AnalyticsDashboardService {
         this.stat('totalAbandonedCarts', 'Total Abandoned Carts', cur.abandoned, prev.abandoned, changeLabel),
       ],
       topPages: this.topPages(currentMetrics),
-      topViewedProducts: this.topViewedProducts(currentMetrics),
-      topAddedToCart: this.topAddedToCart(currentMetrics),
+      topViewedProducts: attachProductImages(viewed, candidates),
+      topAddedToCart: attachProductImages(added, candidates),
       trend: this.buildTrend(current, days),
       meta: { channel, lastRefreshedAt },
     };
@@ -210,32 +225,72 @@ export class AnalyticsDashboardService {
       .slice(0, 5);
   }
 
-  private topViewedProducts(metrics: MetricBlob[]): DashboardViewedProductRow[] {
-    const totals = new Map<string, number>();
+  private topViewedProducts(metrics: MetricBlob[]): ProductTally<{ title: string; views: number }>[] {
+    const totals = new Map<string, { views: number; productId?: string }>();
     for (const m of metrics) {
       for (const p of m.byProduct ?? []) {
         if (!p.productViews) continue;
-        totals.set(p.productTitle, (totals.get(p.productTitle) ?? 0) + p.productViews);
+        const t = totals.get(p.productTitle) ?? { views: 0 };
+        t.views += p.productViews;
+        t.productId ??= p.productId;
+        totals.set(p.productTitle, t);
       }
     }
     return Array.from(totals.entries())
-      .map(([title, views]) => ({ title, views }))
+      .map(([title, t]) => ({ title, views: t.views, productId: t.productId }))
       .sort((a, b) => b.views - a.views)
       .slice(0, 5);
   }
 
-  private topAddedToCart(metrics: MetricBlob[]): DashboardProductRow[] {
-    const totals = new Map<string, number>();
+  private topAddedToCart(metrics: MetricBlob[]): ProductTally<{ title: string; addToCarts: number }>[] {
+    const totals = new Map<string, { addToCarts: number; productId?: string }>();
     for (const m of metrics) {
       for (const p of m.byProduct ?? []) {
         if (!p.addToCarts) continue;
-        totals.set(p.productTitle, (totals.get(p.productTitle) ?? 0) + p.addToCarts);
+        const t = totals.get(p.productTitle) ?? { addToCarts: 0 };
+        t.addToCarts += p.addToCarts;
+        t.productId ??= p.productId;
+        totals.set(p.productTitle, t);
       }
     }
     return Array.from(totals.entries())
-      .map(([title, addToCarts]) => ({ title, addToCarts }))
+      .map(([title, t]) => ({ title, addToCarts: t.addToCarts, productId: t.productId }))
       .sort((a, b) => b.addToCarts - a.addToCarts)
       .slice(0, 5);
+  }
+
+  /**
+   * The products behind the top lists, with their first image — one query for
+   * both lists. By Shopify id where the snapshot kept one, by title otherwise
+   * (see `attachProductImages` for how ambiguous titles are handled).
+   */
+  private async imageCandidates(
+    orgId: string,
+    rows: Array<{ title: string; productId?: string }>,
+  ): Promise<ProductImageCandidate[]> {
+    if (rows.length === 0) return [];
+    const ids = [...new Set(rows.map((r) => r.productId).filter((id): id is string => !!id))];
+    const titles = [...new Set(rows.map((r) => r.title))];
+    const products = await this.prisma.product.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        OR: [
+          ...(ids.length ? [{ externalId: { in: ids } }] : []),
+          { title: { in: titles } },
+        ],
+      },
+      select: {
+        externalId: true,
+        title: true,
+        images: { take: 1, orderBy: { position: 'asc' }, select: { src: true } },
+      },
+    });
+    return products.map((p) => ({
+      externalId: p.externalId,
+      title: p.title,
+      image: p.images[0]?.src ?? null,
+    }));
   }
 
   private buildTrend(

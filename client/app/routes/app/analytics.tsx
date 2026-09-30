@@ -9,7 +9,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { RefreshCw } from "lucide-react";
+import { Package, RefreshCw } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Separator } from "~/components/ui/separator";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -162,23 +162,27 @@ export default function AnalyticsPage() {
         <TopList
           title="Most Viewed Products"
           subtitle="Top 5 products by unique viewers"
+          showImage
           rows={topViewedProducts.map((p) => ({
             key: p.title,
             label: p.title,
             sub: null,
             value: p.views,
             unit: "views",
+            image: p.image,
           }))}
         />
         <TopList
           title="Most Added-to-Cart Products"
           subtitle="Top 5 products by add-to-cart events"
+          showImage
           rows={topAddedToCart.map((p) => ({
             key: p.title,
             label: p.title,
             sub: null,
             value: p.addToCarts,
             unit: "add to cart",
+            image: p.image,
           }))}
         />
       </div>
@@ -294,16 +298,20 @@ interface TopListRow {
   sub: string | null;
   value: number;
   unit: string;
+  image?: string | null;
 }
 
 function TopList({
   title,
   subtitle,
   rows,
+  showImage = false,
 }: {
   title: string;
   subtitle: string;
   rows: TopListRow[];
+  /** Product lists: a thumbnail per row so the merchant recognises the product. */
+  showImage?: boolean;
 }) {
   return (
     <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
@@ -320,6 +328,15 @@ function TopList({
         ) : (
           rows.map((row) => (
             <div key={row.key} className="flex items-center gap-3 px-5 py-3">
+              {showImage ? (
+                <div className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-md bg-muted">
+                  {row.image ? (
+                    <img src={row.image} alt="" className="size-full object-cover" loading="lazy" />
+                  ) : (
+                    <Package className="size-4 text-muted-foreground" />
+                  )}
+                </div>
+              ) : null}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-xs font-medium text-gray-900 dark:text-gray-100">
                   {row.label}

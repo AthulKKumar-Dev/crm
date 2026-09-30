@@ -33,11 +33,14 @@ export interface DashboardPageRow {
 export interface DashboardProductRow {
   title: string;
   addToCarts: number;
+  /** First product image; null when none is set or the title is ambiguous. */
+  image?: string | null;
 }
 
 export interface DashboardViewedProductRow {
   title: string;
   views: number;
+  image?: string | null;
 }
 
 export interface AnalyticsDashboard {

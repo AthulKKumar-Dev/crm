@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { rememberProductId } from './product-image-match.util';
 
 interface PixelDay {
     channelId: string;
@@ -9,6 +10,8 @@ interface PixelDay {
     date: string;
     viewersByProduct: Map<string, Set<string>>;
     addToCartsByProduct: Map<string, number>;
+    /** Shopify product id per title, kept so the Analytics page can show its image. */
+    productIdByTitle: Map<string, string>;
     viewsByPage: Map<string, { title: string | null; views: number }>;
     visitors: Set<string>;
     pageviews: number;
@@ -72,6 +75,7 @@ export class PixelEventsAggregator {
                 date,
                 viewersByProduct: new Map(),
                 addToCartsByProduct: new Map(),
+                productIdByTitle: new Map(),
                 viewsByPage: new Map(),
                 visitors: new Set(),
                 pageviews: 0,
@@ -96,18 +100,22 @@ export class PixelEventsAggregator {
                     break;
                 }
                 case 'product_viewed': {
-                    const title = (evt.payload as { productTitle?: string } | null)?.productTitle;
+                    const p = evt.payload as { productTitle?: string; productId?: unknown } | null;
+                    const title = p?.productTitle;
                     if (title) {
                         const viewers = slot.viewersByProduct.get(title) ?? new Set<string>();
                         viewers.add(visitor);
                         slot.viewersByProduct.set(title, viewers);
+                        rememberProductId(slot.productIdByTitle, title, p?.productId);
                     }
                     break;
                 }
                 case 'product_added_to_cart': {
                     slot.addToCartVisitors.add(visitor);
-                    const title = (evt.payload as { productTitle?: string } | null)?.productTitle;
+                    const p = evt.payload as { productTitle?: string; productId?: unknown } | null;
+                    const title = p?.productTitle;
                     if (title) {
+                        rememberProductId(slot.productIdByTitle, title, p?.productId);
                         slot.addToCartsByProduct.set(
                             title,
                             (slot.addToCartsByProduct.get(title) ?? 0) + 1,
@@ -144,13 +152,14 @@ export class PixelEventsAggregator {
 
         const byProduct = new Map<
             string,
-            { productViews: number; addToCarts: number; checkouts: number; orders: number }
+            { productId?: string; productViews: number; addToCarts: number; checkouts: number; orders: number }
         >();
         for (const row of (existingMetrics.byProduct as Array<{
-            productTitle: string; productViews?: number; addToCarts?: number;
+            productTitle: string; productId?: string; productViews?: number; addToCarts?: number;
             checkouts?: number; orders?: number;
         }> | undefined) ?? []) {
             byProduct.set(row.productTitle, {
+                productId: row.productId,
                 productViews: row.productViews ?? 0,
                 addToCarts: row.addToCarts ?? 0,
                 checkouts: row.checkouts ?? 0,
@@ -169,6 +178,10 @@ export class PixelEventsAggregator {
             const slot = byProduct.get(title) ?? { productViews: 0, addToCarts: 0, checkouts: 0, orders: 0 };
             slot.addToCarts = Math.max(slot.addToCarts, count);
             byProduct.set(title, slot);
+        }
+        for (const [title, id] of bucket.productIdByTitle) {
+            const slot = byProduct.get(title);
+            if (slot && !slot.productId) slot.productId = id;
         }
 
         const nextMetrics = {
