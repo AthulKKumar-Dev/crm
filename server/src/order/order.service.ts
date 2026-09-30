@@ -160,6 +160,9 @@ const FULFILLMENT_ORDER_PAGE_SIZE = 25;
 const MAX_SLIP_ORDERS = 100;
 
 /** The window a comparison reports on, plus the one immediately before it. */
+/** Most order rows one CSV / JSON export will carry, newest first. */
+export const ORDER_EXPORT_ROW_CAP = 10_000;
+
 interface ComparisonPeriods {
   currentStart: Date;
   currentEnd: Date;
@@ -967,10 +970,18 @@ export class OrderService {
       orderBy: { externalCreatedAt: 'desc' },
       // Bounded: the export builds the whole CSV/JSON in memory, so an
       // unlimited query on a large tenant could OOM the process for everyone.
-      take: 10_000,
+      take: ORDER_EXPORT_ROW_CAP,
     });
 
-    return orders.map((o) => ({
+    // How many orders matched in all. Only a full page can have been cut off,
+    // so the extra count runs only then. A capped file that does not say so
+    // reads as complete — the controller passes both numbers to the client.
+    const total =
+      orders.length < ORDER_EXPORT_ROW_CAP
+        ? orders.length
+        : await this.prisma.order.count({ where });
+
+    const rows = orders.map((o) => ({
       orderNumber: o.orderNumber,
       name: o.name,
       date: (o.externalCreatedAt || o.createdAt).toISOString(),
@@ -988,6 +999,8 @@ export class OrderService {
       financialStatus: o.financialStatus,
       fulfillmentStatus: o.fulfillmentStatus,
     }));
+
+    return { orders: rows, total };
   }
 
   generateCsv(data: any[]): string {

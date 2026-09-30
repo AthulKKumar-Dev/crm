@@ -8,6 +8,7 @@ import { constants as zlibConstants } from 'node:zlib';
 import { ConfigService } from '@nestjs/config';
 
 import { AppModule } from './app.module';
+import { EXPORT_EXPOSED_HEADERS } from './common/utils/export-headers.util';
 
 /// Express defaults to 100kb, which a Shopify order webhook for a large cart
 /// exceeds — and the 413 is raised BEFORE HMAC verification, so the handler
@@ -56,6 +57,9 @@ async function bootstrap() {
         origin: config.get<string>('frontendUrl'),
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        // The app is on another origin, so the browser hides these from it
+        // unless exposed — and the "file was cut off" notice never fires.
+        exposedHeaders: EXPORT_EXPOSED_HEADERS,
         maxAge: 86400,
       });
     }

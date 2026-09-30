@@ -1,4 +1,4 @@
-import { DashboardService } from './dashboard.service';
+import { DashboardService, REPORT_ROW_CAP } from './dashboard.service';
 import type { SalesProfitRow } from './profit.util';
 
 /**
@@ -403,6 +403,99 @@ describe('DashboardService.getSalesAndProfit', () => {
           expect.objectContaining({ baseCurrency: expect.objectContaining({ not: 'USD' }) }),
         ]),
       );
+    });
+  });
+});
+
+/**
+ * The CSV / JSON downloads. The dashboard sends `range`, but the export read
+ * only `dateFrom`/`dateTo` — so every download loaded the org's whole order
+ * history with no row limit, outran the client timeout on a large store and
+ * surfaced as an intermittent "Failed to export".
+ */
+describe('DashboardService.getReportData', () => {
+  function buildReport(opts: { rows?: number; matched?: number } = {}) {
+    const findMany = jest.fn().mockResolvedValue(
+      Array.from({ length: opts.rows ?? 0 }, (_, i) => reportOrder(i)),
+    );
+    const count = jest.fn().mockResolvedValue(opts.matched ?? 0);
+    const prisma = {
+      order: { findMany, count },
+      organization: {
+        findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC', currency: 'INR' }),
+      },
+    };
+    return { findMany, count, service: new DashboardService(prisma as any) };
+  }
+
+  const reportOrder = (i: number) => ({
+    orderNumber: i, name: `SJ${i}`, externalCreatedAt: new Date('2026-09-01T00:00:00Z'),
+    createdAt: new Date('2026-09-01T00:00:00Z'), customer: null, channel: { name: 'Shopify' },
+    lineItems: [], subtotalPrice: 1, totalTax: 0, totalShippingPrice: 0, totalDiscounts: 0,
+    totalPrice: 1, currency: 'INR', financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED',
+  });
+
+  it('exports only the period the dashboard is showing', async () => {
+    const { service, findMany } = buildReport();
+    const { period } = await service.getReportData(ORG, { range: '7d' });
+
+    const where = findMany.mock.calls[0][0].where;
+    // `placedBetween`: Shopify time, falling back to the CRM row time, so
+    // CRM-created orders are in the file too.
+    expect(where.OR).toEqual([
+      { externalCreatedAt: { gte: expect.any(Date), lt: expect.any(Date) } },
+      { externalCreatedAt: null, createdAt: { gte: expect.any(Date), lt: expect.any(Date) } },
+    ]);
+    const from: Date = where.OR[0].externalCreatedAt.gte;
+    const days = (where.OR[0].externalCreatedAt.lt.getTime() - from.getTime()) / 86_400_000;
+    expect(days).toBeGreaterThanOrEqual(7);
+    expect(days).toBeLessThan(8);
+    expect(period).toEqual({ from: from.toISOString(), to: expect.any(String) });
+  });
+
+  it('stays unbounded for a request with no range and no dates', async () => {
+    // The Orders page's "All time" export calls this endpoint with nothing.
+    const { service, findMany } = buildReport();
+    const { period } = await service.getReportData(ORG, {});
+
+    expect(findMany.mock.calls[0][0].where).not.toHaveProperty('OR');
+    expect(period).toBeNull();
+  });
+
+  it('never loads more than the row cap', async () => {
+    const { service, findMany } = buildReport();
+    await service.getReportData(ORG, {});
+    await service.getReportData(ORG, { range: '12m' });
+
+    expect(findMany.mock.calls.map((c) => c[0].take)).toEqual([REPORT_ROW_CAP, REPORT_ROW_CAP]);
+  });
+
+  it('reports the full match count when the cap cut the file off', async () => {
+    const { service, count, findMany } = buildReport({ rows: REPORT_ROW_CAP, matched: 10_871 });
+    const { orders, total } = await service.getReportData(ORG, { range: '12m' });
+
+    expect(orders).toHaveLength(REPORT_ROW_CAP);
+    expect(total).toBe(10_871);
+    // Counted over exactly the rows the export selected from.
+    expect(count.mock.calls[0][0].where).toBe(findMany.mock.calls[0][0].where);
+  });
+
+  it('does not run the extra count for a file that fits under the cap', async () => {
+    const { service, count } = buildReport({ rows: 3 });
+    const { total } = await service.getReportData(ORG, { range: '7d' });
+
+    expect(total).toBe(3);
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it('scopes to the organization and skips deleted orders', async () => {
+    const { service, findMany } = buildReport();
+    await service.getReportData(ORG, { range: '30d', channelId: 'ch_1' });
+
+    expect(findMany.mock.calls[0][0].where).toMatchObject({
+      organizationId: ORG,
+      deletedAt: null,
+      channelId: 'ch_1',
     });
   });
 });

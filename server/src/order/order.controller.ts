@@ -20,6 +20,10 @@ import { CreateFulfillmentDto } from './dto/create-fulfillment.dto';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { SetItemsStatusDto } from './dto/mark-in-progress.dto';
 import type { Response } from 'express';
+import {
+  EXPORT_ROWS_HEADER,
+  EXPORT_TOTAL_HEADER,
+} from '../common/utils/export-headers.util';
 
 @Controller('orders')
 export class OrderController {
@@ -62,8 +66,11 @@ export class OrderController {
     @Query() query: QueryOrdersDto,
     @Res() res: Response,
   ) {
-    const data = await this.orderService.getExportData(user.orgId!, query);
-    const csv = this.orderService.generateCsv(data);
+    const { orders, total } = await this.orderService.getExportData(user.orgId!, query);
+    const csv = this.orderService.generateCsv(orders);
+    // Lets the page say so when the file holds fewer orders than matched.
+    res.setHeader(EXPORT_ROWS_HEADER, String(orders.length));
+    res.setHeader(EXPORT_TOTAL_HEADER, String(total));
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=orders-export.csv');
     res.send(csv);
@@ -76,7 +83,9 @@ export class OrderController {
     @Query() query: QueryOrdersDto,
     @Res() res: Response,
   ) {
-    const data = await this.orderService.getExportData(user.orgId!, query);
+    const { orders: data, total } = await this.orderService.getExportData(user.orgId!, query);
+    res.setHeader(EXPORT_ROWS_HEADER, String(data.length));
+    res.setHeader(EXPORT_TOTAL_HEADER, String(total));
     const report = {
       generatedAt: new Date().toISOString(),
       filters: {
@@ -86,6 +95,10 @@ export class OrderController {
         dateTo: query.dateTo || 'all',
       },
       totalOrders: data.length,
+      // Said in the file too, so it still reads correctly away from the page.
+      ...(data.length < total && {
+        truncated: { ordersIncluded: data.length, ordersMatched: total, order: 'newest first' },
+      }),
       orders: data,
     };
     res.setHeader('Content-Type', 'application/json');

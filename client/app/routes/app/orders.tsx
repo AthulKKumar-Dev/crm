@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import {
-  Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package,
+  Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package, Loader2,
   Target, Box, Plus, Printer,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
@@ -24,7 +24,7 @@ import { useDebounced } from "~/hooks/use-debounced";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Separator } from "~/components/ui/separator";
 import { formatCurrency } from "~/lib/utils";
-import { downloadBlob } from "~/lib/download-blob";
+import { useExclusiveDownload } from "~/hooks/use-exclusive-download";
 import { calendarDaysAgo, reportingTimeZone } from "~/lib/reporting-date";
 import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
@@ -91,6 +91,8 @@ export default function OrdersPage() {
 
   const { data, isLoading, isError, refetch } = useOrders(params);
   const { data: stats, isLoading: statsLoading } = useOrderStats(statsParams);
+  // One download at a time across both header buttons.
+  const { running: downloading, run: download } = useExclusiveDownload<"report" | "csv">();
   const orders = data?.data ?? [];
   const meta = data?.meta;
   const totalPages = meta?.totalPages ?? 1;
@@ -168,29 +170,45 @@ export default function OrdersPage() {
               `invoiceService.exportCsv` and save `gst-invoices-*.csv` — a
               copy-paste from the invoices page that also ignored the search box
               and forced `dateTo` to today. */}
+          {/* Both lock while either runs; the clicked one shows progress until
+              its file arrives or fails — same as the dashboard's pair. */}
           <Button
             variant="brand"
             size="action"
-            onClick={() => downloadBlob(
+            disabled={downloading !== null}
+            aria-busy={downloading === "report"}
+            onClick={() => download(
+              "report",
               () => dashboardService.exportCsv(statsParams),
               `orders-report-${dateRange}.csv`,
-              "Failed to download report.",
+              "Couldn't download the report. Please try again.",
             )}
           >
-            <Download className="size-3.5" />
-            Download Report
+            {downloading === "report" ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Download className="size-3.5" />
+            )}
+            {downloading === "report" ? "Preparing…" : "Download Report"}
           </Button>
           <Button
             variant="outline"
             size="action"
-            onClick={() => downloadBlob(
+            disabled={downloading !== null}
+            aria-busy={downloading === "csv"}
+            onClick={() => download(
+              "csv",
               () => orderService.exportCsv(params),
               `orders-${dateRange}.csv`,
-              "Failed to export orders.",
+              "Couldn't export the orders. Please try again.",
             )}
           >
-            <Upload className="size-3.5" />
-            Export CSV
+            {downloading === "csv" ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Upload className="size-3.5" />
+            )}
+            {downloading === "csv" ? "Exporting…" : "Export CSV"}
           </Button>
           <Button asChild variant="brand" size="action">
             <Link to="/orders/new">

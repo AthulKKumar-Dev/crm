@@ -27,6 +27,9 @@ import {
 } from './profit.util';
 import { lowStockVariantRows, toLowStockEntry } from './low-stock.util';
 
+/** Most order rows one CSV / JSON download will carry, newest first. */
+export const REPORT_ROW_CAP = 10_000;
+
 /** The window every figure on the dashboard is reported over. */
 interface Window {
   from: Date;
@@ -218,29 +221,65 @@ export class DashboardService {
 
 
 
+  /**
+   * The order rows behind the CSV / JSON downloads.
+   *
+   * Scoped to the SAME window the dashboard is showing. This used to read only
+   * `dateFrom`/`dateTo`, while the dashboard sends `range` — so every download
+   * loaded the org's entire order history (38k orders with line items for one
+   * merchant), ran past the client's timeout and surfaced as an intermittent
+   * "Failed to export". A request with neither a range nor dates is the Orders
+   * page's "All time" export and stays unbounded — but never uncapped.
+   */
   async getReportData(orgId: string, query: QueryDashboardDto) {
-    const baseWhere: Prisma.OrderWhereInput = {
+    const bounded = Boolean(query.range || query.dateFrom || query.dateTo);
+    const window = bounded ? await this.resolveWindow(orgId, query) : null;
+
+    const where: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       ...(query.channelId && { channelId: query.channelId }),
-      ...(query.dateFrom || query.dateTo ? {
-        externalCreatedAt: {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo && { lte: new Date(query.dateTo) }),
-        },
-      } : {}),
+      ...(window && placedBetween(window.from, window.to)),
     };
 
     const orders = await this.prisma.order.findMany({
-      where: baseWhere,
+      where,
       include: {
         customer: { select: { firstName: true, lastName: true, email: true } },
         lineItems: { select: { title: true, quantity: true, price: true } },
         channel: { select: { name: true } },
       },
       orderBy: { externalCreatedAt: 'desc' },
+      // Bounded: the file is built in memory. Same cap as the Orders export.
+      take: REPORT_ROW_CAP,
     });
 
+    // How many orders matched in all. Only a full page can have been cut off,
+    // so the extra count runs only then. A capped file that does not say so
+    // reads as the complete period — the caller is told and tells the user.
+    const total =
+      orders.length < REPORT_ROW_CAP
+        ? orders.length
+        : await this.prisma.order.count({ where });
+
+    return {
+      period: window
+        ? { from: window.from.toISOString(), to: window.to.toISOString() }
+        : null,
+      orders: this.toReportRows(orders),
+      total,
+    };
+  }
+
+  private toReportRows(
+    orders: Array<Prisma.OrderGetPayload<{
+      include: {
+        customer: { select: { firstName: true; lastName: true; email: true } };
+        lineItems: { select: { title: true; quantity: true; price: true } };
+        channel: { select: { name: true } };
+      };
+    }>>,
+  ) {
     return orders.map((o) => ({
       orderNumber: o.orderNumber,
       name: o.name,

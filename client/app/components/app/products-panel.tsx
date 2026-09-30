@@ -18,6 +18,8 @@ interface ProductsPanelProps {
     topProducts?: DashboardTopProduct[];
     lowStockProducts?: DashboardLowStockProduct[];
     lowStockVariants?: DashboardLowStockVariant[];
+    /** The window the best sellers were counted over, e.g. "Last 7 days". */
+    periodLabel?: string;
     isLoading?: boolean;
     currency: string;
     className?: string;
@@ -49,6 +51,7 @@ export function ProductsPanel({
     topProducts,
     lowStockProducts,
     lowStockVariants,
+    periodLabel,
     isLoading,
     currency,
     className,
@@ -79,7 +82,7 @@ export function ProductsPanel({
                     {tab === "top" ? "Best sellers" : "Variants running low"}
                 </p>
                 <p className="text-caption text-muted-foreground">
-                    {tab === "top" ? "Last 30 days" : "Needs restock"}
+                    {tab === "top" ? periodLabel : "Needs restock"}
                 </p>
             </div>
 

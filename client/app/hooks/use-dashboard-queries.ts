@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { useExclusiveDownload } from "~/hooks/use-exclusive-download";
 import { dashboardService } from "~/services/dashboard.service";
 import type { DashboardQueryParams } from "~/types/api";
 
@@ -44,34 +44,30 @@ export function useSalesByCategory(params?: DashboardQueryParams) {
   });
 }
 
-/** Imperative helpers for triggering dashboard exports (CSV / JSON). */
+export type DashboardExportKind = "csv" | "json";
+
+/**
+ * Dashboard downloads (CSV / JSON), one at a time — `exporting` names the one
+ * in flight. The lock itself lives in `useExclusiveDownload`.
+ */
 export function useExportDashboard() {
-  const download = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const { running: exporting, run } = useExclusiveDownload<DashboardExportKind>();
 
-  const exportCsv = async (params?: DashboardQueryParams) => {
-    try {
-      const blob = await dashboardService.exportCsv(params);
-      download(blob, "orders-report.csv");
-    } catch {
-      toast.error("Failed to export CSV.");
-    }
-  };
+  const exportCsv = (params?: DashboardQueryParams) =>
+    run(
+      "csv",
+      () => dashboardService.exportCsv(params),
+      "orders-report.csv",
+      "Couldn't export the CSV. Please try again.",
+    );
 
-  const exportJson = async (params?: DashboardQueryParams) => {
-    try {
-      const blob = await dashboardService.exportJson(params);
-      download(blob, "dashboard-report.json");
-    } catch {
-      toast.error("Failed to export report.");
-    }
-  };
+  const exportJson = (params?: DashboardQueryParams) =>
+    run(
+      "json",
+      () => dashboardService.exportJson(params),
+      "dashboard-report.json",
+      "Couldn't download the report. Please try again.",
+    );
 
-  return { exportCsv, exportJson };
+  return { exportCsv, exportJson, exporting };
 }

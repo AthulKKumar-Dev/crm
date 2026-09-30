@@ -4,6 +4,10 @@ import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { DashboardService } from './dashboard.service';
 import { QueryDashboardDto } from './dto/query-dashboard.dto';
+import {
+  EXPORT_ROWS_HEADER,
+  EXPORT_TOTAL_HEADER,
+} from '../common/utils/export-headers.util';
 
 @Controller('dashboard')
 export class DashboardController {
@@ -36,9 +40,10 @@ export class DashboardController {
     @Query() query: QueryDashboardDto,
     @Res() res: Response,
   ) {
-    const data = await this.dashboardService.getReportData(user.orgId!, query);
-    const csv = this.dashboardService.generateCsv(data);
+    const { orders, total } = await this.dashboardService.getReportData(user.orgId!, query);
+    const csv = this.dashboardService.generateCsv(orders);
 
+    this.setExportCounts(res, orders.length, total);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=orders-report.csv');
     res.send(csv);
@@ -52,22 +57,36 @@ export class DashboardController {
     @Res() res: Response,
   ) {
     const overview = await this.dashboardService.getOverview(user.orgId!, query);
-    const orders = await this.dashboardService.getReportData(user.orgId!, query);
+    const { orders, period, total } = await this.dashboardService.getReportData(user.orgId!, query);
 
     const report = {
       generatedAt: new Date().toISOString(),
-      dateRange: { from: query.dateFrom || 'all', to: query.dateTo || 'all' },
+      // The period the rows below actually cover — it used to print "all"
+      // above a summary computed over the selected range.
+      dateRange: period ?? { from: 'all', to: 'all' },
       summary: {
         totalSales: overview.totalSales,
         totalOrders: overview.totalOrders,
         totalCustomers: overview.totalCustomers,
         totalProducts: overview.totalProducts,
       },
+      // Said in the file too, so it still reads correctly once it has left
+      // the page that warned about it.
+      ...(orders.length < total && {
+        truncated: { ordersIncluded: orders.length, ordersMatched: total, order: 'newest first' },
+      }),
       orders,
     };
 
+    this.setExportCounts(res, orders.length, total);
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', 'attachment; filename=dashboard-report.json');
     res.send(JSON.stringify(report, null, 2));
+  }
+
+  /** Lets the page tell the user when the file holds fewer orders than matched. */
+  private setExportCounts(res: Response, rows: number, total: number) {
+    res.setHeader(EXPORT_ROWS_HEADER, String(rows));
+    res.setHeader(EXPORT_TOTAL_HEADER, String(total));
   }
 }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRight, Download, Upload, Target, Users, ShoppingBag } from "lucide-react";
+import { ArrowRight, Download, Loader2, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
@@ -62,7 +62,7 @@ export default function DashboardPage() {
   const params: DashboardQueryParams = { range };
 
   const { data: dashboard, isLoading } = useDashboard(params);
-  const { exportCsv, exportJson } = useExportDashboard();
+  const { exportCsv, exportJson, exporting } = useExportDashboard();
   const { data: org } = useCurrentOrg();
   // Same params as the chart below, so React Query serves both from one
   // request and the cards cannot disagree with the bars.
@@ -98,21 +98,35 @@ export default function DashboardPage() {
                 ))}
               </SelectContent>
             </Select>
+            {/* One download at a time: both lock while either runs, and the
+                clicked one shows progress until its file arrives or fails. */}
             <Button
               size="action"
               variant="outline"
               onClick={() => exportCsv(params)}
+              disabled={exporting !== null}
+              aria-busy={exporting === "csv"}
             >
-              <Upload className="size-3.5" />
-              Export CSV
+              {exporting === "csv" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Upload className="size-3.5" />
+              )}
+              {exporting === "csv" ? "Exporting…" : "Export CSV"}
             </Button>
             <Button
               variant="brand"
               size="action"
               onClick={() => exportJson(params)}
+              disabled={exporting !== null}
+              aria-busy={exporting === "json"}
             >
-              <Download className="size-3.5" />
-              Download Report
+              {exporting === "json" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              {exporting === "json" ? "Preparing…" : "Download Report"}
             </Button>
           </PageHeaderActions>
         </PageHeader>
@@ -219,6 +233,7 @@ export default function DashboardPage() {
             topProducts={dashboard?.topSellingProducts}
             lowStockProducts={dashboard?.lowStockProducts}
             lowStockVariants={dashboard?.lowStockVariants}
+            periodLabel={RANGE_OPTIONS.find((option) => option.value === range)?.label}
             isLoading={isLoading}
             currency={orgCurrency}
             className="flex-1"

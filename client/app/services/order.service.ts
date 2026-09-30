@@ -1,4 +1,5 @@
 import { apiClient } from "~/lib/api-client";
+import { warnIfExportCutOff } from "~/lib/export-notice";
 import type {
   PaginatedResponse,
   Order,
@@ -151,6 +152,12 @@ export const orderService = {
    */
   exportCsv: (params?: OrderListParams) =>
     apiClient
-      .get<Blob>("/orders/export/csv", { params, responseType: "blob" })
-      .then((response) => response.data),
+      // A file download outlasts a page request; the 30 s default cut large
+      // exports off. Same allowance as the dashboard exports.
+      .get<Blob>("/orders/export/csv", { params, responseType: "blob", timeout: 120_000 })
+      .then((response) => {
+        // The server caps the file; say so when it held back older orders.
+        warnIfExportCutOff(response.headers);
+        return response.data;
+      }),
 };
