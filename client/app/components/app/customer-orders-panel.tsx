@@ -18,6 +18,8 @@ import { NotYet } from "~/components/app/not-yet";
 import { useChannels } from "~/hooks/use-channel-queries";
 import { useDebounced } from "~/hooks/use-debounced";
 import { useOrder, useOrders } from "~/hooks/use-order-queries";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { calendarDaysAgo, reportingTimeZone } from "~/lib/reporting-date";
 import {
   FINANCIAL_CLASSES,
   FINANCIAL_LABELS,
@@ -36,12 +38,6 @@ const DATE_RANGE_MAP: Record<string, number | null> = {
   "30d": 30,
   "90d": 90,
 };
-
-function daysAgo(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return date.toISOString().split("T")[0];
-}
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "—";
@@ -96,6 +92,7 @@ export function CustomerOrdersPanel({
   const [page, setPage] = useState(1);
 
   const { data: channels = [] } = useChannels();
+  const { data: org } = useCurrentOrg();
 
   // Debounced into the query key only, so typing stays instant.
   const debouncedSearch = useDebounced(search, 350);
@@ -106,7 +103,8 @@ export function CustomerOrdersPanel({
     page,
     limit: PAGE_SIZE,
     search: debouncedSearch || undefined,
-    dateFrom: daysBack != null ? daysAgo(daysBack) : undefined,
+    dateFrom:
+      daysBack != null ? calendarDaysAgo(daysBack, reportingTimeZone(org?.timezone)) : undefined,
     channelId: channelId !== "all" ? channelId : undefined,
   };
 

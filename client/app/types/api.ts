@@ -1996,6 +1996,19 @@ export interface DashboardTopProduct {
   price: string;
 }
 
+/** One low-stock variant — what the dashboard's Low Stock tab lists. */
+export interface DashboardLowStockVariant {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  /** Null for a single-variant product — there is no variant to name. */
+  variantTitle: string | null;
+  sku: string | null;
+  stock: number;
+  image: string | null;
+  threshold: number;
+}
+
 /** A low-stock product returned by the dashboard endpoint. */
 export interface DashboardLowStockProduct {
   id: string;
@@ -2006,6 +2019,15 @@ export interface DashboardLowStockProduct {
   variantCount: number;
   price: string;
   threshold: number;
+  /** The variants at or below `threshold`, lowest stock first. */
+  lowVariants: Array<{
+    id: string;
+    /** Null for a single-variant product — there is no variant to name. */
+    title: string | null;
+    sku: string | null;
+    stock: number;
+  }>;
+  lowVariantCount: number;
 }
 
 /** A recent order returned by the dashboard endpoint (subset of full Order). */
@@ -2041,6 +2063,9 @@ export interface DashboardOverview {
   fulfillmentBreakdown: FulfillmentBreakdown;
   topSellingProducts: DashboardTopProduct[];
   lowStockProducts: DashboardLowStockProduct[];
+  /** The 5 most urgent low-stock variants across all products. Optional:
+   *  absent from servers that predate it. */
+  lowStockVariants?: DashboardLowStockVariant[];
   recentOrders: DashboardRecentOrder[];
 }
 

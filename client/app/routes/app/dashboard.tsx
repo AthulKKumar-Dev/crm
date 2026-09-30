@@ -218,6 +218,7 @@ export default function DashboardPage() {
           <ProductsPanel
             topProducts={dashboard?.topSellingProducts}
             lowStockProducts={dashboard?.lowStockProducts}
+            lowStockVariants={dashboard?.lowStockVariants}
             isLoading={isLoading}
             currency={orgCurrency}
             className="flex-1"

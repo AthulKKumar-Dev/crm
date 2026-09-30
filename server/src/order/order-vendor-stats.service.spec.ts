@@ -20,6 +20,8 @@ function build() {
     // Both raw queries go through this one mock; the pending query reads
     // `count` and the sales query reads `value`, so one shape serves both.
     $queryRaw: jest.fn().mockResolvedValue([{ count: 2, value: 1500 }]),
+    // Date filters are read in the org's reporting zone; "UTC" reads as IST.
+    organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC' }) },
   };
   const service = new OrderService(
     prisma as any, {} as any, {} as any, {} as any, {} as any, {} as any,
@@ -167,5 +169,17 @@ describe('OrderService.getVendorComparison', () => {
     const prevFrom = new Date(period.previous!.from).getTime();
     expect(new Date(period.previous!.to).getTime()).toBe(curFrom - 1);
     expect(curTo - curFrom).toBe(curFrom - prevFrom);
+  });
+
+  it('reads bare dates as whole calendar days in IST', async () => {
+    const { service } = build();
+
+    const { period } = await service.getVendorComparison(ORG, query, VENDOR);
+
+    // 1 Aug 00:00 IST → 31 Aug 23:59:59.999 IST. The old `new Date(...)` read
+    // both as UTC midnight: the window opened at 05:30 IST and dropped all of
+    // 31 Aug.
+    expect(period.current.from).toBe('2026-07-31T18:30:00.000Z');
+    expect(period.current.to).toBe('2026-08-31T18:29:59.999Z');
   });
 });

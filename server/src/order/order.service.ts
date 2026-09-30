@@ -56,6 +56,11 @@ import { Queue } from 'bullmq';
 import { SHOPIFY_PUSH_QUEUE } from '../channel/shopify-push.queue';
 import { displayVariantTitle } from '../product/variant-title.util';
 import {
+  resolveReportingTimeZone,
+  zonedDayEndExclusive,
+  zonedDayStart,
+} from '../common/utils/zoned-date.util';
+import {
   retryOnNumberingConflict,
   uniqueViolationTargets,
 } from '../common/utils/serialization-retry.util';
@@ -254,11 +259,14 @@ export class OrderService {
       ];
     }
 
-    // Date range filter
+    // Date range filter. Bare dates are calendar days in the reporting zone, so
+    // the list covers the same orders as the stats tiles above it.
     if (query.dateFrom || query.dateTo) {
-      where.externalCreatedAt = {};
-      if (query.dateFrom) where.externalCreatedAt.gte = new Date(query.dateFrom);
-      if (query.dateTo) where.externalCreatedAt.lte = new Date(query.dateTo);
+      const timeZone = await this.reportingTimeZone(orgId);
+      where.externalCreatedAt = {
+        ...(query.dateFrom && { gte: zonedDayStart(query.dateFrom, timeZone) }),
+        ...(query.dateTo && { lt: zonedDayEndExclusive(query.dateTo, timeZone) }),
+      };
     }
 
     const page = query.page ?? 1;
@@ -433,7 +441,10 @@ export class OrderService {
   }
 
   async getComparison(orgId: string, query: QueryDashboardDto) {
-    const periods = this.comparisonPeriods(query);
+    const periods = this.comparisonPeriods(
+      query,
+      await this.reportingTimeZone(orgId),
+    );
     const { currentStart, currentEnd, previousStart, previousEnd } = periods;
 
     const channelFilter = query.channelId ? { channelId: query.channelId } : {};
@@ -574,7 +585,10 @@ export class OrderService {
     query: QueryDashboardDto,
     vendorScope: string,
   ) {
-    const periods = this.comparisonPeriods(query);
+    const periods = this.comparisonPeriods(
+      query,
+      await this.reportingTimeZone(orgId),
+    );
     const { currentStart, currentEnd, previousStart, previousEnd } = periods;
 
     const channelFilter = query.channelId ? { channelId: query.channelId } : {};
@@ -733,9 +747,25 @@ export class OrderService {
    * The window to report on, plus the same-length window immediately before it.
    * Shared by the org-wide and vendor comparisons so both quote the same dates.
    */
-  private comparisonPeriods(query: QueryDashboardDto): ComparisonPeriods {
+  /** The zone date filters are read in — see `resolveReportingTimeZone`. */
+  private async reportingTimeZone(orgId: string): Promise<string> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true },
+    });
+    return resolveReportingTimeZone(org ?? {});
+  }
+
+  private comparisonPeriods(
+    query: QueryDashboardDto,
+    timeZone: string,
+  ): ComparisonPeriods {
     const now = new Date();
-    const currentEnd = query.dateTo ? new Date(query.dateTo) : now;
+    // Inclusive (`lte`) end: a bare end date covers that whole day, so stop 1ms
+    // before the next day starts.
+    const currentEnd = query.dateTo
+      ? new Date(zonedDayEndExclusive(query.dateTo, timeZone).getTime() - 1)
+      : now;
 
     // No `dateFrom` means the caller asked for ALL TIME — the Orders page's
     // own "All Time" option sends nothing. This used to default to the 1st of
@@ -758,7 +788,9 @@ export class OrderService {
       };
     }
 
-    const currentStart = new Date(query.dateFrom);
+    // The Orders page sends today − N as a bare date; that means 00:00 on that
+    // day in the reporting zone, not UTC midnight (05:30 IST).
+    const currentStart = zonedDayStart(query.dateFrom, timeZone);
 
     // Previous period = same duration, shifted back
     const duration = currentEnd.getTime() - currentStart.getTime();
@@ -909,6 +941,8 @@ export class OrderService {
   }
 
   async getExportData(orgId: string, query: QueryOrdersDto) {
+    const timeZone =
+      query.dateFrom || query.dateTo ? await this.reportingTimeZone(orgId) : '';
     const where: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
@@ -917,8 +951,8 @@ export class OrderService {
       ...(query.channelId && { channelId: query.channelId }),
       ...((query.dateFrom || query.dateTo) && {
         externalCreatedAt: {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo && { lte: new Date(query.dateTo) }),
+          ...(query.dateFrom && { gte: zonedDayStart(query.dateFrom, timeZone) }),
+          ...(query.dateTo && { lt: zonedDayEndExclusive(query.dateTo, timeZone) }),
         },
       }),
     };

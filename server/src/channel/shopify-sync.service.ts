@@ -21,6 +21,7 @@ import {
 } from './shopify-tax-lines.util';
 import { extractRefundTax } from './refund-tax.util';
 import { planImageReconcile } from './product-image-identity.util';
+import { planVariantPrune } from './shopify-variant-prune.util';
 import { normalizeShopifyOptions } from './product-options.util';
 import {
     gstTypeForSupply,
@@ -1410,7 +1411,8 @@ export class ShopifySyncService {
             // barcodeSource decides whether an incoming empty barcode is allowed
             // to clear the local one — see the update branch below.
             select: {
-                externalId: true, inventoryQuantity: true, sku: true,
+                id: true, externalId: true, createdAt: true,
+                inventoryQuantity: true, sku: true,
                 barcode: true, barcodeSource: true,
             },
         });
@@ -1526,7 +1528,42 @@ export class ShopifySyncService {
             }
         }
 
+        await this.pruneRemovedVariants(externalId, planVariantPrune(priorVariants, sp));
+
         await this.reconcileProductImages(product.id, sp.images);
+    }
+
+    /**
+     * Delete local variants Shopify no longer has — the decision (and every
+     * guard) lives in `planVariantPrune`; this only executes it.
+     *
+     * One transaction per variant, same as `ProductService.deleteVariant`:
+     * all-zero StockLevel rows are released so the RESTRICT FK doesn't block,
+     * and a variant still holding stock is KEPT and logged rather than having
+     * its units silently written off. Order lines survive (variant_id SET NULL,
+     * title/SKU snapshotted on the line). A failure here never fails the
+     * product sync around it.
+     */
+    private async pruneRemovedVariants(
+        productExternalId: string,
+        doomed: Array<{ id: string; externalId: string | null }>,
+    ): Promise<void> {
+        for (const v of doomed) {
+            try {
+                await this.prisma.$transaction(async (tx) => {
+                    await this.inventoryLedger.releaseStockRowsForDelete(tx, v.id);
+                    await tx.productVariant.delete({ where: { id: v.id } });
+                });
+                this.logger.log(
+                    `Removed variant ${v.id} (Shopify ${v.externalId}) of product ${productExternalId}: no longer in Shopify.`,
+                );
+            } catch (err) {
+                this.logger.warn(
+                    `Kept variant ${v.id} (Shopify ${v.externalId}) of product ${productExternalId}, ` +
+                        `which Shopify no longer has: ${(err as Error).message}`,
+                );
+            }
+        }
     }
 
     /**

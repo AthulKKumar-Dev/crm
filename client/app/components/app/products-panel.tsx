@@ -6,28 +6,57 @@ import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { EmptyState } from "./empty-state";
 import { cn, formatCurrency } from "~/lib/utils";
-import type { DashboardTopProduct, DashboardLowStockProduct } from "~/types/api";
+import type {
+    DashboardTopProduct,
+    DashboardLowStockProduct,
+    DashboardLowStockVariant,
+} from "~/types/api";
 
 type Tab = "top" | "low";
 
 interface ProductsPanelProps {
     topProducts?: DashboardTopProduct[];
     lowStockProducts?: DashboardLowStockProduct[];
+    lowStockVariants?: DashboardLowStockVariant[];
     isLoading?: boolean;
     currency: string;
     className?: string;
 }
 
+/**
+ * Low Stock lists VARIANTS: the merchant restocks a size, not a product, so a
+ * row reads "Screw nagas bangles [2.8] · 0 left". A server that predates
+ * `lowStockVariants` still sends products — shown one row each, unnamed.
+ */
+function lowStockRows(
+    variants: DashboardLowStockVariant[] | undefined,
+    products: DashboardLowStockProduct[] | undefined,
+): DashboardLowStockVariant[] | undefined {
+    if (variants) return variants;
+    return products?.map((p) => ({
+        variantId: p.id,
+        productId: p.id,
+        productTitle: p.title,
+        variantTitle: null,
+        sku: null,
+        stock: p.lowestVariantStock,
+        image: p.image,
+        threshold: p.threshold,
+    }));
+}
+
 export function ProductsPanel({
     topProducts,
     lowStockProducts,
+    lowStockVariants,
     isLoading,
     currency,
     className,
 }: ProductsPanelProps) {
     const [tab, setTab] = useState<Tab>("top");
-    const lowCount = lowStockProducts?.length ?? 0;
-    const rows = tab === "top" ? topProducts : lowStockProducts;
+    const lowRows = lowStockRows(lowStockVariants, lowStockProducts);
+    const lowCount = lowRows?.length ?? 0;
+    const rows = tab === "top" ? topProducts : lowRows;
     const isEmpty = !isLoading && (!rows || rows.length === 0);
 
     return (
@@ -47,7 +76,7 @@ export function ProductsPanel({
             {/* Meta row */}
             <div className="flex items-center justify-between px-5 pb-2">
                 <p className="text-caption font-medium text-foreground">
-                    {tab === "top" ? "Best sellers" : "Running low"}
+                    {tab === "top" ? "Best sellers" : "Variants running low"}
                 </p>
                 <p className="text-caption text-muted-foreground">
                     {tab === "top" ? "Last 30 days" : "Needs restock"}
@@ -77,7 +106,7 @@ export function ProductsPanel({
                             description={
                                 tab === "top"
                                     ? "Top sellers appear here once your products start selling."
-                                    : "Products below their reorder threshold will show up here."
+                                    : "Variants at or below their reorder threshold will show up here."
                             }
                             action={
                                 <Button variant="outline" asChild>
@@ -99,15 +128,18 @@ export function ProductsPanel({
                                     value={formatCurrency(p.totalQuantitySold * parseFloat(p.price), currency)}
                                 />
                             ))
-                            : lowStockProducts!.map((p, i) => (
+                            : lowRows!.map((v, i) => (
                                 <ProductRow
-                                    key={p.id}
-                                    image={p.image}
+                                    key={v.variantId}
+                                    image={v.image}
                                     rank={i + 1}
-                                    title={p.title}
-                                    meta={`${p.currentStock} in stock · reorder at ${p.threshold}`}
-                                    value={`${p.lowestVariantStock} left`}
-                                    tone={p.lowestVariantStock === 0 ? "danger" : "warning"}
+                                    title={v.productTitle}
+                                    badge={v.variantTitle}
+                                    meta={[v.sku && `SKU ${v.sku}`, `reorder at ${v.threshold}`]
+                                        .filter(Boolean)
+                                        .join(" · ")}
+                                    value={`${v.stock} left`}
+                                    tone={v.stock <= 0 ? "danger" : "warning"}
                                 />
                             ))}
                     </ul>
@@ -158,6 +190,7 @@ function ProductRow({
     rank,
     image,
     title,
+    badge,
     meta,
     value,
     tone,
@@ -165,6 +198,8 @@ function ProductRow({
     rank: number;
     image?: string | null;
     title: string;
+    /** The variant this row is about, shown beside the product title. */
+    badge?: string | null;
     meta: string;
     value: string;
     tone?: "danger" | "warning";
@@ -189,7 +224,17 @@ function ProductRow({
             </div>
 
             <div className="min-w-0 flex-1">
-                <p className="truncate text-caption font-semibold text-foreground">{title}</p>
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <p className="truncate text-caption font-semibold text-foreground">{title}</p>
+                    {badge && (
+                        <span
+                            className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-micro font-semibold text-foreground ring-1 ring-border"
+                            aria-label={`Variant ${badge}`}
+                        >
+                            {badge}
+                        </span>
+                    )}
+                </div>
                 <p className="text-micro text-muted-foreground">{meta}</p>
             </div>
 

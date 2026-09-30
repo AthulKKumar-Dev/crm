@@ -29,11 +29,31 @@ function datesOf(call: any[]): Date[] {
   return bindsOf(call).filter((v): v is Date => v instanceof Date);
 }
 
+/** Wall-clock parts of an instant as read in IST. */
+function istParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const pick = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  return {
+    year: pick('year'),
+    month: pick('month'),
+    day: pick('day'),
+    hour: pick('hour') % 24,
+    minute: pick('minute'),
+  };
+}
+
 function monthsBetween(from: Date, to: Date): number {
-  return (
-    (to.getUTCFullYear() - from.getUTCFullYear()) * 12 +
-    (to.getUTCMonth() - from.getUTCMonth())
-  );
+  const a = istParts(from);
+  const b = istParts(to);
+  return (b.year - a.year) * 12 + (b.month - a.month);
 }
 
 function profitRow(over: Partial<SalesProfitRow> = {}): SalesProfitRow {
@@ -136,7 +156,7 @@ describe('DashboardService.getSalesAndProfit', () => {
       expect(bindsOf($queryRaw.mock.calls[0])).toContain(ORG);
     });
 
-    it('defaults to twelve months, anchored to the start of a month', async () => {
+    it('defaults to twelve months, anchored to 00:00 IST on the 1st', async () => {
       const { service, $queryRaw } = build();
       const { period } = await service.getSalesAndProfit(ORG, {});
       const from = new Date(period.from);
@@ -146,38 +166,38 @@ describe('DashboardService.getSalesAndProfit', () => {
       // Measuring "12 months" as now − 365 days starts the window mid-month, so
       // the first bar covers a part-month and reads as a slump that never
       // happened — and the series runs to a thirteenth bucket.
-      expect(from.getUTCDate()).toBe(1);
-      expect(from.getUTCHours()).toBe(0);
+      expect(istParts(from)).toMatchObject({ day: 1, hour: 0, minute: 0 });
       expect(monthsBetween(from, to)).toBe(11);
       expect(datesOf($queryRaw.mock.calls[0]).length).toBeGreaterThan(0);
     });
 
-    it('anchors the 30-day range to the start of a day', async () => {
+    it('covers 30 full days plus today for the 30-day range, from 00:00 IST', async () => {
       const { service } = build();
       const { period } = await service.getSalesAndProfit(ORG, { range: '30d' });
       const from = new Date(period.from);
 
       expect(period.label).toBe('Last 30 days');
-      expect(from.getUTCHours()).toBe(0);
-      expect(from.getUTCMinutes()).toBe(0);
-      // 30 daily buckets: 29 whole days plus today, still in progress.
+      expect(istParts(from)).toMatchObject({ hour: 0, minute: 0 });
       const days = (new Date(period.to).getTime() - from.getTime()) / 86_400_000;
-      expect(days).toBeGreaterThanOrEqual(29);
-      expect(days).toBeLessThan(30);
+      expect(days).toBeGreaterThanOrEqual(30);
+      expect(days).toBeLessThan(31);
     });
 
-    it('anchors the 7-day range to the start of a day', async () => {
+    it('covers 7 full days plus today for the 7-day range, from 00:00 IST', async () => {
       const { service } = build();
       const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
       const from = new Date(period.from);
 
       expect(period.label).toBe('Last 7 days');
-      expect(from.getUTCHours()).toBe(0);
-      expect(from.getUTCMinutes()).toBe(0);
-      // 7 daily buckets: 6 whole days plus today, still in progress.
+      // Midnight IST is 18:30 UTC the evening before. Starting at UTC midnight
+      // (05:30 IST) dropped each window's first morning of orders.
+      expect(istParts(from)).toMatchObject({ hour: 0, minute: 0 });
+      expect(from.getUTCHours()).toBe(18);
+      expect(from.getUTCMinutes()).toBe(30);
+      // Same span as the Orders page, which sends today − 7 as its dateFrom.
       const days = (new Date(period.to).getTime() - from.getTime()) / 86_400_000;
-      expect(days).toBeGreaterThanOrEqual(6);
-      expect(days).toBeLessThan(7);
+      expect(days).toBeGreaterThanOrEqual(7);
+      expect(days).toBeLessThan(8);
     });
 
     it('buckets in the organization timezone, not the server one', async () => {
@@ -188,6 +208,23 @@ describe('DashboardService.getSalesAndProfit', () => {
 
       expect(bindsOf($queryRaw.mock.calls[0])).toContain('Asia/Kolkata');
       expect(sqlOf($queryRaw.mock.calls[0])).toContain('AT TIME ZONE');
+    });
+
+    it('reads the untouched UTC default as IST', async () => {
+      const { service, $queryRaw } = build({ timezone: 'UTC' });
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+
+      expect(period.timezone).toBe('Asia/Kolkata');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('Asia/Kolkata');
+    });
+
+    it('keeps an explicitly-set non-UTC timezone', async () => {
+      const { service } = build({ timezone: 'Asia/Tokyo' });
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+
+      expect(period.timezone).toBe('Asia/Tokyo');
+      // 00:00 JST is 15:00 UTC the day before.
+      expect(new Date(period.from).getUTCHours()).toBe(15);
     });
 
     it('compares against the immediately preceding window of equal length', async () => {

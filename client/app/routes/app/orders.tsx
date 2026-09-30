@@ -25,6 +25,7 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { Separator } from "~/components/ui/separator";
 import { formatCurrency } from "~/lib/utils";
 import { downloadBlob } from "~/lib/download-blob";
+import { calendarDaysAgo, reportingTimeZone } from "~/lib/reporting-date";
 import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { orderService } from "~/services/order.service";
@@ -39,12 +40,6 @@ export function meta() {
 }
 
 const PAGE_SIZE = 9;
-
-function daysAgo(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return date.toISOString().split("T")[0];
-}
 
 const DATE_RANGE_MAP: Record<string, number | null> = { all: null, "7d": 7, "30d": 30, "90d": 90 };
 
@@ -74,8 +69,11 @@ export default function OrdersPage() {
   const gstEnabled = org?.gstEnabled ?? false;
   const orgCurrency = org?.currency ?? "USD";
 
+  // "Last 7 days" = 7 full days plus today, from 00:00 in the org's reporting
+  // zone — the same window the dashboard's "Last 7 days" covers.
   const daysBack = DATE_RANGE_MAP[dateRange];
-  const dateFrom = daysBack != null ? daysAgo(daysBack) : undefined;
+  const dateFrom =
+    daysBack != null ? calendarDaysAgo(daysBack, reportingTimeZone(org?.timezone)) : undefined;
 
   // The input stays bound to the raw value so typing feels instant; only the
   // debounced copy reaches the query key. Without this every keystroke was a

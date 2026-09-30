@@ -13,6 +13,11 @@ import {
   salesOrderWhere,
 } from '../common/utils/order-window.util';
 import {
+  resolveReportingTimeZone,
+  zonedDayEndExclusive,
+  zonedDayStart,
+} from '../common/utils/zoned-date.util';
+import {
   computeBucket,
   emptyBucket,
   round2,
@@ -20,6 +25,7 @@ import {
   type ProfitBucket,
   type SalesProfitRow,
 } from './profit.util';
+import { lowStockVariantRows, toLowStockEntry } from './low-stock.util';
 
 /** The window every figure on the dashboard is reported over. */
 interface Window {
@@ -74,7 +80,7 @@ export class DashboardService {
       topSellingProducts,
       recentOrders,
       totalCustomers,
-      lowStockProducts,
+      lowStock,
     ] = await Promise.all([
       // 1. Total sales over the window. NOTE: the dashboard CARD no longer
       //    reads this — it reads `totals.grossSales` off /monthly-sales, so the
@@ -156,7 +162,7 @@ export class DashboardService {
       }),
 
       // 9. Top 5 low-stock products (stock > 0 and <= org threshold)
-      this.getLowStockProducts(orgId, query.channelId, 5),
+      this.getLowStock(orgId, query.channelId, 5),
     ]);
 
     // Format fulfillment status breakdown
@@ -188,8 +194,10 @@ export class DashboardService {
       // Top 5 selling products
       topSellingProducts,
 
-      // Top 5 low-stock products
-      lowStockProducts,
+      // Top 5 low-stock products, and the top 5 low-stock VARIANTS the
+      // dashboard's Low Stock tab lists (it names the size to restock).
+      lowStockProducts: lowStock.products,
+      lowStockVariants: lowStock.variants,
 
       // Recent 5 orders
       recentOrders: recentOrders.map((order) => ({
@@ -592,19 +600,24 @@ export class DashboardService {
       select: { timezone: true, currency: true },
     });
 
+    // One zone for the window edges AND the bar boundaries. The untouched "UTC"
+    // default reads as IST — see `resolveReportingTimeZone`.
+    const timezone = resolveReportingTimeZone(org ?? {});
     const range = rangeToWindow(query.range);
     const explicit = Boolean(query.dateFrom || query.dateTo);
-    const to = query.dateTo ? new Date(query.dateTo) : new Date();
+    // A bare `YYYY-MM-DD` is a calendar day in that zone. `to` is exclusive, so
+    // an explicit end date covers the whole of that day rather than none of it.
+    const to = query.dateTo ? zonedDayEndExclusive(query.dateTo, timezone) : new Date();
     const from = query.dateFrom
-      ? new Date(query.dateFrom)
-      : windowStart(to, range);
+      ? zonedDayStart(query.dateFrom, timezone)
+      : windowStart(to, range, timezone);
 
     return {
       from,
       to,
       unit: explicit ? 'month' : range.unit,
       label: explicit ? 'Selected range' : range.label,
-      timezone: org?.timezone || 'UTC',
+      timezone,
       currency: (org?.currency || 'USD').toUpperCase(),
     };
   }
@@ -766,9 +779,10 @@ export class DashboardService {
     });
   }
 
-  // Top N products with the lowest (non-zero) stock, flagged by the org's lowStockThreshold.
-  // Sort by lowest-stock variant ascending so the most urgent items surface first.
-  private async getLowStockProducts(orgId: string, channelId: string | undefined, limit: number) {
+  // Low stock against the org's lowStockThreshold, most urgent first — as the
+  // top N PRODUCTS (kept for existing consumers) and as the top N VARIANTS,
+  // which is what the dashboard's Low Stock tab lists.
+  private async getLowStock(orgId: string, channelId: string | undefined, limit: number) {
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
       select: { lowStockThreshold: true },
@@ -785,29 +799,20 @@ export class DashboardService {
       },
       include: {
         images: { take: 1, orderBy: { position: 'asc' } },
-        variants: { select: { price: true, inventoryQuantity: true } },
+        // id/title/sku so the row can name WHICH variant is low.
+        variants: {
+          select: { id: true, title: true, sku: true, price: true, inventoryQuantity: true },
+        },
       },
     });
 
-    return products
-      .map((product) => {
-        const stocks = product.variants.map((v) => v.inventoryQuantity);
-        const totalStock = stocks.reduce((sum, s) => sum + s, 0);
-        const lowestVariantStock = stocks.length > 0 ? Math.min(...stocks) : 0;
-        const prices = product.variants.map((v) => parseFloat(String(v.price)));
+    const entries = products
+      .map((product) => toLowStockEntry(product, threshold))
+      .sort((a, b) => a.lowestVariantStock - b.lowestVariantStock);
 
-        return {
-          id: product.id,
-          title: product.title,
-          image: product.images[0]?.src ?? null,
-          currentStock: totalStock,
-          lowestVariantStock,
-          variantCount: product.variants.length,
-          price: prices.length > 0 ? Math.min(...prices).toFixed(2) : '0.00',
-          threshold,
-        };
-      })
-      .sort((a, b) => a.lowestVariantStock - b.lowestVariantStock)
-      .slice(0, limit);
+    return {
+      products: entries.slice(0, limit),
+      variants: lowStockVariantRows(entries, limit),
+    };
   }
 }
