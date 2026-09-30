@@ -275,6 +275,11 @@ html.dark { color-scheme: dark; }
   html {
     @apply font-sans;
   }
+  /* Tailwind v4 reset buttons to cursor: default; restore the pointer. */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
 
 /* ── Custom scrollbar ─────────────────────────────────────────────────────── */
