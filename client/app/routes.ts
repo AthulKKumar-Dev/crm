@@ -60,32 +60,11 @@ export default [
     // packing-slip / pick-slip / invoice print).
     route("products/inventory/labels/print", "routes/app/products/inventory/labels-print.tsx"),
     route("products/:id", "routes/app/products/$id.tsx"),
-    // Logistics section, presented as one section by the navbar strip the same
-    // way Orders and Products are. "/logistics" IS the shipments list — there
-    // is no separate overview, the stat cards sit on top of the table. Creating
-    // a shipment is a dialog over the queue, so it has no route of its own.
-    route("logistics", "routes/app/logistics/shipments.tsx"),
-    route("logistics/orders-to-ship", "routes/app/logistics/orders-to-ship.tsx"),
-    route("logistics/returns", "routes/app/logistics/returns.tsx"),
-    route("logistics/carriers", "routes/app/logistics/carriers.tsx"),
-    route("logistics/zones", "routes/app/logistics/zones.tsx"),
-    route("logistics/analytics", "routes/app/logistics/analytics.tsx"),
-    route("logistics/shipments/:id", "routes/app/logistics/shipments/$id.tsx"),
-
-    // Campaigns section. Broadcasts / Automations live under /campaigns/* so the
-    // navbar can present them as one section. Static segments outrank ":id", so
-    // "broadcasts/new" never hits "broadcasts/:id".
-    // Still a visual preview — these pages read placeholder data.
-    route("campaigns", "routes/app/campaigns.tsx"),
-    route("campaigns/broadcasts", "routes/app/campaigns/broadcasts.tsx"),
-    route("campaigns/broadcasts/new", "routes/app/campaigns/broadcasts/new.tsx"),
-    route("campaigns/broadcasts/:id", "routes/app/campaigns/broadcasts/$id.tsx"),
-    route("campaigns/automations", "routes/app/campaigns/automations.tsx"),
-    route("campaigns/automations/new", "routes/app/campaigns/automations/new.tsx"),
-    route("campaigns/automations/:id", "routes/app/campaigns/automations/$id.tsx"),
-
-    // Chat runs on a mocked conversations layer; its catalogue search is real.
-    route("conversation", "routes/app/conversation.tsx"),
+    // Chat, Campaigns and Logistics are not on this branch. Their old URLs
+    // fall through legacy-redirect to /dashboard rather than the bare 404.
+    route("logistics/*", "routes/app/legacy-redirect.tsx", { id: "removed-logistics" }),
+    route("campaigns/*", "routes/app/legacy-redirect.tsx", { id: "removed-campaigns" }),
+    route("conversation/*", "routes/app/legacy-redirect.tsx", { id: "removed-conversation" }),
     // A visual preview with no backend yet.
     route("analytics", "routes/app/analytics.tsx"),
     route("profile", "routes/app/profile.tsx"),

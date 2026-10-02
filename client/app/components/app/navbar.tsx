@@ -5,8 +5,6 @@ import {
   ShoppingCart,
   Package,
   Boxes,
-  Megaphone,
-  MessageSquare,
   Users,
   BarChart3,
   Bell,
@@ -18,12 +16,6 @@ import {
   ShieldCheck,
   ArrowLeftRight,
   FileText,
-  Truck,
-  ClipboardList,
-  RotateCcw,
-  MapPin,
-  Send,
-  Zap,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -41,7 +33,6 @@ import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
-import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { toast } from "sonner";
 
 type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
@@ -72,53 +63,12 @@ const PRODUCTS_CHILDREN: NavChild[] = [
   { label: "Inventory", href: "/products/inventory", icon: Boxes },
 ];
 
-/**
- * Sub-nav for the Logistics section. Shipment detail stays off the strip and is
- * reached from inside the list, the same way Inventory's ledger and warehouses
- * are.
- */
-const LOGISTICS_CHILDREN: NavChild[] = [
-  { label: "Shipments", href: "/logistics", icon: Truck },
-  { label: "Fulfilment queue", href: "/logistics/orders-to-ship", icon: ClipboardList },
-  { label: "Returns / RTO", href: "/logistics/returns", icon: RotateCcw },
-  { label: "Carriers & rates", href: "/logistics/carriers", icon: Receipt },
-  { label: "Zones", href: "/logistics/zones", icon: MapPin },
-  { label: "Analytics", href: "/logistics/analytics", icon: BarChart3 },
-];
-
-/**
- * Sub-nav for the Campaigns section. Overview keeps the parent href so the pill
- * and the strip's first item agree, matching "All orders" and "All products".
- * The broadcast composer and the automation builder stay off the strip and are
- * reached from inside their lists.
- */
-const CAMPAIGNS_CHILDREN: NavChild[] = [
-  { label: "Overview", href: "/campaigns", icon: Megaphone },
-  { label: "Broadcasts", href: "/campaigns/broadcasts", icon: Send },
-  { label: "Automations", href: "/campaigns/automations", icon: Zap },
-];
-
 const NAV_LINKS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Orders", href: "/orders", icon: ShoppingCart, children: ORDERS_CHILDREN },
   { label: "Products", href: "/products", icon: Package, children: PRODUCTS_CHILDREN },
-  // Chat, Campaigns and Analytics still run on placeholder data rather than a
-  // real backend. Deliberately no badge count on Chat: the old one was
-  // hardcoded to match the sample conversations.
-  { label: "Chat", href: "/conversation", icon: MessageSquare },
-  { label: "Campaigns", href: "/campaigns", icon: Megaphone, children: CAMPAIGNS_CHILDREN },
-  { label: "Logistics", href: "/logistics", icon: Truck, children: LOGISTICS_CHILDREN },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
-
-/**
- * NAV_LINKS minus anything owned by a preview module — see feature-flags.ts.
- * Dropping a pill drops its secondary strip with it, since the strip renders
- * from the active entry's children and matchNav only ever searches this list.
- */
-const BASE_NAV_LINKS: NavItem[] = showPreviewModules
-  ? NAV_LINKS
-  : NAV_LINKS.filter((item) => !isPreviewPath(item.href));
 
 /**
  * The nav entry owning `pathname`, longest matching href first — so
@@ -152,8 +102,8 @@ export function Navbar() {
       { label: "Products", href: "/products", icon: Package },
     ]
     : user?.isSuperAdmin && !impersonatedBy
-      ? [...BASE_NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
-      : BASE_NAV_LINKS;
+      ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+      : NAV_LINKS;
 
   // Longest-prefix match, so a child route keeps its parent pill lit.
   const activeTop = matchNav(navLinks, location.pathname);
