@@ -35,16 +35,40 @@ apiClient.interceptors.request.use((config) => {
  */
 let refreshPromise: Promise<string> | null = null;
 
+/**
+ * The session was replaced while a refresh was in flight — the user signed
+ * out, signed in as someone else, or switched organization. The refresh result
+ * belongs to the OLD session and must be dropped, not applied.
+ */
+class SessionChangedError extends Error {
+  constructor() {
+    super("Session changed during token refresh");
+  }
+}
+
 /** Refresh the access token using the stored refresh token. Returns the new access token. */
 async function refreshAccessToken(): Promise<string> {
   const { refreshToken, setTokens } = useAuthStore.getState();
   if (!refreshToken) {
     throw new Error("No refresh token");
   }
+  const sessionChanged = () =>
+    useAuthStore.getState().refreshToken !== refreshToken;
 
   const baseURL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
-  // Use a raw axios call to avoid interceptor loops
-  const res = await axios.post(`${baseURL}/auth/refresh`, { refreshToken });
+  let res;
+  try {
+    // Use a raw axios call to avoid interceptor loops
+    res = await axios.post(`${baseURL}/auth/refresh`, { refreshToken });
+  } catch (error) {
+    // A failure for the old session says nothing about the new one.
+    if (sessionChanged()) throw new SessionChangedError();
+    throw error;
+  }
+
+  // Writing these would put the previous account's (or org's) tokens back on
+  // top of the session that replaced it.
+  if (sessionChanged()) throw new SessionChangedError();
 
   const tokens = res.data?.data ?? res.data;
   setTokens(tokens.accessToken, tokens.refreshToken);
@@ -73,8 +97,12 @@ apiClient.interceptors.response.use(
 
         originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
         return apiClient(originalRequest);
-      } catch {
-        useAuthStore.getState().logout();
+      } catch (refreshError) {
+        // Only end the session the failed refresh belonged to. If it has
+        // already been replaced, this request is simply abandoned.
+        if (!(refreshError instanceof SessionChangedError)) {
+          useAuthStore.getState().logout();
+        }
         return Promise.reject(error);
       } finally {
         // Reset so the next genuine expiry can refresh again.

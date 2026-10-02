@@ -42,3 +42,12 @@ export function createQueryClient() {
     },
   });
 }
+
+/**
+ * The app's one QueryClient.
+ *
+ * A module singleton rather than provider state so code outside React — the
+ * session guard in session-cache.ts — can empty it when the signed-in user or
+ * organization changes.
+ */
+export const queryClient = createQueryClient();
