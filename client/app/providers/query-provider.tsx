@@ -1,11 +1,12 @@
-import { useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { createQueryClient } from "~/lib/query-client";
+import { queryClient } from "~/lib/query-client";
+import { startSessionCacheGuard } from "~/lib/session-cache";
+
+// Before the first query runs, so no session change can slip past it.
+startSessionCacheGuard();
 
 export function QueryProvider({ children }: { children: React.ReactNode }) {
-  const [queryClient] = useState(() => createQueryClient());
-
   return (
     <QueryClientProvider client={queryClient}>
       {children}

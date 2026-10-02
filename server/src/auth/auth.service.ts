@@ -134,7 +134,7 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
       include: {
-        memberships: { where: { isActive: true }, include: { organization: true } },
+        memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' }, include: { organization: true } },
       },
     });
 
@@ -391,15 +391,20 @@ export class AuthService {
 
   async generateTokenPair(payload: JwtPayload): Promise<TokenPair> {
     const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(payload.sub);
+    const refreshToken = await this.createRefreshToken(payload.sub, undefined, undefined, payload.orgId);
     return { accessToken, refreshToken };
   }
 
-  async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string): Promise<string> {
+  /**
+   * `orgId` is the organization the paired access token was minted for. It is
+   * stored with the refresh token so a rotation re-issues the SAME tenant —
+   * without it a refresh cannot know which org a multi-org user switched to.
+   */
+  async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string, orgId?: string): Promise<string> {
     const token = randomBytes(40).toString('hex');
 
     // Primary: Redis with auto-expiry TTL
-    await this.redis.setRefreshToken(token, { userId, userAgent, ipAddress, createdAt: new Date().toISOString() });
+    await this.redis.setRefreshToken(token, { userId, orgId, userAgent, ipAddress, createdAt: new Date().toISOString() });
     await this.redis.trackUserToken(userId, token);
 
     // Audit trail: DB (fire-and-forget, don't block)
@@ -411,14 +416,14 @@ export class AuthService {
 
   async rotateRefreshToken(oldToken: string, userAgent?: string, ipAddress?: string): Promise<TokenPair> {
     // Look up in Redis (fast)
-    const tokenData = await this.redis.getRefreshToken<{ userId: string }>(oldToken);
+    const tokenData = await this.redis.getRefreshToken<{ userId: string; orgId?: string }>(oldToken);
     if (!tokenData) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
     const user = await this.prisma.user.findUnique({
       where: { id: tokenData.userId },
-      include: { memberships: { where: { isActive: true }, take: 1 } },
+      include: { memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' } } },
     });
     if (!user || user.deletedAt) throw new UnauthorizedException('Account has been deactivated');
 
@@ -428,7 +433,15 @@ export class AuthService {
     // Audit trail (fire-and-forget)
     this.prisma.refreshToken.updateMany({ where: { token: oldToken, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
 
-    const membership = user.memberships[0];
+    // Keep the org the session was in. Taking memberships[0] here silently
+    // moved a multi-org user back to their first org every time the access
+    // token expired, while the UI still named the org they had switched to —
+    // reads AND writes then hit the wrong tenant. The first membership is only
+    // a fallback: tokens issued before orgId was stored, or an org the user
+    // has since been removed from.
+    const membership =
+      user.memberships.find((m) => m.organizationId === tokenData.orgId) ??
+      user.memberships[0];
     const payload: JwtPayload = {
       sub: user.id, email: user.email,
       orgId: membership?.organizationId, role: membership?.role,
@@ -436,7 +449,7 @@ export class AuthService {
     };
 
     const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress);
+    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress, membership?.organizationId);
 
     // Refresh session cache
     await this.redis.setSession(user.id, {

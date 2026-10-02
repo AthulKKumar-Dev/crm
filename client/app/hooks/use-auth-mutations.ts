@@ -5,6 +5,7 @@ import { isAxiosError } from "axios";
 import { authService } from "~/services/auth.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { handleMutationError } from "~/lib/handle-mutation-error";
+import { readTokenOrgId } from "~/lib/jwt";
 import type {
   SignupRequest,
   LoginRequest,
@@ -23,6 +24,21 @@ function resolvePostAuthRoute(nextStep: string | null): string {
   // back in without re-picking — skip ahead to account-type.
   const { pendingPlan } = useAuthStore.getState();
   return pendingPlan ? "/onboarding/account-type" : "/onboarding/choose-plan";
+}
+
+/**
+ * The org to select right after sign-in: the one the access token was minted
+ * for, since that is the tenant the server will answer for. `organizations[0]`
+ * is only a fallback — picking it by position could show one org's name over
+ * another org's data.
+ */
+function initialOrgId(
+  accessToken: string,
+  organizations: { id: string }[],
+): string | null {
+  const tokenOrgId = readTokenOrgId(accessToken);
+  const fromToken = organizations.find((o) => o.id === tokenOrgId);
+  return (fromToken ?? organizations[0])?.id ?? null;
 }
 
 // ─── Signup ──────────────────────────────────────────────────────────────────
@@ -54,9 +70,8 @@ export function useLoginMutation() {
       setAuth(data.user, data.accessToken, data.refreshToken, data.organizations);
       // Backend returns flat orgs: { id, name, slug, type, role }
       // setAuth normalizes them — use the org id directly
-      if (data.organizations.length > 0) {
-        useAuthStore.getState().setCurrentOrg(data.organizations[0].id);
-      }
+      const orgId = initialOrgId(data.accessToken, data.organizations);
+      if (orgId) useAuthStore.getState().setCurrentOrg(orgId);
       navigate(resolvePostAuthRoute(data.nextStep));
     },
     onError: (error) => {
@@ -94,9 +109,8 @@ export function useVerifyEmailMutation() {
     onSuccess: (data) => {
       setAuth(data.user, data.accessToken, data.refreshToken, data.organizations);
       // Backend returns flat orgs: { id, name, slug, type, role }
-      if (data.organizations.length > 0) {
-        useAuthStore.getState().setCurrentOrg(data.organizations[0].id);
-      }
+      const orgId = initialOrgId(data.accessToken, data.organizations);
+      if (orgId) useAuthStore.getState().setCurrentOrg(orgId);
       toast.success("Email verified successfully!");
       navigate(resolvePostAuthRoute(data.nextStep));
     },

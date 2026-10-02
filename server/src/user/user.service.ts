@@ -38,7 +38,7 @@ export class UserService {
   async findByIdWithMemberships(id: string) {
     return this.prisma.user.findUnique({
       where: { id },
-      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+      include: { memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' }, include: { organization: true } } },
     });
   }
 
