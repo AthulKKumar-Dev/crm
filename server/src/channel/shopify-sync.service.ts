@@ -1007,6 +1007,7 @@ export class ShopifySyncService {
             // that beats the webhook would still create a duplicate.
             source_identifier: node.sourceIdentifier ?? null,
             source_name: node.sourceName ?? null,
+            source_label: node.app?.name ?? null,
             financial_status: node.displayFinancialStatus
                 ? node.displayFinancialStatus.toLowerCase()
                 : null,
@@ -1967,6 +1968,17 @@ export class ShopifySyncService {
 
         
 
+        // Where the order was created. Conditional spreads for the same reason
+        // as the tax patch: a webhook carries the code but not the label, and
+        // must not null out a label a pull stored. A CRM-pushed order is
+        // stamped with our own marker even when Shopify rewrote `source_name`
+        // to an app id, so the list can tell it from a Shopify-native order.
+        const sourceName = isLocallyPushedPayload(so) ? CRM_SOURCE_NAME : so.source_name;
+        const sourcePatch = {
+            ...(sourceName ? { sourceName: String(sourceName) } : {}),
+            ...(so.source_label ? { sourceLabel: String(so.source_label) } : {}),
+        };
+
         const gst = await this.gstContext(orgId);
 
         // A CRM-created order now sends its address to Shopify, which echoes
@@ -2047,6 +2059,7 @@ export class ShopifySyncService {
             placeOfSupplyCode,
             gstType: resolvedGstType,
             ...channelTaxPatch,
+            ...sourcePatch,
             ...(customerId ? { customerId } : {}),
             ...(shippingFromShopify ? { shippingAddress: shippingFromShopify } : {}),
             ...(billingFromShopify ? { billingAddress: billingFromShopify } : {}),
@@ -2099,6 +2112,7 @@ export class ShopifySyncService {
                         placeOfSupplyCode,
                         gstType: resolvedGstType,
                         ...channelTaxPatch,
+                        ...sourcePatch,
                     },
                     update: patch,
                     select: { id: true },

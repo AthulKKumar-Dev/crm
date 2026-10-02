@@ -1050,6 +1050,10 @@ export interface Order {
   billingAddress?: Record<string, unknown> | null;
   customer: OrderCustomer | null;
   channel: ChannelRef;
+  /** Shopify's raw source code (`web`, `pos`, `collabo-crm`, …). Null until a sync stores it. */
+  sourceName?: string | null;
+  /** Shopify's display name for the app that created the order. Null on webhook-only orders. */
+  sourceLabel?: string | null;
   /**
    * Computed via `_count` on the LIST endpoint only — `undefined` on detail
    * responses despite the non-optional type. Fall back to `lineItems.length`.

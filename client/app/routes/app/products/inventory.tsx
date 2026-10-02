@@ -452,7 +452,6 @@ function StockScreen() {
           locationName={location.name}
           locationCount={locations.length}
           stats={stats.data}
-          orgId={currentOrg?.id}
         />
       )}
 

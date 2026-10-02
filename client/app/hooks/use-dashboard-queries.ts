@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useExclusiveDownload } from "~/hooks/use-exclusive-download";
 import { dashboardService } from "~/services/dashboard.service";
 import type { DashboardQueryParams } from "~/types/api";
@@ -14,11 +14,18 @@ export const dashboardKeys = {
     [...dashboardKeys.all, "sales-by-category", params] as const,
 };
 
-/** Fetch the dashboard overview (stats, top products, recent orders). */
+/**
+ * Fetch the dashboard overview (stats, top products, recent orders).
+ *
+ * The dashboard hooks keep the previous window's data on screen while a new
+ * range loads (`isPlaceholderData`), so a range switch dims the page instead
+ * of dropping it back to skeletons.
+ */
 export function useDashboard(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.overview(params),
     queryFn: () => dashboardService.getOverview(params),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -33,6 +40,7 @@ export function useSalesAndProfit(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.salesAndProfit(params),
     queryFn: () => dashboardService.getSalesAndProfit(params),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -41,6 +49,7 @@ export function useSalesByCategory(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.salesByCategory(params),
     queryFn: () => dashboardService.getSalesByCategory(params),
+    placeholderData: keepPreviousData,
   });
 }
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { ArrowRight, Download, Loader2, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
@@ -17,8 +17,7 @@ import {
   PageHeaderDescription,
   PageHeaderActions,
 } from "~/components/ui/page-header";
-import { ProfitBarChart } from "~/components/app/profit-bar-chart";
-import { SalesDonutChart } from "~/components/app/sales-donut-chart";
+import { Skeleton } from "~/components/ui/skeleton";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TopProductsPanel } from "~/components/app/top-products-panel";
 import { LowStockProductsPanel } from "~/components/app/low-stock-products-panel";
@@ -33,11 +32,29 @@ import type { SparklinePoint } from "~/components/app/chart-line-default";
 import type { SalesProfitPoint } from "~/services/dashboard.service";
 import type { DashboardQueryParams, DashboardRange } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { formatCurrency } from "~/lib/utils";
+import { cn, formatCurrency } from "~/lib/utils";
 import { StatCard } from "~/components/app/stat-card";
 import { MoneyTotal } from "~/components/app/money-total";
 import { ProductsPanel } from "~/components/app/products-panel";
 import { SectionCard } from "~/components/app/section-card";
+
+// Lazy so the page shell renders and both data requests start while the
+// recharts chunk is still downloading. The hooks stay in this route, so the
+// chart finds its data already in the query cache when it mounts.
+const ProfitBarChart = lazy(() =>
+  import("~/components/app/profit-bar-chart").then((m) => ({
+    default: m.ProfitBarChart,
+  }))
+);
+
+/** Same card shell as ProfitBarChart, so the column doesn't jump when it lands. */
+const profitChartFallback = (
+  <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
+    <p className="mb-3 text-body font-semibold text-foreground">Gross Profit</p>
+    <Skeleton className="mb-3 h-7 w-32" />
+    <Skeleton className="min-h-40 flex-1" />
+  </div>
+);
 
 export function meta() {
   return [
@@ -61,12 +78,20 @@ export default function DashboardPage() {
   const [range, setRange] = useState<DashboardRange>("7d");
   const params: DashboardQueryParams = { range };
 
-  const { data: dashboard, isLoading } = useDashboard(params);
+  const {
+    data: dashboard,
+    isLoading,
+    isPlaceholderData: overviewStale,
+  } = useDashboard(params);
   const { exportCsv, exportJson, exporting } = useExportDashboard();
   const { data: org } = useCurrentOrg();
   // Same params as the chart below, so React Query serves both from one
   // request and the cards cannot disagree with the bars.
-  const { data: sales, isLoading: salesLoading } = useSalesAndProfit(params);
+  const {
+    data: sales,
+    isLoading: salesLoading,
+    isPlaceholderData: salesStale,
+  } = useSalesAndProfit(params);
   const orgCurrency = org?.currency ?? "USD";
   const recentOrders = dashboard?.recentOrders ?? [];
   const series = sales?.data;
@@ -134,7 +159,14 @@ export default function DashboardPage() {
 
       {/* Stat cards row */}
       <div className="flex gap-3 ">
-        <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
+        {/* On a range switch the previous window's figures stay up, dimmed,
+            until the new ones land — no drop back to skeletons. */}
+        <div
+          className={cn(
+            "flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border transition-opacity",
+            (overviewStale || salesStale) && "opacity-50"
+          )}
+        >
           {/* Reads the SAME payload as the profit chart — this is the figure the
               chart's reconciliation strip walks down from. */}
           <StatCard
@@ -194,13 +226,20 @@ export default function DashboardPage() {
 
         {/* Charts row — 2 equal columns */}
         <div className="flex flex-col flex-2  overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
-          <ProfitBarChart currency={orgCurrency} params={params} />
+          <Suspense fallback={profitChartFallback}>
+            <ProfitBarChart currency={orgCurrency} params={params} />
+          </Suspense>
           {/* <SalesDonutChart currency={orgCurrency} /> */}
         </div>
       </div>
 
       {/* Bottom row — recent orders table and top products */}
-      <div className="flex gap-3 justify-between">
+      <div
+        className={cn(
+          "flex gap-3 justify-between transition-opacity",
+          overviewStale && "opacity-50"
+        )}
+      >
         <SectionCard
           className="flex flex-2 flex-col"
           title="Recent Orders"

@@ -140,6 +140,8 @@ export interface OrderNode {
    *  instead of re-imported as a duplicate. */
   sourceIdentifier: string | null;
   sourceName: string | null;
+  /** The app that created the order — "Online Store", "Point of Sale", … */
+  app: { name: string } | null;
   createdAt: string;
   updatedAt: string;
   currencyCode: string;
@@ -257,6 +259,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
         closedAt
         sourceIdentifier
         sourceName
+        app { name }
         createdAt
         updatedAt
         currencyCode

@@ -24,6 +24,7 @@ import {
   FULFILLMENT_LABELS,
 } from "~/lib/order-status";
 import { ChannelBadge } from "~/components/app/channel-badge";
+import { orderSourceLabel } from "~/lib/order-source";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import type { Order, ChannelPlatform, OrderShopifySync } from "~/types/api";
 import { canRetryShopifySync, shopifySyncActionLabel } from "~/lib/shopify-sync";
@@ -37,7 +38,7 @@ type OrderRow = Pick<
   // The dashboard's `DashboardRecentOrder` carries neither of these, so they are
   // optional here rather than required — the compact variant degrades to no
   // channel line, and the sync menu item simply does not render.
-  Partial<Pick<Order, "channel" | "metadata">>;
+  Partial<Pick<Order, "channel" | "metadata" | "sourceName" | "sourceLabel">>;
 
 
 function customerOf(order: OrderRow) {
@@ -149,7 +150,7 @@ export function OrdersTable({ orders, currency, showCustomerName = false, onView
                         <span className="font-normal text-muted-foreground"> · {order.name}</span>
                       </p>
                       <p className="flex items-center gap-1 text-micro text-muted-foreground">
-                        <ChannelBadge platform={platform} /> · {order.itemCount} item
+                        <ChannelBadge platform={platform} name={orderSourceLabel(order)} /> · {order.itemCount} item
                         {order.itemCount !== 1 ? "s" : ""} ·{" "}
                         {new Date(order.createdAt).toLocaleDateString("en-US", {
                           month: "short",

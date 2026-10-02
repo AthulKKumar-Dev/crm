@@ -361,6 +361,8 @@ export class OrderService {
         createdAt: order.externalCreatedAt || order.createdAt,
         customer: order.customer,
         channel: order.channel,
+        sourceName: order.sourceName,
+        sourceLabel: order.sourceLabel,
         itemCount: order._count.lineItems,
       })),
       meta,

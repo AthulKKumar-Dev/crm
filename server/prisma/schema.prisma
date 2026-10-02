@@ -813,6 +813,14 @@ model Order {
   /// assignment read before auto-invoicing; never null-overwritten by a later
   /// sync. Snapshotted onto the invoice as "Dispatch From".
   dispatchWarehouseId String?                @map("dispatch_warehouse_id")
+  /// Where the order was created WITHIN its channel. `sourceName` is Shopify's
+  /// raw code (`web`, `pos`, `shopify_draft_order`, `collabo-crm`, or an app
+  /// id); `sourceLabel` is Shopify's own display name for the creating app
+  /// ("Online Store", "Point of Sale"). Webhooks carry only the code, so the
+  /// label is filled by the next pull. Both null for orders not synced since
+  /// these were introduced.
+  sourceName          String?                @map("source_name")
+  sourceLabel         String?                @map("source_label")
 
   /// What the SALES CHANNEL says it charged in tax, as opposed to what the CRM
   /// computes. Nullable with no default on purpose: NULL means "never told"

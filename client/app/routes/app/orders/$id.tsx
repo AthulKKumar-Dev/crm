@@ -27,6 +27,7 @@ import {
   type LineGroupKey,
 } from "~/components/app/order-items-fulfillment";
 import { ChannelBadge } from "~/components/app/channel-badge";
+import { orderSourceLabel } from "~/lib/order-source";
 import { OrderActivity } from "~/components/app/order-activity";
 import { VendorOrderDetail } from "~/components/app/vendor-order-detail";
 import { useCurrentRole } from "~/hooks/use-current-role";
@@ -291,7 +292,11 @@ function OwnerOrderDetail({ id }: { id: string }) {
               variant="chip"
               size={13}
               platform={order.channel?.platform as ChannelPlatform | undefined}
-              name={order.channel?.name}
+              name={
+                [...new Set([orderSourceLabel(order), order.channel?.name])]
+                  .filter(Boolean)
+                  .join(" · ") || undefined
+              }
             />
           </div>
 

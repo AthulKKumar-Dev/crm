@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, HelpCircle } from "lucide-react";
 
 import { CODE_TERMS, STOCK_TERMS } from "~/lib/inventory-vocabulary";
@@ -15,48 +15,21 @@ import type { StockStats } from "~/types/api";
  *
  * Written in the house style used by the GST panels: name the actual figures on
  * screen rather than describing them in the abstract, and say which control to
- * use rather than "contact support". Open on a merchant's first visit, then
- * remembered collapsed — it teaches once and then gets out of the way.
+ * use rather than "contact support". Starts collapsed so it stays out of the
+ * way on every visit; opening it is not remembered.
  */
-const STORAGE_KEY = "inventory:explainer-collapsed:";
-
-function readCollapsed(orgId: string | undefined): boolean {
-  if (!orgId) return false;
-  try {
-    return window.localStorage.getItem(STORAGE_KEY + orgId) === "1";
-  } catch {
-    return false;
-  }
-}
-
 export function StockExplainer({
   locationName,
   locationCount,
   stats,
-  orgId,
 }: {
   locationName: string;
   locationCount: number;
   stats: StockStats | undefined;
-  orgId: string | undefined;
 }) {
   const [collapsed, setCollapsed] = useState(true);
 
-  // Resolved after mount so the server render and the first client render
-  // agree; localStorage is not available during SSR.
-  useEffect(() => {
-    setCollapsed(readCollapsed(orgId));
-  }, [orgId]);
-
-  const toggle = () => {
-    const next = !collapsed;
-    setCollapsed(next);
-    try {
-      if (orgId) window.localStorage.setItem(STORAGE_KEY + orgId, next ? "1" : "0");
-    } catch {
-      /* the panel still toggles for this session */
-    }
-  };
+  const toggle = () => setCollapsed((c) => !c);
 
   const unavailable = stats ? stats.unitsQc + stats.unitsDamaged : 0;
 

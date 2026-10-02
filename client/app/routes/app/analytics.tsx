@@ -1,15 +1,6 @@
-import { useState } from "react";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-  Legend,
-} from "recharts";
+import { lazy, Suspense, useState } from "react";
 import { Package, RefreshCw } from "lucide-react";
+import { cn } from "~/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Separator } from "~/components/ui/separator";
 import { Skeleton } from "~/components/ui/skeleton";
@@ -27,6 +18,17 @@ import type {
   DashboardTrendPoint,
 } from "~/services/analytics.service";
 
+// Lazy so the page shell renders and the data request starts while the
+// recharts chunk is still downloading.
+const AnalyticsTrendChart = lazy(() =>
+  import("~/components/app/analytics-trend-chart").then((m) => ({
+    default: m.AnalyticsTrendChart,
+  }))
+);
+
+/** Matches the trend chart's rendered height so the card doesn't resize. */
+const trendChartSkeleton = <Skeleton className="h-[260px] w-full" />;
+
 export function meta() {
   return [{ title: "Analytics | Collabo CRM" }];
 }
@@ -42,8 +44,13 @@ export default function AnalyticsPage() {
   const [range, setRange] = useState<AnalyticsRange>("7d");
   const [channel, setChannel] = useState<AnalyticsChannelFilter>("all");
 
-  const { data, isLoading, isFetching, isError, refetch } = useAnalyticsDashboard({ range, channel });
+  const { data, isLoading, isFetching, isError, isPlaceholderData, refetch } =
+    useAnalyticsDashboard({ range, channel });
   const refresh = useRefreshAnalytics();
+  // First load only. A range/channel change keeps the previous data on screen
+  // (dimmed via `stale`) rather than going back to skeletons.
+  const initialLoading = isLoading && !data;
+  const stale = isPlaceholderData && "opacity-50";
 
   const stats = data?.stats ?? [];
   const trend = data?.trend ?? [];
@@ -104,7 +111,7 @@ export default function AnalyticsPage() {
       </div>
 
       {/* 1. Basic stats */}
-      <div className="grid grid-cols-1 gap-5 rounded-xl bg-card p-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className={cn("grid grid-cols-1 gap-5 rounded-xl bg-card p-3 transition-opacity sm:grid-cols-2 lg:grid-cols-3", stale)}>
         {/* Error and loading guard the whole panel rather than sitting beside
             the mapped stats as extra grid children. That older shape rendered
             completely blank on failure: `stats` fell back to [] so nothing
@@ -147,10 +154,11 @@ export default function AnalyticsPage() {
       </div>
 
       {/* 2. Top lists */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <div className={cn("grid grid-cols-1 gap-4 transition-opacity lg:grid-cols-3", stale)}>
         <TopList
           title="Most Viewed Pages"
           subtitle="Top 5 pages by views in this period"
+          isLoading={initialLoading}
           rows={topPages.map((p) => ({
             key: p.path,
             label: p.title || p.path,
@@ -163,6 +171,7 @@ export default function AnalyticsPage() {
           title="Most Viewed Products"
           subtitle="Top 5 products by unique viewers"
           showImage
+          isLoading={initialLoading}
           rows={topViewedProducts.map((p) => ({
             key: p.title,
             label: p.title,
@@ -176,6 +185,7 @@ export default function AnalyticsPage() {
           title="Most Added-to-Cart Products"
           subtitle="Top 5 products by add-to-cart events"
           showImage
+          isLoading={initialLoading}
           rows={topAddedToCart.map((p) => ({
             key: p.title,
             label: p.title,
@@ -208,51 +218,15 @@ export default function AnalyticsPage() {
             <span className="text-xs text-muted-foreground">Updating…</span>
           ) : null}
         </div>
-        <ResponsiveContainer width="100%" height={260}>
-          <LineChart data={trend} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-            <XAxis
-              dataKey="label"
-              tick={{ fontSize: 11, fill: "#6b7280" }}
-              axisLine={false}
-              tickLine={false}
-            />
-            <YAxis
-              tick={{ fontSize: 11, fill: "#6b7280" }}
-              axisLine={false}
-              tickLine={false}
-              allowDecimals={false}
-            />
-            <Tooltip
-              contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}
-            />
-            <Legend wrapperStyle={{ fontSize: 12 }} />
-            <Line
-              type="monotone"
-              dataKey="addToCart"
-              name="Add to Cart"
-              stroke="#CEF17B"
-              strokeWidth={2}
-              dot={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="reachedCheckout"
-              name="Reached Checkout"
-              stroke="#6366f1"
-              strokeWidth={2}
-              dot={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="completedOrders"
-              name="Completed Orders"
-              stroke="#f59e0b"
-              strokeWidth={2}
-              dot={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
+        {initialLoading ? (
+          trendChartSkeleton
+        ) : (
+          <div className={cn("transition-opacity", stale)}>
+            <Suspense fallback={trendChartSkeleton}>
+              <AnalyticsTrendChart trend={trend} />
+            </Suspense>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -306,12 +280,18 @@ function TopList({
   subtitle,
   rows,
   showImage = false,
+  isLoading = false,
 }: {
   title: string;
   subtitle: string;
   rows: TopListRow[];
   /** Product lists: a thumbnail per row so the merchant recognises the product. */
   showImage?: boolean;
+  /**
+   * First load. Without it the list showed its "No data" message while the
+   * request was still in flight, so loading and empty looked identical.
+   */
+  isLoading?: boolean;
 }) {
   return (
     <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden">
@@ -320,7 +300,15 @@ function TopList({
         <p className="text-xs text-muted-foreground">{subtitle}</p>
       </div>
       <div className="divide-y divide-border">
-        {rows.length === 0 ? (
+        {isLoading ? (
+          Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-3 px-5 py-3">
+              {showImage ? <Skeleton className="size-9 shrink-0 rounded-md" /> : null}
+              <Skeleton className="h-3 flex-1" />
+              <Skeleton className="h-3 w-10 shrink-0" />
+            </div>
+          ))
+        ) : rows.length === 0 ? (
           <div className="px-5 py-6 text-xs text-muted-foreground">
             No data for this period yet. Data appears after the Web Pixel
             starts sending events and Refresh (or the hourly rollup) runs.
