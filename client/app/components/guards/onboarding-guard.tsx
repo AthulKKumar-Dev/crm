@@ -1,5 +1,6 @@
 import { Navigate, useLocation } from "react-router";
 import { useAuthStore } from "~/stores/auth.store";
+import { getLandingPath } from "~/lib/sections";
 
 /**
  * Protects /onboarding/* routes.
@@ -27,7 +28,7 @@ export function OnboardingGuard({ children }: { children: React.ReactNode }) {
   const isInvitePage = pathname.includes("invite-team");
 
   if (organizations.length > 0 && !isInvitePage) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={getLandingPath()} replace />;
   }
 
   return <>{children}</>;

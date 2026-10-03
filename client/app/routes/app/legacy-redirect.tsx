@@ -1,4 +1,5 @@
 import { Navigate, useLocation } from "react-router";
+import { getLandingPath } from "~/lib/sections";
 
 /**
  * Top-level paths that moved under a section pill, so the navbar could present
@@ -21,6 +22,6 @@ export default function LegacyRedirect() {
   const from = Object.keys(MOVED).find(
     (p) => pathname === p || pathname.startsWith(`${p}/`)
   );
-  const to = from ? `${MOVED[from]}${pathname.slice(from.length)}` : "/dashboard";
+  const to = from ? `${MOVED[from]}${pathname.slice(from.length)}` : getLandingPath();
   return <Navigate to={`${to}${search}${hash}`} replace />;
 }

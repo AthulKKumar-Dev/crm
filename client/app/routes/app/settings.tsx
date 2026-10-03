@@ -26,6 +26,7 @@ import {
   useRemoveMemberMutation,
   useSendInviteMutation,
   useRevokeInviteMutation,
+  useUpdateMemberPermissionsMutation,
 } from "~/hooks/use-org-mutations";
 import { userService } from "~/services/user.service";
 import { apiClient } from "~/lib/api-client";
@@ -46,8 +47,10 @@ import {
 import { ChannelSettingsTab } from "~/components/app/settings/channel-settings-tab";
 import { StoreProfileTab } from "~/components/app/settings/store-profile-tab";
 import { UpgradeOrganizationDialog } from "~/components/app/settings/upgrade-organization-dialog";
+import { SectionAccessPicker } from "~/components/app/settings/section-access-picker";
+import { AVAILABLE_SECTIONS, isSectionScopedRole, sectionKey, sectionsInGrants, type SectionId } from "~/lib/sections";
 import { formatCurrency } from "~/lib/utils";
-import type { UserRole, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse, Warehouse } from "~/types/api";
+import type { UserRole, OrgMember, OrganizationGstin, CreateGstinRequest, StateTaxRate, ProductTypeTaxRate, CollectionTaxOverride, ShopifyCollection, LoyaltyMetric, OrgResponse, Warehouse } from "~/types/api";
 import { readAddress } from "~/lib/address";
 import { useWarehouses } from "~/hooks/use-inventory-queries";
 import { GstReturnSettings } from "~/components/app/settings/gst-return-settings";
@@ -214,9 +217,12 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<UserRole>("AGENT");
   const [vendorScope, setVendorScope] = useState("");
+  // Sections an Agent / Viewer starts with — everything, until unticked.
+  const [sections, setSections] = useState<SectionId[]>(() => AVAILABLE_SECTIONS.map((s) => s.id));
   const sendInvite = useSendInviteMutation(orgId);
 
   const needsVendor = role === "VENDOR";
+  const needsSections = isSectionScopedRole(role);
 
   // Distinct Product.vendor values to scope a vendor invite to.
   const { data: vendorOptions = [] } = useQuery({
@@ -230,7 +236,12 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
   function handleSendInvite() {
     if (!canSend) return;
     sendInvite.mutate(
-      { email: email.trim(), role, vendorScope: needsVendor ? vendorScope : undefined },
+      {
+        email: email.trim(),
+        role,
+        vendorScope: needsVendor ? vendorScope : undefined,
+        grants: needsSections ? sections.map(sectionKey) : undefined,
+      },
       { onSuccess: () => { setEmail(""); setVendorScope(""); onDone(); } },
     );
   }
@@ -291,6 +302,72 @@ function InviteForm({ orgId, onDone }: { orgId: string; onDone: () => void }) {
           </p>
         </div>
       )}
+
+      {needsSections && (
+        <div className="space-y-1.5 pt-1">
+          <p className="text-[10px] font-medium text-muted-foreground">
+            Sections this {role === "VIEWER" ? "viewer" : "agent"} can open — the rest show as locked
+          </p>
+          <SectionAccessPicker value={sections} onChange={setSections} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Member access editor ────────────────────────────────────────────────────
+
+const AVAILABLE_SECTION_KEYS = new Set(AVAILABLE_SECTIONS.map((s) => sectionKey(s.id)));
+
+/** Short label for a grant list: how many of the sections it opens. */
+function sectionAccessLabel(grants: string[] | undefined) {
+  const granted = sectionsInGrants(grants ?? []).filter((id) => AVAILABLE_SECTION_KEYS.has(sectionKey(id)));
+  if (sectionsInGrants(grants ?? []).length === 0) return "Full access";
+  return `${granted.length} of ${AVAILABLE_SECTIONS.length} sections`;
+}
+
+/** Inline editor for which sections an Agent / Viewer can open. */
+function MemberAccessEditor({ orgId, member, onDone }: { orgId: string; member: OrgMember; onDone: () => void }) {
+  const grants = member.permissions ?? [];
+  const configured = sectionsInGrants(grants);
+  // Not configured yet = full access, so the editor opens with everything ticked.
+  const [sections, setSections] = useState<SectionId[]>(() =>
+    configured.length === 0
+      ? AVAILABLE_SECTIONS.map((s) => s.id)
+      : configured.filter((id) => AVAILABLE_SECTION_KEYS.has(sectionKey(id))),
+  );
+  const updatePermissions = useUpdateMemberPermissionsMutation(orgId);
+
+  function handleSave() {
+    // The endpoint replaces the whole list: keep every grant this picker does
+    // not manage (inventory.*, and sections this build does not show).
+    const kept = grants.filter((g) => !AVAILABLE_SECTION_KEYS.has(g));
+    updatePermissions.mutate(
+      { memberId: member.id, data: { grants: [...kept, ...sections.map(sectionKey)] } },
+      { onSuccess: onDone },
+    );
+  }
+
+  return (
+    <div className="space-y-3 rounded-lg border border-dashed border-[#CEF17B] bg-[#CEF17B]/5 p-3">
+      <p className="text-[10px] font-medium text-muted-foreground">
+        Sections {member.user.firstName} can open — the rest show as locked
+        {configured.length === 0 && " (currently full access)"}
+      </p>
+      <SectionAccessPicker value={sections} onChange={setSections} disabled={updatePermissions.isPending} />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={updatePermissions.isPending || sections.length === 0}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#CEF17B] px-3 text-xs font-medium text-gray-900 hover:bg-[#BADE6F] transition-colors disabled:opacity-50"
+        >
+          {updatePermissions.isPending ? <Loader2 className="size-3.5 animate-spin" /> : "Save access"}
+        </button>
+        <button type="button" onClick={onDone} className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300">
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -1397,6 +1474,8 @@ export default function SettingsPage() {
   const { tab } = useParams();
   const activeTab = TABS.some((t) => t.id === tab) ? tab! : "general";
   const [showInvite, setShowInvite] = useState(false);
+  // Member whose section-access editor is open.
+  const [accessMemberId, setAccessMemberId] = useState<string | null>(null);
   /**
    * Drives the org-setup sheet:
    *   - `null`     — sheet closed
@@ -1422,6 +1501,9 @@ export default function SettingsPage() {
   const updateRole = useUpdateMemberRoleMutation(currentOrgId ?? "");
   const removeMember = useRemoveMemberMutation(currentOrgId ?? "");
   const revokeInvite = useRevokeInviteMutation(currentOrgId ?? "");
+  // Only an Owner / Admin may change someone's access (the server enforces it).
+  const myRole = members?.find((m) => m.user.id === authUser?.id)?.role;
+  const canManageAccess = myRole === "OWNER" || myRole === "ADMIN";
 
   // General form state
   const [orgName, setOrgName] = useState<string | null>(null);
@@ -1853,9 +1935,11 @@ export default function SettingsPage() {
                       const initials = `${member.user.firstName[0]}${member.user.lastName[0]}`.toUpperCase();
                       const isOwner = member.role === "OWNER";
                       const isCurrentUser = member.user.id === authUser?.id;
+                      const hasSectionAccess = isSectionScopedRole(member.role);
 
                       return (
-                        <div key={member.id} className="flex items-center gap-3 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-4 py-3">
+                        <div key={member.id} className="space-y-2">
+                        <div className="flex items-center gap-3 rounded-lg bg-[#f1f7fa] dark:bg-gray-800/60 px-4 py-3">
                           <div className={cn("flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold", AVATAR_COLORS[index % AVATAR_COLORS.length])}>
                             {initials}
                           </div>
@@ -1867,6 +1951,16 @@ export default function SettingsPage() {
                             <p className="text-[10px] text-muted-foreground">{member.user.email}</p>
                           </div>
 
+                          {hasSectionAccess && canManageAccess && (
+                            <button
+                              type="button"
+                              onClick={() => setAccessMemberId(accessMemberId === member.id ? null : member.id)}
+                              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[10px] font-medium text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-gray-100 transition-colors"
+                            >
+                              <Lock className="size-3" /> {sectionAccessLabel(member.permissions)}
+                            </button>
+                          )}
+
                           {isOwner ? (
                             <span className="shrink-0 rounded-full bg-[#CEF17B]/30 px-2 py-0.5 text-[10px] font-semibold text-[#084734]">
                               Owner
@@ -1875,7 +1969,21 @@ export default function SettingsPage() {
                             <Select
                               value={member.role}
                               onValueChange={(selectedRole) =>
-                                updateRole.mutate({ memberId: member.id, data: { role: selectedRole as UserRole } })
+                                updateRole.mutate(
+                                  { memberId: member.id, data: { role: selectedRole as UserRole } },
+                                  {
+                                    // Moving someone down to Agent / Viewer leaves them with full
+                                    // access until sections are picked — open the picker for it.
+                                    onSuccess: () => {
+                                      if (
+                                        isSectionScopedRole(selectedRole as UserRole) &&
+                                        sectionsInGrants(member.permissions ?? []).length === 0
+                                      ) {
+                                        setAccessMemberId(member.id);
+                                      }
+                                    },
+                                  },
+                                )
                               }
                             >
                               <SelectTrigger className="h-7 w-[100px] shrink-0 border-input bg-white dark:bg-gray-900 text-xs">
@@ -1902,6 +2010,14 @@ export default function SettingsPage() {
                             </button>
                           )}
                         </div>
+                        {hasSectionAccess && accessMemberId === member.id && currentOrgId && (
+                          <MemberAccessEditor
+                            orgId={currentOrgId}
+                            member={member}
+                            onDone={() => setAccessMemberId(null)}
+                          />
+                        )}
+                        </div>
                       );
                     })}
                   </div>
@@ -1921,7 +2037,8 @@ export default function SettingsPage() {
                           <div>
                             <p className="text-xs font-medium text-gray-900 dark:text-gray-100">{invite.email}</p>
                             <p className="text-[10px] text-muted-foreground">
-                              Invited as {invite.role.toLowerCase()} · Expires {new Date(invite.expiresAt).toLocaleDateString()}
+                              Invited as {invite.role.toLowerCase()}
+                              {isSectionScopedRole(invite.role) && ` · ${sectionAccessLabel(invite.permissions)}`} · Expires {new Date(invite.expiresAt).toLocaleDateString()}
                             </p>
                           </div>
                         </div>

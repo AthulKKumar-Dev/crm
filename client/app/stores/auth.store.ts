@@ -67,7 +67,7 @@ const initialState: AuthState = {
  * Backend returns: { id, name, slug, type, role }
  * Frontend needs:  { id, organizationId, role, isActive, organization: { id, name, slug, ... } }
  */
-function normalizeOrganizations(
+export function normalizeOrganizations(
   orgs: OrganizationMembership[] | AuthOrganization[]
 ): OrganizationMembership[] {
   if (!orgs || orgs.length === 0) return [];
@@ -84,6 +84,7 @@ function normalizeOrganizations(
     organizationId: o.id,
     role: o.role,
     vendorScope: o.vendorScope ?? null,
+    permissions: o.permissions ?? [],
     isActive: true,
     organization: {
       id: o.id,

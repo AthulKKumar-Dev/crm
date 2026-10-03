@@ -423,6 +423,7 @@ model TeamInvite {
   email          String
   role           UserRole     @default(AGENT)
   vendorScope    String?      @map("vendor_scope") // For VENDOR invites: the Product.vendor value to scope the member to
+  permissions    Json?        @db.JsonB // Grants chosen on the invite form; copied to OrganizationMember.permissions on accept
   token          String       @unique
   status         InviteStatus @default(PENDING)
   invitedBy      String       @map("invited_by")

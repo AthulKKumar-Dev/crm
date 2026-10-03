@@ -29,6 +29,7 @@ type MulterFile = {
 };
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -52,13 +53,16 @@ import {
   BulkTagsDto,
 } from './dto/bulk.dto';
 
+@RequireSection('products')
 @Controller('products')
 export class ProductController {
   constructor(private readonly productService: ProductService) { }
 
   // ── COLLECTION-LEVEL ROUTES ─────────────────────────────────────────────
 
+  // Also read by the order form's product picker and the chat catalog.
   @Get()
+  @RequireSection('products', 'orders', 'chat')
   @AllowVendor()
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryProductsDto) {
     return this.productService.findAll(user.orgId!, query, vendorScopeFor(user));
@@ -69,13 +73,16 @@ export class ProductController {
     return this.productService.create(user.orgId!, user.sub, dto);
   }
 
+  // Reference lists (invite form, settings) — open to every section.
   @Get('vendors')
+  @RequireSection()
   @AllowVendor()
   getVendors(@CurrentUser() user: JwtPayload) {
     return this.productService.getVendors(user.orgId!, vendorScopeFor(user));
   }
 
   @Get('types')
+  @RequireSection()
   @AllowVendor()
   getProductTypes(@CurrentUser() user: JwtPayload) {
     return this.productService.getProductTypes(user.orgId!, vendorScopeFor(user));

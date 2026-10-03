@@ -12,6 +12,7 @@ import type {
   UpdateOrganizationRequest,
   UpgradeToOrganizationRequest,
   UpdateMemberRoleRequest,
+  UpdateMemberPermissionsRequest,
   SendInviteRequest,
 } from "~/types/api";
 
@@ -187,6 +188,21 @@ export function useUpdateMemberRoleMutation(orgId: string) {
       toast.success("Member role updated.");
     },
     onError: (error) => handleMutationError(error, "Failed to update member role."),
+  });
+}
+
+/** Mutation hook for replacing a member's grants (section access). */
+export function useUpdateMemberPermissionsMutation(orgId: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ memberId, data }: { memberId: string; data: UpdateMemberPermissionsRequest }) =>
+      orgService.updateMemberPermissions(orgId, memberId, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: orgKeys.members(orgId) });
+      toast.success("Member access updated.");
+    },
+    onError: (error) => handleMutationError(error, "Failed to update member access."),
   });
 }
 

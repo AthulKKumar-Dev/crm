@@ -2,29 +2,9 @@ import { Outlet, Navigate, useLocation, useMatches } from "react-router";
 import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
-import { useCurrentRole } from "~/hooks/use-current-role";
+import { useMembershipSync, useSectionAccess } from "~/hooks/use-section-access";
 import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { cn } from "~/lib/utils";
-
-// Vendors may only reach these sections (the server enforces the real boundary;
-// this is UX so a vendor never lands on a forbidden, empty/403 page).
-const VENDOR_ALLOWED_PREFIXES = ["/orders", "/products", "/profile"];
-
-// Section sub-pages that are NOT vendor-facing. Checked before the allow list,
-// which is a prefix match and would otherwise sweep these in now that Drafts /
-// Customers / Invoices live under /orders/* and Inventory under /products/*.
-// The inventory entry matters: the API denies vendors every stock endpoint
-// (no @AllowVendor), so without this they would reach pages that only 403.
-const VENDOR_DENIED_PREFIXES = [
-  "/orders/drafts",
-  "/orders/customers",
-  "/orders/invoices",
-  // A package slip prints the customer's full postal address. The server's
-  // /orders/slips/data has no @AllowVendor for the same reason; this stops a
-  // vendor reaching a page that would only 403.
-  "/orders/slips",
-  "/products/inventory",
-];
 
 /** Prefix match on a segment boundary, so /orders never matches /ordersomething. */
 function isUnder(pathname: string, prefix: string) {
@@ -59,26 +39,26 @@ const FULL_HEIGHT_PREFIXES = ["/conversation"];
 const FULL_WIDTH_ROUTE_IDS = ["routes/app/orders/$id"];
 
 export default function AppLayout() {
-  const { isVendor } = useCurrentRole();
+  const { canAccess, landingPath } = useSectionAccess();
+  useMembershipSync();
   const location = useLocation();
   // Read before the print-route early return below, so the hook order is the
   // same on every route.
   const matches = useMatches();
 
-  const vendorBlocked =
-    isVendor &&
-    (VENDOR_DENIED_PREFIXES.some((p) => isUnder(location.pathname, p)) ||
-      !VENDOR_ALLOWED_PREFIXES.some((p) => isUnder(location.pathname, p)));
+  // A section this member was not given, or a page outside a vendor's allow
+  // list (the server enforces the real boundary; this is UX so nobody lands on
+  // a page that would only 403). The navbar shows the same sections as locked.
+  const accessBlocked = !canAccess(location.pathname);
 
   // Chat / Campaigns / Logistics are UI-only previews running on mock data.
   // The navbar already hides their pills outside dev; this stops a typed or
   // bookmarked URL from rendering placeholder data in a production build.
   const previewBlocked = !showPreviewModules && isPreviewPath(location.pathname);
 
-  // Vendors bounce to /orders (their home), everyone else to /dashboard. Vendor
-  // first on purpose: a vendor on /logistics is already outside the allow list
-  // and should keep landing where every other blocked vendor route sends them.
-  const redirectTo = vendorBlocked ? "/orders" : previewBlocked ? "/dashboard" : null;
+  // Either way, back to the member's first open section — /orders for a
+  // vendor, /dashboard for most people.
+  const redirectTo = accessBlocked || previewBlocked ? landingPath : null;
 
   // Print/document routes render bare (no navbar/sidebar) so the app chrome
   // never bleeds into the printed PDF. AuthGuard still gates them.

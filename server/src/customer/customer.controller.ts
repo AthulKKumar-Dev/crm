@@ -1,15 +1,19 @@
 import { Controller, Get, Patch, Param, Query, Body } from '@nestjs/common';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { CustomerService } from './customer.service';
 import { QueryCustomersDto } from './dto/query-customers.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
 
+@RequireSection('customers')
 @Controller('customers')
 export class CustomerController {
   constructor(private readonly customerService: CustomerService) { }
 
+  // Also read by the order form's customer picker and order detail.
   @Get()
+  @RequireSection('customers', 'orders')
   findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryCustomersDto) {
     return this.customerService.findAll(user.orgId!, query);
   }
@@ -31,6 +35,7 @@ export class CustomerController {
   }
 
   @Get(':id')
+  @RequireSection('customers', 'orders')
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     return this.customerService.findOne(id, user.orgId!);
   }

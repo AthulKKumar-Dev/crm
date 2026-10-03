@@ -7,6 +7,7 @@ import type {
   UpgradeToOrganizationRequest,
   OrgMember,
   UpdateMemberRoleRequest,
+  UpdateMemberPermissionsRequest,
   SendInviteRequest,
   OrgInvite,
 } from "~/types/api";
@@ -54,6 +55,12 @@ export const orgService = {
   updateMemberRole: (orgId: string, memberId: string, data: UpdateMemberRoleRequest) =>
     apiClient
       .patch<OrgMember>(`/organizations/${orgId}/members/${memberId}`, data)
+      .then((response) => response.data),
+
+  /** Replaces the member's whole grant list — send every grant they should keep. */
+  updateMemberPermissions: (orgId: string, memberId: string, data: UpdateMemberPermissionsRequest) =>
+    apiClient
+      .patch<OrgMember>(`/organizations/${orgId}/members/${memberId}/permissions`, data)
       .then((response) => response.data),
 
   removeMember: (orgId: string, memberId: string) =>

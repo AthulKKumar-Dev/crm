@@ -23,6 +23,7 @@ import { RolesGuard } from './auth/roles.guard';
 import { OrgRequiredGuard } from './auth/guards/org-required.guard';
 import { VendorAccessGuard } from './auth/guards/vendor-access.guard';
 import { PermissionsGuard } from './auth/guards/permissions.guard';
+import { SectionAccessGuard } from './auth/guards/section-access.guard';
 import { SuperAdminGuard } from './auth/guards/super-admin.guard';
 import { UserModule } from './user/user.module';
 import { OrganizationModule } from './organization/organization.module';
@@ -110,6 +111,8 @@ import { InventoryModule } from './inventory/inventory.module';
     // After VendorAccess so vendor rules resolve first; enforces
     // @RequirePermissions on top of @Roles (allow-by-default without it).
     { provide: APP_GUARD, useClass: PermissionsGuard },
+    // Per-member section access (@RequireSection) — same allow-by-default shape.
+    { provide: APP_GUARD, useClass: SectionAccessGuard },
     { provide: APP_GUARD, useClass: SuperAdminGuard },
     { provide: APP_FILTER, useClass: GlobalExceptionFilter },
     { provide: APP_FILTER, useClass: PrismaExceptionFilter },
