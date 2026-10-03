@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
-import { InviteStatus } from '@prisma/client';
+import { InviteStatus, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
@@ -22,6 +22,8 @@ import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { EmailService } from '../email/email.service';
+import { extractGrants } from './permissions';
+import { buildSessionPayload } from './session-payload.util';
 
 @Injectable()
 export class AuthService {
@@ -105,6 +107,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
         vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
       nextStep: hasOrgs ? null : 'choose-plan',
       message: 'Email verified successfully.',
@@ -192,14 +195,10 @@ export class AuthService {
     const tokens = await this.generateTokenPair(payload);
 
     // Cache session in Redis
-    await this.redis.setSession(user.id, {
-      sub: user.id, email: user.email,
-      orgId: membership?.organizationId, role: membership?.role,
-      vendorScope: membership?.vendorScope ?? undefined,
-      emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
-      isSuperAdmin: user.isSuperAdmin,
-    });
+    await this.redis.setSession(
+      user.id,
+      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin: user.isSuperAdmin }),
+    );
 
     return {
       ...tokens,
@@ -220,6 +219,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
         vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
       nextStep: user.memberships.length === 0 ? 'choose-plan' : null,
     };
@@ -260,14 +260,10 @@ export class AuthService {
     const tokens = await this.generateTokenPair(payload);
 
     // Update session cache with new orgId
-    await this.redis.setSession(userId, {
-      sub: userId, email: user.email,
-      orgId: membership.organizationId, role: membership.role,
-      vendorScope: membership.vendorScope ?? undefined,
-      emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
-      isSuperAdmin: user.isSuperAdmin,
-    });
+    await this.redis.setSession(
+      userId,
+      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin: user.isSuperAdmin }),
+    );
 
     return {
       ...tokens,
@@ -277,6 +273,8 @@ export class AuthService {
         slug: membership.organization.slug,
         type: membership.organization.type,
         role: membership.role,
+        vendorScope: membership.vendorScope ?? undefined,
+        permissions: extractGrants(membership.permissions),
       },
       organizations: user.memberships.map((m) => ({
         id: m.organization.id,
@@ -285,6 +283,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
         vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
     };
   }
@@ -376,7 +375,11 @@ export class AuthService {
     }
 
     await this.prisma.organizationMember.create({
-      data: { organizationId: invite.organizationId, userId: user.id, role: invite.role, vendorScope: invite.vendorScope },
+      data: {
+        organizationId: invite.organizationId, userId: user.id, role: invite.role, vendorScope: invite.vendorScope,
+        // Section access chosen on the invite form travels with it.
+        ...(invite.permissions ? { permissions: invite.permissions as Prisma.InputJsonValue } : {}),
+      },
     });
     await this.prisma.teamInvite.update({
       where: { id: invite.id },
@@ -392,7 +395,13 @@ export class AuthService {
     return {
       ...tokens,
       user: { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName },
-      organization: { id: invite.organization.id, name: invite.organization.name, slug: invite.organization.slug },
+      organization: {
+        id: invite.organization.id, name: invite.organization.name, slug: invite.organization.slug,
+        type: invite.organization.type,
+        role: invite.role,
+        vendorScope: invite.vendorScope ?? undefined,
+        permissions: extractGrants(invite.permissions),
+      },
     };
   }
 
@@ -461,14 +470,10 @@ export class AuthService {
     const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress, membership?.organizationId);
 
     // Refresh session cache
-    await this.redis.setSession(user.id, {
-      sub: user.id, email: user.email,
-      orgId: membership?.organizationId, role: membership?.role,
-      vendorScope: membership?.vendorScope ?? undefined,
-      emailVerified: user.emailVerified,
-      memberships: user.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
-      isSuperAdmin: user.isSuperAdmin,
-    });
+    await this.redis.setSession(
+      user.id,
+      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin: user.isSuperAdmin }),
+    );
 
     return { accessToken, refreshToken };
   }
@@ -565,17 +570,13 @@ export class AuthService {
 
     const tokens = await this.generateTokenPair(payload);
 
-    await this.redis.setSession(target.id, {
-      sub: target.id,
-      email: target.email,
-      orgId: membership?.organizationId,
-      role: membership?.role,
-      vendorScope: membership?.vendorScope ?? undefined,
-      emailVerified: target.emailVerified,
-      memberships: target.memberships.map((m) => ({ orgId: m.organizationId, role: m.role, vendorScope: m.vendorScope ?? undefined })),
-      isSuperAdmin: false,
-      impersonatedBy: superAdminId,
-    });
+    await this.redis.setSession(
+      target.id,
+      buildSessionPayload(target, membership, target.memberships, {
+        isSuperAdmin: false,
+        impersonatedBy: superAdminId,
+      }),
+    );
 
     // Write audit row (best-effort — don't block token issue on audit failures).
     this.prisma.impersonationLog
@@ -609,6 +610,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
         vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
       currentOrganization: membership
         ? {
@@ -654,15 +656,10 @@ export class AuthService {
 
     const tokens = await this.generateTokenPair(payload);
 
-    await this.redis.setSession(superAdmin.id, {
-      sub: superAdmin.id,
-      email: superAdmin.email,
-      orgId: membership?.organizationId,
-      role: membership?.role,
-      emailVerified: superAdmin.emailVerified,
-      memberships: superAdmin.memberships.map((m) => ({ orgId: m.organizationId, role: m.role })),
-      isSuperAdmin: true,
-    });
+    await this.redis.setSession(
+      superAdmin.id,
+      buildSessionPayload(superAdmin, membership, superAdmin.memberships, { isSuperAdmin: true }),
+    );
 
     return {
       ...tokens,
@@ -683,6 +680,7 @@ export class AuthService {
         type: m.organization.type,
         role: m.role,
         vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
       currentOrganization: membership
         ? {

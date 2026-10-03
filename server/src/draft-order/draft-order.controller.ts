@@ -18,7 +18,9 @@ import { SendDraftInvoiceDto } from './dto/send-invoice.dto';
 import { QueryDraftOrdersDto } from './dto/query-drafts.dto';
 import { QueryDraftStatsDto } from './dto/query-draft-stats.dto';
 import { ORG_OPERATORS, Roles } from '../auth/decorators/roles.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 
+@RequireSection('orders')
 @Controller('draft-orders')
 export class DraftOrderController {
   constructor(private readonly service: DraftOrderService) {}

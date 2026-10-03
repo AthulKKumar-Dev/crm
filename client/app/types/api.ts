@@ -124,6 +124,8 @@ export interface OrganizationMembership {
   role: UserRole;
   /** For VENDOR role: the Product.vendor value this membership is scoped to. */
   vendorScope?: string | null;
+  /** Fine-grained grants (`section.*`, `inventory.*`) — see lib/sections.ts. */
+  permissions?: string[];
   isActive: boolean;
   organization: Organization;
 }
@@ -241,6 +243,7 @@ export interface AuthOrganization {
   type: "PERSONAL" | "ORGANIZATION";
   role: UserRole;
   vendorScope?: string | null;
+  permissions?: string[];
 }
 
 /** Response returned after successful login, including tokens and user info. */
@@ -425,6 +428,8 @@ export interface RecomputeLoyaltyResponse {
 export interface OrgMember {
   id: string;
   role: UserRole;
+  /** The member's full grant list; no `section.*` entry means full section access. */
+  permissions?: string[];
   joinedAt: string;
   user: {
     id: string;
@@ -449,6 +454,13 @@ export interface SendInviteRequest {
   role: UserRole;
   /** Required when role is VENDOR: the Product.vendor value to scope them to. */
   vendorScope?: string;
+  /** For AGENT / VIEWER: the `section.*` grants the member starts with. */
+  grants?: string[];
+}
+
+/** Payload for replacing a member's grant list (PATCH …/members/:id/permissions). */
+export interface UpdateMemberPermissionsRequest {
+  grants: string[];
 }
 
 /** A pending team invitation record. */
@@ -456,6 +468,7 @@ export interface OrgInvite {
   id: string;
   email: string;
   role: UserRole;
+  permissions?: string[];
   status: "PENDING";
   token?: string;
   invitedBy: string;
@@ -500,6 +513,10 @@ export interface AcceptInviteResponse {
     id: string;
     name: string;
     slug: string;
+    type?: "PERSONAL" | "ORGANIZATION";
+    role?: UserRole;
+    vendorScope?: string | null;
+    permissions?: string[];
   };
 }
 

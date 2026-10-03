@@ -110,6 +110,19 @@ apiClient.interceptors.response.use(
       }
     }
 
+    // The server refused a section the UI still showed as open — an admin
+    // changed this member's access. Re-sync it (see useMembershipSync) so the
+    // nav locks and the layout redirects without waiting for the next poll.
+    const message = error.response?.data?.message;
+    if (
+      error.response?.status === 403 &&
+      typeof message === "string" &&
+      message.startsWith("Section access denied") &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new Event("crm:access-changed"));
+    }
+
     return Promise.reject(error);
   }
 );

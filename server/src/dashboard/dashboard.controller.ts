@@ -2,6 +2,7 @@ import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { DashboardService } from './dashboard.service';
 import { QueryDashboardDto } from './dto/query-dashboard.dto';
 import {
@@ -9,6 +10,7 @@ import {
   EXPORT_TOTAL_HEADER,
 } from '../common/utils/export-headers.util';
 
+@RequireSection('dashboard')
 @Controller('dashboard')
 export class DashboardController {
   constructor(private readonly dashboardService: DashboardService) { }
@@ -34,7 +36,9 @@ export class DashboardController {
   }
 
   // GET /api/v1/dashboard/export/csv — Download orders as CSV
+  // The Orders page exports through this endpoint too.
   @Get('export/csv')
+  @RequireSection('dashboard', 'orders')
   async exportCsv(
     @CurrentUser() user: JwtPayload,
     @Query() query: QueryDashboardDto,

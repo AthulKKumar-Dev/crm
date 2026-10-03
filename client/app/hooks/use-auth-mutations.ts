@@ -6,6 +6,7 @@ import { authService } from "~/services/auth.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import { readTokenOrgId } from "~/lib/jwt";
+import { getLandingPath } from "~/lib/sections";
 import type {
   SignupRequest,
   LoginRequest,
@@ -19,7 +20,8 @@ import type {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function resolvePostAuthRoute(nextStep: string | null): string {
-  if (nextStep !== "choose-plan") return "/dashboard";
+  // The member's first accessible section — /dashboard unless it is locked.
+  if (nextStep !== "choose-plan") return getLandingPath();
   // Users who pick a plan but close the tab before creating their org can log
   // back in without re-picking — skip ahead to account-type.
   const { pendingPlan } = useAuthStore.getState();
@@ -189,7 +191,9 @@ export function useAcceptInviteMutation() {
       const invitedOrgMembership = {
         id: crypto.randomUUID(),
         organizationId: data.organization.id,
-        role: "AGENT" as const,
+        role: data.organization.role ?? ("AGENT" as const),
+        vendorScope: data.organization.vendorScope ?? null,
+        permissions: data.organization.permissions ?? [],
         isActive: true,
         organization: {
           id: data.organization.id,
@@ -220,7 +224,7 @@ export function useAcceptInviteMutation() {
       setAuth(user, data.accessToken, data.refreshToken, mergedOrgs);
       useAuthStore.getState().setCurrentOrg(data.organization.id);
       toast.success(`Joined ${data.organization.name} successfully!`);
-      navigate("/dashboard");
+      navigate(getLandingPath());
     },
     onError: (error) => handleMutationError(error),
   });

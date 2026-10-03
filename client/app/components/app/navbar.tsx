@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   ArrowLeftRight,
   FileText,
+  Lock,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -28,11 +29,12 @@ import {
 } from "~/components/ui/dropdown-menu";
 import { cn } from "~/lib/utils";
 import { BrandLogo } from "~/components/app/brand-logo";
-import { useAuthStore } from "~/stores/auth.store";
+import { Tip } from "~/components/ui/tooltip";
+import { useAuthStore, normalizeOrganizations } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
-import { useCurrentRole } from "~/hooks/use-current-role";
+import { useSectionAccess } from "~/hooks/use-section-access";
 import { toast } from "sonner";
 
 type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
@@ -91,19 +93,24 @@ export function Navbar() {
     useAuthStore();
   const stopImpersonating = useStopImpersonating();
 
-  const { isVendor } = useCurrentRole();
+  const { canAccess, landingPath, lockReason } = useSectionAccess();
 
-  // Vendors are locked down to Orders + Products only. Otherwise, an extra
+  // Every member sees every pill; the ones they cannot open render locked
+  // rather than hidden (see lib/sections.ts for who can open what). An extra
   // Super Admin link is visible to real Collabo-team super admins (never while
   // impersonating — the impersonation token has isSuperAdmin=false).
-  const navLinks: NavItem[] = isVendor
-    ? [
-      { label: "Orders", href: "/orders", icon: ShoppingCart },
-      { label: "Products", href: "/products", icon: Package },
-    ]
-    : user?.isSuperAdmin && !impersonatedBy
+  const navLinks: NavItem[] =
+    user?.isSuperAdmin && !impersonatedBy
       ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
       : NAV_LINKS;
+
+  // A pill opens its own page, or — when only a sub-page is granted (Customers
+  // without Orders) — the first sub-page the member can open. It is locked only
+  // when nothing under it is reachable.
+  const pillTarget = (item: NavItem): string | null =>
+    canAccess(item.href)
+      ? item.href
+      : item.children?.find((child) => canAccess(child.href))?.href ?? null;
 
   // Longest-prefix match, so a child route keeps its parent pill lit.
   const activeTop = matchNav(navLinks, location.pathname);
@@ -117,29 +124,8 @@ export function Navbar() {
       // Update tokens (new JWT scoped to selected org)
       setTokens(data.accessToken, data.refreshToken);
       // Update org list from backend (freshest data)
-      const normalized = data.organizations.map((o) => ({
-        id: crypto.randomUUID(),
-        organizationId: o.id,
-        role: o.role,
-        isActive: true,
-        organization: {
-          id: o.id,
-          name: o.name,
-          slug: o.slug,
-          type: o.type,
-          logo: null,
-          timezone: "UTC",
-          currency: "USD",
-          industry: null,
-          website: null,
-          billingPlan: "BASIC" as const,
-          billingInterval: null,
-          onboardingStatus: "COMPLETED" as const,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-      }));
-      setOrganizations(normalized);
+      // The store's normaliser, so vendor scope and grants come across too.
+      setOrganizations(normalizeOrganizations(data.organizations));
       setCurrentOrg(orgId);
       // Reload the page to refetch all data with new org context
       window.location.reload();
@@ -169,19 +155,36 @@ export function Navbar() {
       <div className="mx-auto flex h-[72px] max-w-screen-xl items-center justify-between px-6">
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
-        <Link to="/dashboard" className="flex shrink-0 items-center">
+        <Link to={landingPath} className="flex shrink-0 items-center">
           <BrandLogo className="h-7" />
         </Link>
 
         {/* ── Nav — pill container ─────────────────────────────── */}
         <LayoutGroup id="navbar">
           <nav className="hidden md:flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-full bg-foreground/90 dark:bg-gray-900 px-2 py-1.5 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {navLinks.map(({ label, href, icon: Icon, badge }) => {
+            {navLinks.map((item) => {
+              const { label, href, icon: Icon, badge } = item;
               const isActive = activeTop?.href === href;
+              const target = pillTarget(item);
+              if (!target) {
+                return (
+                  <Tip key={href} text={lockReason} side="bottom">
+                    <span
+                      role="link"
+                      aria-disabled="true"
+                      tabIndex={0}
+                      className="flex shrink-0 cursor-not-allowed items-center gap-1 rounded-full p-2.5 text-sm font-medium text-background/40 select-none dark:text-gray-600"
+                    >
+                      <Lock className="size-3" />
+                      {label}
+                    </span>
+                  </Tip>
+                );
+              }
               return (
                 <Link
                   key={href}
-                  to={href}
+                  to={target}
                   className={cn(
                     "relative flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none p-2.5",
                     isActive
@@ -339,6 +342,21 @@ export function Navbar() {
             >
               {sectionChildren.map(({ label, href, icon: Icon }) => {
                 const isActive = activeChild?.href === href;
+                if (!canAccess(href)) {
+                  return (
+                    <Tip key={href} text={lockReason} side="bottom">
+                      <span
+                        role="link"
+                        aria-disabled="true"
+                        tabIndex={0}
+                        className="flex cursor-not-allowed items-center gap-1.5 rounded-full p-2.5 text-xs font-medium text-gray-300 select-none dark:text-gray-600"
+                      >
+                        <Lock className="size-3.5" />
+                        {label}
+                      </span>
+                    </Tip>
+                  );
+                }
                 return (
                   <Link
                     key={href}

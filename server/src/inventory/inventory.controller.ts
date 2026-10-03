@@ -12,6 +12,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { Roles, ORG_OPERATORS } from '../auth/decorators/roles.decorator';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { InventoryService } from './inventory.service';
 import { SkuGeneratorService } from './sku-generator.service';
 import {
@@ -29,6 +30,9 @@ import { GenerateCodesDto } from './dto/generate-skus.dto';
  */
 const ORG_MEMBERS: UserRole[] = [...ORG_OPERATORS, UserRole.VIEWER];
 
+// Inventory lives under Products: the section opens the door, the
+// inventory.* keys below still decide what works inside.
+@RequireSection('products')
 @Controller('inventory')
 export class InventoryController {
   constructor(
@@ -39,6 +43,7 @@ export class InventoryController {
   // Status is intentionally permission-free (any member): the client shell
   // uses it to decide whether to show the Inventory nav item / enable CTA.
   @Get('status')
+  @RequireSection()
   @Roles(...ORG_MEMBERS)
   getStatus(@OrgId() orgId: string) {
     return this.inventory.getStatus(orgId);

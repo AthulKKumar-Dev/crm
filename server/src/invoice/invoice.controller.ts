@@ -20,9 +20,11 @@ import { MarkFiledDto } from './dto/mark-filed.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { attachmentDisposition } from '../common/utils/content-disposition.util';
 import { renderCsvSections } from './gst-return-rows';
 
+@RequireSection('invoices')
 @Controller('invoices')
 export class InvoiceController {
   constructor(private readonly invoiceService: InvoiceService) {}

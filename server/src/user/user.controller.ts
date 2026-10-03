@@ -5,6 +5,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { NoOrgRequired } from '../auth/decorators/no-org-required.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { AuthService } from '../auth/auth.service';
+import { extractGrants } from '../auth/permissions';
 import { UserService } from './user.service';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -32,6 +33,8 @@ export class UserController {
         id: m.organization.id, name: m.organization.name,
         slug: m.organization.slug, type: m.organization.type,
         role: m.role, joinedAt: m.joinedAt,
+        vendorScope: m.vendorScope ?? undefined,
+        permissions: extractGrants(m.permissions),
       })),
     };
   }

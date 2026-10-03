@@ -11,6 +11,7 @@ import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { SendInviteDto } from './dto/send-invite.dto';
 import { EmailService } from '../email/email.service';
+import { extractGrants, sectionGrants, SECTION_SCOPED_ROLES } from '../auth/permissions';
 
 // WHY invites are in OrganizationModule (not AuthModule)?
 // Sending, listing, and revoking invites are org management operations.
@@ -61,6 +62,17 @@ export class InvitesService {
             vendorScope = scope;
         }
 
+        // 2c. Section access applies to AGENT / VIEWER only — every other role
+        // resolves its access from the role itself. A list that names no
+        // section would silently mean "everything", so it is refused.
+        let grants: string[] | null = null;
+        if (dto.grants && SECTION_SCOPED_ROLES.includes(dto.role)) {
+            grants = [...new Set(dto.grants)];
+            if (sectionGrants(grants).length === 0) {
+                throw new BadRequestException('Select at least one section this member can access.');
+            }
+        }
+
         // 3. Check if already a member
         const existingUser = await this.prisma.user.findUnique({ where: { email: dto.email } });
         if (existingUser) {
@@ -90,6 +102,7 @@ export class InvitesService {
                 email: dto.email,
                 role: dto.role,
                 vendorScope,
+                ...(grants ? { permissions: { grants } } : {}),
                 token,
                 invitedBy: userId,
                 expiresAt,
@@ -103,6 +116,7 @@ export class InvitesService {
             email: invite.email,
             role: invite.role,
             vendorScope: invite.vendorScope,
+            permissions: extractGrants(invite.permissions),
             status: invite.status,
             expiresAt: invite.expiresAt,
         };
@@ -110,14 +124,15 @@ export class InvitesService {
 
     // ─── LIST PENDING INVITES ───
     async findAllPending(orgId: string) {
-        return this.prisma.teamInvite.findMany({
+        const invites = await this.prisma.teamInvite.findMany({
             where: { organizationId: orgId, status: InviteStatus.PENDING },
             orderBy: { createdAt: 'desc' },
             select: {
                 id: true, email: true, role: true, status: true,
-                invitedBy: true, expiresAt: true, createdAt: true,
+                invitedBy: true, expiresAt: true, createdAt: true, permissions: true,
             },
         });
+        return invites.map((i) => ({ ...i, permissions: extractGrants(i.permissions) }));
     }
 
     // ─── REVOKE INVITE ───

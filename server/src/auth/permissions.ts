@@ -15,8 +15,29 @@ import { UserRole } from '@prisma/client';
  *   - OWNER / ADMIN / MANAGER implicitly hold EVERY key.
  *   - AGENT and VIEWER hold exactly what their `grants` array contains.
  *   - VENDOR holds none — vendor floor access is a V2 question.
+ *
+ * `section.*` keys are a second family in the same grant list: which app
+ * sections (nav tabs) an AGENT / VIEWER may open. They are enforced by
+ * SectionAccessGuard via `@RequireSection(...)`, with one extra rule — a
+ * member holding NO `section.*` key is unrestricted (see `resolveSections`).
  */
+export const SECTION_KEYS = [
+  'section.dashboard',
+  'section.orders',
+  'section.products',
+  'section.customers',
+  'section.invoices',
+  'section.analytics',
+  // No server controllers yet — reserved so the client can lock these tabs.
+  'section.chat',
+  'section.campaigns',
+  'section.logistics',
+] as const;
+
+export type SectionKey = (typeof SECTION_KEYS)[number];
+
 export const PERMISSION_KEYS = [
+  ...SECTION_KEYS,
   'inventory.view',
   'inventory.receive',
   'inventory.adjust',
@@ -63,27 +84,27 @@ export const PERMISSION_PRESETS: Record<
   receiver: {
     label: 'Receiver',
     role: UserRole.AGENT,
-    grants: ['inventory.view', 'inventory.receive', 'inventory.labels'],
+    grants: ['section.products', 'inventory.view', 'inventory.receive', 'inventory.labels'],
   },
   picker: {
     label: 'Picker',
     role: UserRole.AGENT,
-    grants: ['inventory.view', 'inventory.pick'],
+    grants: ['section.products', 'inventory.view', 'inventory.pick'],
   },
   packer: {
     label: 'Packer',
     role: UserRole.AGENT,
-    grants: ['inventory.view', 'inventory.pack'],
+    grants: ['section.products', 'inventory.view', 'inventory.pack'],
   },
   dispatch: {
     label: 'Dispatch',
     role: UserRole.AGENT,
-    grants: ['inventory.view', 'inventory.dispatch'],
+    grants: ['section.products', 'inventory.view', 'inventory.dispatch'],
   },
   accounts: {
     label: 'Accounts',
     role: UserRole.VIEWER,
-    grants: ['inventory.reports', 'reports.finance'],
+    grants: ['section.products', 'inventory.reports', 'reports.finance'],
   },
 };
 
@@ -105,3 +126,55 @@ export const IMPLICIT_ALL_ROLES: UserRole[] = [
   UserRole.ADMIN,
   UserRole.MANAGER,
 ];
+
+/**
+ * May this member read the order LIST with this filter?
+ *
+ * `GET /orders` is shared: customer detail shows that customer's orders and
+ * product detail the orders containing that product. Without the Orders (or
+ * Logistics) section, the list is only served through one of those filters —
+ * otherwise a Customers-only member could page through every order by calling
+ * the endpoint bare.
+ */
+export function canListOrders(
+  role: UserRole,
+  grants: readonly string[],
+  filter: { customerId?: string; productId?: string },
+): boolean {
+  const sections = resolveSections(role, grants);
+  if (sections === 'all') return true;
+  if (sections.has('section.orders') || sections.has('section.logistics')) return true;
+  return (
+    (sections.has('section.customers') && !!filter.customerId) ||
+    (sections.has('section.products') && !!filter.productId)
+  );
+}
+
+/** Roles whose section access is chosen per member (the invite checkboxes). */
+export const SECTION_SCOPED_ROLES: UserRole[] = [UserRole.AGENT, UserRole.VIEWER];
+
+export function sectionGrants(grants: readonly string[]): SectionKey[] {
+  const known = new Set<string>(SECTION_KEYS);
+  return grants.filter((g): g is SectionKey => known.has(g));
+}
+
+/**
+ * Which sections a member may open: `'all'`, or the granted set.
+ *
+ * An AGENT / VIEWER with no `section.*` key at all is unrestricted. That is
+ * the state of every member who joined before section access existed, so
+ * nobody is locked out by a deploy and no backfill is needed. New data cannot
+ * drift back into it by accident: the invite and the member PATCH both refuse
+ * a grant list that names no section.
+ *
+ * VENDOR resolves to `'all'` here on purpose — VendorAccessGuard and the
+ * vendor scope already decide what a vendor reaches.
+ */
+export function resolveSections(
+  role: UserRole,
+  grants: readonly string[],
+): 'all' | Set<SectionKey> {
+  if (!SECTION_SCOPED_ROLES.includes(role)) return 'all';
+  const sections = sectionGrants(grants);
+  return sections.length === 0 ? 'all' : new Set(sections);
+}
