@@ -1,121 +1,102 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { ArrowLeft, Pencil, Printer } from "lucide-react";
-import { Button } from "~/components/ui/button";
-import { PackageSlip, type PackageSlipStore } from "~/components/app/package-slip";
-import { buildPageCss, chunkPages, type CustomStock } from "~/lib/label-stock";
+import { ArrowLeft, Package, RefreshCw } from "lucide-react";
 import {
-  SLIP_DEFAULT_CUSTOM,
-  SLIP_LAYOUTS,
-  SLIP_PAPERS,
-  SLIP_PAPER_GROUPS,
+  PrintAction,
+  PrintSettingsCard,
+  PrintWarnings,
+  type LabelWarning,
+} from "~/components/app/labels/print-summary-card";
+import type { PackageSlipStore, SlipZone } from "~/components/app/package-slip";
+import { PrintStatusPanel } from "~/components/app/print-status-panel";
+import { SegmentedTabs } from "~/components/app/segmented-tabs";
+import { SlipContentOptions } from "~/components/app/slips/slip-content-options";
+import { SlipCustomFields } from "~/components/app/slips/slip-custom-fields";
+import { SlipLayoutPicker } from "~/components/app/slips/slip-layout-picker";
+import { SlipOrderRows } from "~/components/app/slips/slip-order-rows";
+import {
+  SlipPagePreview,
+  type SlipPreviewView,
+} from "~/components/app/slips/slip-page-preview";
+import { SlipFamilyTabs, SlipPaperGrid } from "~/components/app/slips/slip-paper-picker";
+import { SlipPrintStyles } from "~/components/app/slips/slip-print-styles";
+import { SlipSheet } from "~/components/app/slips/slip-sheet";
+import { SlipStoreDetails } from "~/components/app/slips/slip-store-details";
+import { Button } from "~/components/ui/button";
+import { Skeleton } from "~/components/ui/skeleton";
+import { readAddress } from "~/lib/address";
+import { chunkPages, type CustomStock } from "~/lib/label-stock";
+import {
+  CUSTOM_PAPER_ID,
+  EMPTY_OVERRIDES,
+  loadSlipOptions,
+  saveSlipOptions,
+  type SlipSheetOptions,
+  type SlipStoreOverrides,
+} from "~/lib/slip-options";
+import {
+  SLIP_FAMILIES,
+  findSlipPaper,
   resolveSlipProfile,
-  slipFitWarning,
+  slipPapersInGroup,
   slipScale,
+  slipTooSmall,
+  type SlipFamily,
   type SlipLayout,
 } from "~/lib/slip-stock";
 import type { OrderSlipData } from "~/types/api";
 
 /**
- * Toolbar + paged sheet for package slips. Owns the paper choice, the layout,
- * the print CSS and the N-up paging; `PackageSlip` owns the artwork.
+ * The package-slip editor: controls on the left, a live scaled preview and the
+ * consequences on the right. Owns the paper choice, the layout, the paging and
+ * the warnings; `PackageSlip` owns the artwork.
  *
  * Both print routes render this, which is the point: the per-order slip and a
  * 4-up batch differ only in how many orders they are handed.
  *
- * Geometry is inline in millimetres rather than in classes, for the reason
- * documented on `buildPageCss` — Tailwind cannot emit arbitrary runtime values,
- * and the screen preview must be the same numbers as the paper.
- */
-
-const CUSTOM_PAPER_ID = "__custom__";
-
-/**
- * Per-print overrides for the store block.
+ * The **print DOM is separate from the preview** — `<SlipSheet>` holds every
+ * page at full size, parked off-screen, while the rail renders the same
+ * `<SlipPage>` under a transform. Read the header of `slip-print-styles.tsx`
+ * before touching either.
  *
- * The resolved store profile is the source of truth, but a merchant printing
- * right now should not have to go to Settings to fix a phone number — and
- * before the Store Profile tab is filled in at all, this is the only way to get
- * a real From block onto the paper. BLANK MEANS INHERIT, never "print nothing":
- * an empty box falls through to the profile, so clearing a field is how you go
- * back to the shared value.
+ * `<SlipSheet>` MUST stay a direct child of this component's root. No ancestor
+ * may carry padding, overflow, max-height or transform.
  */
-export interface SlipStoreOverrides {
-  name: string;
-  /** One address line per newline. Blank inherits the resolved address. */
-  address: string;
-  phone: string;
-  whatsapp: string;
-  email: string;
-  website: string;
-  logoUrl: string;
-}
 
-const EMPTY_OVERRIDES: SlipStoreOverrides = {
-  name: "",
-  address: "",
-  phone: "",
-  whatsapp: "",
-  email: "",
-  website: "",
-  logoUrl: "",
-};
+export type SlipEditorStatus = "empty" | "loading" | "error" | "ready";
 
-export interface SlipSheetOptions {
-  paperId: string;
-  layout: SlipLayout;
-  custom: CustomStock;
-  showBarcodeZone: boolean;
-  showItems: boolean;
-  overrides: SlipStoreOverrides;
-}
+const VIEW_ITEMS: Array<{ value: SlipPreviewView; label: string }> = [
+  { value: "sheet", label: "Whole sheet" },
+  { value: "slip", label: "One slip" },
+];
 
-function defaultOptions(paperId: string, layout: SlipLayout): SlipSheetOptions {
-  return {
-    paperId,
-    layout,
-    custom: SLIP_DEFAULT_CUSTOM,
-    showBarcodeZone: true,
-    showItems: false,
-    overrides: EMPTY_OVERRIDES,
-  };
-}
-
-function loadOptions(
-  storageKey: string,
-  paperId: string,
-  layout: SlipLayout,
-): SlipSheetOptions {
-  const fallback = defaultOptions(paperId, layout);
-  if (typeof window === "undefined") return fallback;
-  try {
-    const saved = window.localStorage.getItem(storageKey);
-    if (!saved) return fallback;
-    const parsed = JSON.parse(saved) as Partial<SlipSheetOptions>;
-    // Spread over the defaults so a blob written by an older build — or one
-    // naming a paper that no longer exists — still yields a usable shape.
-    return {
-      ...fallback,
-      ...parsed,
-      custom: { ...fallback.custom, ...(parsed.custom ?? {}) },
-      overrides: { ...EMPTY_OVERRIDES, ...(parsed.overrides ?? {}) },
-    };
-  } catch {
-    return fallback;
-  }
+function familyOf(paperId: string): SlipFamily {
+  if (paperId === CUSTOM_PAPER_ID) return "custom";
+  return findSlipPaper(paperId)?.group ?? "office";
 }
 
 export function PackageSlipSheet({
   orders,
   store,
+  mode,
+  status,
+  onRetry,
+  requestedCount,
   storageKey,
   defaultPaperId,
   defaultLayout,
   backTo,
   backLabel = "Back",
 }: {
+  /** Empty until `status` is "ready". */
   orders: OrderSlipData[];
   store: PackageSlipStore;
+  /** "batch" adds the order checklist; otherwise the two are the same screen. */
+  mode: "batch" | "single";
+  status: SlipEditorStatus;
+  onRetry?: () => void;
+  /** How many orders the URL asked for, so a short answer can be stated. */
+  requestedCount?: number;
   /** Separate per route: printing one parcel and printing the day's batch are
    *  different jobs and merchants pick different paper for each. */
   storageKey: string;
@@ -124,27 +105,71 @@ export function PackageSlipSheet({
   backTo: string;
   backLabel?: string;
 }) {
+  const isBatch = mode === "batch";
+
   const [options, setOptions] = useState<SlipSheetOptions>(() =>
-    loadOptions(storageKey, defaultPaperId, defaultLayout),
+    loadSlipOptions(storageKey, defaultPaperId, defaultLayout),
   );
-  const [editing, setEditing] = useState(false);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(options));
-    } catch {
-      /* private mode / quota — the preference is a convenience, not state */
-    }
-  }, [options, storageKey]);
+  // View state, deliberately outside SlipSheetOptions — that record stays a
+  // description of what gets printed and nothing else.
+  const [family, setFamily] = useState<SlipFamily>(() => familyOf(options.paperId));
+  const [showAll, setShowAll] = useState<boolean>(() => {
+    // Never hide the selected card behind a disclosure.
+    const paper = findSlipPaper(options.paperId);
+    return Boolean(paper && !paper.common);
+  });
+  const [storeOpen, setStoreOpen] = useState(false);
+  const [hover, setHover] = useState<SlipZone | null>(null);
+  const [view, setView] = useState<SlipPreviewView>("sheet");
+  const [previewIndex, setPreviewIndex] = useState(0);
+  // Unticked rather than ticked: every order starts in, whenever it arrives.
+  const [excluded, setExcluded] = useState<ReadonlySet<string>>(() => new Set());
 
-  const set = (patch: Partial<SlipSheetOptions>) =>
+  useEffect(() => saveSlipOptions(storageKey, options), [options, storageKey]);
+
+  const set = (patch: Partial<SlipSheetOptions>) => {
     setOptions((o) => ({ ...o, ...patch }));
+    setPreviewIndex(0);
+  };
   const setCustom = (patch: Partial<CustomStock>) =>
     setOptions((o) => ({ ...o, custom: { ...o.custom, ...patch } }));
   const setOverride = (patch: Partial<SlipStoreOverrides>) =>
     setOptions((o) => ({ ...o, overrides: { ...o.overrides, ...patch } }));
 
+  const selectFamily = (next: SlipFamily) => {
+    setFamily(next);
+    setShowAll(false);
+    if (next === "custom") {
+      set({ paperId: CUSTOM_PAPER_ID });
+      return;
+    }
+    const list = slipPapersInGroup(next);
+    const pick = list.find((p) => p.recommended) ?? list[0];
+    // Keep the layout unless it is unreadable on the paper the pill lands on —
+    // 4-up carried from A4 onto a 4 × 6 card or a label roll would open the
+    // family on a warning nobody asked for.
+    const layout =
+      ([options.layout, 2, 1] as SlipLayout[]).find(
+        (l) =>
+          l <= options.layout &&
+          !slipTooSmall(
+            resolveSlipProfile({ paperId: pick.id, layout: l, custom: options.custom }),
+          ),
+      ) ?? 1;
+    set({ paperId: pick.id, layout });
+  };
+
+  const toggleOrder = (id: string) =>
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+
   const isCustom = options.paperId === CUSTOM_PAPER_ID;
+  const paper = isCustom ? undefined : findSlipPaper(options.paperId);
+  const isThermal = paper?.group === "thermal";
 
   const profile = useMemo(
     () =>
@@ -157,11 +182,16 @@ export function PackageSlipSheet({
     [options.paperId, options.layout, options.custom, isCustom],
   );
   const scale = useMemo(() => slipScale(profile), [profile]);
-  const fitWarning = useMemo(() => slipFitWarning(profile), [profile]);
-  const pages = useMemo(
-    () => chunkPages(orders, profile.perPage, 0),
-    [orders, profile.perPage],
+
+  const printing = useMemo(
+    () => (isBatch ? orders.filter((o) => !excluded.has(o.id)) : orders),
+    [orders, excluded, isBatch],
   );
+  const pages = useMemo(
+    () => chunkPages(printing, profile.perPage, 0),
+    [printing, profile.perPage],
+  );
+  const pageIndex = Math.min(previewIndex, Math.max(0, pages.length - 1));
 
   // Blank inherits — see SlipStoreOverrides.
   const effectiveStore = useMemo<PackageSlipStore>(() => {
@@ -181,296 +211,336 @@ export function PackageSlipSheet({
     };
   }, [options.overrides, store]);
 
-  const inputCls = "rounded-md border px-2 py-1 text-xs";
-  const numCls = "w-16 rounded-md border px-2 py-1 text-xs";
-  const fieldCls =
-    "w-full rounded-md border bg-transparent px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-brand/50";
+  // ── warnings ─────────────────────────────────────────────────────────────
+  const warnings: LabelWarning[] = [];
+  const each = `${profile.widthMm.toFixed(0)} × ${profile.heightMm.toFixed(0)} mm`;
+
+  if (slipTooSmall(profile)) {
+    // The most slips per sheet that still read — not merely one step down,
+    // which on A6 would trade one warning for the same warning.
+    const fewer: SlipLayout | null = isCustom
+      ? null
+      : (([2, 1] as SlipLayout[]).find(
+          (l) =>
+            l < options.layout &&
+            !slipTooSmall(
+              resolveSlipProfile({ paperId: options.paperId, layout: l, custom: options.custom }),
+            ),
+        ) ?? null);
+    warnings.push({
+      id: "too-small",
+      tone: "danger",
+      title: "Each slip is too small to read",
+      body: `At ${each} per slip the text drops below a readable size and long addresses get cut off. Use fewer slips per sheet or a larger paper.`,
+      action: fewer
+        ? { label: `Switch to ${fewer} per sheet`, onClick: () => set({ layout: fewer }) }
+        : undefined,
+    });
+  }
+
+  const noAddress = printing.filter((o) => !readAddress(o.shippingAddress).hasAddress);
+  if (noAddress.length > 0) {
+    const names = noAddress.map((o) => o.name).join(", ");
+    warnings.push({
+      id: "no-address",
+      tone: "warning",
+      title:
+        noAddress.length === 1
+          ? "1 order has no shipping address"
+          : `${noAddress.length} orders have no shipping address`,
+      body: isBatch
+        ? `${names} will print with an empty To block. Add the address on the order first, or untick it from this batch.`
+        : `${names} will print with an empty To block. Add the address on the order first.`,
+      action: isBatch
+        ? {
+            label: noAddress.length === 1 ? "Leave it out of this batch" : "Leave them out of this batch",
+            onClick: () =>
+              setExcluded((prev) => new Set([...prev, ...noAddress.map((o) => o.id)])),
+          }
+        : undefined,
+    });
+  }
+
+  if (isThermal && profile.perPage > 1) {
+    warnings.push({
+      id: "thermal-n-up",
+      tone: "warning",
+      title: "Thermal rolls usually print one slip at a time",
+      body: "Splitting a 100 mm roll label makes each slip very small. 1 per sheet is recommended here.",
+      action: { label: "Use 1 per sheet", onClick: () => set({ layout: 1 }) },
+    });
+  }
+
+  // The server caps a batch and drops ids it cannot read; say so rather than
+  // let a short run look like the whole selection.
+  if (requestedCount !== undefined && status === "ready" && orders.length < requestedCount) {
+    warnings.push({
+      id: "short",
+      tone: "info",
+      title: `${orders.length} of ${requestedCount} orders loaded`,
+      body: "The rest could not be loaded for this print. Print these, then select the remaining orders and print again.",
+    });
+  }
+
+  // ── copy ─────────────────────────────────────────────────────────────────
+  const total = printing.length;
+  const paperName = paper?.name ?? `Custom ${profile.pageWidthMm} × ${profile.pageHeightMm} mm`;
+  const caption = `${paperName} · ${profile.perPage} per sheet${
+    profile.perPage > 1 ? ` · ${each} each` : ""
+  }`;
+  const readyNote =
+    total === 0
+      ? isBatch
+        ? "No orders selected."
+        : "Nothing to print yet."
+      : `${total} slip${total === 1 ? "" : "s"} ready · ${pages.length} sheet${
+          pages.length === 1 ? "" : "s"
+        } of paper`;
+
+  const printSettings = [
+    {
+      key: "Paper size",
+      value:
+        paper && !isThermal
+          ? `${paper.name} (${paper.widthMm} × ${paper.heightMm} mm)`
+          : `${profile.pageWidthMm} × ${profile.pageHeightMm} mm`,
+    },
+    { key: "Scale", value: "Actual size — not “Fit to page”" },
+    { key: "Printer layout", value: "1 page per sheet" },
+    isThermal
+      ? { key: "Printer", value: "Your label printer" }
+      : { key: "Media type", value: "Plain paper" },
+  ];
+  const printerNote =
+    profile.perPage > 1
+      ? `The ${profile.perPage} slips are already arranged on the sheet. If your printer also has a “pages per sheet” option, leave it at 1 or you'll get ${
+          profile.perPage * profile.perPage
+        } tiny slips.`
+      : "Set these in the print dialog your browser opens next.";
+
+  const familyPapers = family === "custom" ? [] : slipPapersInGroup(family);
+  const shownPapers = showAll ? familyPapers : familyPapers.filter((p) => p.common);
+  const familyHint = SLIP_FAMILIES.find((f) => f.id === family)?.hint;
+
+  const title = isBatch ? "Print package slips" : "Print package slip";
+  const subtitle = isBatch
+    ? "Choose your paper, check each slip, and print the whole batch at once."
+    : orders[0]
+      ? `Order ${orders[0].name} · choose your paper and print when it looks right.`
+      : "Choose your paper and print when it looks right.";
+
+  const backButton = (variant: "outline" | "accent") => (
+    <Button asChild variant={variant} size="sm">
+      <Link to={backTo}>
+        <ArrowLeft className="size-3.5" />
+        {backLabel}
+      </Link>
+    </Button>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-950">
-      <style>{`
-        @media print {
-          ${buildPageCss(profile)}
-          body { background: white !important; }
+    <div className="min-h-screen bg-surface-sunken">
+      <SlipPrintStyles profile={profile} />
 
-          /* Whitelist, not blacklist — the same reasoning as the label sheet:
-             hiding only .no-print assumes every stray node carries the tag, so
-             portals and browser-extension-injected nodes would still print.
-             visibility (not display) because it is overridable on descendants,
-             so the sheet re-shows while its ancestors stay hidden, and because
-             it leaves the page-break boxes intact. */
-          body * { visibility: hidden !important; }
-          .slip-sheet, .slip-sheet * { visibility: visible !important; }
-
-          /* The toolbar must occupy NO space; visibility alone leaves a gap
-             above the first slip. */
-          .no-print { display: none !important; }
-
-          .label-page { box-shadow: none !important; margin: 0 !important; }
-        }
-        /* The header band and care tiles are solid dark fills; without this
-           browsers drop backgrounds when printing and they come out blank. */
-        .slip-cell { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-      `}</style>
-
-      <div className="no-print sticky top-0 z-10 border-b bg-white dark:bg-gray-900">
-        <div className="flex flex-wrap items-center gap-4 px-6 py-3 text-xs">
-          <Link
-            to={backTo}
-            className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" /> {backLabel}
-          </Link>
-
-          <span className="font-semibold">
-            {orders.length} slip{orders.length === 1 ? "" : "s"} · {pages.length} sheet
-            {pages.length === 1 ? "" : "s"}
-          </span>
-
-          <label className="flex items-center gap-1.5">
-            <span className="font-medium text-gray-700 dark:text-gray-300">Paper size</span>
-            <select
-              value={options.paperId}
-              onChange={(e) => set({ paperId: e.target.value })}
-              className={inputCls}
-            >
-              {SLIP_PAPER_GROUPS.map((g) => (
-                <optgroup key={g.id} label={g.label}>
-                  {SLIP_PAPERS.filter((p) => p.group === g.id).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-              <optgroup label="Custom">
-                <option value={CUSTOM_PAPER_ID}>Custom size…</option>
-              </optgroup>
-            </select>
-          </label>
-
-          {!isCustom && (
-            <label className="flex items-center gap-1.5">
-              <span className="font-medium text-gray-700 dark:text-gray-300">Layout</span>
-              <select
-                value={options.layout}
-                onChange={(e) => set({ layout: Number(e.target.value) as SlipLayout })}
-                className={inputCls}
-              >
-                {SLIP_LAYOUTS.map((l) => (
-                  <option key={l.value} value={l.value}>
-                    {l.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          {isCustom && (
-            <span className="flex items-center gap-1.5">
-              <input
-                type="number"
-                value={options.custom.widthMm}
-                onChange={(e) => setCustom({ widthMm: Number(e.target.value) })}
-                className={numCls}
-                aria-label="Page width in mm"
-              />
-              <span className="text-muted-foreground">×</span>
-              <input
-                type="number"
-                value={options.custom.heightMm}
-                onChange={(e) => setCustom({ heightMm: Number(e.target.value) })}
-                className={numCls}
-                aria-label="Page height in mm"
-              />
-              <span className="text-muted-foreground">mm</span>
-              <input
-                type="number"
-                value={options.custom.across}
-                onChange={(e) => setCustom({ across: Number(e.target.value) })}
-                className={numCls}
-                aria-label="Slips across"
-              />
-              <span className="text-muted-foreground">across ×</span>
-              <input
-                type="number"
-                value={options.custom.down}
-                onChange={(e) => setCustom({ down: Number(e.target.value) })}
-                className={numCls}
-                aria-label="Slips down"
-              />
-              <span className="text-muted-foreground">down</span>
-            </span>
-          )}
-
-          <label className="flex cursor-pointer items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={options.showBarcodeZone}
-              onChange={() => set({ showBarcodeZone: !options.showBarcodeZone })}
-            />
-            Barcode space
-          </label>
-          <label className="flex cursor-pointer items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={options.showItems}
-              onChange={() => set({ showItems: !options.showItems })}
-            />
-            Item list
-          </label>
-
-          <button
-            type="button"
-            onClick={() => setEditing((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 hover:bg-gray-50 dark:hover:bg-gray-800"
-          >
-            <Pencil className="size-3" /> {editing ? "Done editing" : "Edit store details"}
-          </button>
-
-          <span className="text-muted-foreground">
-            {profile.pageWidthMm.toFixed(1)} × {profile.pageHeightMm.toFixed(1)} mm page
-            {profile.perPage > 1
-              ? ` · ${profile.widthMm.toFixed(1)} × ${profile.heightMm.toFixed(1)} mm each`
-              : ""}
-          </span>
-
-          <Button
-            variant="brand"
-            size="action"
-            className="ml-auto"
-            onClick={() => window.print()}
-            disabled={orders.length === 0}
-          >
-            <Printer className="size-3.5" /> Print / Save PDF
-          </Button>
-        </div>
-
-        {editing && (
-          <div className="border-t bg-gray-50 px-6 py-3 dark:bg-gray-800/50">
-            <p className="mb-2 text-[11px] text-muted-foreground">
-              Overrides for this browser only — leave a box empty to use the value from{" "}
-              <Link to="/settings/store-profile" className="underline">
-                Settings → Store Profile
-              </Link>
-              .
-            </p>
-            <div className="grid gap-2 sm:grid-cols-3">
-              <input
-                value={options.overrides.name}
-                onChange={(e) => setOverride({ name: e.target.value })}
-                placeholder={store.name || "Store name"}
-                className={fieldCls}
-              />
-              <input
-                value={options.overrides.phone}
-                onChange={(e) => setOverride({ phone: e.target.value })}
-                placeholder={store.phone || "Phone"}
-                className={fieldCls}
-              />
-              <input
-                value={options.overrides.whatsapp}
-                onChange={(e) => setOverride({ whatsapp: e.target.value })}
-                placeholder={store.whatsapp || "WhatsApp"}
-                className={fieldCls}
-              />
-              <input
-                value={options.overrides.email}
-                onChange={(e) => setOverride({ email: e.target.value })}
-                placeholder={store.email || "Support email"}
-                className={fieldCls}
-              />
-              <input
-                value={options.overrides.website}
-                onChange={(e) => setOverride({ website: e.target.value })}
-                placeholder={store.website || "Website"}
-                className={fieldCls}
-              />
-              <input
-                value={options.overrides.logoUrl}
-                onChange={(e) => setOverride({ logoUrl: e.target.value })}
-                placeholder={store.logoUrl || "Logo image URL"}
-                className={fieldCls}
-              />
-              <textarea
-                value={options.overrides.address}
-                onChange={(e) => setOverride({ address: e.target.value })}
-                placeholder={
-                  store.addressLines.join("\n") || "From address — one line per row"
-                }
-                rows={3}
-                className={`${fieldCls} sm:col-span-3`}
-              />
+      <div className="no-print mx-auto w-full max-w-screen-xl p-4 lg:p-6">
+        <div className="overflow-hidden rounded-xl bg-card ring-1 ring-border">
+          <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-4">
+            <div className="min-w-0">
+              <h1 className="font-heading text-subhead text-foreground">{title}</h1>
+              <p className="mt-0.5 text-body text-muted-foreground">{subtitle}</p>
             </div>
-          </div>
-        )}
-      </div>
+            <div className="flex flex-none items-center gap-3">
+              <span className="hidden text-caption text-muted-foreground sm:inline">
+                Settings saved on this device
+              </span>
+              {backButton("outline")}
+            </div>
+          </header>
 
-      {fitWarning && (
-        <p className="no-print bg-red-50 px-6 py-2 text-[11px] text-red-800">{fitWarning}</p>
-      )}
-      <p className="no-print px-6 py-2 text-[11px] text-muted-foreground">
-        In the printer dialog: set <strong>Paper size</strong> to the same size chosen above, scale
-        to <strong>Actual size</strong> (100%, not “Fit to page”), and leave the printer’s own{" "}
-        <strong>Layout</strong> on 1-up / “Borders” — the sheet above is already laid out, so the
-        driver’s 2-up or 4-up would tile it a second time. On an inkjet, set Media Type to plain
-        paper.
-      </p>
-
-      {/* Pages. Each .label-page is one physical page. */}
-      <div className="slip-sheet">
-        {pages.map((page, pi) => (
-          <div
-            key={pi}
-            className="label-page mx-auto mb-4 bg-white shadow-sm print:shadow-none"
-            style={{
-              width: `${profile.pageWidthMm}mm`,
-              height: `${profile.pageHeightMm}mm`,
-              paddingTop: `${profile.marginTopMm}mm`,
-              paddingLeft: `${profile.marginLeftMm}mm`,
-              boxSizing: "border-box",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: `repeat(${profile.across}, ${profile.widthMm}mm)`,
-                gridAutoRows: `${profile.heightMm}mm`,
-                columnGap: `${profile.gapXMm}mm`,
-                rowGap: `${profile.gapYMm}mm`,
-              }}
+          {status === "empty" && (
+            <PrintStatusPanel
+              icon={Package}
+              title="No orders selected"
+              body="Go back to Orders, tick the orders you want slips for, then choose Print package slips."
             >
-              {page.map((order, ci) => (
-                <div
-                  key={order?.id ?? `blank-${pi}-${ci}`}
-                  className="label-cell slip-cell"
-                  style={{
-                    width: `${profile.widthMm}mm`,
-                    height: `${profile.heightMm}mm`,
-                    padding: `${profile.paddingMm}mm`,
-                    boxSizing: "border-box",
-                    overflow: "hidden",
-                    // Cut guides only when the sheet holds more than one slip.
-                    outline: profile.guides ? "0.2mm dashed #cbd5e1" : undefined,
-                    outlineOffset: "-0.1mm",
-                  }}
-                >
-                  {order && (
-                    <PackageSlip
-                      order={order}
-                      store={effectiveStore}
-                      scale={scale}
-                      showBarcodeZone={options.showBarcodeZone}
-                      showItems={options.showItems}
+              {backButton("accent")}
+            </PrintStatusPanel>
+          )}
+
+          {status === "error" && (
+            <PrintStatusPanel
+              icon={Package}
+              title={isBatch ? "We couldn't load these orders" : "We couldn't load this order"}
+              body="Nothing was printed. Try again — your slip settings are saved."
+            >
+              {onRetry && (
+                <Button variant="accent" size="sm" onClick={onRetry}>
+                  <RefreshCw className="size-3.5" />
+                  Try again
+                </Button>
+              )}
+              {backButton("outline")}
+            </PrintStatusPanel>
+          )}
+
+          {status === "loading" && (
+            <div className="grid place-items-center gap-3 px-6 py-24 text-center">
+              <Skeleton className="h-40 w-28 rounded-sm" />
+              <p className="text-section text-foreground">
+                Preparing your slip{isBatch ? "s" : ""}…
+              </p>
+              <p className="text-body text-muted-foreground">
+                Loading order and store details.
+              </p>
+            </div>
+          )}
+
+          {status === "ready" && (
+            <div className="grid grid-cols-1 items-start lg:grid-cols-[minmax(0,1fr)_26.5rem]">
+              {/* ── controls ─────────────────────────────────────────────── */}
+              <div className="min-w-0 space-y-6 px-5 py-5">
+                <section className="space-y-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <h2 className="text-section text-foreground">
+                      What paper are you printing on?
+                    </h2>
+                    <span className="text-caption text-muted-foreground">{familyHint}</span>
+                  </div>
+
+                  <SlipFamilyTabs value={family} onChange={selectFamily} />
+
+                  {family === "custom" ? (
+                    <SlipCustomFields custom={options.custom} onChange={setCustom} />
+                  ) : (
+                    <SlipPaperGrid
+                      papers={shownPapers}
+                      hiddenCount={familyPapers.length - shownPapers.length}
+                      showAll={showAll}
+                      onShowAllChange={setShowAll}
+                      value={options.paperId}
+                      onSelect={(paperId) => set({ paperId })}
+                    />
+                  )}
+                </section>
+
+                {!isCustom && (
+                  <section className="space-y-2">
+                    <h2 className="text-section text-foreground">How many slips per sheet?</h2>
+                    <p className="text-caption text-muted-foreground">
+                      {isBatch
+                        ? "Printing several to a sheet saves paper — you cut along the dashed guides."
+                        : "For one parcel, a whole sheet is simplest."}
+                    </p>
+                    <SlipLayoutPicker
+                      paperId={options.paperId}
+                      custom={options.custom}
+                      value={options.layout}
+                      onSelect={(layout) => set({ layout })}
+                    />
+                  </section>
+                )}
+
+                <section className="space-y-2">
+                  <h2 className="text-section text-foreground">What should the slip include?</h2>
+                  <p className="text-caption text-muted-foreground">
+                    Hover a row to see where it sits on the slip.
+                  </p>
+                  <SlipContentOptions
+                    showBarcodeZone={options.showBarcodeZone}
+                    showItems={options.showItems}
+                    onToggle={(zone) =>
+                      setOptions((o) =>
+                        zone === "barcode"
+                          ? { ...o, showBarcodeZone: !o.showBarcodeZone }
+                          : { ...o, showItems: !o.showItems },
+                      )
+                    }
+                    onHover={setHover}
+                  />
+                </section>
+
+                <SlipStoreDetails
+                  store={store}
+                  effectiveStore={effectiveStore}
+                  overrides={options.overrides}
+                  onChange={setOverride}
+                  onReset={() => set({ overrides: EMPTY_OVERRIDES })}
+                  open={storeOpen}
+                  onOpenChange={setStoreOpen}
+                />
+
+                {isBatch && (
+                  <section className="space-y-2">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <h2 className="text-section text-foreground">Orders in this batch</h2>
+                      <span className="text-caption text-muted-foreground">
+                        One slip per order
+                      </span>
+                    </div>
+                    <SlipOrderRows orders={orders} excluded={excluded} onToggle={toggleOrder} />
+                  </section>
+                )}
+              </div>
+
+              {/* ── rail ─────────────────────────────────────────────────── */}
+              <aside className="space-y-4 border-t border-border bg-muted/30 px-5 py-5 lg:border-l lg:border-t-0">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <h2 className="text-section text-foreground">Live preview</h2>
+                  {profile.perPage > 1 && (
+                    <SegmentedTabs
+                      ariaLabel="Preview"
+                      behaviour="filter"
+                      value={view}
+                      onChange={setView}
+                      items={VIEW_ITEMS}
                     />
                   )}
                 </div>
-              ))}
+
+                <SlipPagePreview
+                  pages={pages.length > 0 ? pages : [[]]}
+                  index={pageIndex}
+                  onIndexChange={setPreviewIndex}
+                  view={view}
+                  caption={caption}
+                  profile={profile}
+                  store={effectiveStore}
+                  scale={scale}
+                  showBarcodeZone={options.showBarcodeZone}
+                  showItems={options.showItems}
+                  highlight={hover}
+                />
+
+                <PrintWarnings warnings={warnings} />
+                <PrintSettingsCard settings={printSettings} note={printerNote} />
+                <PrintAction
+                  total={total}
+                  readyNote={readyNote}
+                  noun="slip"
+                  onPrint={() => window.print()}
+                />
+              </aside>
             </div>
-          </div>
-        ))}
+          )}
+        </div>
       </div>
+
+      {/*
+        The print DOM. A DIRECT child of the root and a sibling of the editor
+        above — nothing between it and <body> carries padding, overflow,
+        max-height or transform. Parked off-screen by `@media screen` in
+        SlipPrintStyles; the rail shows its own scaled copy of one page.
+      */}
+      {status === "ready" && (
+        <SlipSheet
+          pages={pages}
+          profile={profile}
+          store={effectiveStore}
+          scale={scale}
+          showBarcodeZone={options.showBarcodeZone}
+          showItems={options.showItems}
+        />
+      )}
     </div>
   );
 }

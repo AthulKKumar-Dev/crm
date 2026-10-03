@@ -32,10 +32,23 @@ import {
 export interface SlipPaper {
   id: string;
   label: string;
+  /** Short name for the size card — "A4", "4 × 6 in". */
+  name: string;
   widthMm: number;
   heightMm: number;
-  group: "office" | "photo" | "thermal";
+  group: SlipPaperGroup;
+  /** The size as the box it came in states it, for inch-denominated stock. */
+  inch?: string;
+  /** Shown before "Show all sizes" is opened. */
+  common?: boolean;
+  /** One per group — where the group's pill lands. */
+  recommended?: boolean;
 }
+
+export type SlipPaperGroup = "office" | "photo" | "thermal";
+
+/** What the picker's pills switch between: a paper group, or hand-typed. */
+export type SlipFamily = SlipPaperGroup | "custom";
 
 /** Slips per sheet. Matches the 1 / 2 / 4-up every print driver offers. */
 export type SlipLayout = 1 | 2 | 4;
@@ -64,55 +77,74 @@ export const SLIP_REF_H_MM = 150;
  */
 export const SLIP_PAPERS: SlipPaper[] = [
   // --- Office / plain paper -------------------------------------------------
-  { id: "a4", label: "A4 — 210 × 297 mm", widthMm: 210, heightMm: 297, group: "office" },
-  { id: "letter", label: "Letter — 8.5 × 11 in", widthMm: 215.9, heightMm: 279.4, group: "office" },
-  { id: "a5", label: "A5 — 148 × 210 mm", widthMm: 148, heightMm: 210, group: "office" },
-  { id: "a6", label: "A6 — 105 × 148 mm", widthMm: 105, heightMm: 148, group: "office" },
-  { id: "b5", label: "B5 — 182 × 257 mm", widthMm: 182, heightMm: 257, group: "office" },
-  { id: "b6", label: "B6 — 128 × 182 mm", widthMm: 128, heightMm: 182, group: "office" },
-  { id: "legal", label: "Legal — 8.5 × 14 in", widthMm: 215.9, heightMm: 355.6, group: "office" },
-  { id: "folio", label: "Folio — 8.5 × 13 in", widthMm: 215.9, heightMm: 330.2, group: "office" },
+  { id: "a4", name: "A4", label: "A4 — 210 × 297 mm", widthMm: 210, heightMm: 297, group: "office", common: true, recommended: true },
+  { id: "letter", name: "Letter", inch: "8.5 × 11 in", label: "Letter — 8.5 × 11 in", widthMm: 215.9, heightMm: 279.4, group: "office", common: true },
+  { id: "a5", name: "A5", label: "A5 — 148 × 210 mm", widthMm: 148, heightMm: 210, group: "office", common: true },
+  { id: "a6", name: "A6", label: "A6 — 105 × 148 mm", widthMm: 105, heightMm: 148, group: "office", common: true },
+  { id: "b5", name: "B5", label: "B5 — 182 × 257 mm", widthMm: 182, heightMm: 257, group: "office" },
+  { id: "b6", name: "B6", label: "B6 — 128 × 182 mm", widthMm: 128, heightMm: 182, group: "office" },
+  { id: "legal", name: "Legal", inch: "8.5 × 14 in", label: "Legal — 8.5 × 14 in", widthMm: 215.9, heightMm: 355.6, group: "office" },
+  { id: "folio", name: "Folio", inch: "8.5 × 13 in", label: "Folio — 8.5 × 13 in", widthMm: 215.9, heightMm: 330.2, group: "office" },
   {
     id: "indian-legal",
+    name: "Indian Legal",
     label: "Indian Legal — 215 × 345 mm",
     widthMm: 215,
     heightMm: 345,
     group: "office",
   },
-  { id: "16k", label: "16K — 195 × 270 mm", widthMm: 195, heightMm: 270, group: "office" },
+  { id: "16k", name: "16K", label: "16K — 195 × 270 mm", widthMm: 195, heightMm: 270, group: "office" },
 
   // --- Photo / card stock ---------------------------------------------------
   {
     id: "4x6",
+    name: "4 × 6 in",
     label: '4 × 6 in / 10 × 15 cm — 101.6 × 152.4 mm',
     widthMm: 101.6,
     heightMm: 152.4,
     group: "photo",
+    common: true,
+    recommended: true,
   },
-  { id: "postcard", label: "Post Card — 100 × 148 mm", widthMm: 100, heightMm: 148, group: "photo" },
-  { id: "5x7", label: "5 × 7 in — 127 × 178 mm", widthMm: 127, heightMm: 178, group: "photo" },
-  { id: "5x8", label: "5 × 8 in — 127 × 203 mm", widthMm: 127, heightMm: 203, group: "photo" },
-  { id: "8x10", label: "8 × 10 in — 203 × 254 mm", widthMm: 203.2, heightMm: 254, group: "photo" },
-  { id: "3.5x5", label: "3.5 × 5 in — 89 × 127 mm", widthMm: 89, heightMm: 127, group: "photo" },
-  { id: "16-9", label: "16:9 wide — 102 × 181 mm", widthMm: 102, heightMm: 181, group: "photo" },
+  { id: "postcard", name: "Post Card", label: "Post Card — 100 × 148 mm", widthMm: 100, heightMm: 148, group: "photo", common: true },
+  { id: "5x7", name: "5 × 7 in", label: "5 × 7 in — 127 × 178 mm", widthMm: 127, heightMm: 178, group: "photo", common: true },
+  { id: "5x8", name: "5 × 8 in", label: "5 × 8 in — 127 × 203 mm", widthMm: 127, heightMm: 203, group: "photo" },
+  { id: "8x10", name: "8 × 10 in", label: "8 × 10 in — 203 × 254 mm", widthMm: 203.2, heightMm: 254, group: "photo" },
+  { id: "3.5x5", name: "3.5 × 5 in", label: "3.5 × 5 in — 89 × 127 mm", widthMm: 89, heightMm: 127, group: "photo" },
+  { id: "16-9", name: "16:9 wide", label: "16:9 wide — 102 × 181 mm", widthMm: 102, heightMm: 181, group: "photo" },
 
   // --- Thermal label rolls --------------------------------------------------
   {
     id: "thermal-100x150",
+    name: "100 × 150 mm",
     label: "Thermal 100 × 150 mm (4 × 6\")",
     widthMm: 100,
     heightMm: 150,
     group: "thermal",
+    common: true,
+    recommended: true,
   },
-  { id: "thermal-100x100", label: "Thermal 100 × 100 mm", widthMm: 100, heightMm: 100, group: "thermal" },
-  { id: "thermal-100x75", label: "Thermal 100 × 75 mm", widthMm: 100, heightMm: 75, group: "thermal" },
+  { id: "thermal-100x100", name: "100 × 100 mm", label: "Thermal 100 × 100 mm", widthMm: 100, heightMm: 100, group: "thermal", common: true },
+  { id: "thermal-100x75", name: "100 × 75 mm", label: "Thermal 100 × 75 mm", widthMm: 100, heightMm: 75, group: "thermal", common: true },
 ];
 
-export const SLIP_PAPER_GROUPS: ReadonlyArray<{ id: SlipPaper["group"]; label: string }> = [
-  { id: "office", label: "Plain paper" },
-  { id: "photo", label: "Photo & card" },
-  { id: "thermal", label: "Thermal label rolls" },
+export const SLIP_FAMILIES: ReadonlyArray<{ id: SlipFamily; label: string; hint: string }> = [
+  { id: "office", label: "Plain paper", hint: "Office and home printers" },
+  { id: "photo", label: "Photo & card", hint: "Photo paper and card stock" },
+  { id: "thermal", label: "Thermal label roll", hint: "Shipping-label printers" },
+  { id: "custom", label: "Custom", hint: "Enter your own measurements" },
 ];
+
+export function slipPapersInGroup(group: SlipPaperGroup): SlipPaper[] {
+  return SLIP_PAPERS.filter((p) => p.group === group);
+}
+
+/** The size line under a paper's name on its card. */
+export function slipPaperDims(p: SlipPaper): string {
+  if (p.group === "thermal") return "Thermal roll";
+  const mm = `${p.widthMm} × ${p.heightMm} mm`;
+  return p.inch ? `${p.inch} · ${mm}` : mm;
+}
 
 /** Per-order route: one slip, on the paper almost everyone has. */
 export const SLIP_DEFAULT_PAPER_ID = "a4";
@@ -147,14 +179,16 @@ function paddingFor(cellWidthMm: number, cellHeightMm: number): number {
  * does not.
  */
 function presetFor(paper: SlipPaper, layout: SlipLayout): LabelPreset {
-  const across = layout === 4 ? 2 : 1;
-  const down = layout === 1 ? 1 : 2;
+  return tiledPreset(paper, layout === 4 ? 2 : 1, layout === 1 ? 1 : 2);
+}
+
+function tiledPreset(paper: SlipPaper, across: number, down: number): LabelPreset {
   const widthMm = paper.widthMm / across;
   const heightMm = paper.heightMm / down;
 
   return {
-    id: `${paper.id}@${layout}`,
-    label: `${paper.label} — ${layout} up`,
+    id: `${paper.id}@${across}x${down}`,
+    label: `${paper.label} — ${across * down} up`,
     group: "single",
     // Always "sheet": the page dimensions are explicit here, so the roll
     // branch (which derives the page from the label) would only get in the way.
@@ -171,7 +205,7 @@ function presetFor(paper: SlipPaper, layout: SlipLayout): LabelPreset {
     marginLeftMm: 0,
     paddingMm: paddingFor(widthMm, heightMm),
     // Cut guides only when there is something to cut.
-    guides: layout > 1,
+    guides: across * down > 1,
     defaultDpi: paper.group === "thermal" ? 203 : 600,
   };
 }
@@ -184,7 +218,8 @@ export function resolveSlipProfile(opts: {
   useCustom?: boolean;
 }): ResolvedProfile {
   if (opts.useCustom) {
-    return resolveProfile({ presetId: "custom", custom: opts.custom, presets: [] });
+    const preset = customPreset(opts.custom);
+    return resolveProfile({ presetId: preset.id, custom: opts.custom, presets: [preset] });
   }
   const paper = findSlipPaper(opts.paperId) ?? SLIP_PAPERS[0];
   const preset = presetFor(paper, opts.layout);
@@ -193,6 +228,36 @@ export function resolveSlipProfile(opts: {
     custom: opts.custom,
     presets: [preset],
   });
+}
+
+/**
+ * Custom stock for a slip is the PAGE, divided evenly — the same model as every
+ * listed paper, so it gets the same proportional padding and cut guides.
+ *
+ * `widthMm` / `heightMm` are therefore the sheet that goes in the printer, not
+ * one slip. They used to be read as a slip-sized cell on a forced A4 page,
+ * which made a custom thermal size print in the corner of an A4 `@page`.
+ *
+ * Clamped here rather than on each keystroke, so a half-typed "1" on the way to
+ * "150" does not snap under the cursor.
+ */
+function customPreset(c: CustomStock): LabelPreset {
+  const n = (v: number, min: number, max: number, fallback: number) =>
+    Number.isFinite(v) && v > 0 ? Math.min(max, Math.max(min, v)) : fallback;
+  const widthMm = n(c.widthMm, 30, 1000, SLIP_REF_W_MM);
+  const heightMm = n(c.heightMm, 30, 1000, SLIP_REF_H_MM);
+  return tiledPreset(
+    {
+      id: "custom",
+      label: `Custom — ${widthMm} × ${heightMm} mm`,
+      name: `Custom ${widthMm} × ${heightMm} mm`,
+      widthMm,
+      heightMm,
+      group: "office",
+    },
+    Math.round(n(c.across, 1, 6, 1)),
+    Math.round(n(c.down, 1, 6, 1)),
+  );
 }
 
 /** Custom slip stock starts at the reference box rather than a label size. */
@@ -213,34 +278,34 @@ export const SLIP_DEFAULT_CUSTOM: CustomStock = {
 export const SLIP_MIN_SCALE = 0.55;
 
 /**
- * How much to scale the slip's typography for this stock.
+ * The unclamped ratio of this cell to the reference box.
  *
  * `min` of the two axes, not an average: overshooting on either one is what
  * pushes text out of the box, and the merchant's own printed sample was
  * clipped for exactly that reason.
+ */
+export function slipRawScale(p: ResolvedProfile): number {
+  const inner = (v: number) => Math.max(1, v - 2 * p.paddingMm);
+  return Math.min(
+    inner(p.widthMm) / (SLIP_REF_W_MM - 6),
+    inner(p.heightMm) / (SLIP_REF_H_MM - 6),
+  );
+}
+
+/**
+ * How much to scale the slip's typography for this stock.
  *
  * ≈1.0 on an A6 quadrant and on the 4×6" roll, ≈1.9 on a full A4.
  */
 export function slipScale(p: ResolvedProfile): number {
-  const inner = (v: number) => Math.max(1, v - 2 * p.paddingMm);
-  const raw = Math.min(
-    inner(p.widthMm) / (SLIP_REF_W_MM - 6),
-    inner(p.heightMm) / (SLIP_REF_H_MM - 6),
-  );
-  return Math.min(2.4, Math.max(SLIP_MIN_SCALE, raw));
+  return Math.min(2.4, Math.max(SLIP_MIN_SCALE, slipRawScale(p)));
 }
 
 /**
- * Warning for a pairing that has hit the scale floor — the cell is too small
- * for the design and the slip will be cramped or clipped. Returned as text
- * rather than a boolean so the toolbar can say what to do about it.
+ * True for a pairing that has hit the scale floor — the cell is too small for
+ * the design and the slip will be cramped or clipped. Depends on the stock
+ * alone; nothing on the slip can be switched off to change it.
  */
-export function slipFitWarning(p: ResolvedProfile): string | null {
-  const inner = (v: number) => Math.max(1, v - 2 * p.paddingMm);
-  const raw = Math.min(
-    inner(p.widthMm) / (SLIP_REF_W_MM - 6),
-    inner(p.heightMm) / (SLIP_REF_H_MM - 6),
-  );
-  if (raw >= SLIP_MIN_SCALE) return null;
-  return `Each slip is only ${p.widthMm.toFixed(0)} × ${p.heightMm.toFixed(0)} mm here — too small for the full layout. Use a larger paper size, fewer per sheet, or turn off the barcode space and item list.`;
+export function slipTooSmall(p: ResolvedProfile): boolean {
+  return slipRawScale(p) < SLIP_MIN_SCALE;
 }
