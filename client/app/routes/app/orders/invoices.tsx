@@ -1,6 +1,8 @@
 import { isAxiosError } from "axios";
-import { useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, Navigate, useSearchParams } from "react-router";
+
+import { isString, useSessionState } from "~/hooks/use-session-state";
 import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X, AlertTriangle } from "lucide-react";
 
 import {
@@ -159,7 +161,42 @@ function returnErrorMessage(error: unknown): string {
   return "Something went wrong building this return. Please try again.";
 }
 
+/** Params that describe a moment, not a view worth coming back to. */
+const TRANSIENT_PARAMS = ["page", "q", "invoice"];
+
+/**
+ * The view lives in the URL (see below), but the navbar links to the bare
+ * path, so returning that way dropped the tab, period and filters. The last
+ * view is mirrored to the browser session and put back when the page is opened
+ * without any params. A link that carries params always wins.
+ */
 export default function InvoicesPage() {
+  const [searchParams] = useSearchParams();
+  const [saved, setSaved] = useSessionState("invoices.params", "", isString);
+
+  const kept = new URLSearchParams(searchParams);
+  for (const key of TRANSIENT_PARAMS) kept.delete(key);
+  const current = kept.toString();
+  const isBare = searchParams.toString() === "";
+
+  // Decided once, on arrival: clearing every filter later must not snap back.
+  const restoring = useRef(isBare && saved !== "");
+
+  useEffect(() => {
+    if (restoring.current) {
+      if (!isBare) restoring.current = false;
+      return;
+    }
+    if (current !== saved) setSaved(current);
+  }, [current, isBare, saved, setSaved]);
+
+  if (restoring.current && isBare) {
+    return <Navigate to={{ search: `?${saved}` }} replace />;
+  }
+  return <InvoicesView />;
+}
+
+function InvoicesView() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   // Tab, return type, period, financial year, filters, page and the open

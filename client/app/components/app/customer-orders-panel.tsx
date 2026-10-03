@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isString, oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link } from "react-router";
 import { Search } from "lucide-react";
 
@@ -87,11 +88,27 @@ export function CustomerOrdersPanel({
   currency: string;
 }) {
   const [search, setSearch] = useState("");
-  const [dateRange, setDateRange] = useState("all");
-  const [channelId, setChannelId] = useState("all");
+  // Remembered per customer for the browser session. This panel unmounts when
+  // the page's tab changes, which used to wipe both filters.
+  const [dateRange, setDateRange] = useSessionState(
+    `customer-orders.${customerId}.range`,
+    "all",
+    oneOf(Object.keys(DATE_RANGE_MAP)),
+  );
+  const [savedChannelId, setChannelId] = useSessionState(
+    `customer-orders.${customerId}.channel`,
+    "all",
+    isString,
+  );
   const [page, setPage] = useState(1);
 
-  const { data: channels = [] } = useChannels();
+  const { data: channels = [], isSuccess: channelsLoaded } = useChannels();
+  // A remembered channel that has since been disconnected would filter to an
+  // empty list behind a blank select.
+  const channelId =
+    channelsLoaded && !channels.some((channel) => channel.id === savedChannelId)
+      ? "all"
+      : savedChannelId;
   const { data: org } = useCurrentOrg();
 
   // Debounced into the query key only, so typing stays instant.

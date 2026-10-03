@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link, useParams } from "react-router";
 import {
   ChevronLeft,
@@ -66,7 +67,11 @@ function formatDate(value: string | null | undefined): string {
 
 export default function CustomerDetailPage() {
   const { id } = useParams();
-  const [activeTab, setActiveTab] = useState<TabId>("orders");
+  const [activeTab, setActiveTab] = useSessionState<TabId>(
+    "customer.tab",
+    "orders",
+    oneOf(TABS.map((tab) => tab.id)),
+  );
   const [gstOpen, setGstOpen] = useState(false);
 
   const { data: customer, isLoading, isError, refetch } = useCustomer(id);

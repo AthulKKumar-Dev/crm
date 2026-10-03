@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Package, RefreshCw } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
@@ -41,8 +42,16 @@ export function meta() {
  * filters return an empty-but-valid shape until their pipelines land.
  */
 export default function AnalyticsPage() {
-  const [range, setRange] = useState<AnalyticsRange>("7d");
-  const [channel, setChannel] = useState<AnalyticsChannelFilter>("all");
+  const [range, setRange] = useSessionState<AnalyticsRange>(
+    "analytics.range",
+    "7d",
+    oneOf(["7d", "30d", "6m", "12m"]),
+  );
+  const [channel, setChannel] = useSessionState<AnalyticsChannelFilter>(
+    "analytics.channel",
+    "all",
+    oneOf(["all", "shopify", "instagram", "whatsapp"]),
+  );
 
   const { data, isLoading, isFetching, isError, isPlaceholderData, refetch } =
     useAnalyticsDashboard({ range, channel });

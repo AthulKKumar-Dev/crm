@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link } from "react-router";
 import { Package } from "lucide-react";
 
@@ -56,7 +56,11 @@ export function ProductsPanel({
     currency,
     className,
 }: ProductsPanelProps) {
-    const [tab, setTab] = useState<Tab>("top");
+    const [tab, setTab] = useSessionState<Tab>(
+        "dashboard.products-tab",
+        "top",
+        oneOf(["top", "low"]),
+    );
     const lowRows = lowStockRows(lowStockVariants, lowStockProducts);
     const lowCount = lowRows?.length ?? 0;
     const rows = tab === "top" ? topProducts : lowRows;

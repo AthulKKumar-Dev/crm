@@ -1,4 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { isString,
+  isStringArray,
+  isStringRecord,
+  oneOf,
+  useSessionState } from "~/hooks/use-session-state";
 import { Link, useNavigate } from "react-router";
 import {
   Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
@@ -106,7 +111,7 @@ export default function ProductsPage() {
   const { isVendor } = useCurrentRole();
   const [searchQuery, setSearchQuery] = useState("");
   const debouncedSearch = useDebounced(searchQuery, 350);
-  const [selectedType, setSelectedType] = useState("All");
+  const [selectedType, setSelectedType] = useSessionState("products.type", "All", isString);
   const [currentPage, setCurrentPage] = useState(1);
   // Full edit/create dialog state. `creatingProduct` toggles the create form;
   // `editingFullProductId` opens the edit form for a MANUAL-channel product
@@ -131,10 +136,24 @@ export default function ProductsPage() {
       codeStatus.data.missingBarcode +
       codeStatus.data.longBarcode
     : 0;
-  const [activeFilters, setActiveFilters] = useState<string[]>([]);
-  const [filterValues, setFilterValues] = useState<Record<string, string>>({});
-  const [sortBy, setSortBy] = useState("createdAt");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  // Filters and sort are remembered for the browser session; search and the
+  // page number deliberately start fresh.
+  const [activeFilters, setActiveFilters] = useSessionState<string[]>(
+    "products.active-filters",
+    [],
+    isStringArray,
+  );
+  const [filterValues, setFilterValues] = useSessionState<Record<string, string>>(
+    "products.filter-values",
+    {},
+    isStringRecord,
+  );
+  const [sortBy, setSortBy] = useSessionState("products.sort-by", "createdAt", isString);
+  const [sortOrder, setSortOrder] = useSessionState<"asc" | "desc">(
+    "products.sort-order",
+    "desc",
+    oneOf(["asc", "desc"]),
+  );
   const [exporting, setExporting] = useState(false);
 
   const deleteProduct = useDeleteProductMutation();

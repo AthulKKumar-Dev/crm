@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link, useBlocker, useParams } from "react-router";
 import {
   Loader2,
@@ -273,7 +274,11 @@ export default function ProductDetailPage() {
   const [gstRate, setGstRate] = useState("");
   const [unitOfMeasure, setUnitOfMeasure] = useState("");
   const [supplyType, setSupplyType] = useState<GstSupplyType>("TAXABLE");
-  const [activeTab, setActiveTab] = useState<ProductTab>("overview");
+  const [activeTab, setActiveTab] = useSessionState<ProductTab>(
+    "product.tab",
+    "overview",
+    oneOf(PRODUCT_TABS.map((tab) => tab.id)),
+  );
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [options, setOptions] = useState<EditableOption[]>([]);
   const [optionValueDrafts, setOptionValueDrafts] = useState<string[]>([]);

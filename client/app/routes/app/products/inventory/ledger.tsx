@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { isString, useSessionState } from "~/hooks/use-session-state";
 import { History, MoveRight } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import {
@@ -49,7 +50,7 @@ function describeMovement(e: InventoryEvent): string {
 
 export default function InventoryLedgerPage() {
   const [page, setPage] = useState(1);
-  const [reason, setReason] = useState("all");
+  const [reason, setReason] = useSessionState("ledger.reason", "all", isString);
   const { locations, locationId, location, setLocationId } = useSelectedLocation();
 
   const params: LedgerParams = useMemo(
