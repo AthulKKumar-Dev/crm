@@ -1,9 +1,9 @@
-import { BadRequestException, ConflictException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, ServiceUnavailableException, Controller, Post, Get, Patch, Delete, Body, Param, Query, Res, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response, Request } from 'express';
 import { ChannelPlatform, ChannelStatus, SyncStatus } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
+import { Queue, type JobType } from 'bullmq';
 import { SYNC_QUEUE, SyncJobData } from './sync.queue';
 import { SYNC_RESUME_MAX_AGE_MS } from './shopify-sync.service';
 
@@ -23,6 +23,9 @@ import { InstagramOAuthService } from './instagram-oauth.service';
 import { WhatsAppOAuthService } from './whatsapp-oauth.service';
 import { WhatsAppCallbackDto } from './dto/whatsapp-callback.dto';
 import { ShopifyPixelService } from './shopify-pixel.service';
+
+/** Queue states in which a sync job is still going to run, or is running. */
+const PENDING_JOB_STATES: JobType[] = ['active', 'waiting', 'delayed', 'prioritized', 'paused'];
 
 @Controller('channels')
 export class ChannelController {
@@ -227,28 +230,39 @@ export class ChannelController {
 
   // POST /channels/:id/sync — trigger manual sync
   //
-  // IN_PROGRESS means one of two very different things, and this endpoint has
-  // to tell them apart:
+  // The channel is claimed (syncStatus → IN_PROGRESS) HERE, before the job is
+  // queued, not later by the worker. Two reasons:
   //
-  //   * a sync really is running  → starting a second one is harmful. Both
-  //     runs resolve the SAME SyncLog row and both write `cursor` into it, so
-  //     they overwrite each other's checkpoint. Refuse.
-  //   * a previous attempt died before its `finally` (e.g. credential
-  //     resolution threw before `runSync` entered its try/finally) → the row
-  //     is pinned and the UI button is disabled for ever. Reset and queue.
+  //   * Truth. The row used to keep its old status until a worker picked the
+  //     job up, so the API answered "Synced" for a channel with a sync queued.
+  //     Clients poll only while IN_PROGRESS, so they never started polling and
+  //     the page showed stale state until a reload.
+  //   * Exclusion. Two triggers in that window both passed the IN_PROGRESS
+  //     check and both enqueued. Two runs resolve the SAME SyncLog row and
+  //     both write `cursor` into it, so they overwrite each other's
+  //     checkpoint. The claim is a compare-and-set, so only one caller wins.
   //
-  // The age of the channel's most recent sync log is what separates them.
-  // This used to reset unconditionally, which fixed the second case by
-  // permanently enabling the first.
+  // IN_PROGRESS therefore means "queued or running". `runSync` and the
+  // worker's `onFailed` handler always end a run with COMPLETED / FAILED, so
+  // the claim is released by the same code that released it before.
+  //
+  // A lost claim still means one of two very different things:
+  //
+  //   * a sync really is queued or running → refuse (409).
+  //   * a previous attempt died before its `finally` → the row is pinned and
+  //     the UI button is disabled for ever. Take the claim over and queue.
+  //
+  // `isSyncLive` is what separates them.
   @Post(':id/sync')
   async triggerSync(
     @Param('id') id: string,
     @CurrentUser() user: JwtPayload,
     @Body() dto: TriggerSyncDto,
   ) {
+    const orgId = user.orgId!;
     const existing = await this.prisma.channel.findFirst({
-      where: { id, organizationId: user.orgId! },
-      select: { syncStatus: true, status: true, platform: true, name: true },
+      where: { id, organizationId: orgId },
+      select: { syncStatus: true, platform: true },
     });
     if (!existing) {
       throw new BadRequestException(`Channel ${id} not found`);
@@ -269,45 +283,70 @@ export class ChannelController {
         `Sync is not available for ${existing.platform} channels.`,
       );
     }
-    if (existing.syncStatus === SyncStatus.IN_PROGRESS) {
-      const latestLog = await this.prisma.syncLog.findFirst({
-        where: { channelId: id, status: SyncStatus.IN_PROGRESS },
-        orderBy: { startedAt: 'desc' },
-        select: { startedAt: true },
-      });
-      const live =
-        !!latestLog &&
-        latestLog.startedAt.getTime() > Date.now() - SYNC_RESUME_MAX_AGE_MS;
+    // MANUAL channels have no pull and never enter IN_PROGRESS (`runSync` marks
+    // them COMPLETED at once), so there is nothing to claim.
+    //
+    // `restoreTo` is what the row goes back to if the job cannot be queued.
+    let restoreTo: SyncStatus | null = null;
 
-      if (live) {
+    if (existing.platform === ChannelPlatform.SHOPIFY) {
+      const claim = await this.prisma.channel.updateMany({
+        where: { id, organizationId: orgId, syncStatus: { not: SyncStatus.IN_PROGRESS } },
+        data: { syncStatus: SyncStatus.IN_PROGRESS },
+      });
+
+      if (claim.count === 1) {
+        // `existing` was read before the claim and may be a beat stale; never
+        // "restore" a row to IN_PROGRESS.
+        restoreTo =
+          existing.syncStatus === SyncStatus.IN_PROGRESS
+            ? SyncStatus.IDLE
+            : existing.syncStatus;
+      } else if (await this.isSyncLive(id)) {
         throw new ConflictException(
           'A sync is already in progress for this channel. Wait for it to finish before starting another.',
         );
+      } else {
+        this.logger.warn(
+          `Channel ${id} was pinned to IN_PROGRESS with no live sync — taking it over and queueing a fresh job.`,
+        );
+        restoreTo = SyncStatus.IDLE;
       }
-
-      this.logger.warn(
-        `Channel ${id} was pinned to IN_PROGRESS with no live sync log — resetting to IDLE before queueing a fresh job.`,
-      );
-      await this.prisma.channel.update({
-        where: { id },
-        data: {
-          syncStatus: SyncStatus.IDLE,
-          status: ChannelStatus.CONNECTED,
-        },
-      });
     }
 
-    // Add job to BullMQ queue — returns immediately
-    const job = await this.syncQueue.add('sync', {
-      channelId: id,
-      organizationId: user.orgId!,
-      entityTypes: dto.entityTypes,
-    } satisfies SyncJobData, {
-      attempts: 3,                          // Retry up to 3 times
-      backoff: { type: 'exponential', delay: 5000 },  // 5s, 10s, 20s
-      removeOnComplete: { count: 100 },     // Keep last 100 completed jobs
-      removeOnFail: { count: 50 },          // Keep last 50 failed jobs
-    });
+    let job: Awaited<ReturnType<Queue['add']>>;
+    try {
+      // Add job to BullMQ queue — returns immediately
+      job = await this.syncQueue.add('sync', {
+        channelId: id,
+        organizationId: orgId,
+        entityTypes: dto.entityTypes,
+      } satisfies SyncJobData, {
+        attempts: 3,                          // Retry up to 3 times
+        backoff: { type: 'exponential', delay: 5000 },  // 5s, 10s, 20s
+        removeOnComplete: { count: 100 },     // Keep last 100 completed jobs
+        removeOnFail: { count: 50 },          // Keep last 50 failed jobs
+      });
+    } catch (error) {
+      // Nothing will ever run, so nothing would ever release the claim.
+      if (restoreTo) {
+        await this.prisma.channel
+          .updateMany({
+            where: { id, syncStatus: SyncStatus.IN_PROGRESS },
+            data: { syncStatus: restoreTo },
+          })
+          .catch((restoreError) =>
+            this.logger.error(
+              `Could not release the sync claim on channel ${id} after a failed enqueue`,
+              restoreError,
+            ),
+          );
+      }
+      this.logger.error(`Failed to enqueue sync for channel ${id}`, error);
+      throw new ServiceUnavailableException(
+        'The sync queue is unavailable right now. Try again in a few minutes.',
+      );
+    }
 
     return {
       message: 'Sync started',
@@ -315,6 +354,33 @@ export class ChannelController {
       channelId: id,
       entityTypes: dto.entityTypes,
     };
+  }
+
+  /**
+   * Is a sync for this channel queued or running right now?
+   *
+   * The queue is the first authority: a job that is waiting, active, or
+   * delayed between retries WILL write the channel's final status. The recent
+   * IN_PROGRESS sync log is kept as a second signal for a run whose job is no
+   * longer visible in the queue but is still inside the resume window.
+   */
+  private async isSyncLive(channelId: string): Promise<boolean> {
+    const jobs = await this.syncQueue.getJobs(PENDING_JOB_STATES);
+    const queued = jobs.some((job) => {
+      const data = job?.data as SyncJobData | undefined;
+      return data?.channelId === channelId && data.type !== 'setup';
+    });
+    if (queued) return true;
+
+    const latestLog = await this.prisma.syncLog.findFirst({
+      where: { channelId, status: SyncStatus.IN_PROGRESS },
+      orderBy: { startedAt: 'desc' },
+      select: { startedAt: true },
+    });
+    return (
+      !!latestLog &&
+      latestLog.startedAt.getTime() > Date.now() - SYNC_RESUME_MAX_AGE_MS
+    );
   }
 
   /**
