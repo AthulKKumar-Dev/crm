@@ -36,10 +36,20 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         // the membership for `payload.orgId` and re-caches. Tokens minted
         // before any org exists (onboarding) carry no orgId and still use the
         // fast path.
+        // Privilege flags come from the signed token, never the shared cache.
+        // The cache is keyed by userId alone, so the session written by
+        // `startImpersonation` was also served to the target user's OWN token:
+        // it carried `impersonatedBy`, passed SuperAdminGuard and let them call
+        // `stop-impersonating` to receive the super admin's tokens.
+        const flags = {
+            isSuperAdmin: payload.isSuperAdmin === true,
+            impersonatedBy: payload.impersonatedBy,
+        };
+
         try {
             const cached = await this.redis.getSession<SessionPayload>(payload.sub);
             if (cached && (!payload.orgId || cached.orgId === payload.orgId)) {
-                return cached;
+                return { ...cached, ...flags };
             }
         } catch {
             // Redis down — fall through to DB
@@ -85,6 +95,6 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         // Cache for subsequent requests (ignore errors)
         this.redis.setSession(user.id, session as unknown as Record<string, unknown>).catch(() => {});
 
-        return session;
+        return { ...session, ...flags };
     }
 }

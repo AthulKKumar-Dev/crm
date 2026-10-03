@@ -2,7 +2,7 @@ import { BadRequestException, Body, Controller, Get, Param, Patch, Post, Query, 
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { NoOrgRequired } from '../auth/decorators/no-org-required.decorator';
-import { SuperAdmin } from '../auth/decorators/super-admin.decorator';
+import { AllowImpersonated, SuperAdmin } from '../auth/decorators/super-admin.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { AuthService } from '../auth/auth.service';
 import { AdminService } from './admin.service';
@@ -14,10 +14,10 @@ import { QueryUsersDto } from './dto/query-users.dto';
  * which is registered globally and reads the `@SuperAdmin()` metadata applied
  * at the class level here.
  *
- * `stop-impersonating` is reachable with an impersonation token too — the
- * guard accepts `JwtPayload.impersonatedBy` as a sibling credential. This is
- * intentional and safe: the underlying service re-validates the super admin
- * via that claim before issuing any new tokens.
+ * `stop-impersonating` is reachable with an impersonation token too — it is
+ * marked `@AllowImpersonated()`, so the guard accepts `JwtPayload.impersonatedBy`
+ * as a sibling credential on that route only. The underlying service
+ * re-validates the super admin via that claim before issuing any new tokens.
  *
  * @NoOrgRequired: super admins operate across tenants and may have no orgId.
  */
@@ -61,6 +61,7 @@ export class AdminController {
     }
 
     @Post('stop-impersonating')
+    @AllowImpersonated()
     stop(@CurrentUser() user: JwtPayload) {
         const superAdminId = user.impersonatedBy;
         if (!superAdminId) {

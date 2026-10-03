@@ -196,8 +196,8 @@ export class ChannelController {
 
   // POST /channels/whatsapp/callback — frontend forwards the code returned by FB.login
   @Post('whatsapp/callback')
-  async whatsappCallback(@Body() dto: WhatsAppCallbackDto) {
-    return this.whatsappOAuth.handleSignupCallback(dto.code, dto.state);
+  async whatsappCallback(@CurrentUser() user: JwtPayload, @Body() dto: WhatsAppCallbackDto) {
+    return this.whatsappOAuth.handleSignupCallback(dto.code, dto.state, user.orgId!, user.sub);
   }
 
   // GET /channels — list org's channels

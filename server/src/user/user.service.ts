@@ -1,5 +1,6 @@
 import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import { randomInt } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -11,7 +12,7 @@ export class UserService {
     if (existing) throw new ConflictException('Email already registered');
 
     const passwordHash = await bcrypt.hash(data.password, 12);
-    const emailVerifyCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailVerifyCode = randomInt(100000, 1000000).toString();
     const emailVerifyExpires = new Date(Date.now() + 10 * 60 * 1000);
 
     return this.prisma.user.create({
@@ -62,7 +63,7 @@ export class UserService {
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user || user.emailVerified) return null;
 
-    const emailVerifyCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const emailVerifyCode = randomInt(100000, 1000000).toString();
     const emailVerifyExpires = new Date(Date.now() + 10 * 60 * 1000);
 
     return this.prisma.user.update({

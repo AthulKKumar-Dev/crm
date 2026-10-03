@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import { useSearchParams, Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -35,6 +35,7 @@ export default function InvitePage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") ?? "";
   const [showPassword, setShowPassword] = useState(false);
+  const [existingPassword, setExistingPassword] = useState("");
 
   const invite = useQuery({
     queryKey: ["invite", token],
@@ -66,9 +67,10 @@ export default function InvitePage() {
         ? "Failed to load invitation."
         : null;
 
-  /* Existing user — just accept */
-  function handleAcceptExisting() {
-    accept.mutate({ token });
+  /* Existing user — confirm with their account password */
+  function handleAcceptExisting(event: FormEvent) {
+    event.preventDefault();
+    accept.mutate({ token, password: existingPassword });
   }
 
   /* New user — accept with credentials */
@@ -169,11 +171,26 @@ export default function InvitePage() {
       </div>
 
       {userExists ? (
-        /* ── Existing user: just accept ── */
-        <div>
+        /* ── Existing user: confirm password + accept ── */
+        <form onSubmit={handleAcceptExisting}>
           <p className="mb-4 text-sm text-gray-500">
-            You already have a Collabo account. Click below to join this workspace.
+            You already have a Collabo account. Enter your password to join this workspace.
           </p>
+
+          <div className="mb-4 space-y-1.5">
+            <label htmlFor="existingPassword" className="block text-sm font-medium text-gray-700">
+              Password
+            </label>
+            <input
+              id="existingPassword"
+              type="password"
+              autoComplete="current-password"
+              required
+              value={existingPassword}
+              onChange={(event) => setExistingPassword(event.target.value)}
+              className="w-full rounded-lg border border-gray-200 bg-white px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm outline-none transition focus:border-[#CEF17B] focus:ring-2 focus:ring-[#CEF17B]/40"
+            />
+          </div>
 
           {serverError && (
             <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
@@ -182,8 +199,7 @@ export default function InvitePage() {
           )}
 
           <button
-            type="button"
-            onClick={handleAcceptExisting}
+            type="submit"
             disabled={accept.isPending}
             className="flex w-full items-center justify-center gap-2 rounded-lg bg-[#CEF17B] px-4 py-2.5 text-sm font-semibold text-gray-900 shadow-sm transition hover:bg-[#BADE6F] disabled:cursor-not-allowed disabled:opacity-60"
           >
@@ -199,7 +215,7 @@ export default function InvitePage() {
               </>
             )}
           </button>
-        </div>
+        </form>
       ) : (
         /* ── New user: create account + accept ── */
         <div>

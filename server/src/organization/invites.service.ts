@@ -118,7 +118,6 @@ export class InvitesService {
             vendorScope: invite.vendorScope,
             permissions: extractGrants(invite.permissions),
             status: invite.status,
-            token: invite.token,
             expiresAt: invite.expiresAt,
         };
     }

@@ -106,6 +106,7 @@ export class AdminService {
         await this.prisma.user.update({ where: { id: userId }, data: { deletedAt: new Date() } });
         // Kill their active sessions as well — they shouldn't stay logged in.
         await this.redis.deleteAllUserTokens(userId);
+        await this.redis.deleteSession(userId);
         this.logger.log(`User ${userId} soft-deleted by super admin`);
         return { ok: true };
     }
@@ -133,6 +134,7 @@ export class AdminService {
     async forceLogout(userId: string) {
         // Revoke all refresh tokens (Redis) and blow away the session cache.
         await this.redis.deleteAllUserTokens(userId);
+        await this.redis.deleteSession(userId);
         this.prisma.refreshToken
             .updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } })
             .catch((err) => this.logger.error('Failed to revoke refresh tokens in DB', err));
