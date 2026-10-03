@@ -16,7 +16,7 @@ import { QueryErrorState } from "~/components/app/query-error-state";
 import { ShopifyConnectDialog } from "~/components/app/shopify-connect-dialog";
 import { ChannelSyncOptions } from "~/components/app/channel-sync-options";
 import { WhatsAppConnectDialog } from "~/components/app/whatsapp-connect-dialog";
-import { useChannels, channelKeys } from "~/hooks/use-channel-queries";
+import { useChannels, useRefreshAfterChannelSync, channelKeys } from "~/hooks/use-channel-queries";
 import { orgKeys } from "~/hooks/use-org-queries";
 import { useTriggerSyncMutation, useDisconnectChannelMutation } from "~/hooks/use-channel-mutations";
 import type { ChannelPlatform, ChannelStatus, SyncStatus } from "~/types/api";
@@ -133,6 +133,7 @@ export function ChannelSettingsTab() {
   const queryClient = useQueryClient();
 
   const { data: channels, isLoading, isError, refetch } = useChannels();
+  useRefreshAfterChannelSync(channels);
   const triggerSync = useTriggerSyncMutation();
   const disconnectChannel = useDisconnectChannelMutation();
 

@@ -1,6 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
+import { pollWhile } from "~/lib/poll-while";
+import { isStalePendingSync } from "~/lib/shopify-sync";
 import { orderService } from "~/services/order.service";
-import type { OrderListParams, DashboardQueryParams } from "~/types/api";
+import type {
+  DashboardQueryParams,
+  Order,
+  OrderDetail,
+  OrderListParams,
+  OrderShopifySync,
+  PaginatedResponse,
+} from "~/types/api";
 
 /** React Query key factory for all order-related queries. */
 export const orderKeys = {
@@ -13,11 +22,27 @@ export const orderKeys = {
   slipData: (ids: string[]) => [...orderKeys.all, "slip-data", ids] as const,
 };
 
+/** A push to Shopify is in flight, and not so old that the job is clearly lost. */
+function isPushPending(order: Pick<Order, "metadata"> | undefined): boolean {
+  const sync = (order?.metadata as { shopifySync?: OrderShopifySync } | null | undefined)
+    ?.shopifySync;
+  return sync?.status === "PENDING" && !isStalePendingSync(sync);
+}
+
+// A manual order shows its push to Shopify as pending until the worker
+// finishes. Nothing re-read the order afterwards, so the state only changed on
+// a page reload.
+const pollWhileAnyOrderPushing = pollWhile<PaginatedResponse<Order>>(
+  (page) => page?.data.some(isPushPending) ?? false,
+);
+const pollWhileOrderPushing = pollWhile<OrderDetail>(isPushPending);
+
 /** Fetch a paginated list of orders with optional filters. */
 export function useOrders(params?: OrderListParams) {
   return useQuery({
     queryKey: orderKeys.list(params),
     queryFn: () => orderService.list(params),
+    refetchInterval: pollWhileAnyOrderPushing,
   });
 }
 
@@ -35,6 +60,7 @@ export function useOrder(id?: string | null) {
     queryKey: orderKeys.detail(id!),
     queryFn: () => orderService.get(id!),
     enabled: !!id,
+    refetchInterval: pollWhileOrderPushing,
   });
 }
 

@@ -1,6 +1,12 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { pollWhile } from "~/lib/poll-while";
 import { productService } from "~/services/product.service";
-import type { ProductListParams } from "~/types/api";
+import type {
+  PaginatedResponse,
+  Product,
+  ProductDetail,
+  ProductListParams,
+} from "~/types/api";
 
 /** React Query key factory for all product-related queries. */
 export const productKeys = {
@@ -12,12 +18,29 @@ export const productKeys = {
   stats: (params?: { channelId?: string }) => [...productKeys.all, "stats", params] as const,
 };
 
+// A row shows a "Syncing" badge while its Shopify push is PENDING. The list
+// used to be fetched once, so the badge stayed until the page was reloaded.
+const pollWhileAnyProductPushing = pollWhile<PaginatedResponse<Product>>(
+  (page) => page?.data.some((p) => p.shopifySync?.status === "PENDING") ?? false,
+);
+
+// The detail endpoint reports sync under metadata (only the list response
+// maps it top-level), so check both places.
+const pollWhileProductPushing = pollWhile<ProductDetail>((product) => {
+  const status =
+    product?.shopifySync?.status ??
+    (product?.metadata as { shopifySync?: { status?: string } } | null | undefined)
+      ?.shopifySync?.status;
+  return status === "PENDING";
+});
+
 /** Fetch a paginated list of products with optional filters. */
 export function useProducts(params?: ProductListParams) {
   return useQuery({
     queryKey: productKeys.list(params),
     queryFn: () => productService.list(params),
     placeholderData: keepPreviousData,
+    refetchInterval: pollWhileAnyProductPushing,
   });
 }
 
@@ -29,20 +52,7 @@ export function useProduct(id?: string | null) {
     enabled: !!id,
     // Poll only while a Shopify push is in flight; stops by itself once it
     // resolves (replaces the old blind 3s/8s setTimeout invalidations).
-    // The detail endpoint reports sync under metadata (only the list response
-    // maps it top-level), so check both places.
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      const status =
-        data?.shopifySync?.status ??
-        (
-          data?.metadata as
-            | { shopifySync?: { status?: string } }
-            | null
-            | undefined
-        )?.shopifySync?.status;
-      return status === "PENDING" ? 3000 : false;
-    },
+    refetchInterval: pollWhileProductPushing,
   });
 }
 
