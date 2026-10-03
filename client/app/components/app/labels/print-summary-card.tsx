@@ -69,8 +69,11 @@ export function PrintWarnings({ warnings }: { warnings: LabelWarning[] }) {
 
 export function PrintSettingsCard({
   settings,
+  note,
 }: {
   settings: Array<{ key: string; value: string }>;
+  /** Replaces the barcode-specific closing line, for the slip editor. */
+  note?: string;
 }) {
   return (
     <div className="rounded-lg border border-border bg-card p-3">
@@ -84,8 +87,12 @@ export function PrintSettingsCard({
         ))}
       </dl>
       <p className="mt-2.5 text-caption leading-relaxed text-muted-foreground">
-        Set these in the print dialog your browser opens next. &ldquo;Fit to
-        page&rdquo; stretches the bars and scanners stop reading them.
+        {note ?? (
+          <>
+            Set these in the print dialog your browser opens next. &ldquo;Fit to
+            page&rdquo; stretches the bars and scanners stop reading them.
+          </>
+        )}
       </p>
     </div>
   );
@@ -95,10 +102,13 @@ export function PrintAction({
   total,
   readyNote,
   onPrint,
+  noun = "label",
 }: {
   total: number;
   readyNote: string;
   onPrint: () => void;
+  /** Singular; pluralised with "s". */
+  noun?: string;
 }) {
   return (
     <div className="space-y-2">
@@ -113,7 +123,7 @@ export function PrintAction({
         <Printer className="size-4" />
         {total === 0
           ? "Nothing to print"
-          : `Print ${total.toLocaleString()} label${total === 1 ? "" : "s"}`}
+          : `Print ${total.toLocaleString()} ${noun}${total === 1 ? "" : "s"}`}
       </Button>
     </div>
   );

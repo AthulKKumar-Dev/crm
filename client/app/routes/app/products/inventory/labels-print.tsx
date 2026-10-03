@@ -10,6 +10,7 @@ import { LabelPagePreview } from "~/components/app/labels/label-page-preview";
 import { LabelPrintStyles } from "~/components/app/labels/label-print-styles";
 import { LabelQuantityRows } from "~/components/app/labels/label-quantity-rows";
 import { LabelSheet } from "~/components/app/labels/label-sheet";
+import { PrintStatusPanel } from "~/components/app/print-status-panel";
 import {
   PrintAction,
   PrintSettingsCard,
@@ -582,18 +583,20 @@ export default function LabelsPrintPage() {
           </header>
 
           {mode === "empty" && (
-            <StatusPanel
+            <PrintStatusPanel
+              icon={Barcode}
               title="No products selected"
               body="Go back to Inventory, tick the products you want labels for, then choose Print labels."
             >
               <Button asChild variant="accent" size="sm">
                 <Link to="/products/inventory">Back to inventory</Link>
               </Button>
-            </StatusPanel>
+            </PrintStatusPanel>
           )}
 
           {mode === "error" && (
-            <StatusPanel
+            <PrintStatusPanel
+              icon={Barcode}
               title="We couldn't prepare the labels"
               body="Nothing was printed. Try again — your label settings are saved."
             >
@@ -604,7 +607,7 @@ export default function LabelsPrintPage() {
               <Button asChild variant="outline" size="sm">
                 <Link to="/products/inventory">Back to inventory</Link>
               </Button>
-            </StatusPanel>
+            </PrintStatusPanel>
           )}
 
           {mode === "loading" && (
@@ -790,27 +793,6 @@ export default function LabelsPrintPage() {
         currency={currency}
         hriPossible={hriPossible}
       />
-    </div>
-  );
-}
-
-function StatusPanel({
-  title,
-  body,
-  children,
-}: {
-  title: string;
-  body: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="grid place-items-center gap-2 px-6 py-24 text-center">
-      <div className="grid size-11 place-items-center rounded-full bg-muted">
-        <Barcode className="size-5 text-muted-foreground" />
-      </div>
-      <p className="mt-1 text-section text-foreground">{title}</p>
-      <p className="max-w-sm text-body leading-relaxed text-muted-foreground">{body}</p>
-      <div className="mt-3 flex flex-wrap justify-center gap-2">{children}</div>
     </div>
   );
 }

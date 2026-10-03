@@ -81,7 +81,7 @@ export function previewScale(args: {
  * own padding, a border and whether a scrollbar is present, and every previous
  * attempt to add those up by hand was wrong.
  */
-function useElementWidth<T extends HTMLElement>() {
+export function useElementWidth<T extends HTMLElement>() {
   const ref = useRef<T | null>(null);
   const [width, setWidth] = useState<number | null>(null);
 
