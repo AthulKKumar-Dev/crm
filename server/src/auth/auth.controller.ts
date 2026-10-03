@@ -53,8 +53,8 @@ export class AuthController {
   }
 
   @Post('logout')
-  logout(@Body() dto: RefreshTokenDto) {
-    return this.authService.logout(dto.refreshToken);
+  logout(@CurrentUser() user: JwtPayload, @Body() dto: RefreshTokenDto) {
+    return this.authService.logout(user.sub, dto.refreshToken);
   }
 
   // Switch to a different organization — requires valid JWT.

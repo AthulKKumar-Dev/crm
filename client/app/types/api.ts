@@ -229,7 +229,6 @@ export interface ResendVerificationRequest {
 export interface SignupResponse {
   userId: string;
   email: string;
-  verifyCode: string;
   message: string;
   nextStep: "verify-email";
 }

@@ -1,12 +1,20 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { promises as fs } from 'fs';
-import { extname, join } from 'path';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 import {
   IImageStorage,
   UploadInput,
   UploadedImageMeta,
 } from './image-storage.interface';
+
+/// Mirrors ALLOWED_IMAGE_MIME in product.service.ts.
+const EXT_BY_MIME: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
 
 /**
  * Disk-based image storage. Files land under `<repoRoot>/server/uploads/products/<orgId>/`
@@ -23,7 +31,11 @@ export class LocalImageStorage implements IImageStorage {
     const orgDir = join(this.rootDir, input.orgId);
     await fs.mkdir(orgDir, { recursive: true });
 
-    const ext = (extname(input.originalName) || '.bin').toLowerCase();
+    // Extension follows the validated MIME type, never the client's filename:
+    // these files are served publicly, so `x.html` sent as image/png must not
+    // be stored (and served) as HTML.
+    const ext = EXT_BY_MIME[input.mimeType];
+    if (!ext) throw new BadRequestException('Unsupported image type');
     const filename = `${randomUUID()}${ext}`;
     const fullPath = join(orgDir, filename);
 

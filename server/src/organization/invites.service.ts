@@ -98,14 +98,12 @@ export class InvitesService {
 
         // TODO: Send invite email via Resend with link: /auth/invite/accept?token=...
         await this.emailService.sendTeamInvite(dto.email, org.name, token);
-        console.log('invite created', invite);
         return {
             id: invite.id,
             email: invite.email,
             role: invite.role,
             vendorScope: invite.vendorScope,
             status: invite.status,
-            token: invite.token,
             expiresAt: invite.expiresAt,
         };
     }

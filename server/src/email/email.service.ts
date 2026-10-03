@@ -113,11 +113,6 @@ export class EmailService implements OnModuleInit {
             this.logger.warn(`[${context}] Skipped — SMTP not configured.`);
             return;
         }
-        console.log(options);
-        console.log(this.from);
-        console.log(this.replyTo);
-        // console.log(this.htmlToText(options.html));\
-        console.log("Sending email...");
         const payload: SendMailOptions = {
             ...options,
             from: options.from ?? this.from,
@@ -144,7 +139,6 @@ export class EmailService implements OnModuleInit {
     }
 
     async sendVerificationCode(email: string, code: string): Promise<void> {
-        console.log("Sending verification code...", email, code);
         if (this.isDev) {
             this.logger.log(`[DEV] Verification code for ${email}: ${code}`);
             return;

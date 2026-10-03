@@ -56,7 +56,6 @@ export class AuthService {
     return {
       userId: user.id,
       email: user.email,
-      verifyCode: user.emailVerifyCode as string,
       message: 'Verification code sent to your email.',
       nextStep: 'verify-email',
     };
@@ -118,9 +117,8 @@ export class AuthService {
       await this.emailService.sendVerificationCode(user.email, user.emailVerifyCode as string);
     }
     return {
-      message: 'Verification code sent.|',
+      message: 'Verification code sent.',
       nextStep: 'verify-email',
-      code: user?.emailVerifyCode,
     };
   }
 
@@ -295,8 +293,13 @@ export class AuthService {
     return this.rotateRefreshToken(refreshToken, userAgent, ipAddress);
   }
 
-  async logout(refreshToken: string) {
-    await this.revokeRefreshToken(refreshToken);
+  async logout(userId: string, refreshToken: string) {
+    // Only revoke a refresh token that belongs to the caller.
+    const tokenData = await this.redis.getRefreshToken<{ userId: string }>(refreshToken);
+    if (tokenData?.userId === userId) {
+      await this.revokeRefreshToken(refreshToken);
+    }
+    await this.redis.deleteSession(userId);
     return { message: 'Logged out successfully' };
   }
 
@@ -307,7 +310,6 @@ export class AuthService {
       await this.prisma.passwordResetToken.create({
         data: { userId: user.id, token, expiresAt: new Date(Date.now() + 3600000) },
       });
-      console.log('token', token);
       await this.emailService.sendPasswordResetLink(email, token);
     }
     return { message: 'If an account exists with this email, a reset link has been sent to your email.' };
@@ -353,7 +355,14 @@ export class AuthService {
     if (invite.expiresAt < new Date()) throw new BadRequestException('Invite has expired');
 
     let user = await this.userService.findByEmail(invite.email);
-    if (!user) {
+    if (user) {
+      // Existing account: the invite token alone must not log anyone in —
+      // the inviter chooses the email, so it would hand them that account.
+      if (user.deletedAt) throw new ForbiddenException('Account has been deactivated');
+      if (!dto.password || !(await bcrypt.compare(dto.password, user.password))) {
+        throw new UnauthorizedException('Enter your account password to accept this invite');
+      }
+    } else {
       if (!dto.password || !dto.firstName || !dto.lastName) {
         throw new BadRequestException('firstName, lastName, and password are required for new users');
       }

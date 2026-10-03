@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { IS_SUPER_ADMIN_KEY } from '../decorators/super-admin.decorator';
+import { ALLOW_IMPERSONATED_KEY, IS_SUPER_ADMIN_KEY } from '../decorators/super-admin.decorator';
 import { JwtPayload } from '../interfaces/jwt-payload.interface';
 
 /**
@@ -9,9 +9,10 @@ import { JwtPayload } from '../interfaces/jwt-payload.interface';
  * Passes when:
  *   - the route/controller is NOT marked @SuperAdmin(), OR
  *   - the caller's JWT has `isSuperAdmin === true`, OR
- *   - the caller has `impersonatedBy` set — this is intentional so that an impersonated
- *     session can still hit `/admin/stop-impersonating` to return to its super-admin self.
- *     (stopImpersonation itself re-verifies the super admin via the impersonatedBy claim.)
+ *   - the route is marked @AllowImpersonated() and the caller's JWT has `impersonatedBy`
+ *     set — so an impersonated session can still hit `/admin/stop-impersonating` to
+ *     return to its super-admin self. (stopImpersonation itself re-verifies the super
+ *     admin via the impersonatedBy claim.)
  */
 @Injectable()
 export class SuperAdminGuard implements CanActivate {
@@ -25,7 +26,13 @@ export class SuperAdminGuard implements CanActivate {
         if (!required) return true;
 
         const user = context.switchToHttp().getRequest<{ user: JwtPayload }>().user;
-        if (user?.isSuperAdmin || user?.impersonatedBy) return true;
+        if (user?.isSuperAdmin) return true;
+
+        const allowImpersonated = this.reflector.get<boolean>(
+            ALLOW_IMPERSONATED_KEY,
+            context.getHandler(),
+        );
+        if (allowImpersonated && user?.impersonatedBy) return true;
 
         throw new ForbiddenException('Super admin access required');
     }

@@ -7,6 +7,12 @@ export const validationSchema = Joi.object({
     // Session-mode URL read by the Prisma CLI for migrations; the app itself never uses it.
     DIRECT_URL: Joi.string().optional(),
     REDIS_URL: Joi.string().required(),
+    // Required: an unset CORS origin makes the `cors` library allow every origin.
+    FRONTEND_URL: Joi.string().uri().required(),
+    // Number of reverse-proxy hops in front of the API (1 behind Caddy).
+    // Without it req.ip is the proxy's address and every client shares one
+    // throttle bucket.
+    TRUST_PROXY: Joi.number().integer().min(0).max(5).optional(),
     JWT_ACCESS_SECRET: Joi.string().min(32).required(),
     JWT_REFRESH_SECRET: Joi.string().min(32).required(),
     RESEND_API_KEY: Joi.string().optional(),

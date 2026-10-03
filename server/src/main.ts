@@ -22,6 +22,9 @@ async function bootstrap() {
   });
   const config = app.get(ConfigService);
 
+  const trustProxy = Number(process.env.TRUST_PROXY);
+  if (trustProxy > 0) app.set('trust proxy', trustProxy);
+
   // Security
   app.use(helmet({
     contentSecurityPolicy: false, // Vite build injects inline scripts/styles
