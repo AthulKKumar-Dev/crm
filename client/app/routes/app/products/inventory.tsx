@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { AxiosError } from "axios";
 import { Link, useSearchParams } from "react-router";
 import {
@@ -166,7 +167,11 @@ function StockScreen() {
     setLocationId,
     isLoading: locationLoading,
   } = useSelectedLocation();
-  const [stockFilter, setStockFilter] = useState<string>("all");
+  const [stockFilter, setStockFilter] = useSessionState<string>(
+    "inventory.stock-filter",
+    "all",
+    oneOf(["all", "low", "out", "oversold"]),
+  );
   const [page, setPage] = useState(1);
   const [adjusting, setAdjusting] = useState<StockLine | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());

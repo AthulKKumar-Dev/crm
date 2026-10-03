@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package, Loader2,
@@ -61,8 +62,13 @@ const STAT_CARDS: ReadonlyArray<{
 export default function OrdersPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
-  // Opens on 7 days rather than All Time: all-time stats scan every order.
-  const [dateRange, setDateRange] = useState("7d");
+  // Opens on 7 days rather than All Time: all-time stats scan every order. A
+  // wider choice is remembered for the browser session.
+  const [dateRange, setDateRange] = useSessionState(
+    "orders.range",
+    "7d",
+    oneOf(Object.keys(DATE_RANGE_MAP)),
+  );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data: org } = useCurrentOrg();

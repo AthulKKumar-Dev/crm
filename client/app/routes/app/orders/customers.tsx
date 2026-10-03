@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { useNavigate } from "react-router";
 import { Search, ChevronLeft, ChevronRight } from "lucide-react";
 import {
@@ -91,7 +92,11 @@ const PAGE_SIZE = 12;
 
 export default function CustomersPage() {
   const [searchQuery, setSearchQuery] = useState("");
-  const [vipFilter, setVipFilter] = useState<"All" | VipLevel>("All");
+  const [vipFilter, setVipFilter] = useSessionState<"All" | VipLevel>(
+    "customers.vip",
+    "All",
+    oneOf(["All", "NONE", "BRONZE", "SILVER", "GOLD", "PLATINUM"]),
+  );
   const [currentPage, setCurrentPage] = useState(1);
   const navigate = useNavigate();
 

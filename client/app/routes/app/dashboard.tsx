@@ -1,4 +1,5 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { ArrowRight, Download, Loader2, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
@@ -30,6 +31,7 @@ import {
 } from "~/hooks/use-dashboard-queries";
 import type { SparklinePoint } from "~/components/app/chart-line-default";
 import type { SalesProfitPoint } from "~/services/dashboard.service";
+import { DASHBOARD_RANGES } from "~/types/api";
 import type { DashboardQueryParams, DashboardRange } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { cn, formatCurrency } from "~/lib/utils";
@@ -74,8 +76,13 @@ export default function DashboardPage() {
   // One window for the whole page. Total Sales used to be an all-time figure
   // sitting beside a chart hard-coded to a rolling 12 months, so the two could
   // never be reconciled and neither said which period it covered.
-  // Opens on 7 days: the narrowest window is the cheapest first load.
-  const [range, setRange] = useState<DashboardRange>("7d");
+  // Opens on 7 days: the narrowest window is the cheapest first load. A wider
+  // choice is remembered for the browser session.
+  const [range, setRange] = useSessionState<DashboardRange>(
+    "dashboard.range",
+    "7d",
+    oneOf(DASHBOARD_RANGES),
+  );
   const params: DashboardQueryParams = { range };
 
   const {

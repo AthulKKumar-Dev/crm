@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link, useNavigate } from "react-router";
 import {
   FileText,
@@ -79,7 +80,11 @@ export default function DraftsPage() {
 
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
-  const [status, setStatus] = useState<Chip>("all");
+  const [status, setStatus] = useSessionState<Chip>(
+    "drafts.status",
+    "all",
+    oneOf(["all", "OPEN", "INVOICE_SENT", "COMPLETED"]),
+  );
 
   // Debounced into the query key only — the input keeps the raw value, so
   // typing stays instant without a request per keystroke.
