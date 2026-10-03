@@ -47,7 +47,28 @@ export class ShopifyPushEnqueuer {
     // rejects any custom job id containing one ("Custom Ids cannot contain :"),
     // so every offline-order push failed at enqueue — before a single Shopify
     // call — and the order was stamped "Sync failed" with no usable reason.
-    const jobId = `push-order-${data.orderId}`;
+    return this.enqueueOnce(
+      `push-order-${data.orderId}`,
+      'push-order',
+      data,
+      `order push for ${data.orderId}`,
+    );
+  }
+
+  /**
+   * Add a job under a fixed id, at most once while it is live.
+   *
+   * Returns whether a job now exists. A live job (waiting / delayed between
+   * retries / active) makes this a no-op; a finished one (completed or failed)
+   * is removed first, because BullMQ's id de-duplication would otherwise
+   * silently ignore the re-add.
+   */
+  private async enqueueOnce(
+    jobId: string,
+    name: string,
+    data: ShopifyPushJobData,
+    label: string,
+  ): Promise<boolean> {
     try {
       const existing = await this.queue.getJob(jobId);
       if (existing) {
@@ -56,17 +77,15 @@ export class ShopifyPushEnqueuer {
           await existing.remove();
         } else {
           this.logger.log(
-            `Shopify order push for ${data.orderId} already ${state} (job ${jobId}) — not re-enqueued.`,
+            `Shopify ${label} already ${state} (job ${jobId}) — not re-enqueued.`,
           );
           return true;
         }
       }
-      await this.queue.add('push-order', data, { ...DEFAULT_JOB_OPTS, jobId });
+      await this.queue.add(name, data, { ...DEFAULT_JOB_OPTS, jobId });
       return true;
     } catch (err) {
-      this.logger.error(
-        `Failed to enqueue Shopify order push for ${data.orderId}: ${err}`,
-      );
+      this.logger.error(`Failed to enqueue Shopify ${label}: ${err}`);
       return false;
     }
   }
@@ -97,15 +116,23 @@ export class ShopifyPushEnqueuer {
     }
   }
 
-  /** Push a single CRM-native product (one-off, e.g. created while Shopify is connected). */
-  async enqueueProductPush(data: Extract<ShopifyPushJobData, { type: 'product' }>): Promise<void> {
-    try {
-      await this.queue.add('push-product', data, DEFAULT_JOB_OPTS);
-    } catch (err) {
-      this.logger.error(
-        `Failed to enqueue Shopify product push for ${data.productId}: ${err}`,
-      );
-    }
+  /**
+   * Push a single CRM-native product.
+   *
+   * Same contract as `enqueueOrderPush`, for the same reasons. It used to
+   * swallow a queue failure and return nothing, so the caller stamped the
+   * product PENDING with no job behind it — "Syncing" for ever. And with no
+   * per-product id, a Sync press while the worker was between retries (status
+   * reads FAILED there) queued a second job that could create the product on
+   * Shopify twice.
+   */
+  async enqueueProductPush(data: Extract<ShopifyPushJobData, { type: 'product' }>): Promise<boolean> {
+    return this.enqueueOnce(
+      `push-product-${data.productId}`,
+      'push-product',
+      data,
+      `product push for ${data.productId}`,
+    );
   }
 
   /**

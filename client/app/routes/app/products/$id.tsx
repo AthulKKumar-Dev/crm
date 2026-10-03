@@ -38,7 +38,12 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { calcMargin, cn, formatCurrency } from "~/lib/utils";
 import { formatDate, formatDateTime } from "~/lib/format-date";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import { canSyncProduct, productSyncActionTitle } from "~/lib/product-shopify-sync";
+import {
+  canSyncProduct,
+  isProductPushInFlight,
+  isProductPushStuck,
+  productSyncActionTitle,
+} from "~/lib/product-shopify-sync";
 import {
   newOptionUid,
   normalizeProductOptions,
@@ -1949,8 +1954,19 @@ const PILL_BASE =
 function ShopifySyncStatusPill({
   sync,
 }: {
-  sync: Pick<ProductShopifySync, "status" | "error"> | null;
+  sync: Pick<ProductShopifySync, "status" | "error" | "queuedAt"> | null;
 }) {
+  if (isProductPushStuck(sync)) {
+    return (
+      <span
+        title="This sync never finished. Retry it."
+        className={cn(PILL_BASE, "bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Sync stuck
+      </span>
+    );
+  }
   if (sync?.status === "OUT_OF_SYNC") {
     return (
       <span
@@ -1988,12 +2004,14 @@ function ProductSyncHeaderAction({
   hasUnsavedChanges,
 }: {
   product: { id: string; channel?: { platform: string } | null };
-  sync: Pick<ProductShopifySync, "status" | "shopifyProductId"> | null;
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "queuedAt"> | null;
   hasUnsavedChanges: boolean;
 }) {
   const syncMutation = useSyncProductMutation();
 
-  if (sync?.status === "PENDING") {
+  // Only a push that is really under way locks the button. A claim nobody is
+  // working any more falls through to "Retry sync".
+  if (isProductPushInFlight(sync)) {
     return (
       <Button type="button" variant="outline" size="action" disabled>
         <Loader2 className="size-3.5 animate-spin" />
@@ -2031,7 +2049,9 @@ function ProductSyncHeaderAction({
       ) : (
         <UploadCloud className="size-3.5" />
       )}
-      {sync?.status === "FAILED" ? "Retry sync" : "Sync to Shopify"}
+      {sync?.status === "FAILED" || isProductPushStuck(sync)
+        ? "Retry sync"
+        : "Sync to Shopify"}
     </Button>
   );
 
@@ -2057,7 +2077,7 @@ function ProductSyncHeaderAction({
 function ShopifySyncCard({
   sync,
 }: {
-  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error"> | null;
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error" | "queuedAt"> | null;
 }) {
   if (!sync) {
     return (
@@ -2083,6 +2103,16 @@ function ShopifySyncCard({
             Shopify ID: <span className="font-mono">{sync.shopifyProductId}</span>
           </p>
         )}
+      </div>
+    );
+  }
+  if (isProductPushStuck(sync)) {
+    return (
+      <div className="space-y-2 text-xs">
+        <ShopifySyncStatusPill sync={sync} />
+        <p className="text-[10px] text-muted-foreground">
+          This sync never finished. Use Retry sync at the top of the page.
+        </p>
       </div>
     );
   }

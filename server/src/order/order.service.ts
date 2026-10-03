@@ -38,13 +38,11 @@ import { GstCalculatorService } from '../gst/gst-calculator.service';
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
-import { ShopifyPushService, isStalePendingSync } from '../channel/shopify-push.service';
-
-/// Recorded on `metadata.shopifySync.error` when a push could not even be
-/// queued. Distinct wording from a worker failure so the audit can tell the
-/// two apart; `attempts` is not incremented because nothing ran.
-const QUEUE_UNAVAILABLE_ERROR =
-  'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
+import {
+  ShopifyPushService,
+  isStalePendingSync,
+  QUEUE_UNAVAILABLE_ERROR,
+} from '../channel/shopify-push.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';

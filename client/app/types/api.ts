@@ -736,6 +736,8 @@ export interface ProductShopifySync {
   shopifyProductId?: string;
   error?: string;
   syncedAt?: string;
+  /** When the PENDING claim was stamped; absent on rows claimed before it existed. */
+  queuedAt?: string;
   attempts: number;
 }
 

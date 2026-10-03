@@ -26,7 +26,12 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { Tip } from "~/components/ui/tooltip";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import { canSyncProduct, productSyncActionTitle } from "~/lib/product-shopify-sync";
+import {
+  canSyncProduct,
+  isProductPushInFlight,
+  isProductPushStuck,
+  productSyncActionTitle,
+} from "~/lib/product-shopify-sync";
 import type { ProductStatus, ProductListParams, Product, ProductStatsResponse, StockStatus } from "~/types/api";
 import { Separator } from "~/components/ui/separator";
 import { Button } from "~/components/ui/button";
@@ -686,8 +691,10 @@ function ProductRowActions({
   const syncMutation = useSyncProductMutation();
 
   // While a push is in flight, collapse the actions to a single spinner badge
-  // — clicking anything else would race the queued job.
-  if (sync?.status === "PENDING") {
+  // — clicking anything else would race the queued job. A PENDING claim that
+  // nobody is working any more is NOT in flight: it falls through to a "stuck"
+  // badge with the normal actions, instead of spinning for ever.
+  if (isProductPushInFlight(sync)) {
     return (
       <span
         title="Syncing to Shopify in the background…"
@@ -733,6 +740,16 @@ function ProductRowActions({
       >
         <AlertTriangle className="size-3" />
         Sync failed
+      </span>
+    );
+  } else if (isProductPushStuck(sync)) {
+    badge = (
+      <span
+        title="This sync never finished. Retry it."
+        className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+      >
+        <AlertTriangle className="size-3" />
+        Sync stuck
       </span>
     );
   }
