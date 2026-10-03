@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   ChannelPlatform,
@@ -33,6 +34,12 @@ import {
 } from './dto/image.dto';
 import { ProductOptionDto } from './dto/option.dto';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
+import {
+  ShopifyPushService,
+  isStalePendingSync,
+  QUEUE_UNAVAILABLE_ERROR,
+} from '../channel/shopify-push.service';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { SkuGeneratorService } from '../inventory/sku-generator.service';
@@ -72,6 +79,13 @@ type ShopifySyncPatch = Partial<{
   attempts: number;
 }>;
 
+/** What became of a request to push one product to Shopify. */
+type ShopifyPushOutcome =
+  | 'QUEUED'
+  | 'ALREADY_SYNCED'
+  | 'ALREADY_QUEUED'
+  | 'QUEUE_UNAVAILABLE';
+
 @Injectable()
 export class ProductService {
   private readonly logger = new Logger(ProductService.name);
@@ -86,6 +100,7 @@ export class ProductService {
     // multi-channel catalogue — see `QueryProductsDto.priceIn`.
     private readonly fx: FxRateService,
     @Inject(IMAGE_STORAGE) private readonly imageStorage: IImageStorage,
+    private readonly shopifyPush: ShopifyPushService,
   ) { }
 
   /**
@@ -294,6 +309,8 @@ export class ProductService {
       shopifyProductId?: string;
       error?: string;
       syncedAt?: string;
+      /** When the PENDING claim was stamped; lets the UI spot an abandoned one. */
+      queuedAt?: string;
       attempts: number;
     };
   }
@@ -693,21 +710,12 @@ export class ProductService {
           },
         });
         if (shopify?.status === ChannelStatus.CONNECTED) {
-          await this.shopifyPushEnqueuer.enqueueProductPush({
-            type: 'product',
-            productId: product.id,
-            organizationId: orgId,
-          });
-          shopifyPushQueued = true;
-          await this.prisma.product.update({
-            where: { id: product.id },
-            data: {
-              metadata: this.mergeShopifySync(product.metadata, {
-                status: 'PENDING',
-                attempts: 0,
-              }),
-            },
-          });
+          const outcome = await this.queueShopifyPush(
+            product.id,
+            orgId,
+            product.metadata,
+          );
+          shopifyPushQueued = outcome === 'QUEUED';
         }
       }
     } catch (err) {
@@ -824,33 +832,111 @@ export class ProductService {
       );
     }
 
-    const meta = (product.metadata as Prisma.JsonObject) ?? {};
-    const sync = (meta.shopifySync ?? null) as {
-      status: ShopifySyncStatus;
-    } | null;
-
-    if (sync?.status === 'SYNCED') {
-      return { status: 'ALREADY_SYNCED' as const, productId: product.id };
+    const outcome = await this.queueShopifyPush(
+      product.id,
+      orgId,
+      product.metadata,
+    );
+    if (outcome === 'QUEUE_UNAVAILABLE') {
+      throw new ServiceUnavailableException(
+        'The Shopify sync queue is unavailable right now. The product is marked as failed to sync — try again in a few minutes.',
+      );
     }
-    if (sync?.status === 'PENDING') {
-      return { status: 'ALREADY_QUEUED' as const, productId: product.id };
+    return { status: outcome, productId: product.id };
+  }
+
+  /**
+   * Queue one product for a push to Shopify: decide, claim, then enqueue —
+   * in that order.
+   *
+   * The three call sites used to enqueue FIRST and stamp PENDING afterwards
+   * with a whole-metadata overwrite from an old snapshot. Either half could
+   * strand the product on "Syncing" for good: a worker that finished first
+   * had its SYNCED / FAILED result overwritten with PENDING, and a queue
+   * outage (swallowed by the enqueuer) left PENDING with no job behind it.
+   * Nothing ever cleared it — the server answered ALREADY_QUEUED, the bulk
+   * sweep skipped it, and the UI showed a spinner with no action.
+   *
+   * `metadata` is the caller's snapshot; it only short-circuits the cases
+   * that need no write. The claim itself is atomic and re-checks in SQL.
+   */
+  private async queueShopifyPush(
+    productId: string,
+    orgId: string,
+    metadata: Prisma.JsonValue | null,
+  ): Promise<ShopifyPushOutcome> {
+    const sync = this.extractShopifySync(metadata);
+
+    if (sync?.status === 'SYNCED') return 'ALREADY_SYNCED';
+    // A PENDING claim is trusted only while it is young enough to still be in
+    // flight. An older one means the job never ran or was lost — let it be
+    // re-claimed. The enqueuer's per-product job id keeps that safe even if
+    // the old job is somehow still live.
+    if (sync?.status === 'PENDING' && !isStalePendingSync(sync)) {
+      return 'ALREADY_QUEUED';
     }
 
-    await this.shopifyPushEnqueuer.enqueueProductPush({
+    const claimed = await this.claimShopifyPush(
+      productId,
+      orgId,
+      sync?.shopifyProductId,
+    );
+    // The snapshot above was stale: a worker marked it SYNCED in between.
+    if (!claimed) return 'ALREADY_SYNCED';
+
+    const queued = await this.shopifyPushEnqueuer.enqueueProductPush({
       type: 'product',
-      productId: product.id,
+      productId,
       organizationId: orgId,
     });
-    await this.prisma.product.update({
-      where: { id: product.id },
-      data: {
-        metadata: this.mergeShopifySync(product.metadata, {
+    if (!queued) {
+      // The claim is only honest while a job exists.
+      await this.shopifyPush.recordProductFailure(
+        productId,
+        orgId,
+        QUEUE_UNAVAILABLE_ERROR,
+        /* incrementAttempt */ false,
+      );
+      return 'QUEUE_UNAVAILABLE';
+    }
+    return 'QUEUED';
+  }
+
+  /**
+   * Claim a product for a Shopify push by stamping
+   * metadata.shopifySync = { status: 'PENDING', attempts: 0, queuedAt }.
+   *
+   * Atomic JSONB merge — it does not read-modify-write the whole blob — and
+   * guarded so it can never demote a product a worker has already marked
+   * SYNCED. `queuedAt` dates the claim so `isStalePendingSync` can tell a
+   * lost job from one still working through its retries.
+   *
+   * The merge replaces the `shopifySync` key wholesale, so the Shopify id is
+   * carried over explicitly.
+   *
+   * Returns true when this call won the claim.
+   */
+  private async claimShopifyPush(
+    productId: string,
+    orgId: string,
+    shopifyProductId?: string,
+  ): Promise<boolean> {
+    const updated = await mergeJsonMetadata(
+      this.prisma,
+      'products',
+      productId,
+      orgId,
+      {
+        shopifySync: {
           status: 'PENDING',
           attempts: 0,
-        }),
+          queuedAt: new Date().toISOString(),
+          ...(shopifyProductId ? { shopifyProductId } : {}),
+        },
       },
-    });
-    return { status: 'QUEUED' as const, productId: product.id };
+      Prisma.sql`AND COALESCE("metadata" -> 'shopifySync' ->> 'status', '') <> 'SYNCED'`,
+    );
+    return updated > 0;
   }
 
   // ─── UPDATE PRODUCT (top-level fields + optional default-variant fields) ───
@@ -2154,46 +2240,31 @@ export class ProductService {
       );
     }
 
-    const results = await Promise.allSettled(
-      ok.map((id) =>
-        this.shopifyPushEnqueuer.enqueueProductPush({
-          type: 'product',
-          productId: id,
-          organizationId: orgId,
-        }),
-      ),
-    );
-
-    const queuedIds: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        queuedIds.push(ok[i]);
-      } else {
-        skipped.push({
-          id: ok[i],
-          reason: `Failed to enqueue: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        });
-      }
+    const rows = await this.prisma.product.findMany({
+      where: { id: { in: ok }, organizationId: orgId },
+      select: { id: true, metadata: true },
     });
 
-    if (queuedIds.length > 0) {
-      const rows = await this.prisma.product.findMany({
-        where: { id: { in: queuedIds } },
-        select: { id: true, metadata: true },
-      });
-      await this.prisma.$transaction(
-        rows.map((p) =>
-          this.prisma.product.update({
-            where: { id: p.id },
-            data: {
-              metadata: this.mergeShopifySync(p.metadata, {
-                status: 'PENDING',
-                attempts: 0,
-              }),
-            },
-          }),
-        ),
-      );
+    // Each product is claimed and queued on its own, so one that cannot be
+    // queued is reported rather than left stamped PENDING with no job.
+    const outcomes = await Promise.all(
+      rows.map(async (row) => ({
+        id: row.id,
+        outcome: await this.queueShopifyPush(row.id, orgId, row.metadata),
+      })),
+    );
+
+    const SKIP_REASON: Record<Exclude<ShopifyPushOutcome, 'QUEUED'>, string> = {
+      ALREADY_SYNCED: 'Already synced to Shopify',
+      ALREADY_QUEUED: 'Sync already in progress',
+      QUEUE_UNAVAILABLE:
+        'The Shopify sync queue is unavailable — try again in a few minutes',
+    };
+
+    const queuedIds: string[] = [];
+    for (const { id, outcome } of outcomes) {
+      if (outcome === 'QUEUED') queuedIds.push(id);
+      else skipped.push({ id, reason: SKIP_REASON[outcome] });
     }
 
     return { ok: queuedIds, skipped, queued: queuedIds.length };

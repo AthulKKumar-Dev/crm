@@ -1,5 +1,3 @@
-import type { OrderShopifySync } from "~/types/api";
-
 /**
  * Mirror of `STALE_PENDING_SYNC_MS` / `isStalePendingSync` on the server
  * (`server/src/channel/shopify-push.service.ts`). Keep the two in step: the
@@ -8,8 +6,14 @@ import type { OrderShopifySync } from "~/types/api";
  */
 export const STALE_PENDING_SYNC_MS = 15 * 60 * 1000;
 
+/**
+ * The part of a push claim the staleness rule reads. Orders and products
+ * share the rule, so this is deliberately not tied to either sync type.
+ */
+type PushClaim = { status?: string; queuedAt?: string } | null | undefined;
+
 export function isStalePendingSync(
-  sync: Pick<OrderShopifySync, "status" | "queuedAt"> | null | undefined,
+  sync: PushClaim,
   now: number = Date.now(),
 ): boolean {
   if (sync?.status !== "PENDING") return false;
@@ -25,7 +29,7 @@ export function isStalePendingSync(
  * order with no visible way out.
  */
 export function canRetryShopifySync(
-  sync: Pick<OrderShopifySync, "status" | "queuedAt"> | null | undefined,
+  sync: PushClaim,
   now: number = Date.now(),
 ): boolean {
   return !sync || sync.status === "FAILED" || isStalePendingSync(sync, now);
@@ -33,7 +37,7 @@ export function canRetryShopifySync(
 
 /** Label for the row / detail action given the current sync state. */
 export function shopifySyncActionLabel(
-  sync: Pick<OrderShopifySync, "status" | "queuedAt"> | null | undefined,
+  sync: PushClaim,
   now: number = Date.now(),
 ): string {
   if (sync?.status === "FAILED") return "Retry sync to Shopify";

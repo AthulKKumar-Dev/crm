@@ -68,6 +68,7 @@ function build() {
     skuGenerator as never,
     {} as never,
     {} as never,
+    {} as never,
   );
 
   return { service, prisma, skuGenerator, created };

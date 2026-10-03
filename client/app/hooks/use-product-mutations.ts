@@ -92,7 +92,12 @@ export function useSyncProductMutation() {
         toast.success("Sync to Shopify queued.");
       }
     },
-    onError: (error) => handleMutationError(error, "Failed to sync product."),
+    onError: (error) => {
+      // A failed request can still have changed the product: when the queue is
+      // unavailable the server records "Sync failed" before answering 503.
+      queryClient.invalidateQueries({ queryKey: productKeys.all });
+      handleMutationError(error, "Failed to sync product.");
+    },
   });
 }
 

@@ -97,8 +97,15 @@ export interface ShopifySyncMetadata {
  */
 export const STALE_PENDING_SYNC_MS = 15 * 60 * 1000;
 
+/// Recorded on `metadata.shopifySync.error` when a push could not even be
+/// queued. Distinct wording from a worker failure so the audit can tell the
+/// two apart; `attempts` is not incremented because nothing ran.
+export const QUEUE_UNAVAILABLE_ERROR =
+  'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
+
+/** Orders and products share the rule; only `status` and `queuedAt` matter. */
 export function isStalePendingSync(
-  sync: Pick<ShopifySyncMetadata, 'status' | 'queuedAt'> | null | undefined,
+  sync: { status?: string; queuedAt?: string } | null | undefined,
   now: number = Date.now(),
 ): boolean {
   if (sync?.status !== 'PENDING') return false;
@@ -2099,14 +2106,19 @@ export class ShopifyPushService {
       const sync = this.readProductSyncMeta(p.metadata);
       const status = sync?.status;
       // Skip in-flight + already-good states regardless of channel.
-      if (status === 'PENDING' || status === 'SYNCED') return false;
+      if (status === 'SYNCED') return false;
+      // A PENDING claim nobody is working (queue was down, job lost) is not
+      // in flight. Skipping it for ever left the product "Syncing" with no
+      // way out; treat it like a failed attempt.
+      const abandoned = isStalePendingSync(sync);
+      if (status === 'PENDING' && !abandoned) return false;
       if (p.channel.platform === ChannelPlatform.MANUAL) {
         // MANUAL: push if never pushed or last attempt failed.
-        return !status || status === 'FAILED';
+        return !status || status === 'FAILED' || abandoned;
       }
       if (p.channel.platform === ChannelPlatform.SHOPIFY) {
         // SHOPIFY-rebadged: push only when there's something to send.
-        return status === 'OUT_OF_SYNC' || status === 'FAILED';
+        return status === 'OUT_OF_SYNC' || status === 'FAILED' || abandoned;
       }
       return false;
     });
@@ -2250,7 +2262,7 @@ export class ShopifyPushService {
   }
 
   private readProductSyncMeta(metadata: Prisma.JsonValue | null | undefined):
-    | { status: string; shopifyProductId?: string; error?: string; attempts: number }
+    | { status: string; shopifyProductId?: string; error?: string; queuedAt?: string; attempts: number }
     | null {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
     const m = (metadata as Record<string, unknown>).shopifySync;
