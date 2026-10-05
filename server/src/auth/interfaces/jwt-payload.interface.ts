@@ -3,6 +3,8 @@ import { UserRole } from '@prisma/client';
 export interface JwtPayload {
     sub: string;
     email: string;
+    /** Server-side session this token belongs to. Deleted on logout/revocation. */
+    sid?: string;
     orgId?: string;
     role?: UserRole;
     /** For VENDOR role: the Product.vendor value this session is scoped to. */

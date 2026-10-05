@@ -134,4 +134,52 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
             await pipeline.exec();
         }
     }
+
+    // ─── AUTH SESSIONS (revocable access tokens) ───
+
+    /**
+     * An access token is only honoured while its `sid` is present here. Lives
+     * as long as a refresh token, and is extended on every rotation.
+     */
+    async setAuthSession(sid: string, userId: string): Promise<void> {
+        const setKey = this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId);
+        await this.client
+            .multi()
+            .setex(this.key(REDIS_KEYS.AUTH_SESSION, sid), REDIS_TTL.REFRESH_TOKEN, userId)
+            .sadd(setKey, sid)
+            .expire(setKey, REDIS_TTL.REFRESH_TOKEN)
+            .exec();
+    }
+
+    /**
+     * Extend a live session. Returns false when it has been revoked — it is
+     * never re-created here, so a refresh racing a logout cannot resurrect it.
+     */
+    async touchAuthSession(sid: string, userId: string): Promise<boolean> {
+        const alive = await this.client.expire(this.key(REDIS_KEYS.AUTH_SESSION, sid), REDIS_TTL.REFRESH_TOKEN);
+        if (alive !== 1) return false;
+        await this.client.expire(this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId), REDIS_TTL.REFRESH_TOKEN);
+        return true;
+    }
+
+    async isAuthSessionActive(sid: string, userId: string): Promise<boolean> {
+        return (await this.client.get(this.key(REDIS_KEYS.AUTH_SESSION, sid))) === userId;
+    }
+
+    async deleteAuthSession(sid: string, userId: string): Promise<void> {
+        await this.client.del(this.key(REDIS_KEYS.AUTH_SESSION, sid));
+        await this.client.srem(this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId), sid);
+    }
+
+    async deleteAllAuthSessions(userId: string): Promise<void> {
+        const setKey = this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId);
+        const sids = await this.client.smembers(setKey);
+
+        const pipeline = this.client.pipeline();
+        for (const sid of sids) {
+            pipeline.del(this.key(REDIS_KEYS.AUTH_SESSION, sid));
+        }
+        pipeline.del(setKey);
+        await pipeline.exec();
+    }
 }

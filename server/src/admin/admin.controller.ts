@@ -67,7 +67,7 @@ export class AdminController {
         if (!superAdminId) {
             throw new BadRequestException('No active impersonation session');
         }
-        return this.auth.stopImpersonation(superAdminId);
+        return this.auth.stopImpersonation(superAdminId, { sid: user.sid, targetUserId: user.sub });
     }
 
     @Patch('users/:userId/soft-delete')

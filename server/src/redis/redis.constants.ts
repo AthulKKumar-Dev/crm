@@ -5,6 +5,8 @@ export const REDIS_KEYS = {
     LOGIN_ATTEMPTS: 'login_attempts:',
     REFRESH_TOKEN: 'refresh:',
     USER_REFRESH_TOKENS: 'user_tokens:',
+    AUTH_SESSION: 'sid:',
+    USER_AUTH_SESSIONS: 'user_sids:',
     OAUTH_SHOPIFY: 'oauth:shopify:',
     OAUTH_INSTAGRAM: 'oauth:instagram:',
 };

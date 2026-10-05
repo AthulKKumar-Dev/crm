@@ -34,6 +34,7 @@ describe('AuthService.rotateRefreshToken — organization is preserved', () => {
       setRefreshToken: jest.fn().mockResolvedValue(undefined),
       trackUserToken: jest.fn().mockResolvedValue(undefined),
       setSession: jest.fn().mockResolvedValue(undefined),
+      setAuthSession: jest.fn().mockResolvedValue(undefined),
     };
     const jwt = { sign: jest.fn().mockReturnValue('access') };
     const config = { get: jest.fn().mockReturnValue('7d') };
