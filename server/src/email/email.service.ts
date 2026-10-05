@@ -38,6 +38,13 @@ export class EmailService implements OnModuleInit {
             host,
             port: this.config.get<number>('smtp.port')!,
             secure: this.config.get<boolean>('smtp.secure')!,
+            // On port 587 the connection starts in plain text and upgrades via
+            // STARTTLS. Without this the upgrade is optional: if it is not
+            // offered (or is stripped in transit) the SMTP login and the mail —
+            // reset links, verification codes, invites — go out unencrypted.
+            // Refuse to send instead. Left off in development so a local test
+            // mail server without TLS still works.
+            requireTLS: !this.isDev,
             auth: { user, pass },
             pool: true,
             maxConnections: 5,
