@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -22,6 +22,22 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
 
     async validate(payload: JwtPayload): Promise<SessionPayload> {
+        // The signature only proves we issued this token. The session lookup
+        // proves it has not been logged out or revoked since — without it an
+        // access token kept working after logout, password reset and admin
+        // force-logout until it expired.
+        //
+        // Fails closed, but a Redis outage is a 503, not a 401: the client
+        // treats 401 as "refresh, then sign out", which would log every user
+        // out on a Redis blip.
+        let active: boolean;
+        try {
+            active = !!payload.sid && (await this.redis.isAuthSessionActive(payload.sid, payload.sub));
+        } catch {
+            throw new ServiceUnavailableException('Authentication is temporarily unavailable');
+        }
+        if (!active) throw new UnauthorizedException('Session expired');
+
         // Try Redis cache first (sub-millisecond) — but ONLY when it holds the
         // org this token was minted for.
         //
@@ -42,6 +58,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         // it carried `impersonatedBy`, passed SuperAdminGuard and let them call
         // `stop-impersonating` to receive the super admin's tokens.
         const flags = {
+            sid: payload.sid,
             isSuperAdmin: payload.isSuperAdmin === true,
             impersonatedBy: payload.impersonatedBy,
         };

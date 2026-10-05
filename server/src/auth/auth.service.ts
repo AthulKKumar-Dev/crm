@@ -225,7 +225,7 @@ export class AuthService {
     };
   }
 
-  async switchOrg(userId: string, orgId: string) {
+  async switchOrg(userId: string, orgId: string, sid?: string) {
     // Verify user is an active member of this org
     const membership = await this.prisma.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId: orgId, userId } },
@@ -248,10 +248,12 @@ export class AuthService {
 
     if (!user) throw new NotFoundException('User not found');
 
-    // Generate new JWT scoped to the selected org
+    // Generate new JWT scoped to the selected org. Same auth session: a
+    // workspace switch is not a new login, and logout must end all of it.
     const payload: JwtPayload = {
       sub: userId,
       email: user.email,
+      sid,
       orgId: membership.organizationId,
       role: membership.role,
       isSuperAdmin: user.isSuperAdmin,
@@ -292,12 +294,14 @@ export class AuthService {
     return this.rotateRefreshToken(refreshToken, userAgent, ipAddress);
   }
 
-  async logout(userId: string, refreshToken: string) {
+  async logout(userId: string, sid: string | undefined, refreshToken: string) {
     // Only revoke a refresh token that belongs to the caller.
     const tokenData = await this.redis.getRefreshToken<{ userId: string }>(refreshToken);
     if (tokenData?.userId === userId) {
       await this.revokeRefreshToken(refreshToken);
     }
+    // Kill the access token too, not just the refresh token.
+    if (sid) await this.redis.deleteAuthSession(sid, userId);
     await this.redis.deleteSession(userId);
     return { message: 'Logged out successfully' };
   }
@@ -408,8 +412,11 @@ export class AuthService {
   // ─── TOKEN MANAGEMENT ───
 
   async generateTokenPair(payload: JwtPayload): Promise<TokenPair> {
-    const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(payload.sub, undefined, undefined, payload.orgId);
+    // A payload that already carries a sid (switchOrg) continues that session.
+    const sid = payload.sid ?? randomBytes(16).toString('hex');
+    await this.redis.setAuthSession(sid, payload.sub);
+    const accessToken = this.jwt.sign({ ...payload, sid });
+    const refreshToken = await this.createRefreshToken(payload.sub, undefined, undefined, payload.orgId, sid);
     return { accessToken, refreshToken };
   }
 
@@ -417,12 +424,13 @@ export class AuthService {
    * `orgId` is the organization the paired access token was minted for. It is
    * stored with the refresh token so a rotation re-issues the SAME tenant —
    * without it a refresh cannot know which org a multi-org user switched to.
+   * `sid` is the auth session the pair belongs to, so a rotation continues it.
    */
-  async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string, orgId?: string): Promise<string> {
+  async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string, orgId?: string, sid?: string): Promise<string> {
     const token = randomBytes(40).toString('hex');
 
     // Primary: Redis with auto-expiry TTL
-    await this.redis.setRefreshToken(token, { userId, orgId, userAgent, ipAddress, createdAt: new Date().toISOString() });
+    await this.redis.setRefreshToken(token, { userId, orgId, sid, userAgent, ipAddress, createdAt: new Date().toISOString() });
     await this.redis.trackUserToken(userId, token);
 
     // Audit trail: DB (fire-and-forget, don't block)
@@ -434,7 +442,7 @@ export class AuthService {
 
   async rotateRefreshToken(oldToken: string, userAgent?: string, ipAddress?: string): Promise<TokenPair> {
     // Look up in Redis (fast)
-    const tokenData = await this.redis.getRefreshToken<{ userId: string; orgId?: string }>(oldToken);
+    const tokenData = await this.redis.getRefreshToken<{ userId: string; orgId?: string; sid?: string }>(oldToken);
     if (!tokenData) {
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
@@ -460,14 +468,33 @@ export class AuthService {
     const membership =
       user.memberships.find((m) => m.organizationId === tokenData.orgId) ??
       user.memberships[0];
+    // Re-check the allowlist on every refresh, not only at login — otherwise
+    // someone removed from it stayed super admin for as long as they refreshed.
+    await this.syncSuperAdminFlag(user);
+
+    // The same auth session continues across rotations — but only while it is
+    // still live. A refresh that raced a logout/revoke-all read its token
+    // before it was deleted; re-creating the session here would undo the
+    // revocation. Refresh tokens issued before sessions existed carry no sid
+    // and get one.
+    let sid = tokenData.sid;
+    if (sid) {
+      if (!(await this.redis.touchAuthSession(sid, user.id))) {
+        throw new UnauthorizedException('Invalid or expired refresh token');
+      }
+    } else {
+      sid = randomBytes(16).toString('hex');
+      await this.redis.setAuthSession(sid, user.id);
+    }
+
     const payload: JwtPayload = {
-      sub: user.id, email: user.email,
+      sub: user.id, email: user.email, sid,
       orgId: membership?.organizationId, role: membership?.role,
       isSuperAdmin: user.isSuperAdmin,
     };
 
     const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress, membership?.organizationId);
+    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress, membership?.organizationId, sid);
 
     // Refresh session cache
     await this.redis.setSession(
@@ -486,6 +513,7 @@ export class AuthService {
 
   async revokeAllUserTokens(userId: string): Promise<void> {
     await this.redis.deleteAllUserTokens(userId);
+    await this.redis.deleteAllAuthSessions(userId);
     await this.redis.deleteSession(userId);
     // Audit trail (fire-and-forget)
     this.prisma.refreshToken.updateMany({ where: { userId, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
@@ -630,13 +658,19 @@ export class AuthService {
    * Called with the super admin's user ID (read from the caller's `impersonatedBy`
    * claim by the controller).
    */
-  async stopImpersonation(impersonatedByUserId: string) {
+  async stopImpersonation(impersonatedByUserId: string, impersonation?: { sid?: string; targetUserId: string }) {
     const superAdmin = await this.prisma.user.findUnique({
       where: { id: impersonatedByUserId },
       include: { memberships: { where: { isActive: true }, include: { organization: true } } },
     });
     if (!superAdmin?.isSuperAdmin) {
       throw new ForbiddenException('Impersonation can only be stopped by a super admin');
+    }
+
+    // End the impersonation session itself, so its tokens stop working now
+    // rather than lingering after the super admin has "exited".
+    if (impersonation?.sid) {
+      await this.redis.deleteAuthSession(impersonation.sid, impersonation.targetUserId);
     }
 
     // Close any open log rows for this super admin (there should be exactly one).

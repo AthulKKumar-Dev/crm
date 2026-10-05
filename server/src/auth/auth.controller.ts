@@ -54,7 +54,7 @@ export class AuthController {
 
   @Post('logout')
   logout(@CurrentUser() user: JwtPayload, @Body() dto: RefreshTokenDto) {
-    return this.authService.logout(user.sub, dto.refreshToken);
+    return this.authService.logout(user.sub, user.sid, dto.refreshToken);
   }
 
   // Switch to a different organization — requires valid JWT.
@@ -64,7 +64,7 @@ export class AuthController {
   @Post('switch-org')
   @AllowVendor()
   switchOrg(@CurrentUser() user: JwtPayload, @Body() dto: SwitchOrgDto) {
-    return this.authService.switchOrg(user.sub, dto.orgId);
+    return this.authService.switchOrg(user.sub, dto.orgId, user.sid);
   }
 
   @Public()
