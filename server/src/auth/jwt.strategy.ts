@@ -87,12 +87,17 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
         // Honour the org the token was minted for (login/switchOrg set
         // payload.orgId) — otherwise a cache miss silently snaps a multi-org
-        // user back to their first org (and its role). Tamper-proof: the
-        // claim is signed, and a forged/deactivated orgId finds no active
-        // membership so we fall back to the first one.
-        const membership =
-            user.memberships.find((m) => m.organizationId === payload.orgId) ??
-            user.memberships[0];
+        // user back to their first org (and its role). A token naming an org
+        // the user is no longer an active member of is rejected: falling back
+        // to another membership ran the request in a different tenant while
+        // the UI still showed the old one. Only tokens minted before any org
+        // existed (onboarding) carry no orgId and take the first membership.
+        const membership = payload.orgId
+            ? user.memberships.find((m) => m.organizationId === payload.orgId)
+            : user.memberships[0];
+        if (payload.orgId && !membership) {
+            throw new UnauthorizedException('You no longer have access to this workspace');
+        }
         const session: SessionPayload = {
             sub: user.id,
             email: user.email,
