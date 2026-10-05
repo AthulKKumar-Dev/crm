@@ -23,6 +23,7 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { EmailService } from '../email/email.service';
 import { extractGrants } from './permissions';
+import { ACTIVE_MEMBERSHIP } from './active-membership';
 import { buildSessionPayload } from './session-payload.util';
 
 /** What is stored in Redis alongside a refresh token. */
@@ -153,7 +154,7 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
       include: {
-        memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' }, include: { organization: true } },
+        memberships: { where: ACTIVE_MEMBERSHIP, orderBy: { createdAt: 'asc' }, include: { organization: true } },
       },
     });
 
@@ -262,7 +263,7 @@ export class AuthService {
     // Get user info + all memberships
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+      include: { memberships: { where: ACTIVE_MEMBERSHIP, include: { organization: true } } },
     });
 
     if (!user) throw new NotFoundException('User not found');
@@ -386,8 +387,10 @@ export class AuthService {
   // ─── INVITE ACCEPTANCE ───
 
   async getInviteByToken(token: string) {
+    // An invite into a deleted workspace no longer exists as far as the
+    // invitee is concerned.
     const invite = await this.prisma.teamInvite.findUnique({
-      where: { token },
+      where: { token, organization: { deletedAt: null } },
       include: { organization: { select: { id: true, name: true, slug: true, logo: true } } },
     });
     if (!invite) throw new NotFoundException('Invite not found');
@@ -399,8 +402,10 @@ export class AuthService {
   }
 
   async acceptInvite(dto: AcceptInviteDto) {
+    // Accepting an invite into a deleted workspace would create a membership
+    // (and for a new invitee, an account) that can never be used.
     const invite = await this.prisma.teamInvite.findUnique({
-      where: { token: dto.token },
+      where: { token: dto.token, organization: { deletedAt: null } },
       include: { organization: true },
     });
     if (!invite) throw new NotFoundException('Invite not found');
@@ -560,7 +565,7 @@ export class AuthService {
   ): Promise<TokenPair> {
     const user = await this.prisma.user.findUnique({
       where: { id: tokenData.userId },
-      include: { memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' } } },
+      include: { memberships: { where: ACTIVE_MEMBERSHIP, orderBy: { createdAt: 'asc' } } },
     });
     if (!user || user.deletedAt) throw new UnauthorizedException('Account has been deactivated');
 
@@ -714,7 +719,7 @@ export class AuthService {
 
     const target = await this.prisma.user.findUnique({
       where: { id: targetUserId },
-      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+      include: { memberships: { where: ACTIVE_MEMBERSHIP, include: { organization: true } } },
     });
     if (!target || target.deletedAt) throw new NotFoundException('User not found');
     if (target.isSuperAdmin) {
@@ -803,7 +808,7 @@ export class AuthService {
   ) {
     const superAdmin = await this.prisma.user.findUnique({
       where: { id: impersonatedByUserId },
-      include: { memberships: { where: { isActive: true }, include: { organization: true } } },
+      include: { memberships: { where: ACTIVE_MEMBERSHIP, include: { organization: true } } },
     });
     if (!superAdmin?.isSuperAdmin) {
       throw new ForbiddenException('Impersonation can only be stopped by a super admin');
