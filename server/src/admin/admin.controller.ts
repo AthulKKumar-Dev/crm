@@ -57,6 +57,7 @@ export class AdminController {
             dto.orgId,
             req.headers['user-agent'] as string | undefined,
             req.ip,
+            user.sid,
         );
     }
 
@@ -67,7 +68,11 @@ export class AdminController {
         if (!superAdminId) {
             throw new BadRequestException('No active impersonation session');
         }
-        return this.auth.stopImpersonation(superAdminId, { sid: user.sid, targetUserId: user.sub });
+        return this.auth.stopImpersonation(superAdminId, {
+            sid: user.sid,
+            targetUserId: user.sub,
+            impersonatorSid: user.impersonatorSid,
+        });
     }
 
     @Patch('users/:userId/soft-delete')

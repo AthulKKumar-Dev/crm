@@ -64,7 +64,10 @@ export class AuthController {
   @Post('switch-org')
   @AllowVendor()
   switchOrg(@CurrentUser() user: JwtPayload, @Body() dto: SwitchOrgDto) {
-    return this.authService.switchOrg(user.sub, dto.orgId, user.sid);
+    return this.authService.switchOrg(user.sub, dto.orgId, user.sid, {
+      impersonatedBy: user.impersonatedBy,
+      impersonatorSid: user.impersonatorSid,
+    });
   }
 
   @Public()
