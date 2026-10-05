@@ -1,3 +1,4 @@
+import { UnauthorizedException } from '@nestjs/common';
 import { AuthService } from './auth.service';
 
 /**
@@ -11,7 +12,7 @@ describe('AuthService.rotateRefreshToken — organization is preserved', () => {
     { organizationId: 'org-b', role: 'ADMIN', vendorScope: null },
   ];
 
-  function build(stored: { userId: string; orgId?: string } | null) {
+  function build(stored: { userId: string; orgId?: string; sid?: string } | null) {
     const prisma = {
       user: {
         findUnique: jest.fn().mockResolvedValue({
@@ -35,6 +36,7 @@ describe('AuthService.rotateRefreshToken — organization is preserved', () => {
       trackUserToken: jest.fn().mockResolvedValue(undefined),
       setSession: jest.fn().mockResolvedValue(undefined),
       setAuthSession: jest.fn().mockResolvedValue(undefined),
+      deleteAuthSession: jest.fn().mockResolvedValue(undefined),
     };
     const jwt = { sign: jest.fn().mockReturnValue('access') };
     const config = { get: jest.fn().mockReturnValue('7d') };
@@ -86,13 +88,13 @@ describe('AuthService.rotateRefreshToken — organization is preserved', () => {
     );
   });
 
-  it('falls back to the first membership when the stored org is no longer a membership', async () => {
-    const { service, jwt } = build({ userId: 'u1', orgId: 'org-gone' });
+  it('ends the session when the stored org is no longer a membership', async () => {
+    const { service, jwt, redis } = build({ userId: 'u1', orgId: 'org-gone', sid: 's1' });
 
-    await service.rotateRefreshToken('old');
-
-    expect(jwt.sign).toHaveBeenCalledWith(
-      expect.objectContaining({ orgId: 'org-a' }),
-    );
+    // Re-issuing for org-a would move the user to another tenant while the UI
+    // still names the one they were removed from.
+    await expect(service.rotateRefreshToken('old')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(jwt.sign).not.toHaveBeenCalled();
+    expect(redis.deleteAuthSession).toHaveBeenCalledWith('s1', 'u1');
   });
 });

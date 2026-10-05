@@ -44,6 +44,44 @@ describe('JwtStrategy.validate — session must be live', () => {
     expect(redis.isAuthSessionActive).not.toHaveBeenCalled();
   });
 
+  describe('on a session-cache miss', () => {
+    const dbUser = {
+      id: 'u1',
+      email: 'u1@example.com',
+      emailVerified: true,
+      memberships: [{ organizationId: 'org-b', role: 'ADMIN', vendorScope: null, permissions: null }],
+    };
+
+    function buildMiss() {
+      const built = build(jest.fn().mockResolvedValue(true));
+      built.redis.getSession.mockResolvedValue(null);
+      built.prisma.user.findFirst.mockResolvedValue(dbUser);
+      return built;
+    }
+
+    it('rejects a token for an org the user was removed from instead of moving it to another org', async () => {
+      const { strategy, redis } = buildMiss();
+
+      await expect(strategy.validate(payload)).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(redis.setSession).not.toHaveBeenCalled();
+    });
+
+    it('resolves the membership the token names', async () => {
+      const { strategy } = buildMiss();
+
+      await expect(strategy.validate({ ...payload, orgId: 'org-b' })).resolves.toMatchObject({
+        orgId: 'org-b',
+        role: 'ADMIN',
+      });
+    });
+
+    it('takes the first membership for a token minted before any org existed', async () => {
+      const { strategy } = buildMiss();
+
+      await expect(strategy.validate({ ...payload, orgId: undefined })).resolves.toMatchObject({ orgId: 'org-b' });
+    });
+  });
+
   it('answers 503, not 401, when Redis cannot be reached', async () => {
     const { strategy, prisma } = build(jest.fn().mockRejectedValue(new Error('redis down')));
 

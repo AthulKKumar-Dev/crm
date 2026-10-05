@@ -462,12 +462,19 @@ export class AuthService {
     // Keep the org the session was in. Taking memberships[0] here silently
     // moved a multi-org user back to their first org every time the access
     // token expired, while the UI still named the org they had switched to —
-    // reads AND writes then hit the wrong tenant. The first membership is only
-    // a fallback: tokens issued before orgId was stored, or an org the user
-    // has since been removed from.
-    const membership =
-      user.memberships.find((m) => m.organizationId === tokenData.orgId) ??
-      user.memberships[0];
+    // reads AND writes then hit the wrong tenant. For the same reason, an org
+    // the user has since been removed from ends the session instead of
+    // re-issuing it for another org. The first membership is only a fallback
+    // for tokens issued before orgId was stored.
+    const membership = tokenData.orgId
+      ? user.memberships.find((m) => m.organizationId === tokenData.orgId)
+      : user.memberships[0];
+    if (tokenData.orgId && !membership) {
+      // End the whole auth session, not just this refresh token — otherwise
+      // its sid lingers for the full refresh TTL with nothing left to use it.
+      if (tokenData.sid) await this.redis.deleteAuthSession(tokenData.sid, user.id);
+      throw new UnauthorizedException('You no longer have access to this workspace');
+    }
     // Re-check the allowlist on every refresh, not only at login — otherwise
     // someone removed from it stayed super admin for as long as they refreshed.
     await this.syncSuperAdminFlag(user);
