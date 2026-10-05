@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { JwtPayload, SessionPayload } from './interfaces/jwt-payload.interface';
 import { extractGrants } from './permissions';
+import { ACTIVE_MEMBERSHIP } from './active-membership';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -78,7 +79,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             where: { id: payload.sub, deletedAt: null },
             include: {
                 memberships: {
-                    where: { isActive: true },
+                    where: ACTIVE_MEMBERSHIP,
                     include: { organization: true },
                 },
             },

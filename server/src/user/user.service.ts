@@ -2,6 +2,7 @@ import { Injectable, ConflictException, NotFoundException } from '@nestjs/common
 import * as bcrypt from 'bcrypt';
 import { randomInt } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { ACTIVE_MEMBERSHIP } from '../auth/active-membership';
 
 @Injectable()
 export class UserService {
@@ -39,7 +40,7 @@ export class UserService {
   async findByIdWithMemberships(id: string) {
     return this.prisma.user.findUnique({
       where: { id },
-      include: { memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' }, include: { organization: true } } },
+      include: { memberships: { where: ACTIVE_MEMBERSHIP, orderBy: { createdAt: 'asc' }, include: { organization: true } } },
     });
   }
 
