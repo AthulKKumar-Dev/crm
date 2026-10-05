@@ -348,11 +348,37 @@ export class AuthService {
     });
     if (!resetToken) throw new NotFoundException('Invalid or expired reset token');
 
+    // Hash before the transaction: it is slow by design and must not hold
+    // row locks while it runs.
     const hash = await bcrypt.hash(dto.newPassword, 12);
-    await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: resetToken.userId }, data: { password: hash } }),
-      this.prisma.passwordResetToken.update({ where: { id: resetToken.id }, data: { usedAt: new Date() } }),
-    ]);
+    const now = new Date();
+
+    await this.prisma.$transaction(async (tx) => {
+      // Write the user row FIRST: its lock serialises every reset for this
+      // account. Claiming the link first let two resets using two different
+      // links each lock their own link, then wait on the other's — a
+      // deadlock the database resolves by failing one with a 500. If the
+      // claim below fails, this write rolls back with the transaction.
+      await tx.user.update({ where: { id: resetToken.userId }, data: { password: hash } });
+
+      // Claim the link. The lookup above only says it WAS unused — hashing
+      // takes long enough for a second request with the same link to pass
+      // that check too. The condition here is re-evaluated under the row
+      // lock, so exactly one request changes the row; the other sees 0.
+      const claimed = await tx.passwordResetToken.updateMany({
+        where: { id: resetToken.id, usedAt: null, expiresAt: { gt: now } },
+        data: { usedAt: now },
+      });
+      if (claimed.count !== 1) throw new NotFoundException('Invalid or expired reset token');
+
+      // Every other outstanding link for this account dies with this reset —
+      // an older email must not be able to change the password again.
+      await tx.passwordResetToken.updateMany({
+        where: { userId: resetToken.userId, usedAt: null },
+        data: { usedAt: now },
+      });
+    });
+
     await this.revokeAllUserTokens(resetToken.userId);
     return { message: 'Password reset successfully. Please log in with your new password.' };
   }
