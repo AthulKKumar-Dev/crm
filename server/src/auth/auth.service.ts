@@ -30,7 +30,14 @@ interface RefreshTokenData {
   userId: string;
   orgId?: string;
   sid?: string;
+  /** Super admin who started this session by impersonating `userId`. */
+  impersonatedBy?: string;
+  /** That super admin's own session at the time — see JwtPayload. */
+  impersonatorSid?: string;
 }
+
+/** Who a support session belongs to; empty for an ordinary session. */
+type ImpersonationOrigin = Pick<RefreshTokenData, 'impersonatedBy' | 'impersonatorSid'>;
 
 // How long a duplicate refresh waits for the rotation it lost to: 30 x 100ms.
 const ROTATION_WAIT_ATTEMPTS = 30;
@@ -236,7 +243,8 @@ export class AuthService {
     };
   }
 
-  async switchOrg(userId: string, orgId: string, sid?: string) {
+  async switchOrg(userId: string, orgId: string, sid?: string, impersonation?: ImpersonationOrigin) {
+    const impersonatedBy = impersonation?.impersonatedBy;
     // Verify user is an active member of this org
     const membership = await this.prisma.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId: orgId, userId } },
@@ -267,7 +275,9 @@ export class AuthService {
       sid,
       orgId: membership.organizationId,
       role: membership.role,
-      isSuperAdmin: user.isSuperAdmin,
+      // Switching workspace while impersonating stays an impersonation.
+      isSuperAdmin: impersonatedBy ? false : user.isSuperAdmin,
+      ...(impersonatedBy ? { impersonatedBy, impersonatorSid: impersonation?.impersonatorSid } : {}),
     };
 
     const tokens = await this.generateTokenPair(payload);
@@ -275,7 +285,10 @@ export class AuthService {
     // Update session cache with new orgId
     await this.redis.setSession(
       userId,
-      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin: user.isSuperAdmin }),
+      buildSessionPayload(user, membership, user.memberships, {
+        isSuperAdmin: impersonatedBy ? false : user.isSuperAdmin,
+        impersonatedBy,
+      }),
     );
 
     return {
@@ -427,7 +440,10 @@ export class AuthService {
     const sid = payload.sid ?? randomBytes(16).toString('hex');
     await this.redis.setAuthSession(sid, payload.sub);
     const accessToken = this.jwt.sign({ ...payload, sid });
-    const refreshToken = await this.createRefreshToken(payload.sub, undefined, undefined, payload.orgId, sid);
+    const refreshToken = await this.createRefreshToken(
+      payload.sub, undefined, undefined, payload.orgId, sid,
+      { impersonatedBy: payload.impersonatedBy, impersonatorSid: payload.impersonatorSid },
+    );
     return { accessToken, refreshToken };
   }
 
@@ -436,12 +452,20 @@ export class AuthService {
    * stored with the refresh token so a rotation re-issues the SAME tenant —
    * without it a refresh cannot know which org a multi-org user switched to.
    * `sid` is the auth session the pair belongs to, so a rotation continues it.
+   * `impersonation` marks a support session, so a rotation keeps it one.
    */
-  async createRefreshToken(userId: string, userAgent?: string, ipAddress?: string, orgId?: string, sid?: string): Promise<string> {
+  async createRefreshToken(
+    userId: string, userAgent?: string, ipAddress?: string,
+    orgId?: string, sid?: string, impersonation?: ImpersonationOrigin,
+  ): Promise<string> {
     const token = randomBytes(40).toString('hex');
 
     // Primary: Redis with auto-expiry TTL
-    await this.redis.setRefreshToken(token, { userId, orgId, sid, userAgent, ipAddress, createdAt: new Date().toISOString() });
+    await this.redis.setRefreshToken(token, {
+      userId, orgId, sid,
+      impersonatedBy: impersonation?.impersonatedBy, impersonatorSid: impersonation?.impersonatorSid,
+      userAgent, ipAddress, createdAt: new Date().toISOString(),
+    });
     await this.redis.trackUserToken(userId, token);
 
     // Audit trail: DB (fire-and-forget, don't block)
@@ -473,6 +497,23 @@ export class AuthService {
       await this.redis.clearRefreshRotation(oldToken).catch(() => { });
       throw err;
     }
+  }
+
+  /**
+   * A support session may continue only while the admin behind it is still a
+   * super admin (per the allowlist, not just the stored flag) and the session
+   * they started it from has not been logged out or revoked.
+   */
+  private async isImpersonationStillAuthorized(adminId: string, adminSid?: string): Promise<boolean> {
+    const admin = await this.prisma.user.findUnique({
+      where: { id: adminId },
+      select: { id: true, email: true, isSuperAdmin: true, deletedAt: true },
+    });
+    if (!admin || admin.deletedAt) return false;
+    await this.syncSuperAdminFlag(admin);
+    if (!admin.isSuperAdmin) return false;
+    // Sessions started before the origin was recorded carry no adminSid.
+    return !adminSid || this.redis.isAuthSessionActive(adminSid, adminId);
   }
 
   /** Result of a rotation of `oldToken` that is in flight or just finished, if any. */
@@ -520,6 +561,24 @@ export class AuthService {
     // someone removed from it stayed super admin for as long as they refreshed.
     await this.syncSuperAdminFlag(user);
 
+    // An impersonation session stays one across refreshes — and only while the
+    // admin who started it is still a super admin and the session they started
+    // it from is still live (so logging that admin out everywhere ends it).
+    // The marker used to be dropped on the first refresh, and the session
+    // carried on as an ordinary login of the target user: no banner, no exit,
+    // nothing in the audit log.
+    const { impersonatedBy, impersonatorSid } = tokenData;
+    if (impersonatedBy && !(await this.isImpersonationStillAuthorized(impersonatedBy, impersonatorSid))) {
+      if (tokenData.sid) await this.redis.deleteAuthSession(tokenData.sid, user.id);
+      // Best-effort: the support session is over, so the audit row is too.
+      this.prisma.impersonationLog
+        .updateMany({ where: { superAdminId: impersonatedBy, targetUserId: user.id, endedAt: null }, data: { endedAt: new Date() } })
+        .catch((err) => this.logger.error('Failed to close impersonation log', err));
+      throw new UnauthorizedException('Impersonation session has ended');
+    }
+    // The impersonated user's own flag never applies to a support session.
+    const isSuperAdmin = impersonatedBy ? false : user.isSuperAdmin;
+
     // The same auth session continues across rotations — but only while it is
     // still live. A refresh that raced a logout/revoke-all read its token
     // before it was deleted; re-creating the session here would undo the
@@ -538,16 +597,20 @@ export class AuthService {
     const payload: JwtPayload = {
       sub: user.id, email: user.email, sid,
       orgId: membership?.organizationId, role: membership?.role,
-      isSuperAdmin: user.isSuperAdmin,
+      isSuperAdmin,
+      ...(impersonatedBy ? { impersonatedBy, impersonatorSid } : {}),
     };
 
     const accessToken = this.jwt.sign(payload);
-    const refreshToken = await this.createRefreshToken(user.id, userAgent, ipAddress, membership?.organizationId, sid);
+    const refreshToken = await this.createRefreshToken(
+      user.id, userAgent, ipAddress, membership?.organizationId, sid,
+      impersonatedBy ? { impersonatedBy, impersonatorSid } : undefined,
+    );
 
     // Refresh session cache
     await this.redis.setSession(
       user.id,
-      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin: user.isSuperAdmin }),
+      buildSessionPayload(user, membership, user.memberships, { isSuperAdmin, impersonatedBy }),
     );
 
     return { accessToken, refreshToken };
@@ -613,6 +676,7 @@ export class AuthService {
     targetOrgId: string | undefined,
     userAgent?: string,
     ipAddress?: string,
+    superAdminSid?: string,
   ) {
     const superAdmin = await this.prisma.user.findUnique({ where: { id: superAdminId } });
     if (!superAdmin?.isSuperAdmin) {
@@ -642,6 +706,7 @@ export class AuthService {
       role: membership?.role,
       isSuperAdmin: false,
       impersonatedBy: superAdminId,
+      impersonatorSid: superAdminSid,
     };
 
     const tokens = await this.generateTokenPair(payload);
@@ -706,7 +771,10 @@ export class AuthService {
    * Called with the super admin's user ID (read from the caller's `impersonatedBy`
    * claim by the controller).
    */
-  async stopImpersonation(impersonatedByUserId: string, impersonation?: { sid?: string; targetUserId: string }) {
+  async stopImpersonation(
+    impersonatedByUserId: string,
+    impersonation?: { sid?: string; targetUserId: string; impersonatorSid?: string },
+  ) {
     const superAdmin = await this.prisma.user.findUnique({
       where: { id: impersonatedByUserId },
       include: { memberships: { where: { isActive: true }, include: { organization: true } } },
@@ -719,6 +787,12 @@ export class AuthService {
     // rather than lingering after the super admin has "exited".
     if (impersonation?.sid) {
       await this.redis.deleteAuthSession(impersonation.sid, impersonation.targetUserId);
+    }
+    // The admin gets a fresh session below. Retire the one this was started
+    // from: nothing uses it any more, and any other support session started
+    // from it ends with it.
+    if (impersonation?.impersonatorSid) {
+      await this.redis.deleteAuthSession(impersonation.impersonatorSid, superAdmin.id);
     }
 
     // Close any open log rows for this super admin (there should be exactly one).

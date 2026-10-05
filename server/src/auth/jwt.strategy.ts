@@ -61,6 +61,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             sid: payload.sid,
             isSuperAdmin: payload.isSuperAdmin === true,
             impersonatedBy: payload.impersonatedBy,
+            impersonatorSid: payload.impersonatorSid,
         };
 
         try {

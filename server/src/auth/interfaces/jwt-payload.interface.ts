@@ -13,6 +13,11 @@ export interface JwtPayload {
     isSuperAdmin?: boolean;
     /** During impersonation, this is the super admin's user ID. Absent otherwise. */
     impersonatedBy?: string;
+    /**
+     * During impersonation, the super admin's own session it was started from.
+     * The support session only lasts while that session does.
+     */
+    impersonatorSid?: string;
 }
 
 export interface SessionPayload extends JwtPayload {
