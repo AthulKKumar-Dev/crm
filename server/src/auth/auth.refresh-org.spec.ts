@@ -30,8 +30,10 @@ describe('AuthService.rotateRefreshToken — organization is preserved', () => {
       },
     };
     const redis = {
-      getRefreshToken: jest.fn().mockResolvedValue(stored),
-      deleteRefreshToken: jest.fn().mockResolvedValue(undefined),
+      consumeRefreshToken: jest.fn().mockResolvedValue(stored),
+      getRefreshRotation: jest.fn().mockResolvedValue(null),
+      setRefreshRotationResult: jest.fn().mockResolvedValue(undefined),
+      clearRefreshRotation: jest.fn().mockResolvedValue(undefined),
       setRefreshToken: jest.fn().mockResolvedValue(undefined),
       trackUserToken: jest.fn().mockResolvedValue(undefined),
       setSession: jest.fn().mockResolvedValue(undefined),

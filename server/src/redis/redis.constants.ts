@@ -5,6 +5,7 @@ export const REDIS_KEYS = {
     LOGIN_ATTEMPTS: 'login_attempts:',
     REFRESH_TOKEN: 'refresh:',
     USER_REFRESH_TOKENS: 'user_tokens:',
+    REFRESH_ROTATION: 'refresh_rotation:',
     AUTH_SESSION: 'sid:',
     USER_AUTH_SESSIONS: 'user_sids:',
     OAUTH_SHOPIFY: 'oauth:shopify:',
@@ -15,6 +16,7 @@ export const REDIS_TTL = {
     SESSION: 900,           // 15 minutes (matches access token)
     LOGIN_ATTEMPTS: 900,    // 15 minute window
     REFRESH_TOKEN: 604800,  // 7 days
+    REFRESH_ROTATION: 10,   // grace for a duplicate of a just-spent refresh token
     OAUTH_STATE: 600,       // 10 minutes
 };
 

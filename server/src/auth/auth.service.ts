@@ -25,6 +25,17 @@ import { EmailService } from '../email/email.service';
 import { extractGrants } from './permissions';
 import { buildSessionPayload } from './session-payload.util';
 
+/** What is stored in Redis alongside a refresh token. */
+interface RefreshTokenData {
+  userId: string;
+  orgId?: string;
+  sid?: string;
+}
+
+// How long a duplicate refresh waits for the rotation it lost to: 30 x 100ms.
+const ROTATION_WAIT_ATTEMPTS = 30;
+const ROTATION_WAIT_INTERVAL_MS = 100;
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -441,20 +452,50 @@ export class AuthService {
   }
 
   async rotateRefreshToken(oldToken: string, userAgent?: string, ipAddress?: string): Promise<TokenPair> {
-    // Look up in Redis (fast)
-    const tokenData = await this.redis.getRefreshToken<{ userId: string; orgId?: string; sid?: string }>(oldToken);
+    // Take the token out of Redis atomically — single use. Only the request
+    // that gets the data here may issue a replacement.
+    const tokenData = await this.redis.consumeRefreshToken<RefreshTokenData>(oldToken);
     if (!tokenData) {
+      // Not ours to rotate. If the same token was spent a moment ago (a second
+      // tab refreshing at the same instant) hand back that rotation's result
+      // rather than signing the user out; otherwise it is simply invalid.
+      const replayed = await this.awaitConcurrentRotation(oldToken);
+      if (replayed) return replayed;
       throw new UnauthorizedException('Invalid or expired refresh token');
     }
 
+    try {
+      const tokens = await this.issueRotatedTokens(tokenData, oldToken, userAgent, ipAddress);
+      await this.redis.setRefreshRotationResult(oldToken, { ...tokens });
+      return tokens;
+    } catch (err) {
+      // No result is coming — let a waiting duplicate fail now, not time out.
+      await this.redis.clearRefreshRotation(oldToken).catch(() => { });
+      throw err;
+    }
+  }
+
+  /** Result of a rotation of `oldToken` that is in flight or just finished, if any. */
+  private async awaitConcurrentRotation(oldToken: string): Promise<TokenPair | null> {
+    for (let attempt = 0; attempt < ROTATION_WAIT_ATTEMPTS; attempt++) {
+      const rotation = await this.redis.getRefreshRotation<TokenPair>(oldToken);
+      if (rotation !== 'pending') return rotation;
+      await new Promise((resolve) => setTimeout(resolve, ROTATION_WAIT_INTERVAL_MS));
+    }
+    return null;
+  }
+
+  private async issueRotatedTokens(
+    tokenData: RefreshTokenData,
+    oldToken: string,
+    userAgent?: string,
+    ipAddress?: string,
+  ): Promise<TokenPair> {
     const user = await this.prisma.user.findUnique({
       where: { id: tokenData.userId },
       include: { memberships: { where: { isActive: true }, orderBy: { createdAt: 'asc' } } },
     });
     if (!user || user.deletedAt) throw new UnauthorizedException('Account has been deactivated');
-
-    // Revoke old token in Redis
-    await this.redis.deleteRefreshToken(oldToken);
 
     // Audit trail (fire-and-forget)
     this.prisma.refreshToken.updateMany({ where: { token: oldToken, revokedAt: null }, data: { revokedAt: new Date() } }).catch(() => { });
