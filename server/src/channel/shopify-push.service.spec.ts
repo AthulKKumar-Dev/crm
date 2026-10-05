@@ -9,6 +9,8 @@ import {
 } from './shopify-push.service';
 import {
   INVENTORY_ACTIVATE_MUTATION,
+  INVENTORY_DEACTIVATE_MUTATION,
+  INVENTORY_LEVEL_AT_LOCATION_QUERY,
   INVENTORY_SET_QUANTITIES_MUTATION,
   ORDER_CREATE_MUTATION,
 } from './shopify-graphql.types';
@@ -453,6 +455,278 @@ describe('ShopifyPushService — inventory write to an unstocked location', () =
 
     expect(calls(INVENTORY_ACTIVATE_MUTATION)).toHaveLength(0);
     expect(calls(INVENTORY_SET_QUANTITIES_MUTATION)).toHaveLength(1);
+  });
+});
+
+describe('ShopifyPushService — Edit locations', () => {
+  const auth = { shopDomain: 'collabo-test.myshopify.com', accessToken: 'tok' };
+  const REMOVE = { variantId: 'v1', warehouseId: 'wh_shop', shopifyLocationId: '222', action: 'remove' };
+  const ADD = { variantId: 'v1', warehouseId: 'wh_shop', shopifyLocationId: '222', action: 'add' };
+  const EMPTY_ROW = { id: 'row_1', available: 0, reserved: 0, qc: 0, damaged: 0 };
+  const LEVEL = (quantity = 0) => ({
+    id: 'gid://shopify/InventoryLevel/7',
+    quantities: [
+      { name: 'available', quantity },
+      { name: 'on_hand', quantity },
+      { name: 'committed', quantity: 0 },
+      { name: 'incoming', quantity: 0 },
+    ],
+  });
+
+  const product = (pending: unknown[]) => ({
+    id: 'p1',
+    metadata: { shopifySync: { status: 'OUT_OF_SYNC' }, pendingLocationChanges: pending },
+  });
+
+  function setup(opts: {
+    pending: unknown[];
+    level?: ReturnType<typeof LEVEL> | null;
+    row?: unknown;
+    activateErrors?: unknown[];
+    deactivateErrors?: unknown[];
+    /** What the list holds when the push re-reads it under the lock. */
+    pendingAtWrite?: unknown[];
+    inventoryItemId?: string | null;
+  }) {
+    const built = build(null);
+    const prisma = built.prisma as any;
+    prisma.productVariant = {
+      findMany: jest.fn().mockResolvedValue([
+        { id: 'v1', externalId: '9001', inventoryItemId: opts.inventoryItemId === undefined ? '1' : opts.inventoryItemId },
+      ]),
+      update: jest.fn(),
+    };
+    prisma.stockLevel = {
+      findFirst: jest.fn().mockResolvedValue(opts.row ?? null),
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
+    };
+    const tx = {
+      $queryRaw: jest.fn().mockResolvedValue([
+        { metadata: { pendingLocationChanges: opts.pendingAtWrite ?? opts.pending } },
+      ]),
+      $executeRaw: jest.fn().mockResolvedValue(1),
+    };
+    prisma.$transaction = jest.fn((cb: (t: unknown) => unknown) => cb(tx));
+    built.graphql.request.mockImplementation(async (_a: unknown, query: string) => {
+      if (query === INVENTORY_LEVEL_AT_LOCATION_QUERY) {
+        return { inventoryItem: { inventoryLevel: opts.level === undefined ? LEVEL() : opts.level } };
+      }
+      if (query === INVENTORY_DEACTIVATE_MUTATION) {
+        return { inventoryDeactivate: { userErrors: opts.deactivateErrors ?? [] } };
+      }
+      if (query === INVENTORY_ACTIVATE_MUTATION) {
+        const errors = opts.activateErrors ?? [];
+        return {
+          inventoryActivate: { inventoryLevel: errors.length ? null : { id: 'lvl' }, userErrors: errors },
+        };
+      }
+      return {};
+    });
+    const calls = (q: string) => built.graphql.request.mock.calls.filter((c) => c[1] === q);
+    /** The pending list written back, or undefined when nothing needed writing. */
+    const written = () => {
+      const call = tx.$executeRaw.mock.calls.at(-1);
+      if (!call) return undefined;
+      const json = (call.slice(1) as unknown[]).find(
+        (v) => typeof v === 'string' && v.startsWith('{'),
+      ) as string;
+      return JSON.parse(json).pendingLocationChanges;
+    };
+    const run = () =>
+      (built.service as any).applyPendingLocationChanges(product(opts.pending), 'org_1', auth);
+    return { ...built, prisma, calls, written, run };
+  }
+
+  describe('removing a location', () => {
+    it('un-stocks the variant on Shopify and forgets the change', async () => {
+      const { run, calls, written } = setup({ pending: [REMOVE] });
+
+      await run();
+
+      expect(calls(INVENTORY_LEVEL_AT_LOCATION_QUERY)[0][2]).toEqual({
+        inventoryItemId: 'gid://shopify/InventoryItem/1',
+        locationId: 'gid://shopify/Location/222',
+      });
+      expect(calls(INVENTORY_DEACTIVATE_MUTATION)[0][2]).toEqual({
+        inventoryLevelId: 'gid://shopify/InventoryLevel/7',
+      });
+      expect(written()).toEqual([]);
+    });
+
+    it('deletes the empty row a pull put back in the meantime, and only if still empty', async () => {
+      const { run, prisma } = setup({ pending: [REMOVE], row: EMPTY_ROW });
+
+      await run();
+
+      expect(prisma.stockLevel.deleteMany).toHaveBeenCalledWith({
+        where: { id: 'row_1', available: 0, reserved: 0, qc: 0, damaged: 0 },
+      });
+    });
+
+    it('keeps the change pending and fails the push when Shopify refuses', async () => {
+      const { run, prisma, written } = setup({
+        pending: [REMOVE],
+        row: EMPTY_ROW,
+        deactivateErrors: [{ field: null, message: 'The product must be stocked at one location.' }],
+      });
+
+      await expect(run()).rejects.toThrow(/must be stocked at one location/);
+      expect(written()).toBeUndefined(); // list unchanged, so nothing rewritten
+      expect(prisma.stockLevel.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('does not deactivate a location Shopify holds stock at — that stock would be discarded', async () => {
+      const { run, calls, prisma, written } = setup({ pending: [REMOVE], level: LEVEL(6) });
+
+      await run();
+
+      expect(calls(INVENTORY_DEACTIVATE_MUTATION)).toHaveLength(0);
+      expect(prisma.stockLevel.deleteMany).not.toHaveBeenCalled();
+      expect(written()).toEqual([]);
+    });
+
+    it('forgets a removal Shopify already reflects, without calling deactivate', async () => {
+      const { run, calls, written } = setup({ pending: [REMOVE], level: null });
+
+      await run();
+
+      expect(calls(INVENTORY_DEACTIVATE_MUTATION)).toHaveLength(0);
+      expect(written()).toEqual([]);
+    });
+
+    it('never un-stocks a location the CRM holds stock at again', async () => {
+      const { run, graphql, written } = setup({
+        pending: [REMOVE],
+        row: { ...EMPTY_ROW, available: 4 },
+      });
+
+      await run();
+
+      expect(graphql.request).not.toHaveBeenCalled();
+      expect(written()).toEqual([]);
+    });
+  });
+
+  describe('adding a location', () => {
+    it('stocks the variant there at zero when Shopify does not stock it yet', async () => {
+      const { run, calls, written } = setup({ pending: [ADD], level: null, row: EMPTY_ROW });
+
+      await run();
+
+      expect(calls(INVENTORY_ACTIVATE_MUTATION)[0][2]).toEqual({
+        inventoryItemId: 'gid://shopify/InventoryItem/1',
+        locationId: 'gid://shopify/Location/222',
+        available: 0,
+      });
+      expect(written()).toEqual([]);
+    });
+
+    it('does not re-activate a location Shopify already stocks', async () => {
+      const { run, calls, written } = setup({ pending: [ADD], level: LEVEL(3), row: EMPTY_ROW });
+
+      await run();
+
+      expect(calls(INVENTORY_ACTIVATE_MUTATION)).toHaveLength(0);
+      expect(written()).toEqual([]);
+    });
+
+    it('keeps the change pending and fails the push when Shopify refuses', async () => {
+      const { run, written } = setup({
+        pending: [ADD],
+        level: null,
+        row: EMPTY_ROW,
+        activateErrors: [{ field: null, message: 'Location is not active.' }],
+      });
+
+      await expect(run()).rejects.toThrow(/Location is not active/);
+      expect(written()).toBeUndefined();
+    });
+
+    it('drops an add whose row has since been removed', async () => {
+      const { run, graphql, written } = setup({ pending: [ADD], row: null });
+
+      await run();
+
+      expect(graphql.request).not.toHaveBeenCalled();
+      expect(written()).toEqual([]);
+    });
+  });
+
+  it('keeps a change made while the push was running, and fails so it is retried', async () => {
+    const arrived = { variantId: 'v2', warehouseId: 'wh_shop', shopifyLocationId: '222', action: 'remove' };
+    const { run, written } = setup({ pending: [REMOVE], pendingAtWrite: [REMOVE, arrived] });
+
+    await expect(run()).rejects.toThrow(/changed while this sync was running/);
+    expect(written()).toEqual([arrived]);
+  });
+
+  it('settles a change for a variant that is not on Shopify without calling it', async () => {
+    const { run, graphql, written } = setup({ pending: [REMOVE], inventoryItemId: null });
+    // No inventory item id, and nothing to backfill it from.
+    graphql.request.mockResolvedValue({ productVariant: null });
+
+    await run();
+
+    expect(written()).toEqual([]);
+  });
+
+  it('does nothing at all for a product with no pending change', async () => {
+    const { run, graphql, prisma } = setup({ pending: [] });
+
+    await run();
+
+    expect(graphql.request).not.toHaveBeenCalled();
+    expect(prisma.productVariant.findMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShopifyPushService — which locations a stock push writes to', () => {
+  const VARIANT = { id: 'v1', inventoryQuantity: 50 };
+  const invIds = new Map([['v1', '1']]);
+
+  /** `mappedRows` are the variant's rows at Shopify locations; `anyRows` at any location. */
+  function setup(mappedRows: unknown[], anyRows: unknown[]) {
+    const { service, prisma } = build(null);
+    const p = prisma as any;
+    p.warehouse = {
+      findMany: jest.fn().mockResolvedValue([{ id: 'wh_shop', shopifyLocationId: '111' }]),
+    };
+    p.stockLevel = {
+      findMany: jest.fn((args: { where: { warehouseId?: unknown } }) =>
+        Promise.resolve(args.where.warehouseId ? mappedRows : anyRows),
+      ),
+    };
+    (service as any).inventoryLedger = { isWarehousingEnabled: jest.fn().mockResolvedValue(true) };
+    jest.spyOn(service as any, 'resolveLocationId').mockResolvedValue('999');
+    const run = () =>
+      (service as any).buildAvailabilityQuantities('org_1', 'ch', 'shop', 'tok', [VARIANT], invIds);
+    return { run };
+  }
+
+  it('writes each Shopify location its own quantity', async () => {
+    const row = { variantId: 'v1', warehouseId: 'wh_shop', available: 7 };
+    const { run } = setup([row], [{ variantId: 'v1' }]);
+
+    expect(await run()).toEqual([
+      { inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: 'gid://shopify/Location/111', quantity: 7 },
+    ]);
+  });
+
+  it('writes nothing for a variant stocked only at non-Shopify locations', async () => {
+    // Its total must NOT land on the primary Shopify location: that stock is
+    // somewhere Shopify does not know about.
+    const { run } = setup([], [{ variantId: 'v1' }]);
+
+    expect(await run()).toEqual([]);
+  });
+
+  it('still falls back to the primary location for a variant with no stock row anywhere', async () => {
+    const { run } = setup([], []);
+
+    expect(await run()).toEqual([
+      { inventoryItemId: 'gid://shopify/InventoryItem/1', locationId: 'gid://shopify/Location/999', quantity: 50 },
+    ]);
   });
 });
 

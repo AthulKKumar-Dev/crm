@@ -10,6 +10,7 @@ import type {
   CreateVariantRequest,
   ProductOption,
   ProductStatus,
+  SetVariantLocationsRequest,
   UpdateProductRequest,
   UpdateVariantRequest,
 } from "~/types/api";
@@ -128,6 +129,31 @@ export function useCreateVariantMutation(productId: string) {
 }
 
 /** Edit a single variant. Pass `silent` when the caller owns the toasts. */
+/**
+ * Changes which locations a variant is stocked at. Resolves only once the
+ * refetch lands, so the dialog closes onto a list that already shows the new
+ * locations rather than the old ones for a beat.
+ */
+export function useSetVariantLocationsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ variantId, data }: { variantId: string; data: SetVariantLocationsRequest }) =>
+      productService.setVariantLocations(variantId, data),
+    onSuccess: (result) => {
+      toast.success(
+        result.needsShopifySync
+          ? "Locations updated. Sync the product to apply them on Shopify."
+          : "Locations updated.",
+      );
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: inventoryKeys.all }),
+        queryClient.invalidateQueries({ queryKey: productKeys.all }),
+      ]);
+    },
+    onError: (error) => handleMutationError(error, "Failed to update locations."),
+  });
+}
+
 export function useUpdateVariantMutation(
   productId: string,
   options?: { silent?: boolean },

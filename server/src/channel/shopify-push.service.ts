@@ -9,6 +9,11 @@ import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from '.
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import {
+  PendingLocationChange,
+  mutatePendingLocationChanges,
+  readPendingLocationChanges,
+} from '../inventory/pending-location-changes';
+import {
   LOCATIONS_QUERY,
   LocationsResponse,
   ORDER_CREATE_MUTATION,
@@ -37,6 +42,10 @@ import {
   InventorySetQuantitiesResponse,
   INVENTORY_ACTIVATE_MUTATION,
   InventoryActivateResponse,
+  INVENTORY_DEACTIVATE_MUTATION,
+  InventoryDeactivateResponse,
+  INVENTORY_LEVEL_AT_LOCATION_QUERY,
+  InventoryLevelAtLocationResponse,
   ShopifyUserError,
   VARIANT_INVENTORY_ITEM_QUERY,
   VariantInventoryItemResponse,
@@ -811,6 +820,12 @@ export class ShopifyPushService {
         trackGlobally,
         pushGeneratedBarcodes,
       );
+      // Throws when Shopify refuses one, which fails the push with Shopify's
+      // own reason instead of reporting a sync that did not fully happen.
+      await this.applyPendingLocationChanges(product, orgId, {
+        shopDomain,
+        accessToken: token,
+      });
       await this.recordProductSuccess(productId, orgId, product.externalId);
       this.logger.log(
         `Pushed update for Shopify product "${product.title}" (${product.externalId}).`,
@@ -916,6 +931,10 @@ export class ShopifyPushService {
     if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
       await this.pushAvailability(orgId, product.variants.map((v) => v.id));
     }
+    // Locations chosen before the product was ever on Shopify. The quantity
+    // push above only stocks a location that holds something; this stocks the
+    // empty ones the merchant ticked.
+    await this.applyPendingLocationChanges(product, orgId, auth);
 
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
@@ -1316,6 +1335,170 @@ export class ShopifyPushService {
   }
 
   /**
+   * Apply the location changes made in the CRM's "Edit locations" dialog to
+   * Shopify — stock a variant at a location, or stop stocking it there — and
+   * forget each one once Shopify agrees with it.
+   *
+   * Only explicit edits are applied; see pending-location-changes.ts for why
+   * the two sides are never simply diffed.
+   *
+   * Shopify can refuse a removal (the location is the variant's only one, or
+   * it has committed stock). A refused change stays pending and the push
+   * fails with Shopify's reason, so the merchant sees why rather than a
+   * product that claims to be synced.
+   */
+  private async applyPendingLocationChanges(
+    product: { id: string; metadata: Prisma.JsonValue | null },
+    orgId: string,
+    auth: ShopifyAuthContext,
+  ): Promise<void> {
+    const pendingChanges = readPendingLocationChanges(product.metadata);
+    if (pendingChanges.length === 0) return;
+
+    // Re-read rather than trust the caller's copy: on a first push the
+    // variants were loaded before Shopify assigned their ids.
+    const variants = await this.prisma.productVariant.findMany({
+      where: { productId: product.id, organizationId: orgId },
+      select: { id: true, externalId: true, inventoryItemId: true },
+    });
+    const inventoryItemIdByVariant = await this.resolveInventoryItemIds(auth, variants);
+
+    const changeKey = (change: PendingLocationChange) =>
+      `${change.variantId}:${change.warehouseId}:${change.action}`;
+    const settledChangeKeys = new Set<string>();
+    const refusalMessages: string[] = [];
+
+    for (const change of pendingChanges) {
+      try {
+        const refusalMessage = await this.applyLocationChange(
+          change,
+          inventoryItemIdByVariant.get(change.variantId),
+          auth,
+        );
+        if (refusalMessage) refusalMessages.push(refusalMessage);
+        else settledChangeKeys.add(changeKey(change));
+      } catch (err) {
+        refusalMessages.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // Drop only what was settled above. Anything else — a refusal, or a change
+    // the merchant made while this push was running — stays for the next one.
+    const stillPending = await this.prisma.$transaction((tx) =>
+      mutatePendingLocationChanges(tx, product.id, orgId, (currentChanges) =>
+        currentChanges.filter((change) => !settledChangeKeys.has(changeKey(change))),
+      ),
+    );
+
+    if (refusalMessages.length > 0) {
+      throw new Error(
+        `Shopify did not accept ${refusalMessages.length} location change(s): ` +
+        [...new Set(refusalMessages)].join('; '),
+      );
+    }
+    if (stillPending.length > 0) {
+      // recordProductSuccess would stamp SYNCED over a product that still has
+      // changes waiting; failing here lets the retry pick them up.
+      throw new Error('Locations were changed while this sync was running. Sync again to apply them.');
+    }
+  }
+
+  /** One pending change. Returns Shopify's refusal, or null once it is settled. */
+  private async applyLocationChange(
+    change: PendingLocationChange,
+    inventoryItemId: string | undefined,
+    auth: ShopifyAuthContext,
+  ): Promise<string | null> {
+    const crmStockRow = await this.prisma.stockLevel.findFirst({
+      where: { variantId: change.variantId, warehouseId: change.warehouseId, locationId: null },
+      select: { id: true, available: true, reserved: true, qc: true, damaged: true },
+    });
+    const crmHoldsStock =
+      !!crmStockRow &&
+      (crmStockRow.available !== 0 ||
+        crmStockRow.reserved !== 0 ||
+        crmStockRow.qc !== 0 ||
+        crmStockRow.damaged !== 0);
+
+    // The CRM has moved on since this was recorded: nothing left to do.
+    if (change.action === 'add' && !crmStockRow) return null;
+    if (change.action === 'remove' && crmHoldsStock) return null;
+    // Variant deleted, or not on Shopify: nothing there to change.
+    if (!inventoryItemId) return null;
+
+    const inventoryItemGid = ShopifyGraphqlClient.toGid('InventoryItem', inventoryItemId);
+    const locationGid = ShopifyGraphqlClient.toGid('Location', change.shopifyLocationId);
+    const levelLookup = await this.graphql.request<InventoryLevelAtLocationResponse>(
+      auth,
+      INVENTORY_LEVEL_AT_LOCATION_QUERY,
+      { inventoryItemId: inventoryItemGid, locationId: locationGid },
+    );
+    const shopifyLevel = levelLookup.inventoryItem?.inventoryLevel ?? null;
+
+    if (change.action === 'add') {
+      // Already stocked there — and activating again with a quantity is an
+      // error on Shopify's side, so do not send it.
+      if (shopifyLevel) return null;
+      const activation = await this.graphql.request<InventoryActivateResponse>(
+        auth,
+        INVENTORY_ACTIVATE_MUTATION,
+        {
+          inventoryItemId: inventoryItemGid,
+          locationId: locationGid,
+          available: Math.max(crmStockRow!.available, 0),
+        },
+      );
+      const activationErrors = activation.inventoryActivate?.userErrors ?? [];
+      if (activationErrors.length > 0 || !activation.inventoryActivate?.inventoryLevel) {
+        return (
+          activationErrors.map((e) => e.message).join('; ') ||
+          'Shopify did not stock the item at the location.'
+        );
+      }
+      this.logger.log(
+        `Activated inventory item ${inventoryItemId} at location ${change.shopifyLocationId}`,
+      );
+      return null;
+    }
+
+    if (shopifyLevel) {
+      // Stock arrived on Shopify after the location was unticked here.
+      // Deactivating would discard it, and Shopify is the authority on its
+      // own quantities — so the removal is dropped and the next pull brings
+      // the location, with that stock, back into the CRM.
+      const quantityHeldOnShopify = shopifyLevel.quantities.find((q) => q.quantity !== 0);
+      if (quantityHeldOnShopify) {
+        this.logger.warn(
+          `Not removing inventory item ${inventoryItemId} from location ${change.shopifyLocationId}: ` +
+          `Shopify holds ${quantityHeldOnShopify.quantity} ${quantityHeldOnShopify.name} there`,
+        );
+        return null;
+      }
+      const deactivation = await this.graphql.request<InventoryDeactivateResponse>(
+        auth,
+        INVENTORY_DEACTIVATE_MUTATION,
+        { inventoryLevelId: shopifyLevel.id },
+      );
+      const deactivationErrors = deactivation.inventoryDeactivate?.userErrors ?? [];
+      if (deactivationErrors.length > 0) {
+        return deactivationErrors.map((e) => e.message).join('; ');
+      }
+      this.logger.log(
+        `Deactivated inventory item ${inventoryItemId} at location ${change.shopifyLocationId}`,
+      );
+    }
+
+    // A pull between the edit and this push puts the empty row back, because
+    // Shopify still stocked the item then. It no longer does.
+    if (crmStockRow) {
+      await this.prisma.stockLevel.deleteMany({
+        where: { id: crmStockRow.id, available: 0, reserved: 0, qc: 0, damaged: 0 },
+      });
+    }
+    return null;
+  }
+
+  /**
    * Push the current sellable quantity (variant.inventoryQuantity — for
    * warehousing orgs the SUM of StockLevel.available) for specific variants to
    * the primary Shopify location. Runs as a `push-availability` queue job
@@ -1484,7 +1667,18 @@ export class ShopifyPushService {
     // was created after the enable seed, or has trackQuantity:false so the
     // seed skipped it. It used to push its cached quantity; without this it
     // would silently stop syncing the moment warehousing was switched on.
-    const covered = new Set(levels.map((l) => l.variantId));
+    //
+    // "Anywhere" has to mean anywhere. Testing only the mapped rows read above
+    // also caught a variant stocked solely at CRM-only (or deactivated)
+    // locations, and wrote its org-wide total onto the primary Shopify
+    // location — stock that is not there. Once "Edit locations" could take a
+    // variant out of its last Shopify location, every sync of it did that.
+    const variantsStockedAnywhere = await this.prisma.stockLevel.findMany({
+      where: { variantId: { in: variants.map((v) => v.id) } },
+      select: { variantId: true },
+      distinct: ['variantId'],
+    });
+    const covered = new Set(variantsStockedAnywhere.map((level) => level.variantId));
     const uncovered = variants.filter((v) => !covered.has(v.id));
     if (uncovered.length > 0) {
       perLocation.push(...(await pushAtPrimary(uncovered)));

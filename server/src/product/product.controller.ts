@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   UploadedFile,
@@ -30,6 +31,8 @@ type MulterFile = {
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
 import { RequireSection } from '../auth/decorators/require-section.decorator';
+import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { Roles, ORG_OPERATORS } from '../auth/decorators/roles.decorator';
 import { vendorScopeFor } from '../auth/vendor-scope.util';
 import { ProductService } from './product.service';
 import { QueryProductsDto } from './dto/query-products.dto';
@@ -39,6 +42,7 @@ import {
   BulkUpdateVariantsDto,
   CreateVariantDto,
   ReorderVariantsDto,
+  SetVariantLocationsDto,
   UpdateVariantDto,
 } from './dto/variant.dto';
 import {
@@ -110,6 +114,20 @@ export class ProductController {
     @Body() dto: UpdateVariantDto,
   ) {
     return this.productService.updateVariant(variantId, user.orgId!, dto, vendorScopeFor(user));
+  }
+
+  // Which locations the variant is stocked at. It moves no quantity, but it
+  // creates and removes stock rows, so it sits behind the same permission as a
+  // stock adjustment — and is not open to vendors, who do not manage locations.
+  @Put('variants/:variantId/locations')
+  @Roles(...ORG_OPERATORS)
+  @RequirePermissions('inventory.adjust')
+  setVariantLocations(
+    @Param('variantId') variantId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: SetVariantLocationsDto,
+  ) {
+    return this.productService.setVariantLocations(variantId, user.orgId!, dto);
   }
 
   @Delete('variants/:variantId')

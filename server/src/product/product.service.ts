@@ -24,6 +24,7 @@ import {
   BulkUpdateVariantsDto,
   CreateVariantDto,
   ReorderVariantsDto,
+  SetVariantLocationsDto,
   UpdateVariantDto,
 } from './dto/variant.dto';
 import { DEFAULT_VARIANT_TITLE } from './variant-title.util';
@@ -43,6 +44,7 @@ import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { SkuGeneratorService } from '../inventory/sku-generator.service';
+import { mutatePendingLocationChanges } from '../inventory/pending-location-changes';
 import { FxRateService } from '../common/fx/fx-rate.service';
 import { normalizeUqc } from '../gst/constants/uqc';
 import {
@@ -1108,6 +1110,77 @@ export class ProductService {
    * Resolve a variant scoped to the org and assert MANUAL editability. Returns
    * the loaded variant + parent product. Throws 404 / 403 as appropriate.
    */
+  /**
+   * Sets which locations a variant is stocked at ("Edit locations").
+   *
+   * The CRM rows change here and now. Shopify changes on the next product
+   * sync, like every other product edit: each change at a Shopify location is
+   * remembered on the product for the push to apply, and the product is marked
+   * out of sync. A change at a CRM-only location stays in the CRM.
+   */
+  async setVariantLocations(variantId: string, orgId: string, dto: SetVariantLocationsDto) {
+    if (!(await this.inventoryLedger.isWarehousingEnabled(orgId))) {
+      throw new BadRequestException('Warehousing is not enabled for this organization.');
+    }
+    const variant = await this.loadVariantForEdit(variantId, orgId);
+    // An untracked variant deliberately has no stock rows (ensureStockRows
+    // skips it); giving it one here would make it appear on stock screens with
+    // a quantity nothing maintains.
+    if (!variant.trackQuantity) {
+      const productSettings = await this.settings.getProductSettings(orgId);
+      if (productSettings.trackQuantityGlobally !== true) {
+        throw new BadRequestException(
+          'This variant does not track quantity. Turn tracking on before choosing locations.',
+        );
+      }
+    }
+    const productId = variant.product.id;
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const locationChange = await this.inventoryLedger.setVariantLocations(
+        tx,
+        orgId,
+        variantId,
+        dto.warehouseIds,
+      );
+
+      // CRM-only locations have nothing on Shopify to change.
+      const shopifyChanges = [
+        ...locationChange.added.map((location) => ({ ...location, action: 'add' as const })),
+        ...locationChange.removed.map((location) => ({ ...location, action: 'remove' as const })),
+      ].filter(
+        (entry): entry is typeof entry & { shopifyLocationId: string } =>
+          !!entry.shopifyLocationId,
+      );
+      if (shopifyChanges.length === 0) return { locationChange, needsShopifySync: false };
+
+      // The latest edit for a location replaces whatever was waiting for it:
+      // ticking a location again cancels its queued removal, and vice versa.
+      const changedWarehouseIds = new Set(shopifyChanges.map((entry) => entry.warehouseId));
+      await mutatePendingLocationChanges(tx, productId, orgId, (pendingChanges) => [
+        ...pendingChanges.filter(
+          (pending) =>
+            !(pending.variantId === variantId && changedWarehouseIds.has(pending.warehouseId)),
+        ),
+        ...shopifyChanges.map((entry) => ({
+          variantId,
+          warehouseId: entry.warehouseId,
+          shopifyLocationId: entry.shopifyLocationId,
+          action: entry.action,
+        })),
+      ]);
+      await this.markOutOfSyncIfNeeded(productId, tx);
+      return { locationChange, needsShopifySync: true };
+    });
+
+    return {
+      ok: true,
+      added: outcome.locationChange.added.length,
+      removed: outcome.locationChange.removed.length,
+      needsShopifySync: outcome.needsShopifySync,
+    };
+  }
+
   private async loadVariantForEdit(
     variantId: string,
     orgId: string,

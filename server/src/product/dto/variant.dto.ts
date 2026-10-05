@@ -291,3 +291,17 @@ export class BulkUpdateVariantsDto {
   @Type(() => BulkVariantUpdateItemDto)
   updates: BulkVariantUpdateItemDto[];
 }
+
+/**
+ * The full set of locations one variant is stocked at. Sent whole, like
+ * Shopify's "Edit locations" dialog: the server works out which locations to
+ * start stocking and which to stop. At least one, because a tracked variant
+ * stocked nowhere is invisible on the Inventory screen and cannot be sold.
+ */
+export class SetVariantLocationsDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  warehouseIds: string[];
+}

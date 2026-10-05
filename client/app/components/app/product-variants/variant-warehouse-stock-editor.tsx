@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
+import { Pencil } from "lucide-react";
 
 import { Input } from "~/components/ui/input";
+import { Tip } from "~/components/ui/tooltip";
 import { STOCK_TERMS } from "~/lib/inventory-vocabulary";
 import { useSelectedLocation } from "~/hooks/use-selected-location";
 import { useVariantStock } from "~/hooks/use-inventory-queries";
 import { cn } from "~/lib/utils";
+import { VariantLocationsDialog } from "./variant-locations-dialog";
 
 /**
  * Editable per-warehouse Available quantities for one variant.
@@ -18,6 +21,9 @@ import { cn } from "~/lib/utils";
  * warehouse), not through the variant PATCH: the server rejects an
  * `inventoryQuantity` that arrives without a `warehouseId`, and the adjustment
  * path is what writes the audit ledger row.
+ *
+ * Only locations the variant is stocked at are listed. The pencil beside the
+ * heading opens the dialog that adds or removes one.
  */
 export function VariantWarehouseStockEditor({
   variantId,
@@ -30,16 +36,20 @@ export function VariantWarehouseStockEditor({
   /** warehouseId → desired AVAILABLE, as typed. */
   values: Record<string, string>;
   onChange: (warehouseId: string, value: string) => void;
-  /** Fired once, when the levels first arrive, to seed the draft and baseline. */
+  /**
+   * Fired when the levels first arrive, and again whenever the set of
+   * locations changes, to seed the draft and baseline.
+   */
   onLevelsLoaded: (seed: Record<string, string>) => void;
   disabled?: boolean;
 }) {
   const stock = useVariantStock(variantId);
   const { locationId } = useSelectedLocation({ sync: false });
-  const seeded = useRef(false);
+  const seededLocationsKey = useRef<string | null>(null);
+  const [isLocationsDialogOpen, setLocationsDialogOpen] = useState(false);
 
-  // Every location stays listed — Shopify's variant page lists them all, and
-  // each box is labelled, so nothing is ambiguous. The one the merchant is
+  // Every stocked location stays listed — Shopify's variant page lists them
+  // all, and each box is labelled, so nothing is ambiguous. The one the merchant is
   // currently working in is pinned to the top so the page respects their
   // choice without hiding the others.
   const levels = useMemo(() => {
@@ -50,9 +60,16 @@ export function VariantWarehouseStockEditor({
     );
   }, [stock.data?.levels, locationId]);
 
+  // Keyed on which locations are present, not on the data itself: a refetch
+  // that only brings fresh quantities must not overwrite what is being typed.
   useEffect(() => {
-    if (seeded.current || !levels) return;
-    seeded.current = true;
+    if (!levels) return;
+    const locationsKey = levels
+      .map((level) => level.warehouseId)
+      .sort()
+      .join(",");
+    if (seededLocationsKey.current === locationsKey) return;
+    seededLocationsKey.current = locationsKey;
     const seed: Record<string, string> = {};
     for (const level of levels) seed[level.warehouseId] = String(level.available);
     onLevelsLoaded(seed);
@@ -66,25 +83,60 @@ export function VariantWarehouseStockEditor({
   if (stock.isError) {
     return <div className={shell}>Couldn&apos;t load stock by warehouse.</div>;
   }
+  // Wrapped so a click in the dialog (or on its backdrop) stops here. React
+  // events bubble through the component tree, and this editor sits inside an
+  // expandable variant row whose own click handlers would otherwise fire.
+  const locationsDialog = isLocationsDialogOpen && (
+    <div onClick={(e) => e.stopPropagation()}>
+      <VariantLocationsDialog
+        variantId={variantId}
+        levels={levels ?? []}
+        onClose={() => setLocationsDialogOpen(false)}
+      />
+    </div>
+  );
+
   if (!levels || levels.length === 0) {
     return (
       <div className={shell}>
-        No stock recorded for this variant yet. Add some from{" "}
+        This variant isn&apos;t stocked at any location yet.{" "}
+        <button
+          type="button"
+          className="underline disabled:opacity-50"
+          onClick={() => setLocationsDialogOpen(true)}
+          disabled={disabled}
+        >
+          Choose locations
+        </button>{" "}
+        or set a quantity from{" "}
         <Link to="/products/inventory" className="underline">
           Inventory
         </Link>
-        — pick a location and set a quantity.
+        .
+        {locationsDialog}
       </div>
     );
   }
 
   return (
     <div className="divide-y rounded-lg border border-border">
+      {locationsDialog}
       {/* Names the figure being edited. Without this the merchant is typing
           into an unlabelled box and has to guess which bucket it is. */}
       <div className="flex items-center gap-3 bg-muted/50 px-4 py-2">
-        <span className="min-w-0 flex-1 text-micro font-medium uppercase tracking-wide text-muted-foreground">
+        <span className="flex min-w-0 flex-1 items-center gap-1.5 text-micro font-medium uppercase tracking-wide text-muted-foreground">
           Location
+          <Tip text="Edit locations">
+            <button
+              type="button"
+              aria-label="Edit locations"
+              className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+              onClick={() => setLocationsDialogOpen(true)}
+              disabled={disabled}
+            >
+              <Pencil className="size-3" />
+            </button>
+          </Tip>
         </span>
         <span className="w-24 text-right text-micro font-medium uppercase tracking-wide text-muted-foreground">
           {STOCK_TERMS.available.label}

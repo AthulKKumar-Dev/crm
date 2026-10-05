@@ -2159,6 +2159,49 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
   }
 `;
 
+// ─── inventoryDeactivate ────────────────────────────────────────────────────
+// Stops stocking an inventory item at a location. It takes the inventory
+// LEVEL id, not the item + location pair, hence the lookup query. Shopify
+// refuses when the level is the item's only one, or still has committed or
+// incoming stock — reported through userErrors.
+
+export interface InventoryLevelAtLocationResponse {
+  inventoryItem: {
+    inventoryLevel: {
+      id: string;
+      quantities: Array<{ name: string; quantity: number }>;
+    } | null;
+  } | null;
+}
+
+export const INVENTORY_LEVEL_AT_LOCATION_QUERY = /* GraphQL */ `
+  query InventoryLevelAtLocation($inventoryItemId: ID!, $locationId: ID!) {
+    inventoryItem(id: $inventoryItemId) {
+      inventoryLevel(locationId: $locationId) {
+        id
+        quantities(names: ["available", "on_hand", "committed", "incoming"]) {
+          name
+          quantity
+        }
+      }
+    }
+  }
+`;
+
+export interface InventoryDeactivateResponse {
+  inventoryDeactivate: {
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const INVENTORY_DEACTIVATE_MUTATION = /* GraphQL */ `
+  mutation InventoryDeactivate($inventoryLevelId: ID!) {
+    inventoryDeactivate(inventoryLevelId: $inventoryLevelId) {
+      userErrors { field message }
+    }
+  }
+`;
+
 // ─── inventoryActivate ──────────────────────────────────────────────────────
 // Stocks an inventory item at a location (and optionally sets its available
 // quantity). inventorySetQuantities rejects a write to a location the item is
