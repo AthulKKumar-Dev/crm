@@ -108,8 +108,28 @@ describe('AuthService — session lifecycle', () => {
         updateMany: jest.fn().mockResolvedValue(undefined),
       },
     };
+    // Mirrors the real rotation marker: 'pending' once the token is consumed,
+    // then the winner's result, or cleared if the winner failed.
+    let rotation: unknown = null;
     const redis = {
       getRefreshToken: jest.fn().mockResolvedValue(stored),
+      // Single use, like the real script: only the first caller gets the data.
+      consumeRefreshToken: jest
+        .fn()
+        .mockImplementationOnce(() => {
+          if (stored) rotation = 'pending';
+          return Promise.resolve(stored);
+        })
+        .mockResolvedValue(null),
+      getRefreshRotation: jest.fn().mockImplementation(() => Promise.resolve(rotation)),
+      setRefreshRotationResult: jest.fn().mockImplementation((_token: string, result: unknown) => {
+        rotation = result;
+        return Promise.resolve();
+      }),
+      clearRefreshRotation: jest.fn().mockImplementation(() => {
+        rotation = null;
+        return Promise.resolve();
+      }),
       deleteRefreshToken: jest.fn().mockResolvedValue(undefined),
       setRefreshToken: jest.fn().mockResolvedValue(undefined),
       trackUserToken: jest.fn().mockResolvedValue(undefined),
@@ -155,6 +175,44 @@ describe('AuthService — session lifecycle', () => {
     expect(redis.setAuthSession).not.toHaveBeenCalled();
     expect(jwt.sign).toHaveBeenCalledWith(expect.objectContaining({ sid: 's1' }));
     expect(redis.setRefreshToken).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ sid: 's1' }));
+  });
+
+  it('rotates a refresh token once; a concurrent duplicate gets the same replacement', async () => {
+    const { service, jwt, redis } = build({ userId: 'u1', orgId: 'org-a', sid: 's1' });
+
+    const [first, second] = await Promise.all([service.rotateRefreshToken('old'), service.rotateRefreshToken('old')]);
+
+    // One rotation, one new refresh token — not two independent sessions.
+    expect(jwt.sign).toHaveBeenCalledTimes(1);
+    expect(redis.setRefreshToken).toHaveBeenCalledTimes(1);
+    expect(second).toEqual(first);
+  });
+
+  it('rejects a spent refresh token once no rotation of it is in flight', async () => {
+    const { service, jwt } = build({ userId: 'u1', orgId: 'org-a', sid: 's1' });
+    await service.rotateRefreshToken('old');
+    // The grace window has passed.
+    await service['redis'].clearRefreshRotation('old');
+
+    await expect(service.rotateRefreshToken('old')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(jwt.sign).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a waiting duplicate when the rotation it lost to fails', async () => {
+    const { service, redis } = build({ userId: 'u1', orgId: 'org-a', sid: 's1' }, false);
+
+    const outcomes = await Promise.allSettled([service.rotateRefreshToken('old'), service.rotateRefreshToken('old')]);
+
+    expect(outcomes.map((o) => o.status)).toEqual(['rejected', 'rejected']);
+    expect(redis.clearRefreshRotation).toHaveBeenCalledWith('old');
+    expect(redis.setRefreshRotationResult).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown refresh token without waiting', async () => {
+    const { service, redis } = build(null);
+
+    await expect(service.rotateRefreshToken('never-issued')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(redis.getRefreshRotation).toHaveBeenCalledTimes(1);
   });
 
   it('refuses a refresh whose session was revoked instead of re-creating it', async () => {
