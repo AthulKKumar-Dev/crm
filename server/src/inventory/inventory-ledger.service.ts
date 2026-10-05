@@ -169,6 +169,119 @@ export class InventoryLedgerService {
     });
   }
 
+  /**
+   * Sets which locations a variant is stocked at — the "Edit locations" dialog.
+   *
+   * Every stock screen lists stock ROWS, so a variant could only ever be
+   * edited where a row already existed: there was no way to start holding it
+   * at a second location. This adds an empty row for each newly chosen
+   * location and drops the row for each one left out.
+   *
+   * No quantity moves, so there is no ledger entry: a new row starts at zero,
+   * and a row is only removed once every bucket in it is zero.
+   *
+   * Runs in the caller's transaction. Returns what changed, with each
+   * location's Shopify id, so the caller can mirror it to Shopify.
+   */
+  async setVariantLocations(
+    db: Db,
+    orgId: string,
+    variantId: string,
+    warehouseIds: string[],
+  ): Promise<{
+    added: Array<{ warehouseId: string; shopifyLocationId: string | null }>;
+    removed: Array<{ warehouseId: string; shopifyLocationId: string | null }>;
+  }> {
+    // Same lock applyMovement takes. Without it an adjustment can land in a
+    // row between the "is it empty?" check below and the delete, and the stock
+    // it added is deleted with the row.
+    await db.$queryRaw`SELECT 1 FROM "product_variants" WHERE "id" = ${variantId} FOR UPDATE`;
+
+    const requestedWarehouseIds = [...new Set(warehouseIds)];
+    const requestedWarehouses = await db.warehouse.findMany({
+      where: { id: { in: requestedWarehouseIds }, organizationId: orgId, isActive: true },
+      select: { id: true, shopifyLocationId: true },
+    });
+    if (requestedWarehouses.length !== requestedWarehouseIds.length) {
+      throw new NotFoundException('Location not found');
+    }
+
+    const rows = await db.stockLevel.findMany({
+      where: { variantId },
+      select: {
+        id: true,
+        warehouseId: true,
+        available: true,
+        reserved: true,
+        qc: true,
+        damaged: true,
+        warehouse: { select: { name: true, isActive: true, shopifyLocationId: true } },
+      },
+    });
+
+    // Rows at a deactivated location are left alone: the dialog cannot show
+    // them, so their absence from the list is not a request to remove them.
+    const rowsToRemove = rows.filter(
+      (row) => row.warehouse.isActive && !requestedWarehouseIds.includes(row.warehouseId),
+    );
+    for (const row of rowsToRemove) {
+      if (row.available !== 0 || row.reserved !== 0 || row.qc !== 0 || row.damaged !== 0) {
+        throw new ConflictException(
+          `${row.warehouse.name} still holds stock for this variant. Set every quantity there to 0 first.`,
+        );
+      }
+    }
+
+    const stockedWarehouseIds = new Set(rows.map((row) => row.warehouseId));
+    const warehousesToAdd = requestedWarehouses.filter(
+      (warehouse) => !stockedWarehouseIds.has(warehouse.id),
+    );
+    if (warehousesToAdd.length > 0) {
+      await db.stockLevel.createMany({
+        data: warehousesToAdd.map((warehouse) => ({
+          organizationId: orgId,
+          variantId,
+          warehouseId: warehouse.id,
+        })),
+        skipDuplicates: true,
+      });
+    }
+    if (rowsToRemove.length > 0) {
+      // The zero test is repeated in the delete itself: the lock above covers
+      // movements, and this covers any writer that does not take it.
+      const deleteResult = await db.stockLevel.deleteMany({
+        where: {
+          id: { in: rowsToRemove.map((row) => row.id) },
+          available: 0,
+          reserved: 0,
+          qc: 0,
+          damaged: 0,
+        },
+      });
+      if (deleteResult.count !== rowsToRemove.length) {
+        throw new ConflictException(
+          'Stock at one of these locations changed while you were editing. Reload and try again.',
+        );
+      }
+    }
+
+    // Keyed by warehouse so a location with several rows is reported once.
+    const shopifyLocationByRemovedWarehouse = new Map<string, string | null>();
+    for (const row of rowsToRemove) {
+      shopifyLocationByRemovedWarehouse.set(row.warehouseId, row.warehouse.shopifyLocationId);
+    }
+    return {
+      added: warehousesToAdd.map((warehouse) => ({
+        warehouseId: warehouse.id,
+        shopifyLocationId: warehouse.shopifyLocationId,
+      })),
+      removed: [...shopifyLocationByRemovedWarehouse].map(([warehouseId, shopifyLocationId]) => ({
+        warehouseId,
+        shopifyLocationId,
+      })),
+    };
+  }
+
   // ─────────────────────────── legacy path ───────────────────────────
 
   /**

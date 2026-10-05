@@ -16,6 +16,8 @@ import type {
   UpdateProductRequest,
   UpdateVariantRequest,
   ManualSyncResponse,
+  SetVariantLocationsRequest,
+  SetVariantLocationsResponse,
 } from "~/types/api";
 
 /**
@@ -60,6 +62,11 @@ export const productService = {
 
   updateVariant: (variantId: string, data: UpdateVariantRequest) =>
     apiClient.patch<ProductVariant>(`/products/variants/${variantId}`, data).then((r) => r.data),
+
+  setVariantLocations: (variantId: string, data: SetVariantLocationsRequest) =>
+    apiClient
+      .put<SetVariantLocationsResponse>(`/products/variants/${variantId}/locations`, data)
+      .then((r) => r.data),
 
   bulkUpdateVariants: (
     productId: string,

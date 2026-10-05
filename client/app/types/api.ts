@@ -3024,6 +3024,19 @@ export interface CreateAdjustmentRequest {
   note?: string;
 }
 
+/** The full set of locations a variant is stocked at — sent whole. */
+export interface SetVariantLocationsRequest {
+  warehouseIds: string[];
+}
+
+export interface SetVariantLocationsResponse {
+  ok: boolean;
+  added: number;
+  removed: number;
+  /** A Shopify location changed, so the product now needs a sync. */
+  needsShopifySync: boolean;
+}
+
 export interface BulkAdjustmentRequest {
   warehouseId: string;
   items: Array<{

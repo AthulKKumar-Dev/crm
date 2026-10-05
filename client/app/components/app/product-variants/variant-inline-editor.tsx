@@ -322,9 +322,20 @@ export function VariantInlineEditor({
 
   // Both halves move together so a warehouse can never look "changed" merely
   // because the baseline arrived a render later than the form.
+  //
+  // Re-run whenever the variant's set of locations changes. Only locations in
+  // the seed survive: a quantity typed for a location that has since been
+  // removed would otherwise read as an unsaved change and, on save, write an
+  // adjustment that puts the location straight back.
   const seedWarehouses = useCallback((seed: Record<string, string>) => {
     setBaseline((prev) => ({ ...prev, warehouseQty: seed }));
-    setForm((prev) => ({ ...prev, warehouseQty: { ...seed, ...prev.warehouseQty } }));
+    setForm((prev) => {
+      const quantityByWarehouseId: Record<string, string> = {};
+      for (const warehouseId of Object.keys(seed)) {
+        quantityByWarehouseId[warehouseId] = prev.warehouseQty[warehouseId] ?? seed[warehouseId];
+      }
+      return { ...prev, warehouseQty: quantityByWarehouseId };
+    });
   }, []);
 
   const trackQuantity = trackForced ? true : form.trackQuantity;
