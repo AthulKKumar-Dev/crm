@@ -410,6 +410,37 @@ describe('InvoiceService.createForOrderTx dating', () => {
     return { service, tx, invoiceNumber, warn };
   }
 
+  /**
+   * The one-live-invoice guard must count the same rows the partial unique
+   * index does. A credit note carries the original's orderId; counting it
+   * blocked reissuing after the original was cancelled, quoting the credit
+   * note's number back as the "existing invoice".
+   */
+  it("does not treat a credit note as the order's existing invoice", async () => {
+    const { service, tx } = build({ placedAt: new Date('2026-10-01T10:00:00.000Z') });
+    const rows = [{ invoiceNumber: 'CN-26-27/000001', status: 'CREDIT_NOTE' }];
+    tx.invoice.findFirst.mockImplementation((args: any) => {
+      const f = args.where.status;
+      const hit = rows.find((r) =>
+        f?.notIn ? !f.notIn.includes(r.status) : f?.not ? r.status !== f.not : true,
+      );
+      return Promise.resolve(hit ?? null);
+    });
+
+    await expect(service.createForOrderTx(tx as any, ORG, 'order_1', {})).resolves.toBeDefined();
+    expect(tx.invoice.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('still refuses a second invoice while the original is live', async () => {
+    const { service, tx } = build({ placedAt: new Date('2026-10-01T10:00:00.000Z') });
+    tx.invoice.findFirst.mockResolvedValue({ invoiceNumber: 'INV-26-27/000001' });
+
+    await expect(service.createForOrderTx(tx as any, ORG, 'order_1', {})).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    expect(tx.invoice.create).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => jest.useFakeTimers({ now: NOW }));
   afterEach(() => jest.useRealTimers());
 
@@ -631,5 +662,151 @@ describe('InvoiceService.update', () => {
     await expect(
       service.update(ID, ORG, { buyerGstin: 'NOT-A-GSTIN' }, 'user_1'),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+/**
+ * Bulk issue from the Orders list.
+ *
+ * Numbering is read-max-then-increment, so the batch must run one order at a
+ * time — and one bad order must not take the others down with it.
+ */
+describe('InvoiceService.bulkCreate', () => {
+  const ORG = 'org_1';
+
+  const order = (
+    id: string,
+    over: Partial<{
+      financialStatus: string;
+      cancelledAt: Date | null;
+      createdAt: Date;
+      orderNumber: number;
+      invoices: Array<{ invoiceNumber: string }>;
+    }> = {},
+  ) => ({
+    id,
+    name: `#${id}`,
+    orderNumber: over.orderNumber ?? 1,
+    financialStatus: over.financialStatus ?? 'PAID',
+    cancelledAt: over.cancelledAt ?? null,
+    externalCreatedAt: null,
+    createdAt: over.createdAt ?? new Date('2026-10-01T00:00:00Z'),
+    invoices: over.invoices ?? [],
+  });
+
+  function build(
+    orders: ReturnType<typeof order>[],
+    opts: { gstEnabled?: boolean; failFor?: Record<string, Error>; liveAfterFail?: string[] } = {},
+  ) {
+    const prisma = {
+      organization: {
+        findUnique: jest.fn().mockResolvedValue({ gstEnabled: opts.gstEnabled ?? true }),
+      },
+      order: { findMany: jest.fn().mockResolvedValue(orders) },
+      invoice: {
+        findFirst: jest.fn((args: any) =>
+          Promise.resolve(
+            opts.liveAfterFail?.includes(args.where.orderId)
+              ? { invoiceNumber: 'INV-26-27/000099' }
+              : null,
+          ),
+        ),
+      },
+    };
+    const service = new InvoiceService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    let n = 0;
+    const create = jest.spyOn(service, 'create').mockImplementation(async (_org, dto) => {
+      const err = opts.failFor?.[dto.orderId];
+      if (err) throw err;
+      n += 1;
+      return {
+        id: `inv_${dto.orderId}`,
+        invoiceNumber: `INV-26-27/${String(n).padStart(6, '0')}`,
+        invoiceDate: new Date('2026-10-01T00:00:00Z'),
+      } as any;
+    });
+    return { service, prisma, create };
+  }
+
+  it('issues eligible orders and skips the rest with a reason', async () => {
+    const { service } = build([
+      order('paid'),
+      order('done', { invoices: [{ invoiceNumber: 'INV-26-27/000001' }] }),
+      order('gone', { cancelledAt: new Date() }),
+      order('cod', { financialStatus: 'PENDING' }),
+    ]);
+
+    const res = await service.bulkCreate(ORG, ['paid', 'done', 'gone', 'cod', 'missing']);
+
+    expect(res.issued.map((i) => i.orderId)).toEqual(['paid']);
+    expect(res.failed).toEqual([]);
+    expect(Object.fromEntries(res.skipped.map((s) => [s.orderId, s.reason]))).toEqual({
+      done: 'Already invoiced (INV-26-27/000001)',
+      gone: 'Order is cancelled',
+      cod: 'Not paid (pending)',
+      missing: 'Order not found',
+    });
+  });
+
+  it('issues oldest supply date first so serials rise with invoice dates', async () => {
+    const { service, create } = build([
+      order('new', { createdAt: new Date('2026-10-05T00:00:00Z'), orderNumber: 3 }),
+      order('old', { createdAt: new Date('2026-10-01T00:00:00Z'), orderNumber: 1 }),
+      order('mid', { createdAt: new Date('2026-10-03T00:00:00Z'), orderNumber: 2 }),
+    ]);
+
+    await service.bulkCreate(ORG, ['new', 'old', 'mid']);
+
+    expect(create.mock.calls.map(([, dto]) => dto.orderId)).toEqual(['old', 'mid', 'new']);
+  });
+
+  it('keeps going when one order is rejected, and reports why', async () => {
+    const { service } = build([order('a'), order('b'), order('c')], {
+      failFor: { b: new BadRequestException('No GSTIN registration found.') },
+    });
+
+    const res = await service.bulkCreate(ORG, ['a', 'b', 'c']);
+
+    expect(res.issued.map((i) => i.orderId)).toEqual(['a', 'c']);
+    expect(res.failed).toEqual([
+      { orderId: 'b', orderName: '#b', reason: 'No GSTIN registration found.' },
+    ]);
+  });
+
+  it('reports an order invoiced concurrently as skipped, not failed', async () => {
+    const { service } = build([order('a')], {
+      failFor: { a: new ConflictException('Invoice INV-26-27/000099 already exists') },
+      liveAfterFail: ['a'],
+    });
+
+    const res = await service.bulkCreate(ORG, ['a']);
+
+    expect(res.failed).toEqual([]);
+    expect(res.skipped).toEqual([
+      { orderId: 'a', orderName: '#a', reason: 'Already invoiced (INV-26-27/000099)' },
+    ]);
+  });
+
+  it('still returns the batch when the post-failure lookup itself fails', async () => {
+    const { service, prisma } = build([order('a'), order('b')], {
+      failFor: { a: new BadRequestException('No GSTIN registration found.') },
+    });
+    prisma.invoice.findFirst.mockRejectedValueOnce(new Error('connection reset'));
+
+    const res = await service.bulkCreate(ORG, ['a', 'b']);
+
+    expect(res.issued.map((i) => i.orderId)).toEqual(['b']);
+    expect(res.failed).toEqual([
+      { orderId: 'a', orderName: '#a', reason: 'No GSTIN registration found.' },
+    ]);
+  });
+
+  it('refuses the whole batch when GST is off, issuing nothing', async () => {
+    const { service, create } = build([order('a')], { gstEnabled: false });
+
+    await expect(service.bulkCreate(ORG, ['a'])).rejects.toBeInstanceOf(BadRequestException);
+    expect(create).not.toHaveBeenCalled();
   });
 });

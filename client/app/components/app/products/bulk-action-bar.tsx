@@ -3,12 +3,13 @@ import {
   Archive,
   Barcode,
   CheckCheck,
+  ChevronDown,
   Loader2,
+  MoreHorizontal,
   SlidersHorizontal,
   Tag,
   Trash2,
   UploadCloud,
-  X,
 } from "lucide-react";
 import {
   useBulkAddTagsMutation,
@@ -24,10 +25,19 @@ import {
 } from "~/hooks/use-inventory-mutations";
 import type { Product, ProductStatus } from "~/types/api";
 import { Tip } from "~/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "~/components/ui/dropdown-menu";
+import { DockButton, FloatingDock } from "~/components/app/floating-dock";
 
 /**
- * Sticky action bar shown above the products table when one or more rows are
- * selected. Provides bulk archive / delete / status / tag / sync actions.
+ * Floating dock of bulk actions shown while one or more products are selected.
+ * Status, tagging, sync, archive and delete sit in the pill; the less frequent
+ * remove-tags and SKU/barcode generation live in its overflow menu.
  *
  * Both MANUAL and SHOPIFY-channel products are now editable — the prior
  * "read-only" carve-out for synced products was removed. Bulk actions touch
@@ -74,7 +84,6 @@ export function BulkActionBar({
 
   const [tagDialogOpen, setTagDialogOpen] = useState<"add" | "remove" | null>(null);
   const [tagsInput, setTagsInput] = useState("");
-  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
 
   const isPending =
     archive.isPending ||
@@ -109,7 +118,6 @@ export function BulkActionBar({
   }
 
   function handleStatus(status: ProductStatus) {
-    setStatusMenuOpen(false);
     setStatus.mutate({ productIds: ids, status }, { onSuccess: handleAfter(() => undefined) });
   }
 
@@ -135,107 +143,119 @@ export function BulkActionBar({
 
   return (
     <>
-      <div className="sticky top-2 z-30 flex flex-wrap items-center gap-2 rounded-xl border border-input bg-white dark:bg-gray-900 px-3 py-2 shadow-lg">
-        <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">
-          {ids.length} selected
-          {offPageCount > 0 && (
-            <span className="ml-1 font-normal text-muted-foreground">
-              ({offPageCount} on other pages)
-            </span>
-          )}
-        </span>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          <ActionButton onClick={handleArchive} disabled={isPending || editableCount === 0}>
-            <Archive className="size-3.5" /> Archive
-          </ActionButton>
+      <FloatingDock
+        count={ids.length}
+        noun="selected"
+        summary={offPageCount > 0 ? `${offPageCount} on other pages` : undefined}
+        onClear={onClear}
+      >
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <DockButton disabled={isPending || editableCount === 0}>
+              <CheckCheck /> Status <ChevronDown className="-ml-0.5 opacity-60" />
+            </DockButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent side="top" align="start" sideOffset={10} className="w-36">
+            {(["ACTIVE", "DRAFT", "ARCHIVED"] as ProductStatus[]).map((s) => (
+              <DropdownMenuItem key={s} onSelect={() => handleStatus(s)}>
+                {s.charAt(0) + s.slice(1).toLowerCase()}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-          <div className="relative">
-            <ActionButton
-              onClick={() => setStatusMenuOpen((v) => !v)}
-              disabled={isPending || editableCount === 0}
-            >
-              <CheckCheck className="size-3.5" /> Status
-            </ActionButton>
-            {statusMenuOpen && (
-              <div
-                className="absolute right-0 top-9 z-40 w-32 rounded-lg border border-input bg-white dark:bg-gray-900 p-1 shadow-lg"
-                onMouseLeave={() => setStatusMenuOpen(false)}
+        <DockButton
+          onClick={() => setTagDialogOpen("add")}
+          disabled={isPending || editableCount === 0}
+        >
+          <Tag /> Add tags
+        </DockButton>
+        <DockButton onClick={handleSync} disabled={isPending || editableCount === 0}>
+          <UploadCloud /> Sync to Shopify
+        </DockButton>
+        <DockButton onClick={handleArchive} disabled={isPending || editableCount === 0}>
+          <Archive /> Archive
+        </DockButton>
+        {archivedCount > 0 && (
+          <Tip
+            text={`Delete forever — ${archivedCount} of ${ids.length} are archived and can be permanently deleted`}
+          >
+            <span className="inline-flex">
+              <DockButton
+                tone="danger"
+                iconOnly
+                onClick={handleDelete}
+                disabled={isPending}
+                aria-label="Delete forever"
               >
-                {(["ACTIVE", "DRAFT", "ARCHIVED"] as ProductStatus[]).map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => handleStatus(s)}
-                    className="block w-full rounded px-2 py-1 text-left text-xs hover:bg-gray-100 dark:hover:bg-gray-800"
-                  >
-                    {s.charAt(0) + s.slice(1).toLowerCase()}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                <Trash2 />
+              </DockButton>
+            </span>
+          </Tip>
+        )}
 
-          <ActionButton
-            onClick={() => setTagDialogOpen("add")}
-            disabled={isPending || editableCount === 0}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <DockButton iconOnly disabled={isPending} aria-label="More actions">
+              <MoreHorizontal />
+            </DockButton>
+          </DropdownMenuTrigger>
+          {/* "Remove tags" opens the tag modal; without this the menu hands
+              focus back to its trigger on close and steals it from the
+              modal's input. */}
+          <DropdownMenuContent
+            side="top"
+            align="end"
+            sideOffset={10}
+            className="w-60"
+            onCloseAutoFocus={(e) => e.preventDefault()}
           >
-            <Tag className="size-3.5" /> Add tags
-          </ActionButton>
-          <ActionButton
-            onClick={() => setTagDialogOpen("remove")}
-            disabled={isPending || editableCount === 0}
-          >
-            <Tag className="size-3.5" /> Remove tags
-          </ActionButton>
-          <ActionButton
-            onClick={() =>
-              generateSkus.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
-            }
-            disabled={isPending || missingSkuCount === 0}
-            title={
-              missingSkuCount === 0
-                ? "Every selected variant already has a SKU"
-                : `${missingSkuCount} of ${selectedVariants.length} variants need a SKU`
-            }
-          >
-            <SlidersHorizontal className="size-3.5" /> Create SKUs ({missingSkuCount})
-          </ActionButton>
-          <ActionButton
-            onClick={() =>
-              generateBarcodes.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
-            }
-            disabled={isPending || missingBarcodeCount === 0}
-            title={
-              missingBarcodeCount === 0
-                ? "Every selected variant already has a barcode"
-                : `${missingBarcodeCount} of ${selectedVariants.length} variants need a barcode`
-            }
-          >
-            <Barcode className="size-3.5" /> Create barcodes ({missingBarcodeCount})
-          </ActionButton>
-          <ActionButton onClick={handleSync} disabled={isPending || editableCount === 0}>
-            <UploadCloud className="size-3.5" /> Sync to Shopify
-          </ActionButton>
-          {archivedCount > 0 && (
-            <ActionButton
-              onClick={handleDelete}
-              disabled={isPending}
-              tone="danger"
-              title={`${archivedCount} of ${ids.length} are archived and can be permanently deleted`}
+            <DropdownMenuItem
+              onSelect={() => setTagDialogOpen("remove")}
+              disabled={editableCount === 0}
             >
-              <Trash2 className="size-3.5" /> Delete forever
-            </ActionButton>
-          )}
-          <button
-            type="button"
-            onClick={onClear}
-            className="rounded p-1 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800"
-            title="Clear selection"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
-      </div>
+              <Tag /> Remove tags
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {/* The scope line is the only statement of how many of the
+                selected variants a generate action will change. */}
+            <DropdownMenuItem
+              onSelect={() =>
+                generateSkus.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
+              }
+              disabled={missingSkuCount === 0}
+              className="items-start"
+            >
+              <SlidersHorizontal className="mt-0.5" />
+              <span className="flex flex-col">
+                Create SKUs ({missingSkuCount})
+                <span className="text-caption text-muted-foreground">
+                  {missingSkuCount === 0
+                    ? "Every selected variant already has a SKU"
+                    : `${missingSkuCount} of ${selectedVariants.length} variants need a SKU`}
+                </span>
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() =>
+                generateBarcodes.mutate({ variantIds }, { onSuccess: handleAfter(() => undefined) })
+              }
+              disabled={missingBarcodeCount === 0}
+              className="items-start"
+            >
+              <Barcode className="mt-0.5" />
+              <span className="flex flex-col">
+                Create barcodes ({missingBarcodeCount})
+                <span className="text-caption text-muted-foreground">
+                  {missingBarcodeCount === 0
+                    ? "Every selected variant already has a barcode"
+                    : `${missingBarcodeCount} of ${selectedVariants.length} variants need a barcode`}
+                </span>
+              </span>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </FloatingDock>
 
       {tagDialogOpen && (
         <div
@@ -285,46 +305,5 @@ export function BulkActionBar({
         </div>
       )}
     </>
-  );
-}
-
-function ActionButton({
-  children,
-  onClick,
-  disabled,
-  tone = "default",
-  title,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  tone?: "default" | "danger";
-  title?: string;
-}) {
-  const button = (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex items-center gap-1 rounded-md border border-input px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:pointer-events-none ${
-        tone === "danger"
-          ? "bg-white dark:bg-gray-900 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20"
-          : "bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800"
-      }`}
-    >
-      {children}
-    </button>
-  );
-
-  // A real tooltip rather than the native `title`, which never appears on
-  // touch and is unreachable by keyboard — and these strings carry the only
-  // statement of how many of the selected variants an action will change.
-  // `disabled` is kept off the trigger wrapper so the tip still opens on a
-  // button that has nothing to do, which is exactly when it explains why.
-  if (!title) return button;
-  return (
-    <Tip text={title}>
-      <span className="inline-flex">{button}</span>
-    </Tip>
   );
 }

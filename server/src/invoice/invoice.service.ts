@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  HttpException,
   PayloadTooLargeException,
 } from '@nestjs/common';
 import {
@@ -146,6 +147,21 @@ function nonEmptyAddress(
   return address && Object.keys(address).length > 0 ? address : null;
 }
 
+/** Outcome of `InvoiceService.bulkCreate`, one entry per requested order. */
+export interface BulkInvoiceResult {
+  issued: Array<{
+    orderId: string;
+    orderName: string;
+    invoiceId: string;
+    invoiceNumber: string;
+    invoiceDate: Date;
+  }>;
+  /** Not attempted, or found already invoiced — nothing is wrong with these. */
+  skipped: Array<{ orderId: string; orderName: string | null; reason: string }>;
+  /** Attempted and rejected — the reason is the server's message. */
+  failed: Array<{ orderId: string; orderName: string; reason: string }>;
+}
+
 @Injectable()
 export class InvoiceService {
   private readonly logger = new Logger(InvoiceService.name);
@@ -184,6 +200,136 @@ export class InvoiceService {
           ),
       },
     );
+  }
+
+  /**
+   * Issue invoices for a batch of selected orders — the Orders list's bulk
+   * action. Only PAID, uncancelled orders without a live invoice are issued;
+   * every other order comes back under `skipped` with the reason.
+   *
+   * Strictly one order at a time, each through `create` in its own
+   * transaction. Numbering is read-max-then-increment under Serializable, so
+   * issuing in parallel would collide on every attempt and could exhaust the
+   * retry; and a single wrapping transaction would let one bad order roll back
+   * the rest. A failure never consumes a serial.
+   *
+   * Eligible orders go oldest supply date first, so within the batch serials
+   * follow the order dates. (An order too old to be dated to its own month is
+   * dated today by `createForOrderTx`, so this is best effort, not a rule.)
+   *
+   * Failures are returned, not written to `order.invoiceError` — the person
+   * who pressed the button sees them at once, as with the single-order flow.
+   */
+  async bulkCreate(orgId: string, orderIds: string[]): Promise<BulkInvoiceResult> {
+    const ids = [...new Set(orderIds)];
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { gstEnabled: true },
+    });
+    if (!org?.gstEnabled) {
+      throw new BadRequestException(
+        'GST is not enabled for this organization. Enable it in Settings → Tax & GST.',
+      );
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where: { id: { in: ids }, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        orderNumber: true,
+        financialStatus: true,
+        cancelledAt: true,
+        externalCreatedAt: true,
+        createdAt: true,
+        invoices: {
+          where: { status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] } },
+          select: { invoiceNumber: true },
+          take: 1,
+        },
+      },
+    });
+    const byId = new Map(orders.map((o) => [o.id, o]));
+
+    const result: BulkInvoiceResult = { issued: [], skipped: [], failed: [] };
+    const eligible: typeof orders = [];
+
+    for (const id of ids) {
+      const order = byId.get(id);
+      if (!order) {
+        result.skipped.push({ orderId: id, orderName: null, reason: 'Order not found' });
+      } else if (order.invoices.length > 0) {
+        result.skipped.push({
+          orderId: id,
+          orderName: order.name,
+          reason: `Already invoiced (${order.invoices[0].invoiceNumber})`,
+        });
+      } else if (order.cancelledAt) {
+        result.skipped.push({ orderId: id, orderName: order.name, reason: 'Order is cancelled' });
+      } else if (order.financialStatus !== OrderFinancialStatus.PAID) {
+        result.skipped.push({
+          orderId: id,
+          orderName: order.name,
+          reason: `Not paid (${order.financialStatus.toLowerCase().replace(/_/g, ' ')})`,
+        });
+      } else {
+        eligible.push(order);
+      }
+    }
+
+    const now = new Date();
+    eligible.sort(
+      (a, b) =>
+        resolveSupplyDate(a, now).getTime() - resolveSupplyDate(b, now).getTime() ||
+        a.orderNumber - b.orderNumber,
+    );
+
+    for (const order of eligible) {
+      try {
+        const invoice = await this.create(orgId, { orderId: order.id } as CreateInvoiceDto);
+        result.issued.push({
+          orderId: order.id,
+          orderName: order.name,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          invoiceDate: invoice.invoiceDate,
+        });
+      } catch (err) {
+        // A concurrent issue (another tab, auto-invoice on a webhook) is
+        // rejected by the duplicate check or the partial unique index. The
+        // order is invoiced either way, so report it as such. This lookup must
+        // not throw: invoices earlier in the batch are already issued, and a
+        // 500 here would hide them from the person who issued them.
+        const live = await this.prisma.invoice
+          .findFirst({
+            where: {
+              orderId: order.id,
+              organizationId: orgId,
+              status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+            },
+            select: { invoiceNumber: true },
+          })
+          .catch(() => null);
+        if (live) {
+          result.skipped.push({
+            orderId: order.id,
+            orderName: order.name,
+            reason: `Already invoiced (${live.invoiceNumber})`,
+          });
+        } else if (err instanceof HttpException) {
+          result.failed.push({ orderId: order.id, orderName: order.name, reason: err.message });
+        } else {
+          this.logger.error(
+            `Bulk invoice failed for order ${order.id}`,
+            err instanceof Error ? err.stack : String(err),
+          );
+          result.failed.push({ orderId: order.id, orderName: order.name, reason: 'Unexpected error' });
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -335,11 +481,13 @@ export class InvoiceService {
     // the read above — but the 409 below quotes the invoice NUMBER back to the
     // caller, so an unscoped read here is one deleted line away from leaking a
     // different tenant's invoice number.
+    // Credit notes share the original's orderId but are not the order's
+    // invoice — the same set the partial unique index treats as live.
     const existingInvoice = await tx.invoice.findFirst({
       where: {
         orderId,
         organizationId: orgId,
-        status: { not: InvoiceStatus.CANCELLED },
+        status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
       },
       select: { invoiceNumber: true },
     });
