@@ -14,12 +14,19 @@ export function useCreateInvoiceMutation() {
 
   return useMutation({
     mutationFn: (data: CreateInvoiceRequest) => invoiceService.create(data),
-    onSuccess: () => {
+    onSuccess: (invoice) => {
       queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
       // The order detail embeds its live invoice — refresh it so the invoice
       // card appears and the Generate button hides.
       queryClient.invalidateQueries({ queryKey: orderKeys.all });
-      toast.success("GST invoice generated successfully.");
+      // The date is the GST filing month. It is the order's date, or today when
+      // the order's month was already filed — say which, so neither surprises.
+      const dated = new Date(invoice.invoiceDate).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+      toast.success(`GST invoice ${invoice.invoiceNumber} issued, dated ${dated}.`);
     },
     onError: (error) =>
       handleMutationError(error, "Failed to generate invoice."),

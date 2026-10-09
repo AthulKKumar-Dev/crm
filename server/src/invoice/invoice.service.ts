@@ -57,6 +57,7 @@ import {
   type ReturnInvoice,
 } from './gst-return.accumulator';
 import { summarizeDocumentSeries } from './document-series.util';
+import { resolveSupplyDate } from './invoice-date.util';
 import {
   buildGstr1Sections,
   buildGstr3bSections,
@@ -583,23 +584,56 @@ export class InvoiceService {
 
     
 
-    // 8. Generate invoice number (passes the same tx so it's atomic with the create below)
-    const invoiceDate = new Date();
-    const financialYear = this.calculator.getFinancialYear(
+    // 8. Date the document, then number it.
+    //
+    // The invoice date decides everything statutory about this document: the
+    // GST period it is reported in, its financial year, and therefore which
+    // consecutive series its serial comes from. This used to be `new Date()`,
+    // so a September order invoiced on 8 October was filed in October, and a
+    // 30 March order invoiced in April drew a new-year serial. The order's own
+    // date is the taxable supply date; "today" is only when the button was
+    // pressed.
+    const now = new Date();
+    const timeZone = this.gstTimeZone(orgId, org);
+    let invoiceDate = resolveSupplyDate(order, now);
+
+    // A late invoice for a period that has already been filed cannot be added
+    // to that return. The statutory treatment is to issue it dated today, into
+    // the current open period — which is also exactly what every invoice did
+    // before the order date was honoured, so this path cannot regress anyone.
+    const filing = await this.findPeriodFiling(
+      tx,
+      orgId,
       invoiceDate,
-      this.gstTimeZone(orgId, org),
+      sellerGstin.id,
+      timeZone,
     );
-    // A filed period is closed. Issuing into it would change a return that has
-    // already gone to the government, with no amendment trail.
+    if (filing) {
+      this.logger.warn(
+        `Order ${order.id}: supply date ${invoiceDate.toISOString()} falls in ` +
+          `${filing.returnType} ${filing.period}/${filing.financialYear}, which is ` +
+          `already filed — dating the invoice today instead.`,
+      );
+      invoiceDate = now;
+    }
+
+    const financialYear = this.calculator.getFinancialYear(invoiceDate, timeZone);
+    // Still asserted: today's period could itself be filed (a quarterly filer
+    // who recorded the quarter early), and that must stay a 409.
     await this.assertPeriodOpen(
       tx,
       orgId,
       invoiceDate,
       sellerGstin.id,
-      this.gstTimeZone(orgId, org),
+      timeZone,
       'Issuing an invoice',
     );
 
+    // Serial from the year the invoice is DATED in, so a March order invoiced
+    // in April stays in the old year's run. Back-dating can give a later serial
+    // an earlier date once newer invoices exist; the series is still gapless
+    // and consecutive, which is what Rule 46(b) requires. Chronological order
+    // of serials is not.
     const invoiceNum = await this.invoiceNumber.getNextInvoiceNumber(
       orgId,
       financialYear,
@@ -983,22 +1017,17 @@ export class InvoiceService {
 
   // ─── FILING STATE ───
   /**
-   * Refuse to change a period that has already been filed.
-   *
-   * Nothing recorded a filing before, so GSTR-1/3B were recomputed from
-   * `invoices` on every request — issuing or cancelling an invoice inside an
-   * already-filed month silently rewrote history with no amendment trail. The
-   * statutory correction for a filed period is a credit note or an amendment,
-   * never an edit.
+   * The filing that locks the period `invoiceDate` falls in, or null when the
+   * period is open. Shared by `assertPeriodOpen`, which throws, and the
+   * late-invoice fallback in `createForOrderTx`, which re-dates.
    */
-  private async assertPeriodOpen(
+  private async findPeriodFiling(
     client: Prisma.TransactionClient | PrismaService,
     orgId: string,
     invoiceDate: Date,
     sellerGstinId: string,
     timeZone: string,
-    action: string,
-  ): Promise<void> {
+  ) {
     const financialYear = getFinancialYear(invoiceDate, timeZone);
     const month = String(zonedParts(invoiceDate, timeZone).month).padStart(2, '0');
 
@@ -1019,7 +1048,35 @@ export class InvoiceService {
       select: { returnType: true, period: true, filedAt: true, arn: true },
     });
 
+    return filing ? { ...filing, financialYear } : null;
+  }
+
+  /**
+   * Refuse to change a period that has already been filed.
+   *
+   * Nothing recorded a filing before, so GSTR-1/3B were recomputed from
+   * `invoices` on every request — issuing or cancelling an invoice inside an
+   * already-filed month silently rewrote history with no amendment trail. The
+   * statutory correction for a filed period is a credit note or an amendment,
+   * never an edit.
+   */
+  private async assertPeriodOpen(
+    client: Prisma.TransactionClient | PrismaService,
+    orgId: string,
+    invoiceDate: Date,
+    sellerGstinId: string,
+    timeZone: string,
+    action: string,
+  ): Promise<void> {
+    const filing = await this.findPeriodFiling(
+      client,
+      orgId,
+      invoiceDate,
+      sellerGstinId,
+      timeZone,
+    );
     if (!filing) return;
+    const { financialYear } = filing;
 
     // returnType is deliberately NOT part of the predicate: whichever return
     // went in, the underlying documents for that period are now on record.

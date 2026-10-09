@@ -317,3 +317,151 @@ describe('InvoiceService.autoInvoiceForPaidOrder', () => {
     await expect(service.autoInvoiceForPaidOrder(ORG, ORDER)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Dating at issue time.
+ *
+ * `invoiceDate` used to be `new Date()`, so a September order invoiced on
+ * 8 October was reported in October's return, and a 30 March order invoiced in
+ * April drew a serial from the new financial year. The order's placed date is
+ * the taxable supply date and decides the GST period.
+ */
+describe('InvoiceService.createForOrderTx dating', () => {
+  const ORG = 'org_1';
+  const NOW = new Date('2026-10-08T09:00:00.000Z');
+
+  function build(opts: { placedAt: Date; filings?: Array<object | null> }) {
+    const order = {
+      id: 'order_1',
+      organizationId: ORG,
+      externalCreatedAt: opts.placedAt,
+      createdAt: opts.placedAt,
+      currency: 'INR',
+      totalTax: '18.00',
+      totalShippingPrice: '0.00',
+      billingAddress: null,
+      dispatchWarehouseId: null,
+      placeOfSupplyCode: '29',
+      customer: null,
+      lineItems: [
+        {
+          id: 'li_1',
+          title: 'Cotton Shirt',
+          variantTitle: null,
+          price: '100.00',
+          quantity: 1,
+          totalDiscount: '0.00',
+          taxable: true,
+          variant: null,
+        },
+      ],
+    };
+    const filings = [...(opts.filings ?? [])];
+    const tx = {
+      order: {
+        findFirst: jest.fn().mockResolvedValue(order),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      invoice: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn(({ data }: any) =>
+          Promise.resolve({ ...data, lineItems: [] }),
+        ),
+      },
+      organization: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ gstEnabled: true, timezone: 'Asia/Kolkata' }),
+      },
+      organizationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+      organizationGstin: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'gstin_1',
+          gstin: '29AABCT1332L1ZN',
+          legalName: 'Test Seller',
+          address: null,
+          stateCode: '29',
+          stateName: 'Karnataka',
+        }),
+      },
+      warehouse: { findFirst: jest.fn().mockResolvedValue(null) },
+      gstFiling: {
+        findFirst: jest.fn(() => Promise.resolve(filings.shift() ?? null)),
+      },
+    };
+    const invoiceNumber = {
+      getNextInvoiceNumber: jest.fn().mockResolvedValue('INV-26-27/000001'),
+    };
+    const taxResolver = { resolveLineGstRates: jest.fn().mockResolvedValue([18]) };
+    const service = new InvoiceService(
+      {} as any,
+      {} as any,
+      new GstCalculatorService(),
+      taxResolver as any,
+      invoiceNumber as any,
+    );
+    const warn = jest
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    return { service, tx, invoiceNumber, warn };
+  }
+
+  beforeEach(() => jest.useFakeTimers({ now: NOW }));
+  afterEach(() => jest.useRealTimers());
+
+  it('dates the invoice on the day the order was placed, not today', async () => {
+    const placedAt = new Date('2026-09-25T10:00:00.000Z');
+    const { service, tx, invoiceNumber } = build({ placedAt });
+
+    await service.createForOrderTx(tx as any, ORG, 'order_1', {});
+
+    const data = tx.invoice.create.mock.calls[0][0].data;
+    expect(data.invoiceDate).toEqual(placedAt);
+    expect(data.financialYear).toBe('2026-27');
+    expect(invoiceNumber.getNextInvoiceNumber).toHaveBeenCalledWith(
+      ORG,
+      '2026-27',
+      tx,
+    );
+  });
+
+  it('draws the serial from the financial year the invoice is DATED in', async () => {
+    // Placed 30 March, invoiced in October: the old year's series, not the new one.
+    const { service, tx, invoiceNumber } = build({
+      placedAt: new Date('2026-03-30T10:00:00.000Z'),
+    });
+
+    await service.createForOrderTx(tx as any, ORG, 'order_1', {});
+
+    expect(invoiceNumber.getNextInvoiceNumber).toHaveBeenCalledWith(
+      ORG,
+      '2025-26',
+      tx,
+    );
+  });
+
+  it('dates a late invoice today when the order month is already filed', async () => {
+    const { service, tx, warn } = build({
+      placedAt: new Date('2026-09-25T10:00:00.000Z'),
+      // First lookup (September) is filed; second (October, after the fallback)
+      // is open.
+      filings: [
+        {
+          returnType: 'GSTR1',
+          period: '09',
+          filedAt: new Date('2026-10-05T00:00:00.000Z'),
+          arn: null,
+        },
+        null,
+      ],
+    });
+
+    await service.createForOrderTx(tx as any, ORG, 'order_1', {});
+
+    const data = tx.invoice.create.mock.calls[0][0].data;
+    expect(data.invoiceDate).toEqual(NOW);
+    expect(data.financialYear).toBe('2026-27');
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/already filed/));
+    expect(tx.gstFiling.findFirst).toHaveBeenCalledTimes(2);
+  });
+});
