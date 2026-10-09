@@ -4,7 +4,7 @@ import { useClampPage, useListUrlState } from "~/hooks/use-list-url-state";
 import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package, Loader2,
-  Target, Box, Plus, Printer,
+  Target, Box, Plus, Printer, FileText,
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { Button } from "~/components/ui/button";
@@ -19,6 +19,9 @@ import { StatCard } from "~/components/app/stat-card";
 import { MoneyTotal } from "~/components/app/money-total";
 import { SectionCard } from "~/components/app/section-card";
 import { OrdersTable } from "~/components/app/orders-table";
+import { DockButton, FloatingDock } from "~/components/app/floating-dock";
+import { BulkInvoiceDialog } from "~/components/app/bulk-invoice-dialog";
+import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
 import { TableSkeleton } from "~/components/app/table-skeleton";
 import { EmptyState } from "~/components/app/empty-state";
 import { QueryErrorState } from "~/components/app/query-error-state";
@@ -73,6 +76,8 @@ export default function OrdersPage() {
     oneOf(Object.keys(DATE_RANGE_MAP)),
   );
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
+  const { canIssue } = useInvoiceActionGates();
 
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
@@ -140,6 +145,19 @@ export default function OrdersPage() {
       ? `/orders/slips/print?orderIds=${[...selectedIds].join(",")}`
       : null;
 
+  // Selection never outlives the page (see above), so every selected order is
+  // on screen. The total is only shown when they share a currency — a mixed
+  // selection has no single figure that would be true.
+  const selectedOrders = orders.filter((o) => selectedIds.has(o.id));
+  const selectedCurrencies = new Set(selectedOrders.map((o) => o.currency || orgCurrency));
+  const selectedTotal =
+    selectedCurrencies.size === 1
+      ? formatCurrency(
+          selectedOrders.reduce((sum, o) => sum + Number(o.totalPrice), 0),
+          [...selectedCurrencies][0],
+        )
+      : undefined;
+
   function handleSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
     list.setSearch(event.target.value);
   }
@@ -154,7 +172,9 @@ export default function OrdersPage() {
   }
 
   return (
-    <div className="space-y-6">
+    // Bottom padding while the bulk-action dock is up, so it never covers the
+    // pagination row.
+    <div className={slipHref ? "space-y-6 pb-24" : "space-y-6"}>
       {/* Page header */}
       <PageHeader>
         <PageHeaderContent>
@@ -293,17 +313,6 @@ export default function OrdersPage() {
         description="Keep track of recent order data and others information."
         action={
           <div className="flex items-center gap-2">
-            {/* Opens in a new tab so the selection and scroll position survive
-                the print job — the operator comes straight back to the list to
-                pick the next batch. */}
-            {slipHref && (
-              <Button asChild variant="outline" size="action">
-                <Link to={slipHref} target="_blank" rel="noreferrer">
-                  <Printer className="size-3.5" />
-                  Print package slips ({selectedIds.size})
-                </Link>
-              </Button>
-            )}
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
               <input
@@ -383,6 +392,44 @@ export default function OrdersPage() {
           </div>
         )}
       </SectionCard>
+
+      {slipHref && (
+        <FloatingDock
+          count={selectedIds.size}
+          noun={selectedIds.size === 1 ? "order" : "orders"}
+          summary={selectedTotal}
+          onClear={() => setSelectedIds(new Set())}
+        >
+          {/* Opens in a new tab so the selection and scroll position survive
+              the print job — the operator comes straight back to the list to
+              pick the next batch. */}
+          <DockButton asChild>
+            <Link to={slipHref} target="_blank" rel="noreferrer">
+              <Printer />
+              Print package slips
+            </Link>
+          </DockButton>
+          {/* Same gate as the order page's Generate button: the server only
+              lets ORG_MANAGERS issue, and only with GST enabled. */}
+          {gstEnabled && canIssue && (
+            <DockButton onClick={() => setBulkInvoiceOpen(true)}>
+              <FileText />
+              Generate GST invoices
+            </DockButton>
+          )}
+        </FloatingDock>
+      )}
+
+      <BulkInvoiceDialog
+        open={bulkInvoiceOpen}
+        orderIds={[...selectedIds]}
+        onClose={(done) => {
+          setBulkInvoiceOpen(false);
+          // A submitted batch has been acted on; keeping the ticks would invite
+          // re-submitting it.
+          if (done) setSelectedIds(new Set());
+        }}
+      />
     </div>
   );
 }

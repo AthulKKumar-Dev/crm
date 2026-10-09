@@ -2333,6 +2333,24 @@ export interface CreateInvoiceRequest {
   reverseCharge?: boolean;
 }
 
+/**
+ * POST /invoices/bulk — one entry per requested order. Mirrors
+ * `BulkInvoiceResult` in `server/src/invoice/invoice.service.ts`.
+ */
+export interface BulkInvoiceResult {
+  issued: Array<{
+    orderId: string;
+    orderName: string;
+    invoiceId: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+  }>;
+  /** Not attempted, or already invoiced. */
+  skipped: Array<{ orderId: string; orderName: string | null; reason: string }>;
+  /** Attempted and rejected; `reason` is the server's message. */
+  failed: Array<{ orderId: string; orderName: string; reason: string }>;
+}
+
 /** A refunded order whose invoice still needs a credit note. */
 export interface RefundPendingCredit {
   orderId: string;

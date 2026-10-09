@@ -36,6 +36,29 @@ export function useCreateInvoiceMutation() {
   });
 }
 
+/**
+ * POST /invoices/bulk — the Orders list's bulk action. The caller shows the
+ * per-order outcome, so this only toasts the headline.
+ */
+export function useBulkCreateInvoicesMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (orderIds: string[]) => invoiceService.bulkCreate(orderIds),
+    onSuccess: ({ issued }) => {
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      queryClient.invalidateQueries({ queryKey: orderKeys.all });
+      if (issued.length > 0) {
+        toast.success(
+          `${issued.length} GST invoice${issued.length === 1 ? "" : "s"} issued.`,
+        );
+      }
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to generate invoices."),
+  });
+}
+
 /** PATCH /invoices/:id — buyer block and notes only; amounts are immutable. */
 export function useUpdateInvoiceMutation() {
   const queryClient = useQueryClient();

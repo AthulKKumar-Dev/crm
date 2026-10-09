@@ -8,6 +8,7 @@ import type {
   Invoice,
   InvoiceDetail,
   CreateInvoiceRequest,
+  BulkInvoiceResult,
   UpdateInvoiceRequest,
   InvoiceListParams,
   InvoiceStats,
@@ -56,6 +57,17 @@ export const invoiceService = {
   create: (data: CreateInvoiceRequest) =>
     apiClient
       .post<InvoiceDetail>("/invoices", data)
+      .then((res) => res.data),
+
+  /**
+   * Issue invoices for several orders; ineligible ones come back skipped.
+   * The server issues them one at a time, so this outlives the default 30s
+   * timeout — a client that gave up early would report a failure for a batch
+   * that was still being issued.
+   */
+  bulkCreate: (orderIds: string[]) =>
+    apiClient
+      .post<BulkInvoiceResult>("/invoices/bulk", { orderIds }, { timeout: 90_000 })
       .then((res) => res.data),
 
   /** List invoices with pagination and filtering. */

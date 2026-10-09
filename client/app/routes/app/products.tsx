@@ -274,8 +274,12 @@ export default function ProductsPage() {
     }));
   }
 
+  const showDock = !isVendor && selectedProducts.length > 0;
+
   return (
-    <div className="space-y-6">
+    // Bottom padding while the bulk-action dock is up, so it never covers the
+    // pagination row.
+    <div className={showDock ? "space-y-6 pb-24" : "space-y-6"}>
       {/* Page header */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -331,8 +335,8 @@ export default function ProductsPage() {
 
       <ProductCodesDialog open={codesOpen} onOpenChange={setCodesOpen} />
 
-      {/* Bulk action bar — only visible when at least one product is selected */}
-      {!isVendor && selectedProducts.length > 0 && (
+      {/* Floating bulk-action dock — only up while a product is selected */}
+      {showDock && (
         <BulkActionBar
           selectedProducts={selectedProducts}
           offPageCount={selectedProducts.length - selectedOnPageCount}

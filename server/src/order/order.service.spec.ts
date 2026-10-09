@@ -266,3 +266,57 @@ describe('OrderService.computeFulfillmentStatus', () => {
     expect(compute([{ fulfillmentStatus: 'fulfilled', quantity: 2, fulfilledQuantity: 5 }])).toBe('FULFILLED');
   });
 });
+
+/**
+ * The order's invoice card. Credit notes are stored with the ORIGINAL
+ * invoice's orderId and are created after it, so a filter that only dropped
+ * CANCELLED returned the newest credit note as "the invoice" (#M1001 showed
+ * CN-26-27/000001 instead of INV-26-27/000001 on dev).
+ */
+describe('OrderService.findOne invoice', () => {
+  /** Applies a Prisma `status` filter the way the database would. */
+  const allows = (status: string, filter: any) =>
+    filter?.notIn ? !filter.notIn.includes(status) : filter?.not ? status !== filter.not : true;
+
+  function build(invoices: Array<{ id: string; status: string; createdAt: Date }>) {
+    const prisma = {
+      order: {
+        findFirst: jest.fn((args: any) => {
+          const rel = args.include.invoices;
+          const live = invoices
+            .filter((i) => allows(i.status, rel.where.status))
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+            .slice(0, rel.take);
+          return Promise.resolve({ id: ORDER_ID, lineItems: [], fulfillments: [], invoices: live });
+        }),
+      },
+    };
+    const service = new OrderService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return service;
+  }
+
+  it('shows the original invoice, not a later credit note against it', async () => {
+    const service = build([
+      { id: 'inv_1', status: 'ISSUED', createdAt: new Date('2026-09-01T00:00:00Z') },
+      { id: 'cn_1', status: 'CREDIT_NOTE', createdAt: new Date('2026-09-10T00:00:00Z') },
+    ]);
+
+    const order = await service.findOne(ORDER_ID, ORG);
+
+    expect(order.invoices.map((i: any) => i.id)).toEqual(['inv_1']);
+  });
+
+  it('shows no invoice once the original is cancelled, even with a credit note left', async () => {
+    const service = build([
+      { id: 'inv_1', status: 'CANCELLED', createdAt: new Date('2026-09-01T00:00:00Z') },
+      { id: 'cn_1', status: 'CREDIT_NOTE', createdAt: new Date('2026-09-10T00:00:00Z') },
+    ]);
+
+    const order = await service.findOne(ORDER_ID, ORG);
+
+    expect(order.invoices).toEqual([]);
+  });
+});

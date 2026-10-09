@@ -418,9 +418,14 @@ export class OrderService {
         // The order's live GST invoice (at most one — enforced by the partial
         // unique index invoices_order_id_active_key). Lets the client show the
         // invoice card / gate the Generate button without scanning the
-        // paginated invoice list.
+        // paginated invoice list. Credit notes carry the original's orderId
+        // and are created after it, so they must be excluded here exactly as
+        // the index excludes them — otherwise the newest one is shown as "the
+        // invoice".
         invoices: {
-          where: { status: { not: InvoiceStatus.CANCELLED } },
+          where: {
+            status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+          },
           select: {
             id: true,
             invoiceNumber: true,

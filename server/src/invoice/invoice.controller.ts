@@ -13,6 +13,7 @@ import type { Response } from 'express';
 import { OrgId } from '../auth/decorators/org-id.decorator';
 import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { BulkCreateInvoicesDto } from './dto/bulk-create-invoices.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
@@ -23,6 +24,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
 import { RequireSection } from '../auth/decorators/require-section.decorator';
+import { Throttle } from '@nestjs/throttler';
 import { attachmentDisposition } from '../common/utils/content-disposition.util';
 import { renderCsvSections } from './gst-return-rows';
 
@@ -36,6 +38,17 @@ export class InvoiceController {
   @Roles(...ORG_MANAGERS)
   create(@OrgId() orgId: string, @Body() dto: CreateInvoiceDto) {
     return this.invoiceService.create(orgId, dto);
+  }
+
+  // POST /api/v1/invoices/bulk — generate GST invoices for selected orders.
+  // Static route, so it is declared before the :id POST routes below. Each
+  // call runs up to MAX_BULK_INVOICES Serializable transactions, so it gets a
+  // tighter limit than the global 60/min.
+  @Post('bulk')
+  @Roles(...ORG_MANAGERS)
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  bulkCreate(@OrgId() orgId: string, @Body() dto: BulkCreateInvoicesDto) {
+    return this.invoiceService.bulkCreate(orgId, dto.orderIds);
   }
 
   // GET /api/v1/invoices/stats — KPI aggregates and filter-chip counts
