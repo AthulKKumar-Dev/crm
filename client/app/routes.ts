@@ -32,6 +32,7 @@ export default [
     route("orders/customers", "routes/app/orders/customers.tsx"),
     route("orders/customers/:id", "routes/app/orders/customers/$id.tsx"),
     route("orders/invoices", "routes/app/orders/invoices.tsx"),
+    route("orders/invoices/:id", "routes/app/orders/invoices/$id.tsx"),
     route("orders/invoices/:id/print", "routes/app/orders/invoices/print.tsx"),
     // Batch package slips, N-up. Static "slips" outranks ":id", and ending in
     // /print is what makes the app layout render it chrome-free.

@@ -2299,6 +2299,22 @@ export interface InvoiceDetail extends Invoice {
 }
 
 /** Payload for generating a new invoice. */
+/** PATCH /invoices/:id — the non-tax fields an issued invoice may correct. */
+export interface UpdateInvoiceRequest {
+  buyerName?: string;
+  /** Empty or null clears it; the invoice becomes B2C. */
+  buyerGstin?: string | null;
+  buyerAddress?: {
+    address1?: string;
+    address2?: string;
+    city?: string;
+    province?: string;
+    zip?: string;
+    country?: string;
+  } | null;
+  notes?: string | null;
+}
+
 export interface CreateInvoiceRequest {
   orderId: string;
   sellerGstinId?: string;

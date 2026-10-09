@@ -543,7 +543,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
             )}
             {invoice ? (
               <Button asChild variant="outline" className="w-full">
-                <Link to={`/orders/invoices/${invoice.id}/print`} target="_blank">
+                <Link to={`/orders/invoices/${invoice.id}`}>
                   <Receipt className="size-3.5" />
                   View GST invoice
                 </Link>

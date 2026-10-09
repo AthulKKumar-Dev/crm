@@ -2,6 +2,7 @@ import {
   Controller,
   Delete,
   Get,
+  Patch,
   Post,
   Body,
   Param,
@@ -17,6 +18,7 @@ import { QueryGstReturnDto } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { MarkFiledDto } from './dto/mark-filed.dto';
+import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
@@ -219,5 +221,17 @@ export class InvoiceController {
   @Roles(...ORG_MANAGERS)
   cancel(@Param('id') id: string, @OrgId() orgId: string) {
     return this.invoiceService.cancel(id, orgId);
+  }
+
+  // PATCH /api/v1/invoices/:id — correct the non-tax fields of an issued invoice
+  @Patch(':id')
+  @Roles(...ORG_MANAGERS)
+  update(
+    @Param('id') id: string,
+    @OrgId() orgId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateInvoiceDto,
+  ) {
+    return this.invoiceService.update(id, orgId, dto, user.sub);
   }
 }

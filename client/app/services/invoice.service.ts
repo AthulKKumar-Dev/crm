@@ -8,6 +8,7 @@ import type {
   Invoice,
   InvoiceDetail,
   CreateInvoiceRequest,
+  UpdateInvoiceRequest,
   InvoiceListParams,
   InvoiceStats,
   GstReturnParams,
@@ -79,6 +80,12 @@ export const invoiceService = {
   cancel: (id: string) =>
     apiClient
       .post<Invoice>(`/invoices/${id}/cancel`)
+      .then((res) => res.data),
+
+  /** Correct buyer details or notes on an issued invoice. */
+  update: (id: string, data: UpdateInvoiceRequest) =>
+    apiClient
+      .patch<InvoiceDetail>(`/invoices/${id}`, data)
       .then((res) => res.data),
 
   /** Get GST return summary (GSTR-1 or GSTR-3B). */
