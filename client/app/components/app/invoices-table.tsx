@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router";
 import {
   ArrowDown,
@@ -5,12 +6,15 @@ import {
   ArrowUpDown,
   Ban,
   Copy,
-  Download,
   Eye,
+  FileDown,
+  Loader2,
   MoreHorizontal,
+  Printer,
   ShoppingBag,
 } from "lucide-react";
 import { toast } from "sonner";
+import { downloadInvoicePdf } from "~/lib/invoice-pdf";
 
 import {
   Table,
@@ -26,6 +30,8 @@ import {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuShortcut,
 } from "~/components/ui/dropdown-menu";
 import { cn, formatCurrency } from "~/lib/utils";
 import {
@@ -123,6 +129,18 @@ export function InvoicesTable({
   onSortChange,
 }: InvoicesTableProps) {
   const sortProps = { sortBy, sortOrder, onSortChange };
+
+  // One build at a time per row: a second click while the PDF engine is still
+  // loading would otherwise produce two downloads of the same file.
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  async function downloadPdf(id: string) {
+    setDownloadingId(id);
+    try {
+      await downloadInvoicePdf(id);
+    } finally {
+      setDownloadingId(null);
+    }
+  }
 
   async function copyInvoiceNumber(invoiceNumber: string) {
     try {
@@ -257,24 +275,10 @@ export function InvoicesTable({
                     propagation rather than nesting interactive elements. */}
                 <TableCell onClick={(event) => event.stopPropagation()}>
                   <div className="flex items-center justify-end gap-0.5">
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      asChild
-                      title="Open printable invoice"
-                    >
-                      {/* New tab, matching how order detail opens this same
-                          route — printing shouldn't lose the list you were on. */}
-                      <Link
-                        to={`/orders/invoices/${invoice.id}/print`}
-                        target="_blank"
-                        rel="noreferrer"
-                        aria-label={`Open printable invoice ${invoice.invoiceNumber}`}
-                      >
-                        <Download />
-                      </Link>
-                    </Button>
-
+                    {/* One menu per row. The standalone download icon used to
+                        open the print page — a promise the row did not keep —
+                        so every action now lives here, grouped: view and
+                        navigate, then documents, then the destructive one. */}
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button
@@ -285,7 +289,10 @@ export function InvoicesTable({
                           <MoreHorizontal />
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                      {/* Wide enough that "Copy invoice no." and the order
+                          suffix never wrap — a two-line menu item reads as
+                          two items. */}
+                      <DropdownMenuContent align="end" className="w-56">
                         <DropdownMenuItem onClick={() => onSelect(invoice.id)}>
                           <Eye />
                           View details
@@ -293,25 +300,56 @@ export function InvoicesTable({
                         <DropdownMenuItem asChild>
                           <Link to={`/orders/${invoice.order.id}`}>
                             <ShoppingBag />
-                            Open order {invoice.order.name}
+                            Open order
+                            <DropdownMenuShortcut>{invoice.order.name}</DropdownMenuShortcut>
+                          </Link>
+                        </DropdownMenuItem>
+
+                        <DropdownMenuSeparator />
+
+                        <DropdownMenuItem
+                          disabled={downloadingId === invoice.id}
+                          onSelect={() => downloadPdf(invoice.id)}
+                        >
+                          {downloadingId === invoice.id ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <FileDown />
+                          )}
+                          Download PDF
+                        </DropdownMenuItem>
+                        <DropdownMenuItem asChild>
+                          {/* New tab, matching how order detail opens this same
+                              route — printing shouldn't lose the list you were on. */}
+                          <Link
+                            to={`/orders/invoices/${invoice.id}/print`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <Printer />
+                            Print
                           </Link>
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           onClick={() => copyInvoiceNumber(invoice.invoiceNumber)}
                         >
                           <Copy />
-                          Copy invoice number
+                          Copy invoice no.
                         </DropdownMenuItem>
+
                         {/* Cancelling is ORG_MANAGERS-only server-side; without
                             the role check this item could only ever 403. */}
                         {canCancel && invoice.status === "ISSUED" && (
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onClick={() => onCancel(invoice)}
-                          >
-                            <Ban />
-                            Cancel invoice
-                          </DropdownMenuItem>
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onClick={() => onCancel(invoice)}
+                            >
+                              <Ban />
+                              Cancel invoice
+                            </DropdownMenuItem>
+                          </>
                         )}
                       </DropdownMenuContent>
                     </DropdownMenu>

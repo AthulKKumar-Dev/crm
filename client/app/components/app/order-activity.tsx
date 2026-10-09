@@ -24,6 +24,7 @@ const EVENT_CATEGORY: Record<string, EventCategory> = {
   closed: "order",
   reopened: "order",
   sync_queued: "order",
+  invoice_edited: "order",
   paid: "payment",
   captured: "payment",
   payment_status_changed: "payment",

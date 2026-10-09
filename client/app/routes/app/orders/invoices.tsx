@@ -1,6 +1,6 @@
 import { isAxiosError } from "axios";
 import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, useSearchParams } from "react-router";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
 
 import { isString, useSessionState } from "~/hooks/use-session-state";
 import { Search, Download, Plus, ChevronLeft, ChevronRight, Clock, X, AlertTriangle } from "lucide-react";
@@ -26,7 +26,6 @@ import { SectionCard } from "~/components/app/section-card";
 import { StatCard } from "~/components/app/stat-card";
 import { SegmentedTabs } from "~/components/app/segmented-tabs";
 import { InvoicesTable } from "~/components/app/invoices-table";
-import { InvoiceDetailDialog } from "~/components/app/invoice-detail-dialog";
 import { CreditNoteDialog } from "~/components/app/credit-note-dialog";
 import { CancelInvoiceDialog } from "~/components/app/cancel-invoice-dialog";
 import {
@@ -85,7 +84,6 @@ import {
 } from "~/lib/gst-return";
 import type {
   RefundPendingCredit,
-  InvoiceDetail,
   GstFiling,
   GstReturnGstr1,
   GstReturnGstr3B,
@@ -193,6 +191,12 @@ export default function InvoicesPage() {
   if (restoring.current && isBare) {
     return <Navigate to={{ search: `?${saved}` }} replace />;
   }
+  // `?invoice=<id>` used to open the detail dialog on this page. Bookmarks and
+  // shared links still carry it, so send them to the invoice page instead.
+  const legacyInvoiceId = searchParams.get("invoice");
+  if (legacyInvoiceId) {
+    return <Navigate to={`/orders/invoices/${legacyInvoiceId}`} replace />;
+  }
   return <InvoicesView />;
 }
 
@@ -230,7 +234,7 @@ function InvoicesView() {
   // Reference-only lens over the return. Kept in the URL like every other
   // filter so a scoped view is shareable and survives a reload.
   const warehouseScopeId = searchParams.get("warehouse") ?? "";
-  const selectedInvoiceId = searchParams.get("invoice");
+  const navigate = useNavigate();
 
   // Search stays local so typing is instant; only the debounced value reaches
   // the query key and the URL.
@@ -239,9 +243,6 @@ function InvoicesView() {
   );
   const debouncedSearch = useDebounced(searchQuery, 350);
 
-  const [invoiceToCredit, setInvoiceToCredit] = useState<InvoiceDetail | null>(
-    null,
-  );
   // A refunded order picked from the banner. Carries the refund figures so the
   // dialog can pre-fill instead of making someone re-key an amount off Shopify.
   const [pendingCreditTarget, setPendingCreditTarget] =
@@ -728,7 +729,7 @@ function InvoicesView() {
                 sortBy={sortBy}
                 sortOrder={sortOrder}
                 onSortChange={handleSort}
-                onSelect={(id) => patchParams({ invoice: id, page: String(currentPage) })}
+                onSelect={(id) => navigate(`/orders/invoices/${id}`)}
                 onCancel={(invoice: Invoice) =>
                   setInvoiceToCancel({
                     id: invoice.id,
@@ -1089,17 +1090,8 @@ function InvoicesView() {
         onClose={() => setReopening(null)}
       />
 
-      <InvoiceDetailDialog
-        invoiceId={selectedInvoiceId}
-        currency={currency}
-        canCancel={canCancel}
-        onClose={() => patchParams({ invoice: null, page: String(currentPage) })}
-        onRequestCancel={setInvoiceToCancel}
-        onRequestCreditNote={setInvoiceToCredit}
-      />
-
-      {/* One dialog, two entry points: the invoice detail view opens it blank,
-          the refunds banner opens it pre-filled from the refund. */}
+      {/* Opened from the refunds banner, pre-filled from the refund. The blank
+          form lives on the invoice page. */}
       <CreditNoteDialog
         invoice={
           pendingCreditTarget
@@ -1108,7 +1100,7 @@ function InvoicesView() {
                 invoiceNumber: pendingCreditTarget.invoiceNumber,
                 grandTotal: pendingCreditTarget.invoiceTotal,
               }
-            : invoiceToCredit
+            : null
         }
         currency={pendingCreditTarget?.currency ?? currency}
         prefill={
@@ -1123,18 +1115,12 @@ function InvoicesView() {
               }
             : null
         }
-        onClose={() => {
-          setInvoiceToCredit(null);
-          setPendingCreditTarget(null);
-        }}
+        onClose={() => setPendingCreditTarget(null)}
       />
 
       <CancelInvoiceDialog
         invoice={invoiceToCancel}
         onClose={() => setInvoiceToCancel(null)}
-        // Close the detail dialog too — it would otherwise sit there showing an
-        // invoice whose status has just changed underneath it.
-        onCancelled={() => patchParams({ invoice: null, page: String(currentPage) })}
       />
     </div>
   );

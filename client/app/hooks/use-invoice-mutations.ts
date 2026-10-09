@@ -6,7 +6,10 @@ import { orderKeys } from "~/hooks/use-order-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   CreateCreditNoteRequest,
-  MarkFiledRequest, CreateInvoiceRequest } from "~/types/api";
+  MarkFiledRequest,
+  CreateInvoiceRequest,
+  UpdateInvoiceRequest,
+} from "~/types/api";
 
 /** Mutation hook for generating a GST invoice from an order. */
 export function useCreateInvoiceMutation() {
@@ -30,6 +33,23 @@ export function useCreateInvoiceMutation() {
     },
     onError: (error) =>
       handleMutationError(error, "Failed to generate invoice."),
+  });
+}
+
+/** PATCH /invoices/:id — buyer block and notes only; amounts are immutable. */
+export function useUpdateInvoiceMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateInvoiceRequest }) =>
+      invoiceService.update(id, data),
+    onSuccess: (invoice) => {
+      // Seed the detail so the page shows the saved state before the refetch.
+      queryClient.setQueryData(invoiceKeys.detail(invoice.id), invoice);
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      toast.success("Invoice updated.");
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to update the invoice."),
   });
 }
 

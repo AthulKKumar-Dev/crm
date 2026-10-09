@@ -57,7 +57,7 @@ import {
   type ReturnInvoice,
 } from './gst-return.accumulator';
 import { summarizeDocumentSeries } from './document-series.util';
-import { resolveSupplyDate } from './invoice-date.util';
+import { isWithinInvoicingWindow, resolveSupplyDate } from './invoice-date.util';
 import {
   buildGstr1Sections,
   buildGstr3bSections,
@@ -120,6 +120,31 @@ import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { MarkFiledDto } from './dto/mark-filed.dto';
+import {
+  InvoiceBuyerAddressDto,
+  UpdateInvoiceDto,
+} from './dto/update-invoice.dto';
+
+/**
+ * The buyer address as stored: the six postal keys, trimmed, blanks dropped.
+ * A DTO instance carries class metadata and empty strings; neither belongs in
+ * a JSON column that `readAddress` on the client treats as display lines.
+ */
+function pickAddress(address: InvoiceBuyerAddressDto): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of ['address1', 'address2', 'city', 'province', 'zip', 'country'] as const) {
+    const value = address[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim();
+  }
+  return out;
+}
+
+/** `{}` reads as "no address"; keep that and NULL the same thing. */
+function nonEmptyAddress(
+  address: Record<string, string> | null,
+): Record<string, string> | null {
+  return address && Object.keys(address).length > 0 ? address : null;
+}
 
 @Injectable()
 export class InvoiceService {
@@ -595,26 +620,40 @@ export class InvoiceService {
     // pressed.
     const now = new Date();
     const timeZone = this.gstTimeZone(orgId, org);
-    let invoiceDate = resolveSupplyDate(order, now);
+    const supplyDate = resolveSupplyDate(order, now);
+    let invoiceDate = supplyDate;
 
     // A late invoice for a period that has already been filed cannot be added
     // to that return. The statutory treatment is to issue it dated today, into
     // the current open period — which is also exactly what every invoice did
     // before the order date was honoured, so this path cannot regress anyone.
-    const filing = await this.findPeriodFiling(
-      tx,
-      orgId,
-      invoiceDate,
-      sellerGstin.id,
-      timeZone,
-    );
-    if (filing) {
+    //
+    // "Filed" means EITHER a filing recorded here OR a month older than the
+    // previous one. The filings table only knows what was recorded in the CRM;
+    // an org that files on the portal and never marks it here would otherwise
+    // have a year-old imported order mint a serial into a closed year.
+    if (!isWithinInvoicingWindow(supplyDate, now, timeZone)) {
       this.logger.warn(
-        `Order ${order.id}: supply date ${invoiceDate.toISOString()} falls in ` +
-          `${filing.returnType} ${filing.period}/${filing.financialYear}, which is ` +
-          `already filed — dating the invoice today instead.`,
+        `Order ${order.id}: supply date ${supplyDate.toISOString()} is older ` +
+          `than the previous GST period — dating the invoice today instead.`,
       );
       invoiceDate = now;
+    } else {
+      const filing = await this.findPeriodFiling(
+        tx,
+        orgId,
+        supplyDate,
+        sellerGstin.id,
+        timeZone,
+      );
+      if (filing) {
+        this.logger.warn(
+          `Order ${order.id}: supply date ${supplyDate.toISOString()} falls in ` +
+            `${filing.returnType} ${filing.period}/${filing.financialYear}, which is ` +
+            `already filed — dating the invoice today instead.`,
+        );
+        invoiceDate = now;
+      }
     }
 
     const financialYear = this.calculator.getFinancialYear(invoiceDate, timeZone);
@@ -663,9 +702,14 @@ export class InvoiceService {
     }
 
     const buyerGstin = normalizeGstin(dto.buyerGstin) || customerGstin || null;
-    const buyerName = order.customer
-      ? `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim()
-      : 'Guest Customer';
+    // A customer synced with only an email (common for Shopify checkouts) has
+    // no first or last name, and this used to store "" — a tax invoice with a
+    // blank buyer. Fall through to what identifies them, then to the guest
+    // label the no-customer case already uses.
+    const buyerName =
+      `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() ||
+      order.customer?.email?.trim() ||
+      'Guest Customer';
     const buyerStateCode =
       this.extractStateFromAddress(order.billingAddress) ||
       order.customer?.billingStateCode ||
@@ -1014,6 +1058,146 @@ export class InvoiceService {
     return this.findOne(id, orgId);
   }
 
+
+  // ─── EDIT INVOICE ───
+  /**
+   * Correct the buyer block or the notes on an issued invoice.
+   *
+   * Everything that moves tax is off limits here by construction: the DTO
+   * cannot carry it. A buyer GSTIN still changes which GSTR-1 table the
+   * invoice lands in, so the period lock applies exactly as it does to
+   * cancelling — once filed, the fix is a credit note. The edit is recorded on
+   * the order's timeline: a statutory document changed after issue needs a
+   * who-and-what, the same way cancel and credit note leave one.
+   */
+  async update(
+    id: string,
+    orgId: string,
+    dto: UpdateInvoiceDto,
+    userId?: string,
+  ) {
+    const target = await this.prisma.invoice.findFirst({
+      where: { id, organizationId: orgId },
+      select: {
+        status: true,
+        invoiceDate: true,
+        sellerGstinId: true,
+        orderId: true,
+        invoiceNumber: true,
+        // The current values, so the write and the audit event are a real
+        // diff: the client sends every editable field on every save.
+        buyerName: true,
+        buyerGstin: true,
+        buyerAddress: true,
+        notes: true,
+      },
+    });
+    if (!target) throw new NotFoundException('Invoice not found');
+    if (target.status !== InvoiceStatus.ISSUED) {
+      throw new BadRequestException(
+        `Only an issued invoice can be edited. This one is ${target.status}.`,
+      );
+    }
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true },
+    });
+    await this.assertPeriodOpen(
+      this.prisma,
+      orgId,
+      target.invoiceDate,
+      target.sellerGstinId,
+      this.gstTimeZone(orgId, org),
+      'Editing this invoice',
+    );
+
+    const data: Prisma.InvoiceUpdateManyMutationInput = {};
+    const changed: string[] = [];
+
+    if (dto.buyerName !== undefined) {
+      const name = dto.buyerName.trim();
+      // The DTO's length check sees the raw string, so "   " gets this far —
+      // and a blank buyer on a tax invoice is the defect issue-time now avoids.
+      if (!name) throw new BadRequestException('Buyer name cannot be blank.');
+      if (name !== target.buyerName) {
+        data.buyerName = name;
+        changed.push('buyer name');
+      }
+    }
+    if (dto.buyerGstin !== undefined) {
+      let gstin: string | null = null;
+      if (dto.buyerGstin?.trim()) {
+        // Same rule as issue time: a valid GSTIN or nothing. Storing junk
+        // would make the list and the return classify the invoice differently.
+        gstin = normalizeGstin(dto.buyerGstin);
+        if (!gstin) {
+          throw new BadRequestException(
+            'Buyer GSTIN must be a valid 15-character GST Identification Number',
+          );
+        }
+      }
+      if (gstin !== target.buyerGstin) {
+        data.buyerGstin = gstin;
+        changed.push('buyer GSTIN');
+        if (gstin) {
+          // The first two digits of a GSTIN ARE the state of registration. The
+          // buyer block must not say Maharashtra under a Karnataka GSTIN.
+          const stateCode = gstin.slice(0, 2);
+          data.buyerStateCode = stateCode;
+          data.buyerStateName = getStateName(stateCode) || stateCode;
+        }
+      }
+    }
+    if (dto.buyerAddress !== undefined) {
+      // Every field blank is "no address", stored as NULL like an invoice that
+      // never had one — not as `{}`, which every reader would then special-case.
+      const next = nonEmptyAddress(dto.buyerAddress ? pickAddress(dto.buyerAddress) : null);
+      const current = nonEmptyAddress(
+        target.buyerAddress && typeof target.buyerAddress === 'object'
+          ? pickAddress(target.buyerAddress as InvoiceBuyerAddressDto)
+          : null,
+      );
+      if (JSON.stringify(next) !== JSON.stringify(current)) {
+        data.buyerAddress = next ?? Prisma.JsonNull;
+        changed.push('buyer address');
+      }
+    }
+    if (dto.notes !== undefined) {
+      const notes = dto.notes?.trim() || null;
+      if (notes !== target.notes) {
+        data.notes = notes;
+        changed.push('notes');
+      }
+    }
+    // Nothing differs: no write, and no audit event claiming one happened.
+    if (changed.length === 0) return this.findOne(id, orgId);
+
+    await this.prisma.$transaction(async (tx) => {
+      // The status is in the WHERE so a cancel that lands between the read
+      // above and this write cannot be overwritten by a stale edit.
+      const claimed = await tx.invoice.updateMany({
+        where: { id, organizationId: orgId, status: InvoiceStatus.ISSUED },
+        data,
+      });
+      if (claimed.count === 0) {
+        throw new ConflictException(
+          'Invoice changed while you were editing it. Reload and try again.',
+        );
+      }
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId: target.orderId,
+          actorId: userId ?? null,
+          action: 'invoice_edited',
+          message: `Invoice ${target.invoiceNumber} edited: ${changed.join(', ')}`,
+          metadata: { invoiceId: id, fields: changed },
+        },
+      });
+    });
+
+    return this.findOne(id, orgId);
+  }
 
   // ─── FILING STATE ───
   /**

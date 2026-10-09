@@ -1,4 +1,8 @@
-import { PayloadTooLargeException, BadRequestException } from '@nestjs/common';
+import {
+  PayloadTooLargeException,
+  BadRequestException,
+  ConflictException,
+} from "@nestjs/common";
 import { Test, TestingModule } from '@nestjs/testing';
 import { GstType, InvoiceStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -426,7 +430,9 @@ describe('InvoiceService.createForOrderTx dating', () => {
   });
 
   it('draws the serial from the financial year the invoice is DATED in', async () => {
-    // Placed 30 March, invoiced in October: the old year's series, not the new one.
+    // Placed 30 March, invoiced on 8 April: still within the window, so the
+    // old year's series, not the new one.
+    jest.setSystemTime(new Date('2026-04-08T09:00:00.000Z'));
     const { service, tx, invoiceNumber } = build({
       placedAt: new Date('2026-03-30T10:00:00.000Z'),
     });
@@ -438,6 +444,27 @@ describe('InvoiceService.createForOrderTx dating', () => {
       '2025-26',
       tx,
     );
+  });
+
+  it('dates an order older than the previous period today, without consulting filings', async () => {
+    // Placed 30 March, invoiced in October. The CRM cannot know whether the
+    // merchant filed March on the portal, so it must not mint into it.
+    const { service, tx, warn, invoiceNumber } = build({
+      placedAt: new Date('2026-03-30T10:00:00.000Z'),
+    });
+
+    await service.createForOrderTx(tx as any, ORG, 'order_1', {});
+
+    const data = tx.invoice.create.mock.calls[0][0].data;
+    expect(data.invoiceDate).toEqual(NOW);
+    expect(invoiceNumber.getNextInvoiceNumber).toHaveBeenCalledWith(ORG, '2026-27', tx);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/older than the previous GST period/));
+    // Only today's period is checked (the lock assertion on the final date);
+    // the supply month is never consulted.
+    const periodsLookedUp = tx.gstFiling.findFirst.mock.calls.map(
+      (c: any) => c[0].where.period.in[0],
+    );
+    expect(periodsLookedUp).toEqual(['10']);
   });
 
   it('dates a late invoice today when the order month is already filed', async () => {
@@ -463,5 +490,146 @@ describe('InvoiceService.createForOrderTx dating', () => {
     expect(data.financialYear).toBe('2026-27');
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/already filed/));
     expect(tx.gstFiling.findFirst).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Editing an issued invoice.
+ *
+ * Only the buyer block and the notes are editable, and only while the period
+ * is open. The write is status-guarded and leaves a timeline event, because a
+ * statutory document changed after issue needs a who-and-what.
+ */
+describe('InvoiceService.update', () => {
+  const ORG = 'org_1';
+  const ID = 'inv_1';
+
+  function build(
+    opts: { status?: InvoiceStatus; filing?: object | null; buyerGstin?: string | null } = {},
+  ) {
+    const updates: any[] = [];
+    const events: any[] = [];
+    const tx = {
+      invoice: {
+        updateMany: jest.fn((args: any) => {
+          updates.push(args);
+          return Promise.resolve({ count: 1 });
+        }),
+      },
+      orderTimelineEvent: {
+        create: jest.fn((args: any) => {
+          events.push(args);
+          return Promise.resolve({});
+        }),
+      },
+    };
+    const prisma = {
+      invoice: {
+        findFirst: jest.fn().mockResolvedValue({
+          status: opts.status ?? InvoiceStatus.ISSUED,
+          invoiceDate: new Date('2026-09-25T10:00:00.000Z'),
+          sellerGstinId: 'gstin_1',
+          orderId: 'order_1',
+          invoiceNumber: 'INV-26-27/000036',
+          buyerName: 'Test Er',
+          buyerGstin: opts.buyerGstin ?? null,
+          buyerAddress: null,
+          notes: null,
+          id: ID,
+          order: { id: 'order_1' },
+        }),
+      },
+      organization: {
+        findUnique: jest.fn().mockResolvedValue({ timezone: 'Asia/Kolkata', gstEnabled: true }),
+      },
+      gstFiling: { findFirst: jest.fn().mockResolvedValue(opts.filing ?? null) },
+      $transaction: jest.fn((fn: any) => fn(tx)),
+    };
+    const service = new InvoiceService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return { service, prisma, updates, events };
+  }
+
+  it('rejects a blank buyer name before anything is written', async () => {
+    const { service, updates } = build();
+    await expect(
+      service.update(ID, ORG, { buyerName: '   ' }, 'user_1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(updates).toHaveLength(0);
+  });
+
+  it('writes nothing and logs nothing when the values already match', async () => {
+    // The page sends every editable field on every save; an unchanged save
+    // must not produce an audit event that claims an edit happened.
+    const { service, prisma, updates, events } = build();
+    await service.update(
+      ID,
+      ORG,
+      { buyerName: ' Test Er ', buyerGstin: '', buyerAddress: { city: '' }, notes: null },
+      'user_1',
+    );
+    expect(updates).toHaveLength(0);
+    expect(events).toHaveLength(0);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('records only the fields that actually changed', async () => {
+    const { service, updates, events } = build();
+    await service.update(
+      ID,
+      ORG,
+      { buyerName: 'Test Er', buyerGstin: null, buyerAddress: null, notes: 'Paid by UPI' },
+      'user_1',
+    );
+    expect(updates[0].data).toEqual({ notes: 'Paid by UPI' });
+    expect(events[0].data.message).toBe('Invoice INV-26-27/000036 edited: notes');
+  });
+
+  it('refuses anything but an issued invoice', async () => {
+    const { service } = build({ status: InvoiceStatus.CANCELLED });
+    await expect(
+      service.update(ID, ORG, { notes: 'x' }, 'user_1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('refuses once the period is filed', async () => {
+    const { service, updates } = build({
+      filing: { returnType: 'GSTR1', period: '09', filedAt: new Date(), arn: null },
+    });
+    await expect(
+      service.update(ID, ORG, { notes: 'x' }, 'user_1'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(updates).toHaveLength(0);
+  });
+
+  it('normalises the GSTIN, derives the buyer state from it, and logs the edit', async () => {
+    const { service, updates, events } = build();
+    await service.update(
+      ID,
+      ORG,
+      { buyerGstin: ' 29aabct1332l1zn ', buyerAddress: { city: ' Bengaluru ', zip: '' } },
+      'user_1',
+    );
+
+    const { where, data } = updates[0];
+    expect(where.status).toBe(InvoiceStatus.ISSUED);
+    expect(data.buyerGstin).toBe('29AABCT1332L1ZN');
+    expect(data.buyerStateCode).toBe('29');
+    expect(data.buyerStateName).toBe('Karnataka');
+    // Trimmed, blanks dropped, plain object.
+    expect(data.buyerAddress).toEqual({ city: 'Bengaluru' });
+    expect(events[0].data.actorId).toBe('user_1');
+    expect(events[0].data.message).toMatch(/INV-26-27\/000036 edited: buyer GSTIN, buyer address/);
+  });
+
+  it('clears the GSTIN on an empty string and rejects a malformed one', async () => {
+    const { service, updates } = build({ buyerGstin: '27AAPFU0939F1ZV' });
+    await service.update(ID, ORG, { buyerGstin: '' }, 'user_1');
+    expect(updates[0].data.buyerGstin).toBeNull();
+
+    await expect(
+      service.update(ID, ORG, { buyerGstin: 'NOT-A-GSTIN' }, 'user_1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 });
