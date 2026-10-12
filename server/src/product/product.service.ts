@@ -1512,6 +1512,21 @@ export class ProductService {
       return updated;
     });
 
+    // Same rule as updateVariant: turning tracking ON is a creation event for
+    // stock. ensureStockRows skips untracked variants, so without this the
+    // variant has no row anywhere and can never be given stock. The product
+    // page sends every variant edit through here, not the single PATCH.
+    const trackingTurnedOn = variants.filter(
+      (v) => v.trackQuantity === true && byId.get(v.id)?.trackQuantity === false,
+    );
+    if (trackingTurnedOn.length > 0) {
+      await this.inventoryLedger.ensureStockRows(
+        this.prisma,
+        orgId,
+        trackingTurnedOn,
+      );
+    }
+
     const movedStock = dto.updates
       .filter((u) => u.inventoryQuantity !== undefined)
       .map((u) => u.variantId);

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { AlertTriangle, Loader2, Plus } from "lucide-react";
 
 import { SectionCard } from "~/components/app/section-card";
@@ -23,7 +23,7 @@ import { VariantOptionRow } from "./variant-option-row";
  * push issues a destructive `productOptionsDelete`. A *reorder* keeps both names
  * present in the set, which is why a name still found elsewhere isn't a rename.
  */
-function detectRenames(
+export function detectRenames(
   options: EditableOption[],
   committedNames: string[],
 ): Array<{ from: string; to: string }> {
@@ -69,10 +69,9 @@ export function VariantOptionsCard({
   onValueDraftChange: (index: number, value: string) => void;
   onAddValue: (index: number) => void;
   onRemoveValue: (optionIndex: number, valueIndex: number) => void;
+  /** Generate missing combinations. Only offered when nothing is unsaved. */
   onSaveAndGenerate: () => void;
 }) {
-  const [confirmRenames, setConfirmRenames] = useState(false);
-
   const summary = useMemo(() => combinationSummary(options), [options]);
   const pending = useMemo(
     () => pendingCombinationCount(options, variants),
@@ -90,26 +89,15 @@ export function VariantOptionsCard({
     new Set(options.map((o) => o.name.trim()).filter(Boolean)).size !==
     options.filter((o) => o.name.trim()).length;
 
-  const canSubmit =
+  // Option edits go out with the page Save (which also generates and asks
+  // before a rename). The button here is only the immediate "fill in the
+  // missing combinations" action for options that are already saved.
+  const canGenerate =
     !isSaving &&
-    options.length > 0 &&
+    !isDirty &&
+    pending > 0 &&
     !hasIncompleteOption &&
-    !duplicateNames &&
-    (isDirty || pending > 0);
-
-  const label = isDirty
-    ? "Save and generate"
-    : pending > 0
-      ? `Generate ${plural(pending, "variant")}`
-      : "Everything is generated";
-
-  function submit() {
-    if (renames.length > 0) {
-      setConfirmRenames(true);
-      return;
-    }
-    onSaveAndGenerate();
-  }
+    !duplicateNames;
 
   return (
     <SectionCard
@@ -187,59 +175,81 @@ export function VariantOptionsCard({
             </>
           )}
         </p>
-        <Button type="button" variant="accent" onClick={submit} disabled={!canSubmit}>
-          {isSaving && <Loader2 className="size-3.5 animate-spin" />}
-          {label}
-        </Button>
+        {isDirty ? (
+          <p className="text-caption text-muted-foreground">Saved with the page</p>
+        ) : pending > 0 ? (
+          <Button
+            type="button"
+            variant="accent"
+            onClick={onSaveAndGenerate}
+            disabled={!canGenerate}
+          >
+            {isSaving && <Loader2 className="size-3.5 animate-spin" />}
+            Generate {plural(pending, "variant")}
+          </Button>
+        ) : (
+          <p className="text-caption text-muted-foreground">Everything is generated</p>
+        )}
       </div>
-
-      <Dialog open={confirmRenames} onOpenChange={setConfirmRenames}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Rename this option?</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 text-caption">
-            <ul className="space-y-1">
-              {renames.map((r) => (
-                <li key={r.from} className="font-medium text-foreground">
-                  {r.from} → {r.to}
-                </li>
-              ))}
-            </ul>
-            <p className="text-muted-foreground">
-              Options are matched by name, so this is a delete and re-create, not
-              an edit. All {plural(variants.length, "variant")} lose their value for
-              this option and are regenerated from the new name — prices, SKUs and
-              stock stay on the rows they are already on.
-            </p>
-            {isSyncedToShopify && (
-              <p className="text-warning">
-                This product is synced to Shopify. The next push deletes the old
-                option there and creates the new one.
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setConfirmRenames(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="accent"
-              onClick={() => {
-                setConfirmRenames(false);
-                onSaveAndGenerate();
-              }}
-            >
-              Rename and regenerate
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </SectionCard>
+  );
+}
+
+/**
+ * Confirms an option rename before the page Save sends it. Lives outside the
+ * card because the page Save — not the card — is what persists options now.
+ */
+export function OptionRenameDialog({
+  open,
+  renames,
+  variantCount,
+  isSyncedToShopify,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean;
+  renames: Array<{ from: string; to: string }>;
+  variantCount: number;
+  isSyncedToShopify: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(next) => !next && onCancel()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Rename this option?</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-caption">
+          <ul className="space-y-1">
+            {renames.map((r) => (
+              <li key={r.from} className="font-medium text-foreground">
+                {r.from} → {r.to}
+              </li>
+            ))}
+          </ul>
+          <p className="text-muted-foreground">
+            Options are matched by name, so this is a delete and re-create, not
+            an edit. All {plural(variantCount, "variant")} lose their value for
+            this option and are regenerated from the new name — prices, SKUs and
+            stock stay on the rows they are already on.
+          </p>
+          {isSyncedToShopify && (
+            <p className="text-warning">
+              This product is synced to Shopify. The next push deletes the old
+              option there and creates the new one.
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button type="button" variant="accent" onClick={onConfirm}>
+            Rename and save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

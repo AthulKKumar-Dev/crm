@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 import { ChevronDown, ChevronUp, Loader2 } from "lucide-react";
 import { Link } from "react-router";
 
@@ -14,187 +13,28 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Switch } from "~/components/ui/switch";
-import { inventoryKeys } from "~/hooks/use-inventory-queries";
-import {
-  useCreateAdjustmentMutation,
-  useGenerateSkusMutation,
-} from "~/hooks/use-inventory-mutations";
+import { useGenerateSkusMutation } from "~/hooks/use-inventory-mutations";
 import { COMMON_UQC, GST_RATE_OPTIONS, GST_SUPPLY_TYPES } from "~/lib/gst-uqc";
 import { CODE_TERMS } from "~/lib/inventory-vocabulary";
-import { handleMutationError } from "~/lib/handle-mutation-error";
 import { cn, formatMargin } from "~/lib/utils";
 import {
-  toGstRateOption,
+  changedVariantFields,
   toInputNumber,
-  toNullableNumber,
+  VARIANT_FIELD_LABELS,
   type VariantDraft,
 } from "~/lib/variant-draft";
 import { formatVariantOptionLabel, type ProductTaxDefaults } from "~/lib/variant-grouping";
-import type {
-  GstSupplyType,
-  ProductStatus,
-  ProductVariant,
-  UpdateVariantRequest,
-} from "~/types/api";
+import type { ProductStatus, ProductVariant } from "~/types/api";
 import { VariantWarehouseStockEditor } from "./variant-warehouse-stock-editor";
 
 /** Radix Select reserves "" for "nothing selected", so inherit needs a sentinel. */
 const INHERIT = "__inherit";
 
-type VariantEditDraft = {
-  price: string;
-  compareAtPrice: string;
-  cost: string;
-  sku: string;
-  barcode: string;
-  /** Legacy single-number stock. Unused (and unsent) once warehousing is on. */
-  inventoryQuantity: string;
-  trackQuantity: boolean;
-  continueSelling: boolean;
-  taxable: boolean;
-  requiresShipping: boolean;
-  weight: string;
-  weightUnit: string;
-  hsCode: string;
-  countryOfOrigin: string;
-  // GST override — "" everywhere means "inherit from the product".
-  gstHsnCode: string;
-  gstRate: string;
-  uqc: string;
-  supplyType: string;
-  /** warehouseId → desired AVAILABLE. Seeded once the stock query resolves. */
-  warehouseQty: Record<string, string>;
+/** Per-warehouse AVAILABLE for one variant, as seeded and as typed. */
+export type WarehouseDraft = {
+  baseline: Record<string, string>;
+  form: Record<string, string>;
 };
-
-function seedDraft(
-  variant: ProductVariant,
-  draft: VariantDraft | undefined,
-): VariantEditDraft {
-  return {
-    // Table drafts win: a price typed into the row and not yet saved must not
-    // be silently reverted by opening the panel on that same row.
-    price: draft?.price ?? toInputNumber(variant.price),
-    compareAtPrice: toInputNumber(variant.compareAtPrice),
-    cost: draft?.cost ?? toInputNumber(variant.cost),
-    sku: draft?.sku ?? variant.sku ?? "",
-    barcode: variant.barcode ?? "",
-    inventoryQuantity:
-      draft?.inventoryQuantity ?? toInputNumber(variant.inventoryQuantity ?? 0),
-    trackQuantity: variant.trackQuantity ?? true,
-    continueSelling: variant.continueSellingWhenOutOfStock ?? false,
-    taxable: variant.taxable ?? true,
-    requiresShipping: variant.requiresShipping ?? true,
-    weight: toInputNumber(variant.weight),
-    weightUnit: variant.weightUnit ?? "kg",
-    hsCode: variant.hsCode ?? "",
-    countryOfOrigin: variant.countryOfOrigin ?? "",
-    gstHsnCode: variant.hsnCode ?? "",
-    gstRate: toGstRateOption(variant.gstRate),
-    uqc: variant.unitOfMeasure ?? "",
-    supplyType: variant.supplyType ?? "",
-    warehouseQty: {},
-  };
-}
-
-const FIELD_LABELS: Partial<Record<keyof VariantEditDraft, string>> = {
-  price: "price",
-  compareAtPrice: "compare-at",
-  cost: "cost",
-  sku: "SKU",
-  barcode: "barcode",
-  inventoryQuantity: "stock",
-  trackQuantity: "track quantity",
-  continueSelling: "keep selling at zero",
-  taxable: "charge tax",
-  requiresShipping: "shipping",
-  weight: "weight",
-  weightUnit: "weight unit",
-  hsCode: "HS code",
-  countryOfOrigin: "country of origin",
-  gstHsnCode: "HSN/SAC",
-  gstRate: "GST rate",
-  uqc: "UQC",
-  supplyType: "supply type",
-};
-
-function changedLabels(base: VariantEditDraft, form: VariantEditDraft): string[] {
-  const labels: string[] = [];
-  for (const key of Object.keys(FIELD_LABELS) as Array<keyof VariantEditDraft>) {
-    if (base[key] !== form[key]) labels.push(FIELD_LABELS[key]!);
-  }
-  const warehouses = Object.keys({ ...base.warehouseQty, ...form.warehouseQty });
-  if (warehouses.some((id) => base.warehouseQty[id] !== form.warehouseQty[id])) {
-    labels.push("stock");
-  }
-  return labels;
-}
-
-function buildPatch(
-  base: VariantEditDraft,
-  form: VariantEditDraft,
-  { isVendor, warehousingEnabled }: { isVendor: boolean; warehousingEnabled: boolean },
-): UpdateVariantRequest {
-  const data: UpdateVariantRequest = {};
-
-  if (form.price !== base.price) {
-    const n = Number(form.price);
-    if (form.price.trim() && Number.isFinite(n)) data.price = n;
-  }
-  if (form.compareAtPrice !== base.compareAtPrice) {
-    const n = toNullableNumber(form.compareAtPrice);
-    if (n !== undefined) data.compareAtPrice = n;
-  }
-  if (form.cost !== base.cost) {
-    const n = toNullableNumber(form.cost);
-    if (n !== undefined) data.cost = n;
-  }
-  if (form.sku !== base.sku) data.sku = form.sku.trim() || null;
-  if (form.barcode !== base.barcode) data.barcode = form.barcode.trim() || null;
-  // Under warehousing the quantity belongs to a warehouse, and the server
-  // rejects it here without one — those go out as adjustments instead.
-  if (!warehousingEnabled && form.inventoryQuantity !== base.inventoryQuantity) {
-    const n = Number.parseInt(form.inventoryQuantity, 10);
-    if (Number.isFinite(n)) data.inventoryQuantity = n;
-  }
-  if (form.trackQuantity !== base.trackQuantity) {
-    data.trackQuantity = form.trackQuantity;
-  }
-  if (form.continueSelling !== base.continueSelling) {
-    data.continueSellingWhenOutOfStock = form.continueSelling;
-  }
-  if (form.taxable !== base.taxable) data.taxable = form.taxable;
-  if (form.requiresShipping !== base.requiresShipping) {
-    data.requiresShipping = form.requiresShipping;
-  }
-  if (form.weight !== base.weight) {
-    const n = toNullableNumber(form.weight);
-    if (n !== undefined) data.weight = n;
-  }
-  // A unit with no weight is meaningless to the server, so it only travels
-  // alongside one.
-  if (form.weightUnit !== base.weightUnit && form.weight.trim()) {
-    data.weightUnit = form.weightUnit as UpdateVariantRequest["weightUnit"];
-  }
-  if (form.hsCode !== base.hsCode) data.hsCode = form.hsCode.trim() || null;
-  if (form.countryOfOrigin !== base.countryOfOrigin) {
-    data.countryOfOrigin = form.countryOfOrigin.trim().toUpperCase() || null;
-  }
-  if (!isVendor) {
-    // null = back to inheriting from the product.
-    if (form.gstHsnCode !== base.gstHsnCode) {
-      data.hsnCode = form.gstHsnCode.trim() || null;
-    }
-    if (form.gstRate !== base.gstRate) {
-      data.gstRate = form.gstRate === "" ? null : Number(form.gstRate);
-    }
-    if (form.uqc !== base.uqc) data.unitOfMeasure = form.uqc || null;
-    if (form.supplyType !== base.supplyType) {
-      data.supplyType =
-        form.supplyType === "" ? null : (form.supplyType as GstSupplyType);
-    }
-  }
-  return data;
-}
 
 /**
  * Whether this variant is actually purchasable, and why.
@@ -205,7 +45,7 @@ function buildPatch(
  * and a second, conflicting UI for the two switches below.
  */
 function deriveAvailability(
-  form: VariantEditDraft,
+  form: VariantDraft,
   productStatus: ProductStatus,
   stock: number,
 ): { label: string; tone: string; reason: string } {
@@ -243,13 +83,15 @@ function deriveAvailability(
 /**
  * The expanding "EDITING …" panel under a variant row.
  *
- * Mount it with `key={variant.id}` — the draft is seeded by lazy initialiser,
- * and later refetches only refresh fields the merchant hasn't touched, so a
- * background refetch can never overwrite what is being typed.
+ * Controlled: the draft and the per-warehouse quantities live on the product
+ * page, so closing the panel or opening another row loses nothing, and the
+ * page's one Save sends them with everything else.
  */
 export function VariantInlineEditor({
   variant,
   draft,
+  baseline,
+  warehouseQty,
   productTax,
   productStatus,
   currency,
@@ -258,14 +100,18 @@ export function VariantInlineEditor({
   trackForced,
   oversellForced,
   isVendor,
-  isSaving,
-  onSaveVariant,
-  onSaved,
-  onCancel,
-  onDirtyChange,
+  disabled,
+  onChange,
+  onWarehouseChange,
+  onLevelsLoaded,
+  onRevert,
+  onClose,
 }: {
   variant: ProductVariant;
-  draft: VariantDraft | undefined;
+  draft: VariantDraft;
+  /** The draft as last saved — what Revert goes back to. */
+  baseline: VariantDraft;
+  warehouseQty: WarehouseDraft | undefined;
   productTax: ProductTaxDefaults;
   productStatus: ProductStatus;
   currency: string;
@@ -274,135 +120,38 @@ export function VariantInlineEditor({
   trackForced: boolean;
   oversellForced: boolean;
   isVendor: boolean;
-  isSaving: boolean;
-  onSaveVariant: (variantId: string, data: UpdateVariantRequest) => Promise<void>;
-  /** Fires only after every call in the save sequence has resolved. */
-  onSaved: (patch: Partial<VariantDraft>) => void;
-  onCancel: () => void;
-  onDirtyChange: (dirty: boolean) => void;
+  /** The page is saving. */
+  disabled: boolean;
+  onChange: (patch: Partial<VariantDraft>) => void;
+  onWarehouseChange: (warehouseId: string, value: string) => void;
+  /** Seeds the page's per-warehouse draft; see VariantWarehouseStockEditor. */
+  onLevelsLoaded: (seed: Record<string, string>) => void;
+  onRevert: () => void;
+  onClose: () => void;
 }) {
-  const [baseline, setBaseline] = useState(() => seedDraft(variant, draft));
-  const [form, setForm] = useState(baseline);
   const [advanced, setAdvanced] = useState(true);
-  const [stockReloadKey, setStockReloadKey] = useState(0);
-  const [busy, setBusy] = useState(false);
-
-  const queryClient = useQueryClient();
-  const adjust = useCreateAdjustmentMutation({ silent: true });
   const generateSkus = useGenerateSkusMutation();
 
-  const changes = changedLabels(baseline, form);
+  const changes = changedVariantFields(baseline, draft, { warehousingEnabled }).map(
+    (key) => VARIANT_FIELD_LABELS[key],
+  );
+  if (
+    warehouseQty &&
+    Object.keys(warehouseQty.form).some(
+      (id) => warehouseQty.form[id] !== warehouseQty.baseline[id],
+    )
+  ) {
+    changes.push("stock");
+  }
   const dirty = changes.length > 0;
 
-  useEffect(() => {
-    onDirtyChange(dirty);
-    return () => onDirtyChange(false);
-  }, [dirty, onDirtyChange]);
-
-  // A refetch of this variant (Create SKU, the save below, a stock adjustment)
-  // flows into every field the merchant hasn't touched — form === baseline —
-  // so the panel can stay open on fresh data instead of closing to force a
-  // re-seed. Touched fields keep what is being typed.
-  useEffect(() => {
-    const fresh = seedDraft(variant, undefined);
-    const stale = (Object.keys(FIELD_LABELS) as Array<keyof typeof FIELD_LABELS>).filter(
-      (key) => baseline[key] !== fresh[key] && form[key] === baseline[key],
-    );
-    if (stale.length === 0) return;
-    const patch = Object.fromEntries(stale.map((key) => [key, fresh[key]]));
-    setBaseline((prev) => ({ ...prev, ...patch }));
-    setForm((prev) => ({ ...prev, ...patch }));
-    // Only a new variant payload should trigger this; baseline/form are read
-    // from the same render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [variant]);
-
-  const set = <K extends keyof VariantEditDraft>(key: K, value: VariantEditDraft[K]) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
-
-  // Both halves move together so a warehouse can never look "changed" merely
-  // because the baseline arrived a render later than the form.
-  //
-  // Re-run whenever the variant's set of locations changes. Only locations in
-  // the seed survive: a quantity typed for a location that has since been
-  // removed would otherwise read as an unsaved change and, on save, write an
-  // adjustment that puts the location straight back.
-  const seedWarehouses = useCallback((seed: Record<string, string>) => {
-    setBaseline((prev) => ({ ...prev, warehouseQty: seed }));
-    setForm((prev) => {
-      const quantityByWarehouseId: Record<string, string> = {};
-      for (const warehouseId of Object.keys(seed)) {
-        quantityByWarehouseId[warehouseId] = prev.warehouseQty[warehouseId] ?? seed[warehouseId];
-      }
-      return { ...prev, warehouseQty: quantityByWarehouseId };
-    });
-  }, []);
-
-  const trackQuantity = trackForced ? true : form.trackQuantity;
+  const trackQuantity = trackForced ? true : draft.trackQuantity;
   const optionLabel = formatVariantOptionLabel(variant) ?? variant.title;
-  const saving = busy || isSaving;
 
   const shownStock = warehousingEnabled
     ? (variant.inventoryQuantity ?? 0)
-    : Number.parseInt(form.inventoryQuantity, 10) || 0;
-  const availability = deriveAvailability(form, productStatus, shownStock);
-
-  async function handleSave() {
-    if (!dirty || saving) return;
-    setBusy(true);
-    try {
-      const data = buildPatch(baseline, form, { isVendor, warehousingEnabled });
-      if (Object.keys(data).length > 0) {
-        await onSaveVariant(variant.id, data);
-      }
-
-      if (warehousingEnabled) {
-        const changed = Object.keys(form.warehouseQty).filter(
-          (id) => form.warehouseQty[id] !== baseline.warehouseQty[id],
-        );
-        // Sequential on purpose: each movement recomputes the variant's
-        // sellable cache, so parallel writes to one variant race each other.
-        for (const warehouseId of changed) {
-          const setTo = Number.parseInt(form.warehouseQty[warehouseId], 10);
-          if (!Number.isInteger(setTo) || setTo < 0) continue;
-          await adjust.mutateAsync({
-            variantId: variant.id,
-            warehouseId,
-            bucket: "AVAILABLE",
-            setTo,
-            reason: "correction",
-            note: "Edited from product variants",
-          });
-        }
-      }
-
-      onSaved({
-        price: form.price,
-        cost: form.cost,
-        sku: form.sku,
-        ...(warehousingEnabled ? {} : { inventoryQuantity: form.inventoryQuantity }),
-      });
-      // Stay open: what was just saved is the new baseline. Closing here made
-      // every save collapse the row the merchant was working in.
-      setBaseline(form);
-    } catch (error) {
-      // Adjustments already applied stay applied — there is no undo endpoint,
-      // and a compensating adjustment would write a ledger row that never
-      // happened. Show the server's own reason and re-seed from what is now
-      // true, so the inputs stop showing an intent that didn't land.
-      handleMutationError(error, "Couldn't save this variant.");
-      await queryClient.invalidateQueries({
-        queryKey: inventoryKeys.variantStock(variant.id),
-      });
-      if (warehousingEnabled) {
-        setForm((prev) => ({ ...prev, warehouseQty: {} }));
-        setBaseline((prev) => ({ ...prev, warehouseQty: {} }));
-        setStockReloadKey((n) => n + 1);
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
+    : Number.parseInt(draft.inventoryQuantity, 10) || 0;
+  const availability = deriveAvailability(draft, productStatus, shownStock);
 
   return (
     <tr>
@@ -419,9 +168,9 @@ export function VariantInlineEditor({
               type="number"
               min="0"
               step="0.01"
-              value={form.price}
-              onChange={(e) => set("price", e.target.value)}
-              disabled={saving}
+              value={draft.price}
+              onChange={(e) => onChange({ price: e.target.value })}
+              disabled={disabled}
             />
           </Field>
 
@@ -440,10 +189,10 @@ export function VariantInlineEditor({
               value={
                 warehousingEnabled
                   ? toInputNumber(variant.inventoryQuantity ?? 0)
-                  : form.inventoryQuantity
+                  : draft.inventoryQuantity
               }
-              onChange={(e) => set("inventoryQuantity", e.target.value)}
-              disabled={saving || warehousingEnabled || !trackQuantity}
+              onChange={(e) => onChange({ inventoryQuantity: e.target.value })}
+              disabled={disabled || warehousingEnabled || !trackQuantity}
             />
           </Field>
 
@@ -455,22 +204,22 @@ export function VariantInlineEditor({
             <div className="flex gap-2">
               <Input
                 id="vie-sku"
-                value={form.sku}
+                value={draft.sku}
                 placeholder="Add a SKU"
                 className="font-mono"
-                onChange={(e) => set("sku", e.target.value)}
-                disabled={saving}
+                onChange={(e) => onChange({ sku: e.target.value })}
+                disabled={disabled}
               />
-              {!form.sku.trim() && (
+              {!draft.sku.trim() && (
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   className="h-9 shrink-0"
-                  disabled={saving || generateSkus.isPending}
+                  disabled={disabled || generateSkus.isPending}
                   // The mutation stays pending until the product refetch lands;
-                  // the minted SKU then arrives through the `variant` prop and
-                  // the refresh effect above, with the panel left open.
+                  // the minted SKU then flows into the page's draft (untouched
+                  // fields absorb server values), with the panel left open.
                   onClick={() => generateSkus.mutate({ variantIds: [variant.id] })}
                 >
                   {generateSkus.isPending && (
@@ -524,9 +273,9 @@ export function VariantInlineEditor({
                     min="0"
                     step="0.01"
                     placeholder="—"
-                    value={form.compareAtPrice}
-                    onChange={(e) => set("compareAtPrice", e.target.value)}
-                    disabled={saving}
+                    value={draft.compareAtPrice}
+                    onChange={(e) => onChange({ compareAtPrice: e.target.value })}
+                    disabled={disabled}
                   />
                 </Field>
                 <Field label="Cost per item" htmlFor="vie-cost">
@@ -536,15 +285,15 @@ export function VariantInlineEditor({
                     min="0"
                     step="0.01"
                     placeholder="—"
-                    value={form.cost}
-                    onChange={(e) => set("cost", e.target.value)}
-                    disabled={saving}
+                    value={draft.cost}
+                    onChange={(e) => onChange({ cost: e.target.value })}
+                    disabled={disabled}
                   />
                 </Field>
                 <Field label="Margin">
                   <p className="flex h-9 items-center text-body tabular-nums text-muted-foreground">
-                    {form.cost.trim()
-                      ? formatMargin(form.price, form.cost, currency)
+                    {draft.cost.trim()
+                      ? formatMargin(draft.price, draft.cost, currency)
                       : "Set cost to see"}
                   </p>
                 </Field>
@@ -553,9 +302,9 @@ export function VariantInlineEditor({
                     id="vie-barcode"
                     className="font-mono"
                     placeholder="—"
-                    value={form.barcode}
-                    onChange={(e) => set("barcode", e.target.value)}
-                    disabled={saving}
+                    value={draft.barcode}
+                    onChange={(e) => onChange({ barcode: e.target.value })}
+                    disabled={disabled}
                   />
                 </Field>
               </div>
@@ -566,17 +315,11 @@ export function VariantInlineEditor({
               <div className="grid gap-4 lg:grid-cols-2">
                 {warehousingEnabled ? (
                   <VariantWarehouseStockEditor
-                    key={stockReloadKey}
                     variantId={variant.id}
-                    values={form.warehouseQty}
-                    onChange={(warehouseId, value) =>
-                      setForm((prev) => ({
-                        ...prev,
-                        warehouseQty: { ...prev.warehouseQty, [warehouseId]: value },
-                      }))
-                    }
-                    onLevelsLoaded={seedWarehouses}
-                    disabled={saving || !trackQuantity}
+                    values={warehouseQty?.form ?? {}}
+                    onChange={onWarehouseChange}
+                    onLevelsLoaded={onLevelsLoaded}
+                    disabled={disabled || !trackQuantity}
                   />
                 ) : (
                   <div className="rounded-lg border border-border px-4 py-3 text-caption text-muted-foreground">
@@ -600,8 +343,8 @@ export function VariantInlineEditor({
                     }
                     warn={trackForced}
                     checked={trackQuantity}
-                    onCheckedChange={(v) => set("trackQuantity", v)}
-                    disabled={trackForced || saving}
+                    onCheckedChange={(v) => onChange({ trackQuantity: v })}
+                    disabled={trackForced || disabled}
                   />
                   <SwitchRow
                     id="vie-continue"
@@ -612,9 +355,9 @@ export function VariantInlineEditor({
                         : "Allow backorders"
                     }
                     warn={oversellForced}
-                    checked={oversellForced ? true : form.continueSelling}
-                    onCheckedChange={(v) => set("continueSelling", v)}
-                    disabled={oversellForced || saving}
+                    checked={oversellForced ? true : draft.continueSelling}
+                    onCheckedChange={(v) => onChange({ continueSelling: v })}
+                    disabled={oversellForced || disabled}
                   />
                 </div>
               </div>
@@ -631,14 +374,14 @@ export function VariantInlineEditor({
                       min="0"
                       step="0.01"
                       placeholder="0.0"
-                      value={form.weight}
-                      onChange={(e) => set("weight", e.target.value)}
-                      disabled={saving || !form.requiresShipping}
+                      value={draft.weight}
+                      onChange={(e) => onChange({ weight: e.target.value })}
+                      disabled={disabled || !draft.requiresShipping}
                     />
                     <Select
-                      value={form.weightUnit}
-                      onValueChange={(v) => set("weightUnit", v)}
-                      disabled={saving || !form.requiresShipping}
+                      value={draft.weightUnit}
+                      onValueChange={(v) => onChange({ weightUnit: v })}
+                      disabled={disabled || !draft.requiresShipping}
                     >
                       <SelectTrigger className="w-20 shrink-0" aria-label="Weight unit">
                         <SelectValue />
@@ -659,17 +402,17 @@ export function VariantInlineEditor({
                     id="vie-hs"
                     placeholder="6109.10"
                     className="font-mono"
-                    value={form.hsCode}
-                    onChange={(e) => set("hsCode", e.target.value)}
-                    disabled={saving}
+                    value={draft.hsCode}
+                    onChange={(e) => onChange({ hsCode: e.target.value })}
+                    disabled={disabled}
                   />
                 </Field>
 
                 <Field label="GST rate">
                   <Select
-                    value={form.gstRate === "" ? INHERIT : form.gstRate}
-                    onValueChange={(v) => set("gstRate", v === INHERIT ? "" : v)}
-                    disabled={isVendor || saving}
+                    value={draft.gstRate === "" ? INHERIT : draft.gstRate}
+                    onValueChange={(v) => onChange({ gstRate: v === INHERIT ? "" : v })}
+                    disabled={isVendor || disabled}
                   >
                     <SelectTrigger id="vie-gst-rate" className="w-full">
                       <SelectValue />
@@ -698,9 +441,9 @@ export function VariantInlineEditor({
                         ? `${productTax.hsnCode} (product)`
                         : "Same as product"
                     }
-                    value={form.gstHsnCode}
-                    onChange={(e) => set("gstHsnCode", e.target.value)}
-                    disabled={isVendor || saving}
+                    value={draft.gstHsnCode}
+                    onChange={(e) => onChange({ gstHsnCode: e.target.value })}
+                    disabled={isVendor || disabled}
                   />
                 </Field>
 
@@ -710,17 +453,19 @@ export function VariantInlineEditor({
                     placeholder="IN"
                     maxLength={2}
                     className="font-mono uppercase"
-                    value={form.countryOfOrigin}
-                    onChange={(e) => set("countryOfOrigin", e.target.value.toUpperCase())}
-                    disabled={saving}
+                    value={draft.countryOfOrigin}
+                    onChange={(e) =>
+                      onChange({ countryOfOrigin: e.target.value.toUpperCase() })
+                    }
+                    disabled={disabled}
                   />
                 </Field>
 
                 <Field label="Unit (UQC)">
                   <Select
-                    value={form.uqc === "" ? INHERIT : form.uqc}
-                    onValueChange={(v) => set("uqc", v === INHERIT ? "" : v)}
-                    disabled={isVendor || saving}
+                    value={draft.uqc === "" ? INHERIT : draft.uqc}
+                    onValueChange={(v) => onChange({ uqc: v === INHERIT ? "" : v })}
+                    disabled={isVendor || disabled}
                   >
                     <SelectTrigger id="vie-uqc" className="w-full">
                       <SelectValue />
@@ -740,9 +485,11 @@ export function VariantInlineEditor({
 
                 <Field label="Supply type">
                   <Select
-                    value={form.supplyType === "" ? INHERIT : form.supplyType}
-                    onValueChange={(v) => set("supplyType", v === INHERIT ? "" : v)}
-                    disabled={isVendor || saving}
+                    value={draft.supplyType === "" ? INHERIT : draft.supplyType}
+                    onValueChange={(v) =>
+                      onChange({ supplyType: v === INHERIT ? "" : v })
+                    }
+                    disabled={isVendor || disabled}
                   >
                     <SelectTrigger id="vie-supply" className="w-full">
                       <SelectValue />
@@ -769,24 +516,24 @@ export function VariantInlineEditor({
                   id="vie-physical"
                   label="This is a physical product"
                   hint="Off for downloads and services"
-                  checked={form.requiresShipping}
-                  onCheckedChange={(v) => set("requiresShipping", v)}
-                  disabled={saving}
+                  checked={draft.requiresShipping}
+                  onCheckedChange={(v) => onChange({ requiresShipping: v })}
+                  disabled={disabled}
                 />
                 <SwitchRow
                   id="vie-taxable"
                   label="Charge tax"
                   hint="Include this variant in GST"
-                  checked={form.taxable}
-                  onCheckedChange={(v) => set("taxable", v)}
-                  disabled={isVendor || saving}
+                  checked={draft.taxable}
+                  onCheckedChange={(v) => onChange({ taxable: v })}
+                  disabled={isVendor || disabled}
                 />
               </div>
 
               <p className="mt-3 text-caption text-muted-foreground">
                 {isVendor
                   ? "Tax fields are managed by the store owner."
-                  : overrideSummary(form)}
+                  : overrideSummary(draft)}
               </p>
             </Section>
           </div>
@@ -800,26 +547,16 @@ export function VariantInlineEditor({
               dirty ? "text-foreground" : "text-muted-foreground",
             )}
           >
-            {dirty ? summariseChanges(changes) : "No changes yet"}
+            {dirty ? `${summariseChanges(changes)} · saved with the page` : "No changes yet"}
           </p>
           <div className="flex items-center gap-2">
-            <Button type="button" variant="outline" onClick={onCancel} disabled={saving}>
-              Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="accent"
-              onClick={handleSave}
-              // Deliberately NOT gated on the warehouse levels having loaded.
-              // The editor lives inside the collapsible section, so a "wait for
-              // stock" gate left Save dead for anyone who only wanted to change
-              // a price. It is safe: warehouse quantities can only be typed into
-              // inputs that exist once the levels are in, and until then both
-              // halves of the diff are empty, so the adjustment loop is a no-op.
-              disabled={!dirty || saving}
-            >
-              {saving && <Loader2 className="size-3.5 animate-spin" />}
-              Save variant
+            {dirty && (
+              <Button type="button" variant="ghost" onClick={onRevert} disabled={disabled}>
+                Revert
+              </Button>
+            )}
+            <Button type="button" variant="outline" onClick={onClose}>
+              Close
             </Button>
           </div>
         </div>
@@ -916,8 +653,8 @@ function summariseChanges(changes: string[]): string {
   return `${unique.length} unsaved changes`;
 }
 
-/** Reads the live form, not the saved variant — so it updates as you type. */
-function overrideSummary(form: VariantEditDraft): string {
+/** Reads the live draft, not the saved variant — so it updates as you type. */
+function overrideSummary(form: VariantDraft): string {
   const overridden = [
     form.gstHsnCode.trim() && "HSN/SAC",
     form.gstRate && "GST rate",
