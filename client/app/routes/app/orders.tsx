@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
-import { oneOf, useSessionState } from "~/hooks/use-session-state";
+import {
+  type DateRangePreset,
+  type OrderRangePreset,
+  orderRangeDates,
+  useDateRangeFilter,
+} from "~/hooks/use-date-range-filter";
 import { useClampPage, useListUrlState } from "~/hooks/use-list-url-state";
 import { Link } from "react-router";
 import {
   Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package, Loader2,
   Target, Box, Plus, Printer, FileText,
 } from "lucide-react";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { DateRangeFilter } from "~/components/app/date-range-filter";
 import { Button } from "~/components/ui/button";
 import {
   PageHeader,
@@ -30,7 +35,7 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { Separator } from "~/components/ui/separator";
 import { formatCurrency } from "~/lib/utils";
 import { useExclusiveDownload } from "~/hooks/use-exclusive-download";
-import { calendarDaysAgo, reportingTimeZone } from "~/lib/reporting-date";
+import { reportingTimeZone, todayIn } from "~/lib/reporting-date";
 import { useOrders, useOrderStats } from "~/hooks/use-order-queries";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
@@ -47,7 +52,12 @@ export function meta() {
 
 const PAGE_SIZE = 9;
 
-const DATE_RANGE_MAP: Record<string, number | null> = { all: null, "7d": 7, "30d": 30, "90d": 90 };
+const DATE_RANGE_PRESETS: ReadonlyArray<DateRangePreset<OrderRangePreset>> = [
+  { value: "all", label: "All Time" },
+  { value: "7d", label: "Last 7 Days" },
+  { value: "30d", label: "Last 30 Days" },
+  { value: "90d", label: "Last 90 Days" },
+];
 
 type OrderStatKey = Exclude<keyof OrderStatsResponse, "period">;
 
@@ -69,12 +79,8 @@ export default function OrdersPage() {
   // page's breadcrumb) return to the page the row was opened from.
   const list = useListUrlState("orders");
   // Opens on 7 days rather than All Time: all-time stats scan every order. A
-  // wider choice is remembered for the browser session.
-  const [dateRange, setDateRange] = useSessionState(
-    "orders.range",
-    "7d",
-    oneOf(Object.keys(DATE_RANGE_MAP)),
-  );
+  // wider choice, or a custom range, is remembered for the browser session.
+  const dateRange = useDateRangeFilter<OrderRangePreset>("orders.range", "7d", DATE_RANGE_PRESETS);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
   const { canIssue } = useInvoiceActionGates();
@@ -83,11 +89,8 @@ export default function OrdersPage() {
   const gstEnabled = org?.gstEnabled ?? false;
   const orgCurrency = org?.currency ?? "USD";
 
-  // "Last 7 days" = 7 full days plus today, from 00:00 in the org's reporting
-  // zone — the same window the dashboard's "Last 7 days" covers.
-  const daysBack = DATE_RANGE_MAP[dateRange];
-  const dateFrom =
-    daysBack != null ? calendarDaysAgo(daysBack, reportingTimeZone(org?.timezone)) : undefined;
+  const timeZone = reportingTimeZone(org?.timezone);
+  const { dateFrom, dateTo } = orderRangeDates(dateRange, timeZone);
 
   // The input stays bound to the raw value so typing feels instant; only the
   // debounced copy reaches the query key. Without this every keystroke was a
@@ -99,9 +102,11 @@ export default function OrdersPage() {
     limit: PAGE_SIZE,
     search: debouncedSearch || undefined,
     dateFrom,
+    dateTo,
   };
 
-  const statsParams: DashboardQueryParams | undefined = dateFrom ? { dateFrom } : undefined;
+  const statsParams: DashboardQueryParams | undefined =
+    dateFrom || dateTo ? { dateFrom, dateTo } : undefined;
 
   const { data, isLoading, isError, refetch } = useOrders(params);
   const { data: stats, isLoading: statsLoading } = useOrderStats(statsParams);
@@ -122,7 +127,7 @@ export default function OrdersPage() {
   // Same reasoning as the inventory label picker.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [list.page, debouncedSearch, dateRange]);
+  }, [list.page, debouncedSearch, dateFrom, dateTo]);
 
   function toggleRow(orderId: string) {
     setSelectedIds((prev) => {
@@ -162,11 +167,6 @@ export default function OrdersPage() {
     list.setSearch(event.target.value);
   }
 
-  function handleDateRangeChange(value: string) {
-    setDateRange(value);
-    list.resetPage();
-  }
-
   function formatChange(direction: "up" | "down" | "same", percentage: number) {
     return direction === "down" ? -percentage : percentage;
   }
@@ -184,22 +184,26 @@ export default function OrdersPage() {
           </PageHeaderDescription>
         </PageHeaderContent>
         <PageHeaderActions>
-          <Select value={dateRange} onValueChange={handleDateRangeChange}>
-            <SelectTrigger className="h-8 w-30 rounded-lg text-caption font-medium shadow-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Time</SelectItem>
-              <SelectItem value="7d">Last 7 Days</SelectItem>
-              <SelectItem value="30d">Last 30 Days</SelectItem>
-              <SelectItem value="90d">Last 90 Days</SelectItem>
-            </SelectContent>
-          </Select>
+          <DateRangeFilter
+            presets={DATE_RANGE_PRESETS}
+            preset={dateRange.preset}
+            custom={dateRange.custom}
+            label={dateRange.label}
+            today={todayIn(timeZone)}
+            onPresetChange={(value) => {
+              dateRange.selectPreset(value);
+              list.resetPage();
+            }}
+            onCustomApply={(range) => {
+              dateRange.applyCustom(range);
+              list.resetPage();
+            }}
+          />
           {/* "Download Report" is the dashboard's order CSV for the chosen
               date range. "Export JSON" is the same orders as a JSON file via
               the orders export route. Both take the date range only — the
-              search box is deliberately not applied, and only `dateFrom` is
-              sent so the request does not claim a filter the file lacks.
+              search box is deliberately not applied, so the request does not
+              claim a filter the file lacks.
               Both lock while either runs; the clicked one shows progress
               until its file arrives or fails. */}
           {!isVendor && (
@@ -212,7 +216,7 @@ export default function OrdersPage() {
                 onClick={() => startDownload(
                   "report",
                   () => dashboardService.exportCsv(statsParams),
-                  `orders-report-${dateRange}.csv`,
+                  `orders-report-${dateRange.fileTag}.csv`,
                   "Couldn't download the report. Please try again.",
                 )}
               >
@@ -230,8 +234,8 @@ export default function OrdersPage() {
                 aria-busy={activeDownload === "json"}
                 onClick={() => startDownload(
                   "json",
-                  () => orderService.exportJson({ dateFrom }),
-                  `orders-${dateRange}.json`,
+                  () => orderService.exportJson({ dateFrom, dateTo }),
+                  `orders-${dateRange.fileTag}.json`,
                   "Couldn't export the orders. Please try again.",
                 )}
               >

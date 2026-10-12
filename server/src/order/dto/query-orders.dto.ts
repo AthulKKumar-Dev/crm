@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderFinancialStatus, OrderFulfillmentStatus } from '@prisma/client';
 
@@ -24,7 +24,9 @@ export class QueryOrdersDto {
     @IsOptional() @IsString() sortBy?: string = 'externalCreatedAt';
     @IsOptional() @IsString() sortOrder?: 'asc' | 'desc' = 'desc';
 
-    // Date range
-    @IsOptional() @IsString() dateFrom?: string;
-    @IsOptional() @IsString() dateTo?: string;
-}
+    // Date range: a calendar day (`2026-10-01`) or a full ISO instant. `strict`
+    // rejects impossible days like `2026-02-30`, which would otherwise reach
+    // the query as an Invalid Date and surface as a 500.
+    @IsOptional() @IsDateString({ strict: true }) dateFrom?: string;
+    @IsOptional() @IsDateString({ strict: true }) dateTo?: string;
+}

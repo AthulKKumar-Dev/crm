@@ -255,6 +255,68 @@ describe('DashboardService.getSalesAndProfit', () => {
     });
   });
 
+  describe('explicit dates (custom range)', () => {
+    it('charts a short custom range by day and labels it with its dates', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-10-01',
+        dateTo: '2026-10-12',
+      });
+
+      expect(period.label).toBe('1 Oct – 12 Oct 2026');
+      // Whole days in IST: 00:00 on the 1st up to (not including) the 13th.
+      expect(period.from).toBe('2026-09-30T18:30:00.000Z');
+      expect(period.to).toBe('2026-10-12T18:30:00.000Z');
+      // Bucketed by month, twelve days drew a single bar.
+      const binds = bindsOf($queryRaw.mock.calls[0]);
+      expect(binds).toContain('day');
+      expect(binds).not.toContain('month');
+    });
+
+    it('charts a long custom range by month', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-01-01',
+        dateTo: '2026-10-12',
+      });
+
+      expect(period.label).toBe('1 Jan – 12 Oct 2026');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('month');
+    });
+
+    it('labels a single day once, and a range across years with both years', async () => {
+      const single = build();
+      const one = await single.service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-10-12',
+        dateTo: '2026-10-12',
+      });
+      expect(one.period.label).toBe('12 Oct 2026');
+
+      const across = build();
+      const two = await across.service.getSalesAndProfit(ORG, {
+        dateFrom: '2025-12-28',
+        dateTo: '2026-01-03',
+      });
+      expect(two.period.label).toBe('28 Dec 2025 – 3 Jan 2026');
+    });
+
+    it('ends the bucket series before the exclusive end, so no empty trailing bar', async () => {
+      const { service, $queryRaw } = build();
+      await service.getSalesAndProfit(ORG, { dateFrom: '2026-10-01', dateTo: '2026-10-12' });
+
+      // `to` is 00:00 on the 13th; date_trunc of it is a 13th bucket nobody asked for.
+      expect(sqlOf($queryRaw.mock.calls[0])).toMatch(/- interval '1 millisecond'\) AT TIME ZONE/);
+    });
+
+    it('leaves preset ranges on their own unit and label', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, { range: '6m' });
+
+      expect(period.label).toBe('Last 6 months');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('month');
+    });
+  });
+
   describe('reported figures', () => {
     it('reports gross profit as net sales minus COGS', async () => {
       const { service } = build({ rows: [profitRow()] });

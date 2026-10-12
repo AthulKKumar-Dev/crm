@@ -38,3 +38,22 @@ export function calendarDaysAgo(days: number, timeZone: string): string {
   const [year, month, day] = today.split("-").map(Number);
   return new Date(Date.UTC(year, month - 1, day - days)).toISOString().slice(0, 10);
 }
+
+/** Today as `YYYY-MM-DD` in `timeZone`: the last day a range may end on. */
+export function todayIn(timeZone: string): string {
+  return calendarDaysAgo(0, timeZone);
+}
+
+/** "1 Oct – 12 Oct 2026" for two `YYYY-MM-DD` days; the year once if shared. */
+export function formatDayRange(from: string, to: string): string {
+  // Read as UTC on both sides: these are calendar days, not instants.
+  const format = (day: string, withYear: boolean) =>
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "UTC",
+      day: "numeric",
+      month: "short",
+      ...(withYear && { year: "numeric" }),
+    }).format(new Date(`${day}T00:00:00Z`));
+  if (from === to) return format(to, true);
+  return `${format(from, from.slice(0, 4) !== to.slice(0, 4))} – ${format(to, true)}`;
+}
