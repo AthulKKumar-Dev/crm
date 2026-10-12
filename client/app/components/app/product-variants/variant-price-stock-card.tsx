@@ -1,6 +1,5 @@
 import { Fragment, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, ChevronUp, Loader2, Search } from "lucide-react";
-import { toast } from "sonner";
 
 import { SectionCard } from "~/components/app/section-card";
 import { Input } from "~/components/ui/input";
@@ -34,9 +33,8 @@ import type {
   ProductOption,
   ProductStatus,
   ProductVariant,
-  UpdateVariantRequest,
 } from "~/types/api";
-import { VariantInlineEditor } from "./variant-inline-editor";
+import { VariantInlineEditor, type WarehouseDraft } from "./variant-inline-editor";
 import { VariantSwatch } from "./variant-swatch";
 
 /** Variant · Price · Stock · SKU · (disclosure chevron) */
@@ -50,10 +48,14 @@ export function VariantPriceStockCard({
   committedOptions,
   currency,
   drafts,
+  baselineDrafts,
+  warehouseDrafts,
   productTax,
-  onSaveVariant,
-  onVariantPersisted,
-  isSavingVariant,
+  onDraftChange,
+  onWarehouseChange,
+  onLevelsLoaded,
+  onRevertVariant,
+  disabled,
   warehousingEnabled,
   trackForced,
   oversellForced,
@@ -66,10 +68,16 @@ export function VariantPriceStockCard({
   committedOptions: ProductOption[];
   currency: string;
   drafts: Record<string, VariantDraft>;
+  /** The drafts as last saved — what each panel diffs against and reverts to. */
+  baselineDrafts: Record<string, VariantDraft>;
+  warehouseDrafts: Record<string, WarehouseDraft>;
   productTax: ProductTaxDefaults;
-  onSaveVariant: (variantId: string, data: UpdateVariantRequest) => Promise<void>;
-  onVariantPersisted: (variant: ProductVariant, patch: Partial<VariantDraft>) => void;
-  isSavingVariant: boolean;
+  onDraftChange: (variant: ProductVariant, patch: Partial<VariantDraft>) => void;
+  onWarehouseChange: (variantId: string, warehouseId: string, value: string) => void;
+  onLevelsLoaded: (variantId: string, seed: Record<string, string>) => void;
+  onRevertVariant: (variantId: string) => void;
+  /** The page is saving. */
+  disabled: boolean;
   warehousingEnabled: boolean;
   trackForced: boolean;
   oversellForced: boolean;
@@ -78,7 +86,6 @@ export function VariantPriceStockCard({
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editorDirty, setEditorDirty] = useState(false);
 
   const query = useDebounced(search, 200).trim().toLowerCase();
 
@@ -108,20 +115,10 @@ export function VariantPriceStockCard({
     });
   }
 
+  // Edits live on the page, so closing a panel or opening another loses
+  // nothing — they all go out with the page Save.
   function requestEdit(variantId: string) {
-    if (editingId === variantId) {
-      if (editorDirty) {
-        toast.info("Save or cancel your changes first.");
-        return;
-      }
-      setEditingId(null);
-      return;
-    }
-    if (editingId && editorDirty) {
-      toast.info("Save or cancel your changes first.");
-      return;
-    }
-    setEditingId(variantId);
+    setEditingId((current) => (current === variantId ? null : variantId));
   }
 
   const editingVariant = editingId
@@ -129,12 +126,16 @@ export function VariantPriceStockCard({
     : null;
 
   function renderEditor(v: ProductVariant) {
-    if (editingId !== v.id || !editingVariant) return null;
+    const draft = drafts[v.id];
+    const baseline = baselineDrafts[v.id];
+    if (editingId !== v.id || !editingVariant || !draft || !baseline) return null;
     return (
       <VariantInlineEditor
         key={v.id}
         variant={editingVariant}
-        draft={drafts[v.id]}
+        draft={draft}
+        baseline={baseline}
+        warehouseQty={warehouseDrafts[v.id]}
         productTax={productTax}
         productStatus={productStatus}
         currency={currency}
@@ -143,11 +144,14 @@ export function VariantPriceStockCard({
         trackForced={trackForced}
         oversellForced={oversellForced}
         isVendor={isVendor}
-        isSaving={isSavingVariant}
-        onSaveVariant={onSaveVariant}
-        onSaved={(patch) => onVariantPersisted(editingVariant, patch)}
-        onCancel={() => setEditingId(null)}
-        onDirtyChange={setEditorDirty}
+        disabled={disabled}
+        onChange={(patch) => onDraftChange(editingVariant, patch)}
+        onWarehouseChange={(warehouseId, value) =>
+          onWarehouseChange(v.id, warehouseId, value)
+        }
+        onLevelsLoaded={(seed) => onLevelsLoaded(v.id, seed)}
+        onRevert={() => onRevertVariant(v.id)}
+        onClose={() => setEditingId(null)}
       />
     );
   }

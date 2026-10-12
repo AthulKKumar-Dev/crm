@@ -904,9 +904,11 @@ export interface CreateProductRequest {
 
 /** Payload for editing a MANUAL-channel product. All fields optional. */
 export type UpdateProductRequest = Partial<
-  Omit<CreateProductRequest, "variant">
+  Omit<CreateProductRequest, "variant" | "gstRate">
 > & {
   variant?: Partial<ProductVariantInput>;
+  /** null clears the rate back to "Not set". */
+  gstRate?: number | null;
 };
 
 /** Variant CRUD payloads (for /products/:id/variants and /variants/:id endpoints). */
