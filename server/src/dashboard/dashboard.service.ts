@@ -16,6 +16,7 @@ import {
   resolveReportingTimeZone,
   zonedDayEndExclusive,
   zonedDayStart,
+  zonedParts,
 } from '../common/utils/zoned-date.util';
 import {
   computeBucket,
@@ -29,6 +30,9 @@ import { lowStockVariantRows, toLowStockEntry } from './low-stock.util';
 
 /** Most order rows one CSV / JSON download will carry, newest first. */
 export const REPORT_ROW_CAP = 10_000;
+
+/** Longest custom range still charted day by day; beyond it, by month. */
+const MAX_DAILY_BUCKET_DAYS = 92;
 
 /** The window every figure on the dashboard is reported over. */
 interface Window {
@@ -596,7 +600,9 @@ export class DashboardService {
       buckets AS (
         SELECT generate_series(
           date_trunc(${unit}, ${window.from}::timestamptz AT TIME ZONE ${tz}),
-          date_trunc(${unit}, ${window.to}::timestamptz   AT TIME ZONE ${tz}),
+          -- The window end is exclusive: step back off it, or an explicit range
+          -- gains an empty trailing bucket for the day after its end date.
+          date_trunc(${unit}, (${window.to}::timestamptz - interval '1 millisecond') AT TIME ZONE ${tz}),
           CAST(${step} AS interval)
         ) AS bucket
       )
@@ -673,15 +679,34 @@ export class DashboardService {
     const from = query.dateFrom
       ? zonedDayStart(query.dateFrom, timezone)
       : windowStart(to, range, timezone);
+    // A custom 12-day range bucketed by month drew one bar.
+    const days = (to.getTime() - from.getTime()) / 86_400_000;
+    const unit = explicit ? (days <= MAX_DAILY_BUCKET_DAYS ? 'day' : 'month') : range.unit;
 
     return {
       from,
       to,
-      unit: explicit ? 'month' : range.unit,
-      label: explicit ? 'Selected range' : range.label,
+      unit,
+      label: explicit ? this.rangeLabel(from, to, timezone) : range.label,
       timezone,
       currency: (org?.currency || 'USD').toUpperCase(),
     };
+  }
+
+  /** "1 Oct – 12 Oct 2026"; the year only once when both ends share it. */
+  private rangeLabel(from: Date, to: Date, timeZone: string): string {
+    const last = new Date(to.getTime() - 1); // `to` is exclusive
+    const format = (date: Date, withYear: boolean) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone,
+        day: 'numeric',
+        month: 'short',
+        ...(withYear && { year: 'numeric' }),
+      }).format(date);
+    const end = format(last, true);
+    if (format(from, true) === end) return end;
+    const sameYear = zonedParts(from, timeZone).year === zonedParts(last, timeZone).year;
+    return `${format(from, !sameYear)} – ${end}`;
   }
 
   /** The equally long window ending where this one begins. */

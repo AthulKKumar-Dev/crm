@@ -1,16 +1,10 @@
 import { lazy, Suspense } from "react";
-import { oneOf, useSessionState } from "~/hooks/use-session-state";
+import { type DateRangePreset, useDateRangeFilter } from "~/hooks/use-date-range-filter";
 import { ArrowRight, Download, Loader2, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { DateRangeFilter } from "~/components/app/date-range-filter";
 import {
   PageHeader,
   PageHeaderContent,
@@ -31,9 +25,9 @@ import {
 } from "~/hooks/use-dashboard-queries";
 import type { SparklinePoint } from "~/components/app/chart-line-default";
 import type { SalesProfitPoint } from "~/services/dashboard.service";
-import { DASHBOARD_RANGES } from "~/types/api";
 import type { DashboardQueryParams, DashboardRange } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { reportingTimeZone, todayIn } from "~/lib/reporting-date";
 import { cn, formatCurrency } from "~/lib/utils";
 import { StatCard } from "~/components/app/stat-card";
 import { MoneyTotal } from "~/components/app/money-total";
@@ -65,7 +59,7 @@ export function meta() {
   ];
 }
 
-const RANGE_OPTIONS: ReadonlyArray<{ value: DashboardRange; label: string }> = [
+const RANGE_OPTIONS: ReadonlyArray<DateRangePreset<DashboardRange>> = [
   { value: "7d", label: "Last 7 days" },
   { value: "30d", label: "Last 30 days" },
   { value: "6m", label: "Last 6 months" },
@@ -77,13 +71,13 @@ export default function DashboardPage() {
   // sitting beside a chart hard-coded to a rolling 12 months, so the two could
   // never be reconciled and neither said which period it covered.
   // Opens on 7 days: the narrowest window is the cheapest first load. A wider
-  // choice is remembered for the browser session.
-  const [range, setRange] = useSessionState<DashboardRange>(
-    "dashboard.range",
-    "7d",
-    oneOf(DASHBOARD_RANGES),
-  );
-  const params: DashboardQueryParams = { range };
+  // choice, or a custom range, is remembered for the browser session.
+  const range = useDateRangeFilter<DashboardRange>("dashboard.range", "7d", RANGE_OPTIONS);
+  // A preset sends `range`, a custom range sends its dates; never both, since
+  // the server lets explicit dates win and the two would disagree silently.
+  const params: DashboardQueryParams = range.custom
+    ? { dateFrom: range.custom.from, dateTo: range.custom.to }
+    : { range: range.preset };
 
   const {
     data: dashboard,
@@ -92,6 +86,7 @@ export default function DashboardPage() {
   } = useDashboard(params);
   const { downloadReport, exportJson, exporting } = useExportDashboard();
   const { data: org } = useCurrentOrg();
+  const timeZone = reportingTimeZone(org?.timezone);
   // Same params as the chart below, so React Query serves both from one
   // request and the cards cannot disagree with the bars.
   const {
@@ -118,18 +113,15 @@ export default function DashboardPage() {
             </PageHeaderDescription>
           </PageHeaderContent>
           <PageHeaderActions>
-            <Select value={range} onValueChange={(v) => setRange(v as DashboardRange)}>
-              <SelectTrigger className="h-8 w-36 rounded-lg text-caption font-medium shadow-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RANGE_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <DateRangeFilter
+              presets={RANGE_OPTIONS}
+              preset={range.preset}
+              custom={range.custom}
+              label={range.label}
+              today={todayIn(timeZone)}
+              onPresetChange={range.selectPreset}
+              onCustomApply={range.applyCustom}
+            />
             {/* One download at a time: both lock while either runs, and the
                 clicked one shows progress until its file arrives or fails. */}
             <Button
@@ -279,7 +271,7 @@ export default function DashboardPage() {
             topProducts={dashboard?.topSellingProducts}
             lowStockProducts={dashboard?.lowStockProducts}
             lowStockVariants={dashboard?.lowStockVariants}
-            periodLabel={RANGE_OPTIONS.find((option) => option.value === range)?.label}
+            periodLabel={range.label}
             isLoading={isLoading}
             currency={orgCurrency}
             className="flex-1"

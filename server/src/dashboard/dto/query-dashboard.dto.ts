@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { IsDateString, IsEnum, IsOptional, IsString } from 'class-validator';
 import {
     zonedDayStartDaysAgo,
     zonedMonthStartMonthsAgo,
@@ -54,7 +54,10 @@ export class QueryDashboardDto {
     /// Pre-canned window matching the UI selector. Defaults to `12m`.
     @IsOptional() @IsEnum(DASHBOARD_RANGES) range?: DashboardRange;
 
-    @IsOptional() @IsString() dateFrom?: string;  // e.g., "2026-01-01"
-    @IsOptional() @IsString() dateTo?: string;    // e.g., "2026-12-31"
+    /// A calendar day ("2026-01-01") or a full ISO instant. `strict` rejects
+    /// impossible days, which would otherwise reach the window as an Invalid
+    /// Date and surface as a 500.
+    @IsOptional() @IsDateString({ strict: true }) dateFrom?: string;
+    @IsOptional() @IsDateString({ strict: true }) dateTo?: string;
     @IsOptional() @IsString() channelId?: string; // filter by specific channel
 }

@@ -264,12 +264,24 @@ export class OrderService {
 
     // Date range filter. Bare dates are calendar days in the reporting zone, so
     // the list covers the same orders as the stats tiles above it.
+    //
+    // `placedBetween` is the "when was it placed" rule the dashboard and both
+    // export routes use (`externalCreatedAt`, else `createdAt`). Every write
+    // path sets `externalCreatedAt` today, so this changes nothing on current
+    // data; it keeps the list and its downloads on one definition should a
+    // null-dated order ever appear. The stats tiles above still filter on the
+    // bare column (see getComparison) — aligning them is a separate change.
+    //
+    // Under AND, not spread: `placedBetween` is an OR and would overwrite the
+    // search `where.OR` above.
     if (query.dateFrom || query.dateTo) {
       const timeZone = await this.reportingTimeZone(orgId);
-      where.externalCreatedAt = {
-        ...(query.dateFrom && { gte: zonedDayStart(query.dateFrom, timeZone) }),
-        ...(query.dateTo && { lt: zonedDayEndExclusive(query.dateTo, timeZone) }),
-      };
+      where.AND = [
+        placedBetween(
+          query.dateFrom ? zonedDayStart(query.dateFrom, timeZone) : undefined,
+          query.dateTo ? zonedDayEndExclusive(query.dateTo, timeZone) : undefined,
+        ),
+      ];
     }
 
     const page = query.page ?? 1;

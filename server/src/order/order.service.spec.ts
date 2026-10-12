@@ -320,3 +320,56 @@ describe('OrderService.findOne invoice', () => {
     expect(order.invoices).toEqual([]);
   });
 });
+
+describe('OrderService.findAll date range', () => {
+  function build() {
+    const prisma = {
+      order: {
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC' }) },
+    };
+    const service = new OrderService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return { service, prisma };
+  }
+
+  it('windows on placedBetween, the same rule as the exports', async () => {
+    const { service, prisma } = build();
+    await service.findAll(ORG, { dateFrom: '2026-10-01', dateTo: '2026-10-12' } as any);
+
+    const { where } = prisma.order.findMany.mock.calls[0][0];
+    // A bare `externalCreatedAt` range never matches NULL. No write path leaves
+    // it NULL today, but the list and its downloads must share one definition
+    // of "placed", or a null-dated order would land in one and not the other.
+    expect(where.externalCreatedAt).toBeUndefined();
+    const range = { gte: expect.any(Date), lt: expect.any(Date) };
+    expect(where.AND).toEqual([
+      {
+        OR: [
+          { externalCreatedAt: range },
+          { externalCreatedAt: null, createdAt: range },
+        ],
+      },
+    ]);
+    // Bare dates are whole days in the reporting zone (UTC default → IST).
+    const [{ OR: [{ externalCreatedAt: bounds }] }] = where.AND;
+    expect(bounds.gte.toISOString()).toBe('2026-09-30T18:30:00.000Z');
+    expect(bounds.lt.toISOString()).toBe('2026-10-12T18:30:00.000Z');
+    expect(prisma.order.count).toHaveBeenCalledWith({ where });
+  });
+
+  it('does not let the date window overwrite the search OR', async () => {
+    const { service, prisma } = build();
+    await service.findAll(ORG, { dateFrom: '2026-10-01', search: 'shirt' } as any);
+
+    const { where } = prisma.order.findMany.mock.calls[0][0];
+    expect(where.OR).toEqual(
+      expect.arrayContaining([{ name: { contains: 'shirt', mode: 'insensitive' } }]),
+    );
+    expect(where.AND).toHaveLength(1);
+  });
+});
