@@ -376,10 +376,10 @@ function MemberAccessEditor({ orgId, member, onDone }: { orgId: string; member: 
 
 const loyaltySchema = z.object({
   loyaltyMetric: z.enum(["ORDERS", "TOTAL_SPENT"]),
-  loyaltyBronzeMin: z.coerce.number().positive("Must be greater than 0"),
-  loyaltySilverMin: z.coerce.number().positive("Must be greater than 0"),
-  loyaltyGoldMin: z.coerce.number().positive("Must be greater than 0"),
-  loyaltyPlatinumMin: z.coerce.number().positive("Must be greater than 0"),
+  loyaltyBronzeMin: z.coerce.number<number>().positive("Must be greater than 0"),
+  loyaltySilverMin: z.coerce.number<number>().positive("Must be greater than 0"),
+  loyaltyGoldMin: z.coerce.number<number>().positive("Must be greater than 0"),
+  loyaltyPlatinumMin: z.coerce.number<number>().positive("Must be greater than 0"),
 }).refine((v) => v.loyaltyBronzeMin < v.loyaltySilverMin, {
   path: ["loyaltySilverMin"], message: "Silver must be greater than Bronze",
 }).refine((v) => v.loyaltySilverMin < v.loyaltyGoldMin, {

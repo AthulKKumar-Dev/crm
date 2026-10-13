@@ -23,7 +23,6 @@ import { SectionCard } from "~/components/app/section-card";
 import { ChannelBadge } from "~/components/app/channel-badge";
 import { EmptyState } from "~/components/app/empty-state";
 import { QueryErrorState } from "~/components/app/query-error-state";
-import { CustomerActivity } from "~/components/app/customer-activity";
 import { CustomerGstDialog } from "~/components/app/customer-gst-dialog";
 import { CustomerOrdersPanel } from "~/components/app/customer-orders-panel";
 import { NotYet } from "~/components/app/not-yet";
@@ -251,19 +250,6 @@ export default function CustomerDetailPage() {
               currency={orgCurrency}
             />
           )}
-          {activeTab === "wishlist" && (
-            <SectionCard
-              title="Wishlist"
-              description="Items this customer saved for later."
-            >
-              <div className="p-8">
-                <EmptyState
-                  title="Wishlists aren't available yet"
-                  description="Nothing in the platform records saved items today. This tab will fill in once wishlists ship."
-                />
-              </div>
-            </SectionCard>
-          )}
           {activeTab === "loyalty" && (
             <SectionCard
               title="Loyalty program"
@@ -275,14 +261,6 @@ export default function CustomerDetailPage() {
                   description="VIP tier is shown beside the customer's name. Per-customer points and rewards don't exist in the platform yet."
                 />
               </div>
-            </SectionCard>
-          )}
-          {activeTab === "activity" && (
-            <SectionCard
-              title="Activity"
-              description={`${customer.activityLogs.length} recent event${customer.activityLogs.length === 1 ? "" : "s"}`}
-            >
-              <CustomerActivity logs={customer.activityLogs} />
             </SectionCard>
           )}
         </div>
