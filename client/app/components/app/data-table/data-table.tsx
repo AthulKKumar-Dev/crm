@@ -241,60 +241,15 @@ export function DataTable<Row>({
     : "";
   const hasChipRow = Boolean(dateConfig) || filters.length > 0;
 
-  // ── Selection ──────────────────────────────────────────────────────────────
-  const allOnPage = rows.length > 0 && rows.every((r) => selection?.isSelected(r));
-  const someOnPage = !allOnPage && rows.some((r) => selection?.isSelected(r));
-
-  // ── Which state to show ────────────────────────────────────────────────────
-  const hasRows = rows.length > 0;
-  const showError = status.isError && !hasRows;
-  const showSkeleton = !showError && status.isLoading && !hasRows;
-  const showEmpty =
-    !showError && !showSkeleton && !hasRows && !state.hasActiveFilters && state.isDefaultTab;
-  const showNoResults = !showError && !showSkeleton && !hasRows && !showEmpty;
-  const showFooter = paginated && !showError && !showEmpty && !showNoResults;
-  const dimmed = Boolean(status.isPlaceholderData) && hasRows;
-
-  function handleRowClick(row: Row, event: MouseEvent<HTMLDivElement>) {
-    if (!onRowClick || isInteractiveTarget(event)) return;
-    onRowClick(row);
-  }
-  function handleRowKey(row: Row, event: KeyboardEvent<HTMLDivElement>) {
-    if (!onRowClick || event.key !== "Enter" || isInteractiveTarget(event)) return;
-    if (event.target !== event.currentTarget) return;
-    onRowClick(row);
-  }
-
-  return (
-    <div
-      className={cn(
-        "flex min-w-0 flex-col rounded-xl bg-card text-card-foreground shadow-sm ring-1 ring-border",
-        className,
-      )}
-    >
-      {/* Row 1 — tabs, Sort, Columns */}
-      <div className="flex flex-wrap items-center gap-2 px-2.5 pt-2.5">
-        {tabs && config.tab && (
-          <SegmentedTabs
-            variant="table"
-            behaviour="filter"
-            ariaLabel={tabs.ariaLabel ?? `Filter ${noun}`}
-            items={tabs.items}
-            value={state.tab}
-            onChange={state.setTab}
-            className="max-w-full flex-nowrap overflow-x-auto"
-          />
-        )}
-        <div className="flex-1" />
-        <SortMenu state={state} />
-        <ColumnsMenu state={state} />
-        {toolbarEnd}
-      </div>
-
-      {/* Row 2 — search, scopes */}
-      {(searchable || (config.scopes ?? []).length > 0) && (
-      <div className="flex flex-wrap items-center gap-2 px-2.5 pb-1.5 pt-2">
-        {searchable && (
+  // The search box and scope selectors. They sit on their own row under the
+  // tabs; a table without tabs puts them where the tabs would be instead, so
+  // the first row never carries an empty stretch beside Sort and Columns.
+  const hasTabs = Boolean(tabs && config.tab);
+  const scopes = config.scopes ?? [];
+  const hasSearchControls = searchable || scopes.length > 0;
+  const searchControls = (
+    <>
+      {searchable && (
         <div className="relative min-w-55 max-w-110 flex-[1_1_280px]">
           <Search className="pointer-events-none absolute left-2.5 top-2 size-4 text-muted-foreground" />
           <Input
@@ -329,12 +284,72 @@ export function DataTable<Row>({
             </kbd>
           )}
         </div>
-        )}
-        {(config.scopes ?? []).map((scope) => (
-          <ScopeSelect key={scope.key} state={state} def={scope} />
-        ))}
-      </div>
       )}
+      {scopes.map((scope) => (
+        <ScopeSelect key={scope.key} state={state} def={scope} />
+      ))}
+    </>
+  );
+
+  // ── Selection ──────────────────────────────────────────────────────────────
+  const allOnPage = rows.length > 0 && rows.every((r) => selection?.isSelected(r));
+  const someOnPage = !allOnPage && rows.some((r) => selection?.isSelected(r));
+
+  // ── Which state to show ────────────────────────────────────────────────────
+  const hasRows = rows.length > 0;
+  const showError = status.isError && !hasRows;
+  const showSkeleton = !showError && status.isLoading && !hasRows;
+  const showEmpty =
+    !showError && !showSkeleton && !hasRows && !state.hasActiveFilters && state.isDefaultTab;
+  const showNoResults = !showError && !showSkeleton && !hasRows && !showEmpty;
+  const showFooter = paginated && !showError && !showEmpty && !showNoResults;
+  const dimmed = Boolean(status.isPlaceholderData) && hasRows;
+
+  function handleRowClick(row: Row, event: MouseEvent<HTMLDivElement>) {
+    if (!onRowClick || isInteractiveTarget(event)) return;
+    onRowClick(row);
+  }
+  function handleRowKey(row: Row, event: KeyboardEvent<HTMLDivElement>) {
+    if (!onRowClick || event.key !== "Enter" || isInteractiveTarget(event)) return;
+    if (event.target !== event.currentTarget) return;
+    onRowClick(row);
+  }
+
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 flex-col rounded-xl bg-card text-card-foreground shadow-sm ring-1 ring-border",
+        className,
+      )}
+    >
+      {/* Row 1 — tabs (or, without tabs, the search and scopes), Sort, Columns */}
+      <div className="flex flex-wrap items-center gap-2 px-2.5 pt-2.5">
+        {hasTabs && tabs ? (
+          <SegmentedTabs
+            variant="table"
+            behaviour="filter"
+            ariaLabel={tabs.ariaLabel ?? `Filter ${noun}`}
+            items={tabs.items}
+            value={state.tab}
+            onChange={state.setTab}
+            className="max-w-full flex-nowrap overflow-x-auto"
+          />
+        ) : (
+          searchControls
+        )}
+        <div className="flex-1" />
+        <SortMenu state={state} />
+        <ColumnsMenu state={state} />
+        {toolbarEnd}
+      </div>
+
+      {/* Row 2 — search, scopes (only when tabs took row 1) */}
+      {hasTabs && hasSearchControls && (
+        <div className="flex flex-wrap items-center gap-2 px-2.5 pb-1.5 pt-2">
+          {searchControls}
+        </div>
+      )}
+      {!hasTabs && hasSearchControls && <div className="pb-1.5" />}
 
       {/* Row 3 — date chip, filter chips, + Filter, Clear all */}
       {hasChipRow && (
