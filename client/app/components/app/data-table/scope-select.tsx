@@ -41,7 +41,11 @@ export function ScopeSelect<Row>({ state, def }: { state: DataTableState<Row>; d
           <ChevronDown className="text-muted-foreground" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-70 p-1">
+      <PopoverContent
+        align="start"
+        className="w-70 p-1"
+        onFocusOutside={(event) => event.preventDefault()}
+      >
         {searchable && (
           <div className="p-1 pb-1.5">
             <Input

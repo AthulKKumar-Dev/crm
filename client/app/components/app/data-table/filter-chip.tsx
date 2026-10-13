@@ -27,11 +27,15 @@ export function FilterChip<Row>({
   def,
   open,
   onOpenChange,
+  onPicked,
 }: {
   state: DataTableState<Row>;
   def: FilterDef;
   open: boolean;
+  /** Dismissed (click outside, Escape, ×) — may close a pending chip for good. */
   onOpenChange: (open: boolean) => void;
+  /** A single-select value was chosen: close the popover, keep the chip. */
+  onPicked: () => void;
 }) {
   const [query, setQuery] = useState("");
   const values = state.filters[def.key] ?? [];
@@ -58,7 +62,10 @@ export function FilterChip<Row>({
       state.setFilter(def.key, on ? values.filter((v) => v !== value) : [...values, value]);
     } else {
       state.setFilter(def.key, on ? [] : [value]);
-      onOpenChange(false);
+      // Not `onOpenChange(false)`: the URL write is async, so a dismissal
+      // handler reading the filters now would still see the chip as empty
+      // and drop it before the value lands.
+      onPicked();
     }
   }
 
@@ -92,7 +99,14 @@ export function FilterChip<Row>({
           <X className="size-3" strokeWidth={2.5} />
         </button>
       </div>
-      <PopoverContent align="start" className="w-60 p-1">
+      {/* Closes on a click outside or Escape only, never on focus moving
+          away: this popover is opened from the "+ Filter" menu, and that
+          menu's close-time focus return would otherwise dismiss it. */}
+      <PopoverContent
+        align="start"
+        className="w-60 p-1"
+        onFocusOutside={(event) => event.preventDefault()}
+      >
         {searchable && (
           <div className="p-1 pb-1.5">
             <Input
@@ -183,7 +197,14 @@ export function AddFilterMenu({
           Filter
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-50">
+      {/* Picking an item opens the new chip's popover; the menu must not
+          pull focus back to this trigger as it closes, or the popover sees
+          focus leave and dismisses itself. */}
+      <DropdownMenuContent
+        align="start"
+        className="w-50"
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
         <DropdownMenuLabel className="text-caption font-normal text-muted-foreground">
           Filter by
         </DropdownMenuLabel>
