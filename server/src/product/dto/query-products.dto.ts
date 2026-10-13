@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ProductStatus } from '@prisma/client';
 
@@ -11,8 +11,12 @@ export class QueryProductsDto {
     @IsOptional() @IsString() productType?: string;
     @IsOptional() @IsString() channelId?: string;
     @IsOptional() @IsString() search?: string;
-    @IsOptional() @IsString() sortBy?: string = 'createdAt';
-    @IsOptional() @IsString() sortOrder?: 'asc' | 'desc' = 'desc';
+    // Whitelisted: spread straight into Prisma `orderBy`, where an unknown
+    // column is a 500, not a 400. See query-invoices.dto.ts.
+    @IsOptional()
+    @IsIn(['createdAt', 'updatedAt', 'title', 'vendor', 'productType', 'status'])
+    sortBy?: string = 'createdAt';
+    @IsOptional() @IsIn(['asc', 'desc']) sortOrder?: 'asc' | 'desc' = 'desc';
 
     // Inventory filters
     @IsOptional() @IsString() stockStatus?: 'in_stock' | 'low_stock' | 'out_of_stock';

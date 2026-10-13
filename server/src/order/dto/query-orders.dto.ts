@@ -1,4 +1,4 @@
-import { IsDateString, IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsDateString, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { OrderFinancialStatus, OrderFulfillmentStatus } from '@prisma/client';
 
@@ -20,9 +20,13 @@ export class QueryOrdersDto {
     // Search (by order number, customer name, or customer email)
     @IsOptional() @IsString() search?: string;
 
-    // Sort
-    @IsOptional() @IsString() sortBy?: string = 'externalCreatedAt';
-    @IsOptional() @IsString() sortOrder?: 'asc' | 'desc' = 'desc';
+    // Sort. Whitelisted: the service spreads this straight into Prisma's
+    // `orderBy`, where an unknown column is a 500, not a 400. Scalar columns
+    // the list UI offers, and nothing else.
+    @IsOptional()
+    @IsIn(['externalCreatedAt', 'createdAt', 'totalPrice', 'orderNumber', 'name'])
+    sortBy?: string = 'externalCreatedAt';
+    @IsOptional() @IsIn(['asc', 'desc']) sortOrder?: 'asc' | 'desc' = 'desc';
 
     // Date range: a calendar day (`2026-10-01`) or a full ISO instant. `strict`
     // rejects impossible days like `2026-02-30`, which would otherwise reach

@@ -314,6 +314,14 @@ html.dark { color-scheme: dark; }
   background: var(--surface-sunken);
 }
 
+/* ── DataTable refetch bar (components/app/data-table) ───────────────────── */
+/* A 30%-wide sliver sweeping the top edge of the table while a page of rows
+   that is already on screen is being replaced. */
+@keyframes table-progress {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
 /* ── Native select/option dark-mode fix ─────────────────────────────────── */
 /* Native <option> elements ignore most CSS — background + color are the
    only reliable properties across browsers. */

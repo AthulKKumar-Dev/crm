@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import { adminService } from "~/services/admin.service";
@@ -6,16 +6,18 @@ import { useAuthStore } from "~/stores/auth.store";
 
 export const adminKeys = {
     all: ["admin"] as const,
-    users: (params: { page: number; search: string }) =>
+    users: (params: { page: number; limit?: number; search?: string }) =>
         [...adminKeys.all, "users", params] as const,
     user: (userId: string) => [...adminKeys.all, "user", userId] as const,
 };
 
 /** Paginated + searchable list of every registered user. */
-export function useAdminUsers(params: { page: number; search: string }) {
+export function useAdminUsers(params: { page: number; limit?: number; search?: string }) {
     return useQuery({
         queryKey: adminKeys.users(params),
         queryFn: () => adminService.listUsers(params),
+        // The previous page stays on screen, dimmed, while the next one loads.
+        placeholderData: keepPreviousData,
     });
 }
 

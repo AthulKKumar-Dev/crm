@@ -3,15 +3,13 @@ import {
   type DateRangePreset,
   type OrderRangePreset,
   orderRangeDates,
-  useDateRangeFilter,
 } from "~/hooks/use-date-range-filter";
-import { useClampPage, useListUrlState } from "~/hooks/use-list-url-state";
-import { Link } from "react-router";
+import { useListUrlState } from "~/hooks/use-list-url-state";
+import { Link, useNavigate } from "react-router";
 import {
-  Search, Download, Upload, ChevronLeft, ChevronRight, ShoppingBag, Package, Loader2,
+  Download, Upload, ShoppingBag, Package, Loader2,
   Target, Box, Plus, Printer, FileText,
 } from "lucide-react";
-import { DateRangeFilter } from "~/components/app/date-range-filter";
 import { Button } from "~/components/ui/button";
 import {
   PageHeader,
@@ -22,15 +20,11 @@ import {
 } from "~/components/ui/page-header";
 import { StatCard } from "~/components/app/stat-card";
 import { MoneyTotal } from "~/components/app/money-total";
-import { SectionCard } from "~/components/app/section-card";
-import { OrdersTable } from "~/components/app/orders-table";
+import { DataTable, useDataTableState } from "~/components/app/data-table";
+import { OrderRowActions, useOrderColumns } from "~/components/app/orders-table";
 import { DockButton, FloatingDock } from "~/components/app/floating-dock";
 import { BulkInvoiceDialog } from "~/components/app/bulk-invoice-dialog";
 import { useInvoiceActionGates } from "~/hooks/use-invoice-action-gates";
-import { TableSkeleton } from "~/components/app/table-skeleton";
-import { EmptyState } from "~/components/app/empty-state";
-import { QueryErrorState } from "~/components/app/query-error-state";
-import { useDebounced } from "~/hooks/use-debounced";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Separator } from "~/components/ui/separator";
 import { formatCurrency } from "~/lib/utils";
@@ -41,7 +35,7 @@ import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { orderService } from "~/services/order.service";
 import { dashboardService } from "~/services/dashboard.service";
-import type { OrderListParams, DashboardQueryParams, OrderStatsResponse } from "~/types/api";
+import type { Order, OrderListParams, DashboardQueryParams, OrderStatsResponse } from "~/types/api";
 
 export function meta() {
   return [
@@ -49,8 +43,6 @@ export function meta() {
     { name: "description", content: "Manage and track all your orders" },
   ];
 }
-
-const PAGE_SIZE = 9;
 
 const DATE_RANGE_PRESETS: ReadonlyArray<DateRangePreset<OrderRangePreset>> = [
   { value: "all", label: "All Time" },
@@ -75,12 +67,11 @@ const STAT_CARDS: ReadonlyArray<{
 ];
 
 export default function OrdersPage() {
-  // Page and search live in the URL so Back from an order (and the order
-  // page's breadcrumb) return to the page the row was opened from.
+  // The whole view — page, search, date range, sort, page size — lives in the
+  // URL so Back from an order (and the order page's breadcrumb) return to the
+  // exact list the row was opened from.
   const list = useListUrlState("orders");
-  // Opens on 7 days rather than All Time: all-time stats scan every order. A
-  // wider choice, or a custom range, is remembered for the browser session.
-  const dateRange = useDateRangeFilter<OrderRangePreset>("orders.range", "7d", DATE_RANGE_PRESETS);
+  const navigate = useNavigate();
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkInvoiceOpen, setBulkInvoiceOpen] = useState(false);
   const { canIssue } = useInvoiceActionGates();
@@ -88,61 +79,79 @@ export default function OrdersPage() {
   const { data: org } = useCurrentOrg();
   const gstEnabled = org?.gstEnabled ?? false;
   const orgCurrency = org?.currency ?? "USD";
-
   const timeZone = reportingTimeZone(org?.timezone);
-  const { dateFrom, dateTo } = orderRangeDates(dateRange, timeZone);
 
-  // The input stays bound to the raw value so typing feels instant; only the
-  // debounced copy reaches the query key. Without this every keystroke was a
-  // fresh cache key and therefore its own request — "shirt" was five.
-  const debouncedSearch = useDebounced(list.search, 350);
+  // Mirrors ORG_MANAGERS / ORG_OPERATORS — see OrderRowActions.
+  const { role, isVendor } = useCurrentRole();
+  const canManage = role === "OWNER" || role === "ADMIN" || role === "MANAGER";
+  const canOperate = canManage || role === "AGENT";
+  const showShopifyColumn = !isVendor;
+
+  const columns = useOrderColumns({ currency: orgCurrency, showShopifyColumn });
+  const table = useDataTableState({
+    key: "orders",
+    list,
+    columns,
+    sort: { default: { field: "externalCreatedAt", dir: "desc" } },
+    // Opens on 7 days rather than All Time: all-time stats scan every order.
+    date: {
+      presets: DATE_RANGE_PRESETS,
+      default: "7d",
+      custom: true,
+      today: todayIn(timeZone),
+    },
+  });
+
+  const dateFilter = {
+    preset: (table.date?.preset ?? "7d") as OrderRangePreset,
+    custom: table.date?.custom ?? null,
+  };
+  const { dateFrom, dateTo } = orderRangeDates(dateFilter, timeZone);
+  /** File-name part for exports: the preset key, or the two dates. */
+  const fileTag = dateFilter.custom
+    ? `${dateFilter.custom.from}-to-${dateFilter.custom.to}`
+    : dateFilter.preset;
 
   const params: OrderListParams = {
-    page: list.page,
-    limit: PAGE_SIZE,
-    search: debouncedSearch || undefined,
+    page: table.page,
+    limit: table.limit,
+    search: table.debouncedSearch || undefined,
     dateFrom,
     dateTo,
+    sortBy: table.sort?.field,
+    sortOrder: table.sort?.dir,
   };
 
   const statsParams: DashboardQueryParams | undefined =
     dateFrom || dateTo ? { dateFrom, dateTo } : undefined;
 
-  const { data, isLoading, isError, refetch } = useOrders(params);
+  const { data, isLoading, isError, isPlaceholderData, refetch } = useOrders(params);
   const { data: stats, isLoading: statsLoading } = useOrderStats(statsParams);
   // One download at a time across both header buttons.
   const { running: activeDownload, run: startDownload } = useExclusiveDownload<"report" | "json">();
-  // Neither export route is open to vendors: the export query has no vendor
-  // scope, so opening it would hand one vendor every other vendor's orders.
-  // The buttons go rather than fail with a "try again" that never would.
-  const { isVendor } = useCurrentRole();
   const orders = data?.data ?? [];
-  const meta = data?.meta;
-  const totalPages = meta?.totalPages ?? 1;
-  useClampPage(list, meta?.totalPages);
 
   // Selection is cleared whenever the visible rows change. Printing slips for
   // orders that scrolled out of view is unrecoverable — you only find out at
   // the printer — so the selection never outlives the page it was made on.
   // Same reasoning as the inventory label picker.
+  const sortField = table.sort?.field;
+  const sortDir = table.sort?.dir;
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [list.page, debouncedSearch, dateFrom, dateTo]);
+  }, [table.page, table.limit, table.debouncedSearch, dateFrom, dateTo, sortField, sortDir]);
 
-  function toggleRow(orderId: string) {
+  function toggleRow(order: Order, checked: boolean) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(orderId)) next.delete(orderId);
-      else next.add(orderId);
+      if (checked) next.add(order.id);
+      else next.delete(order.id);
       return next;
     });
   }
 
-  function toggleAllOnPage() {
-    setSelectedIds((prev) => {
-      const allSelected = orders.length > 0 && orders.every((o) => prev.has(o.id));
-      return allSelected ? new Set() : new Set(orders.map((o) => o.id));
-    });
+  function toggleAllOnPage(rows: ReadonlyArray<Order>, checked: boolean) {
+    setSelectedIds(checked ? new Set(rows.map((o) => o.id)) : new Set());
   }
 
   const slipHref =
@@ -163,10 +172,6 @@ export default function OrdersPage() {
         )
       : undefined;
 
-  function handleSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
-    list.setSearch(event.target.value);
-  }
-
   function formatChange(direction: "up" | "down" | "same", percentage: number) {
     return direction === "down" ? -percentage : percentage;
   }
@@ -184,21 +189,6 @@ export default function OrdersPage() {
           </PageHeaderDescription>
         </PageHeaderContent>
         <PageHeaderActions>
-          <DateRangeFilter
-            presets={DATE_RANGE_PRESETS}
-            preset={dateRange.preset}
-            custom={dateRange.custom}
-            label={dateRange.label}
-            today={todayIn(timeZone)}
-            onPresetChange={(value) => {
-              dateRange.selectPreset(value);
-              list.resetPage();
-            }}
-            onCustomApply={(range) => {
-              dateRange.applyCustom(range);
-              list.resetPage();
-            }}
-          />
           {/* "Download Report" is the dashboard's order CSV for the chosen
               date range. "Export JSON" is the same orders as a JSON file via
               the orders export route. Both take the date range only — the
@@ -216,7 +206,7 @@ export default function OrdersPage() {
                 onClick={() => startDownload(
                   "report",
                   () => dashboardService.exportCsv(statsParams),
-                  `orders-report-${dateRange.fileTag}.csv`,
+                  `orders-report-${fileTag}.csv`,
                   "Couldn't download the report. Please try again.",
                 )}
               >
@@ -235,7 +225,7 @@ export default function OrdersPage() {
                 onClick={() => startDownload(
                   "json",
                   () => orderService.exportJson({ dateFrom, dateTo }),
-                  `orders-${dateRange.fileTag}.json`,
+                  `orders-${fileTag}.json`,
                   "Couldn't export the orders. Please try again.",
                 )}
               >
@@ -311,91 +301,37 @@ export default function OrdersPage() {
         )}
       </div>
 
-      {/* Orders table with search and pagination */}
-      <SectionCard
-        title="All Orders"
-        description="Keep track of recent order data and others information."
-        action={
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                type="search"
-                placeholder="Search here..."
-                value={list.search}
-                onChange={handleSearchChange}
-                className="h-8 w-48 rounded-lg border border-input bg-transparent pl-8 pr-3 text-caption placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-brand/50"
-              />
-            </div>
-          </div>
-        }
-      >
-
-        {/* Table body */}
-        {/* The error branch MUST precede the loading and empty branches. A
-            failed request leaves isLoading false and data undefined, so
-            `orders.length === 0` was reached and the user was told the store
-            had simply synced with nothing in it. `!data` keeps a failed
-            background refetch from replacing a table that is already on
-            screen. */}
-        {isError && !data ? (
-          <div className="p-8">
-            <QueryErrorState resource="orders" onRetry={() => refetch()} />
-          </div>
-        ) : isLoading ? (
-          <div className="p-4">
-            {/* Checkbox, Order, Items, Customer, Date, Amount, Fulfillment,
-                Shopify, Action — the Shopify column is not drawn for a vendor. */}
-            <TableSkeleton rows={PAGE_SIZE} columns={isVendor ? 8 : 9} />
-          </div>
-        ) : orders.length === 0 ? (
-          <div className="p-8">
-            <EmptyState
-              title="No orders found"
-              description={list.search ? "Try adjusting your search." : "Orders will appear here once synced from your channels."}
-            />
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <OrdersTable
-              orders={orders}
-              currency={orgCurrency}
-              showCustomerName
-              gstEnabled={gstEnabled}
-              selectedIds={selectedIds}
-              onToggleRow={toggleRow}
-              onToggleAll={toggleAllOnPage}
-            />
-          </div>
+      <DataTable
+        state={table}
+        rows={orders}
+        rowKey={(order) => order.id}
+        meta={data?.meta}
+        status={{ isLoading, isError, isPlaceholderData, refetch }}
+        noun="orders"
+        searchPlaceholder="Search order #, customer or email…"
+        onRowClick={(order) => navigate(`/orders/${order.id}`)}
+        selection={{
+          isSelected: (order) => selectedIds.has(order.id),
+          onToggle: toggleRow,
+          onToggleAll: toggleAllOnPage,
+          label: (order) => `Select order ${order.name}`,
+        }}
+        rowActions={(order) => (
+          <OrderRowActions
+            order={order}
+            canOperate={canOperate}
+            canManage={canManage}
+            gstEnabled={gstEnabled}
+            showShopifyColumn={showShopifyColumn}
+            onViewDetail={(id) => navigate(`/orders/${id}`)}
+          />
         )}
-
-        {/* Pagination controls */}
-        {!isLoading && orders.length > 0 && (
-          <div className="flex items-center justify-between border-t px-5 py-3">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => list.setPage(list.page - 1)}
-              disabled={list.page === 1}
-            >
-              <ChevronLeft className="size-3.5" />
-              Previous
-            </Button>
-            <p className="text-caption text-muted-foreground">
-              Page {meta?.page ?? 1} of {totalPages} ({meta?.total ?? 0} total)
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => list.setPage(list.page + 1)}
-              disabled={list.page >= totalPages}
-            >
-              Next
-              <ChevronRight className="size-3.5" />
-            </Button>
-          </div>
-        )}
-      </SectionCard>
+        actionsWidth={canOperate && showShopifyColumn ? 128 : 56}
+        emptyState={{
+          title: "No orders yet",
+          description: "Orders will appear here once synced from your channels.",
+        }}
+      />
 
       {slipHref && (
         <FloatingDock
