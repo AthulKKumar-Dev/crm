@@ -227,6 +227,11 @@ export function DataTable<Row>({
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [openChip, setOpenChip] = useState<string | null>(null);
   const applied = filters.filter((f) => state.filters[f.key]?.length || f.key === pendingKey);
+  // Once the picked value has reached the URL the chip stands on its own.
+  const pendingHasValue = Boolean(pendingKey && state.filters[pendingKey]?.length);
+  useEffect(() => {
+    if (pendingHasValue) setPendingKey(null);
+  }, [pendingHasValue]);
   const addable = filters.filter((f) => !applied.includes(f));
   const dateConfig = config.date;
   const dateLabel = state.date
@@ -356,11 +361,12 @@ export function DataTable<Row>({
               open={openChip === filter.key}
               onOpenChange={(open) => {
                 setOpenChip(open ? filter.key : null);
-                // A pending chip closed without a pick goes away again.
+                // A pending chip dismissed without a pick goes away again.
                 if (!open && pendingKey === filter.key && !state.filters[filter.key]?.length) {
                   setPendingKey(null);
                 }
               }}
+              onPicked={() => setOpenChip(null)}
             />
           ))}
           <AddFilterMenu
