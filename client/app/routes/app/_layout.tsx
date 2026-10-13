@@ -3,7 +3,6 @@ import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
 import { useMembershipSync, useSectionAccess } from "~/hooks/use-section-access";
-import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { cn } from "~/lib/utils";
 
 /** Prefix match on a segment boundary, so /orders never matches /ordersomething. */
@@ -22,7 +21,7 @@ function isUnder(pathname: string, prefix: string) {
 // appears for sections that have children, and ImpersonationBanner adds 40px
 // when a super admin is impersonating. Any calc() is wrong in at least one of
 // those states; the flex column is exact in all of them with no magic number.
-const FULL_HEIGHT_PREFIXES = ["/conversation"];
+const FULL_HEIGHT_PREFIXES: string[] = [];
 
 // Routes that drop the shared page width. The order detail page flanks its
 // line-items table with two fixed-width rails (200px + 240px), which leaves the
@@ -51,14 +50,9 @@ export default function AppLayout() {
   // a page that would only 403). The navbar shows the same sections as locked.
   const accessBlocked = !canAccess(location.pathname);
 
-  // Chat / Campaigns / Logistics are UI-only previews running on mock data.
-  // The navbar already hides their pills outside dev; this stops a typed or
-  // bookmarked URL from rendering placeholder data in a production build.
-  const previewBlocked = !showPreviewModules && isPreviewPath(location.pathname);
-
-  // Either way, back to the member's first open section — /orders for a
-  // vendor, /dashboard for most people.
-  const redirectTo = accessBlocked || previewBlocked ? landingPath : null;
+  // Back to the member's first open section — /orders for a vendor,
+  // /dashboard for most people.
+  const redirectTo = accessBlocked ? landingPath : null;
 
   // Print/document routes render bare (no navbar/sidebar) so the app chrome
   // never bleeds into the printed PDF. AuthGuard still gates them.
