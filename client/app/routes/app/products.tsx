@@ -1,27 +1,29 @@
 import { useMemo, useState } from "react";
-import { isString,
-  isStringArray,
-  isStringRecord,
-  oneOf,
-  useSessionState } from "~/hooks/use-session-state";
-import { useClampPage, useListUrlState } from "~/hooks/use-list-url-state";
+import { useListUrlState } from "~/hooks/use-list-url-state";
 import { Link, useNavigate } from "react-router";
 import {
-  Search, Plus, Filter, ChevronLeft, ChevronRight, Package, ListChecks,
+  Plus, Package, ListChecks,
   PackageX, Loader2, Pencil, Trash2, UploadCloud,
-  Download, Upload, X, ArrowUpDown, ChevronDown, Boxes, Barcode,
+  Download, Upload, Boxes, Barcode,
 } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
-import { TableSkeleton } from "~/components/app/table-skeleton";
-import { EmptyState } from "~/components/app/empty-state";
 import { Skeleton } from "~/components/ui/skeleton";
 import { ProductFormDialog } from "~/components/app/product-create/product-form-dialog";
 import { BulkActionBar } from "~/components/app/products/bulk-action-bar";
 import { CsvImportWizard } from "~/components/app/products/csv-import-wizard";
 import { ProductCodesDialog } from "~/components/app/inventory/product-codes-dialog";
-import { formatCurrency } from "~/lib/utils";
+import {
+  DataTable,
+  DateCell,
+  ProductCell,
+  StatusPill,
+  TextCell,
+  useDataTableState,
+  type ColumnDef,
+  type FilterDef,
+} from "~/components/app/data-table";
+import { cn, formatCurrency } from "~/lib/utils";
 import { useProducts, useProductTypes, useProductStats, useProductVendors } from "~/hooks/use-product-queries";
-import { useDebounced } from "~/hooks/use-debounced";
 import { useCodeStatus } from "~/hooks/use-inventory-queries";
 import {
   useDeleteProductMutation,
@@ -29,7 +31,6 @@ import {
 } from "~/hooks/use-product-mutations";
 import { productService } from "~/services/product.service";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { Tip } from "~/components/ui/tooltip";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import {
@@ -38,19 +39,9 @@ import {
   type ProductSyncAction,
 } from "~/lib/product-shopify-sync";
 import { ShopifySyncCell } from "~/components/app/shopify-sync-cell";
-import ShopifyIcon from "~/assests/icon/shopifyIcon";
 import type { ProductStatus, ProductListParams, Product, ProductStatsResponse, StockStatus } from "~/types/api";
 import { Separator } from "~/components/ui/separator";
 import { Button } from "~/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuCheckboxItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-} from "~/components/ui/dropdown-menu";
 
 export function meta() {
   return [{ title: "Products | Collabo CRM" }];
@@ -74,55 +65,36 @@ const STAT_CARDS = [
 }>;
 
 const STATUS_CLASS: Record<ProductStatus, string> = {
-  ACTIVE: "bg-[#CEF17B]/30 text-[#084734]",
-  DRAFT: "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400",
-  ARCHIVED: "bg-orange-100 text-orange-700",
+  ACTIVE: "bg-brand/30 text-brand-strong",
+  DRAFT: "bg-muted text-muted-foreground",
+  ARCHIVED: "bg-warning-strong-subtle text-warning-strong",
 };
 
-const PAGE_SIZE = 12;
-const FILTER_OPTIONS = ["Status", "Type", "Stock", "Vendor"] as const;
-const FILTER_VALUES: Record<(typeof FILTER_OPTIONS)[number], string[]> = {
-  Status: ["Active", "Draft", "Archived"],
-  Stock: ["In stock", "Low stock", "Out of stock"],
-  Type: [],
-  Vendor: [],
-};
-const SORT_OPTIONS: { label: string; sortBy: string; sortOrder: "asc" | "desc" }[] = [
-  { label: "Newest first", sortBy: "createdAt", sortOrder: "desc" },
-  { label: "Oldest first", sortBy: "createdAt", sortOrder: "asc" },
-  { label: "Recently updated", sortBy: "updatedAt", sortOrder: "desc" },
-  { label: "Name (A–Z)", sortBy: "title", sortOrder: "asc" },
-  { label: "Name (Z–A)", sortBy: "title", sortOrder: "desc" },
+/** Filter chip options carry the API value, so the URL and the request agree. */
+const STATUS_OPTIONS: ReadonlyArray<{ value: ProductStatus; label: string }> = [
+  { value: "ACTIVE", label: "Active" },
+  { value: "DRAFT", label: "Draft" },
+  { value: "ARCHIVED", label: "Archived" },
 ];
-
-const STATUS_VALUE_MAP: Record<string, ProductStatus> = {
-  Active: "ACTIVE",
-  Draft: "DRAFT",
-  Archived: "ARCHIVED",
-};
-const STOCK_VALUE_MAP: Record<string, StockStatus> = {
-  "In stock": "in_stock",
-  "Low stock": "low_stock",
-  "Out of stock": "out_of_stock",
-};
-
-
+const STOCK_OPTIONS: ReadonlyArray<{ value: StockStatus; label: string }> = [
+  { value: "in_stock", label: "In stock" },
+  { value: "low_stock", label: "Low stock" },
+  { value: "out_of_stock", label: "Out of stock" },
+];
 
 export default function ProductsPage() {
   const navigate = useNavigate();
   const { isVendor } = useCurrentRole();
-  // Page and search live in the URL so Back from a product (and the product
-  // page's breadcrumb) return to the page the row was opened from. See the
-  // note on filters below for what is remembered where.
+  // The whole view — page, search, filters, sort, page size — lives in the
+  // URL so Back from a product (and the product page's breadcrumb) return to
+  // the exact list the row was opened from, while the navbar's bare link
+  // still opens page 1 with nothing applied.
   const list = useListUrlState("products");
-  const debouncedSearch = useDebounced(list.search, 350);
-  const [selectedType, setSelectedType] = useSessionState("products.type", "All", isString);
   // Full edit/create dialog state. `creatingProduct` toggles the create form;
   // `editingFullProductId` opens the edit form for a MANUAL-channel product
   // (also reachable from the detail page).
   const [creatingProduct, setCreatingProduct] = useState(false);
   const [editingFullProductId, setEditingFullProductId] = useState<string | null>(null);
-  // Phase 3: bulk-selection state + wizards
   // Selected products by id, kept as full objects so a selection made on one
   // page survives paging to another. This used to be a Set of ids resolved
   // against the CURRENT page only, so the bar (and every bulk action) saw just
@@ -131,6 +103,7 @@ export default function ProductsPage() {
   const [selected, setSelected] = useState<Map<string, Product>>(new Map());
   const [importOpen, setImportOpen] = useState(false);
   const [codesOpen, setCodesOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   // Org-wide, so the badge is honest about what the dialog will change. Hidden
   // from vendors along with the rest of the catalogue-wide actions.
@@ -140,27 +113,6 @@ export default function ProductsPage() {
       codeStatus.data.missingBarcode +
       codeStatus.data.longBarcode
     : 0;
-  // Filters and sort are remembered for the browser session. Search and the
-  // page number live in the URL instead (useListUrlState): Back and the product
-  // page's breadcrumb return to the same page, while the navbar's bare link
-  // still opens page 1 with no search.
-  const [activeFilters, setActiveFilters] = useSessionState<string[]>(
-    "products.active-filters",
-    [],
-    isStringArray,
-  );
-  const [filterValues, setFilterValues] = useSessionState<Record<string, string>>(
-    "products.filter-values",
-    {},
-    isStringRecord,
-  );
-  const [sortBy, setSortBy] = useSessionState("products.sort-by", "createdAt", isString);
-  const [sortOrder, setSortOrder] = useSessionState<"asc" | "desc">(
-    "products.sort-order",
-    "desc",
-    oneOf(["asc", "desc"]),
-  );
-  const [exporting, setExporting] = useState(false);
 
   const deleteProduct = useDeleteProductMutation();
 
@@ -170,32 +122,188 @@ export default function ProductsPage() {
   const lowStockThreshold = org?.lowStockThreshold ?? 10;
   const orgCurrency = org?.currency ?? "USD";
 
-  const params: ProductListParams = {
-    page: list.page,
-    limit: PAGE_SIZE,
-    search: debouncedSearch || undefined,
-    sortBy,
-    sortOrder,
-    status: filterValues.Status ? STATUS_VALUE_MAP[filterValues.Status] : undefined,
-    stockStatus: filterValues.Stock ? STOCK_VALUE_MAP[filterValues.Stock] : undefined,
-    productType: filterValues.Type || undefined,
-    vendor: filterValues.Vendor || undefined,
-  };
-
-  const { data, isLoading, isPlaceholderData } = useProducts(params);
   const { data: productTypes } = useProductTypes();
   const { data: vendors } = useProductVendors();
+
+  const columns = useMemo<ColumnDef<Product>[]>(
+    () => [
+      {
+        key: "product",
+        label: "Product",
+        width: 280,
+        locked: true,
+        sortKey: "title",
+        sortType: "text",
+        cell: (product) => (
+          <ProductCell
+            title={product.title}
+            sub={product.variantCount > 1 ? `${product.variantCount} variants` : undefined}
+            imageUrl={product.image?.src}
+          />
+        ),
+      },
+      {
+        key: "type",
+        label: "Type",
+        width: 130,
+        sortKey: "productType",
+        sortType: "text",
+        cell: (product) => <TextCell muted>{product.productType ?? "—"}</TextCell>,
+      },
+      {
+        key: "vendor",
+        label: "Vendor",
+        width: 140,
+        sortKey: "vendor",
+        sortType: "text",
+        cell: (product) => <TextCell muted>{product.vendor ?? "—"}</TextCell>,
+      },
+      {
+        key: "price",
+        label: "Price",
+        width: 140,
+        align: "right",
+        cell: (product) => {
+          // A catalogue price is in the CHANNEL's currency, not the
+          // workspace's — a USD store's $749.95 snowboard was being listed as
+          // "₹749.95". Falls back to the org currency for a channel whose
+          // currency is not yet known (no order has arrived from it).
+          const priceCurrency = product.channel?.currency ?? orgCurrency;
+          return (
+            <span className="whitespace-nowrap font-semibold tabular-nums text-foreground">
+              {product.priceRange.min === product.priceRange.max
+                ? formatCurrency(product.priceRange.min, priceCurrency)
+                : `${formatCurrency(product.priceRange.min, priceCurrency)} – ${formatCurrency(product.priceRange.max, priceCurrency)}`}
+            </span>
+          );
+        },
+      },
+      {
+        key: "stock",
+        label: "Stock",
+        width: 100,
+        align: "right",
+        // Deliberately a cross-location total, the way Shopify's own product
+        // list works. The Inventory screen is the per-location view; saying
+        // so here stops the two figures reading as a contradiction.
+        headerTooltip:
+          "Total across every location. Open Inventory to see and edit stock at one location.",
+        cell: (product) => (
+          // Links into the per-location view, filtered to this product. The
+          // number used to be a dead end, which is why nobody found where
+          // stock was edited.
+          <Link
+            to={`/products/inventory?search=${encodeURIComponent(product.title)}`}
+            className={cn(
+              "font-medium tabular-nums underline-offset-3 hover:underline",
+              product.totalStock === 0
+                ? "text-danger"
+                : product.totalStock <= lowStockThreshold
+                  ? "text-warning-strong"
+                  : "text-foreground",
+            )}
+          >
+            {product.totalStock.toLocaleString("en-IN")}
+          </Link>
+        ),
+      },
+      {
+        key: "status",
+        label: "Status",
+        width: 110,
+        sortKey: "status",
+        sortType: "text",
+        cell: (product) => (
+          <StatusPill className={STATUS_CLASS[product.status]}>
+            {product.totalStock === 0 && product.status === "ACTIVE"
+              ? "Out of Stock"
+              : STATUS_LABEL[product.status]}
+          </StatusPill>
+        ),
+      },
+      {
+        // HSN and GST % used to sit here. They belong to the product's tax
+        // setup, not its listing, and are edited in the product codes dialog.
+        key: "shopify",
+        label: "Shopify",
+        width: 150,
+        cell: (product) => (
+          <ShopifySyncCell
+            summary={describeProductShopifySync(product)}
+            title={
+              product.shopifySync?.shopifyProductId
+                ? `Shopify product ID: ${product.shopifySync.shopifyProductId}`
+                : undefined
+            }
+          />
+        ),
+      },
+      {
+        key: "updated",
+        label: "Updated",
+        width: 120,
+        hiddenByDefault: true,
+        sortKey: "updatedAt",
+        sortType: "date",
+        cell: (product) => <DateCell value={product.updatedAt} />,
+      },
+      {
+        key: "created",
+        label: "Created",
+        width: 120,
+        hiddenByDefault: true,
+        sortKey: "createdAt",
+        sortType: "date",
+        cell: (product) => <DateCell value={product.createdAt} />,
+      },
+    ],
+    [lowStockThreshold, orgCurrency],
+  );
+
+  // Type and Vendor come from the API; `undefined` keeps the chip in its
+  // loading state until they land.
+  const filters = useMemo<FilterDef[]>(
+    () => [
+      { key: "status", label: "Status", options: STATUS_OPTIONS },
+      {
+        key: "type",
+        label: "Type",
+        options: productTypes?.map((type) => ({ value: type, label: type })),
+      },
+      { key: "stock", label: "Stock", options: STOCK_OPTIONS },
+      {
+        key: "vendor",
+        label: "Vendor",
+        options: vendors?.map((vendor) => ({ value: vendor, label: vendor })),
+      },
+    ],
+    [productTypes, vendors],
+  );
+
+  const table = useDataTableState({
+    key: "products",
+    list,
+    columns,
+    filters,
+    sort: { default: { field: "createdAt", dir: "desc" } },
+  });
+
+  const params: ProductListParams = {
+    page: table.page,
+    limit: table.limit,
+    search: table.debouncedSearch || undefined,
+    sortBy: table.sort?.field,
+    sortOrder: table.sort?.dir,
+    status: table.filters.status?.[0] as ProductStatus | undefined,
+    stockStatus: table.filters.stock?.[0] as StockStatus | undefined,
+    productType: table.filters.type?.[0],
+    vendor: table.filters.vendor?.[0],
+  };
+
+  const { data, isLoading, isError, isPlaceholderData, refetch } = useProducts(params);
   const { data: stats, isLoading: statsLoading } = useProductStats();
 
-  const statsArray = stats ? Object.entries(stats) : [];
-
   const products = data?.data ?? [];
-  const meta = data?.meta;
-  const totalPages = meta?.totalPages ?? 1;
-  // While keepPreviousData shows another query's rows, its page count is not
-  // this query's — clamping against it would bounce the page for nothing.
-  useClampPage(list, isPlaceholderData ? undefined : meta?.totalPages);
-  const categoryFilters = ["All", ...(productTypes ?? [])];
 
   // Every selected product across pages; rows visible on the current page are
   // taken fresh from the list so status/tag changes show up in the bar.
@@ -205,25 +313,6 @@ export default function ProductsPage() {
     return [...byId.values()];
   }, [products, selected]);
   const selectedOnPageCount = products.filter((p) => selected.has(p.id)).length;
-  const allOnPageSelected =
-    products.length > 0 && selectedOnPageCount === products.length;
-  const allFiltersSelected = activeFilters.length === FILTER_OPTIONS.length;
-  // The catalog is genuinely empty (not just filtered/searched to zero results).
-  // When true, the search/sort/filter controls are pointless, so we disable them.
-  const hasActiveQuery = list.search.trim() !== "" || activeFilters.length > 0;
-  const noProducts = !isLoading && products.length === 0 && !hasActiveQuery;
-
-  // Search and every filter change land on page 1 through the URL patch itself
-  // (see useListUrlState) — there is deliberately no reset effect here: one that
-  // ran on mount would wipe the page Back just restored.
-  function handleSearchChange(event: React.ChangeEvent<HTMLInputElement>) {
-    list.setSearch(event.target.value);
-  }
-
-  function handleTypeFilter(type: string) {
-    setSelectedType(type);
-    list.resetPage();
-  }
 
   function toggleSelect(product: Product, checked: boolean) {
     setSelected((prev) => {
@@ -234,11 +323,11 @@ export default function ProductsPage() {
     });
   }
 
-  function toggleSelectAllOnPage(checked: boolean) {
+  function toggleSelectAllOnPage(rows: ReadonlyArray<Product>, checked: boolean) {
     setSelected((prev) => {
       const next = new Map(prev);
-      if (checked) products.forEach((p) => next.set(p.id, p));
-      else products.forEach((p) => next.delete(p.id));
+      if (checked) rows.forEach((p) => next.set(p.id, p));
+      else rows.forEach((p) => next.delete(p.id));
       return next;
     });
   }
@@ -247,31 +336,16 @@ export default function ProductsPage() {
     setExporting(true);
     try {
       await productService.downloadExportCsv({
-        search: debouncedSearch || undefined,
-        status: filterValues.Status ? STATUS_VALUE_MAP[filterValues.Status] : undefined,
-        productType: filterValues.Type || undefined,
-        vendor: filterValues.Vendor || undefined,
+        search: table.debouncedSearch || undefined,
+        status: params.status,
+        productType: params.productType,
+        vendor: params.vendor,
       });
     } catch (err) {
       handleMutationError(err, "Failed to export CSV.");
     } finally {
       setExporting(false);
     }
-  }
-
-  function getStatCards(stats: ProductStatsResponse) {
-    return STAT_CARDS.map(({ key, label, icon }) => ({
-      label,
-      icon,
-      value: stats[key],
-    }));
-  }
-
-  function getStatChartData(stats: ProductStatsResponse) {
-    return STAT_CARDS.map(({ key, label }) => ({
-      name: label,
-      value: stats[key],
-    }));
   }
 
   const showDock = !isVendor && selectedProducts.length > 0;
@@ -376,319 +450,39 @@ export default function ProductsPage() {
         )}
       </div>
 
-
-
-      {/* Products table */}
-      <div className="rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border overflow-hidden p-2">
-        {/* Search and filter */}
-        <div className="flex flex-col  gap-2 pt-1 pb-2">
-          <div className="flex items-center gap-3">
-            <div className="relative flex-1 ">
-              <Search className="absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder="Search by name or SKU…"
-                value={list.search}
-                onChange={handleSearchChange}
-                disabled={noProducts}
-                className="h-8 w-full rounded-lg border border-input bg-white dark:bg-gray-900 pl-8 pr-3 text-xs focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50 disabled:opacity-50 disabled:cursor-not-allowed"
-              />
-            </div>
-            <div className="flex items-center gap-1.5">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button size="sm" variant="secondary" disabled={noProducts}>
-                    <ArrowUpDown className="size-3.5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-44">
-                  <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  {SORT_OPTIONS.map((opt) => (
-                    <DropdownMenuCheckboxItem
-                      key={opt.label}
-                      checked={sortBy === opt.sortBy && sortOrder === opt.sortOrder}
-                      onCheckedChange={() => {
-                        setSortBy(opt.sortBy);
-                        setSortOrder(opt.sortOrder);
-                        list.resetPage();
-                      }}
-                    >
-                      {opt.label}
-                    </DropdownMenuCheckboxItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-              {/* <Filter className="size-3.5 text-muted-foreground" />
-                {categoryFilters.map((filterName) => (
-                  <button
-                    key={filterName}
-                    onClick={() => handleTypeFilter(filterName)}
-                    className={`h-7 rounded-full px-3 text-xs font-medium transition-colors ${selectedType === filterName
-                      ? "bg-[#CEF17B]/30 text-[#084734]"
-                      : "bg-white dark:bg-gray-900 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 border border-input"
-                      }`}
-                  >
-                    {filterName}
-                  </button>
-                ))} */}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {/* Added filter badges — each opens a dropdown of its values */}
-            {activeFilters.map((name) => {
-              const options =
-                name === "Type" ? (productTypes ?? [])
-                  : name === "Vendor" ? (vendors ?? [])
-                    : FILTER_VALUES[name as (typeof FILTER_OPTIONS)[number]];
-              const selected = filterValues[name];
-              return (
-                <span
-                  key={name}
-                  className="inline-flex items-center rounded-full bg-[#CEF17B]/30 text-[#084734] text-xs font-medium"
-                >
-                  <DropdownMenu>
-                    <DropdownMenuTrigger className="inline-flex items-center gap-1 rounded-l-full px-2.5 py-1 focus:outline-none">
-                      {name}
-                      {selected && <span className="opacity-70">: {selected}</span>}
-                      <ChevronDown className="size-3" />
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="start" className="w-40">
-                      {options.length === 0 ? (
-                        <DropdownMenuItem disabled>No options</DropdownMenuItem>
-                      ) : (
-                        options.map((opt) => (
-                          <DropdownMenuCheckboxItem
-                            key={opt}
-                            checked={selected === opt}
-                            onCheckedChange={(c) => {
-                              setFilterValues((prev) => ({ ...prev, [name]: c ? opt : "" }));
-                              list.resetPage();
-                            }}
-                          >
-                            {opt}
-                          </DropdownMenuCheckboxItem>
-                        ))
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setActiveFilters((prev) => prev.filter((f) => f !== name));
-                      setFilterValues((prev) => {
-                        const next = { ...prev };
-                        delete next[name];
-                        return next;
-                      });
-                      list.resetPage();
-                    }}
-                    title={`Remove ${name}`}
-                    className="px-1.5 py-1 hover:text-red-600"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </span>
-              );
-            })}
-
-            {/* Add Filter dropdown — only shows not-yet-added options */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="outline" disabled={allFiltersSelected || noProducts}>
-                  <Plus size={15} absoluteStrokeWidth={true} />
-                  Add Filter
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-40">
-                {FILTER_OPTIONS.filter((opt) => !activeFilters.includes(opt)).map((opt) => (
-                  <DropdownMenuItem
-                    key={opt}
-                    onSelect={() => setActiveFilters((prev) => [...prev, opt])}
-                  >
-                    {opt}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-
-        {isLoading ? (
-          <TableSkeleton rows={6} columns={9} />
-        ) : products.length === 0 ? (
-          <EmptyState
-            title="No products found"
-            description={list.search ? "Try adjusting your search or filters." : "Connect a channel to sync your products."}
+      <DataTable
+        state={table}
+        rows={products}
+        rowKey={(product) => product.id}
+        meta={data?.meta}
+        status={{ isLoading, isError, isPlaceholderData, refetch }}
+        noun="products"
+        searchPlaceholder="Search by name, vendor or SKU…"
+        onRowClick={(product) => navigate(`/products/${product.id}`)}
+        selection={{
+          isSelected: (product) => selected.has(product.id),
+          onToggle: toggleSelect,
+          onToggleAll: toggleSelectAllOnPage,
+          label: (product) => `Select ${product.title}`,
+        }}
+        rowActions={(product) => (
+          <ProductRowActions
+            product={product}
+            syncAction={describeProductShopifySync(product).action}
+            onEdit={() => setEditingFullProductId(product.id)}
+            onArchive={() => {
+              if (confirm(`Archive "${product.title}"? Existing orders will keep their record.`)) {
+                deleteProduct.mutate(product.id);
+              }
+            }}
           />
-        ) : (
-          <>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b bg-gray-50/60 dark:bg-gray-800/60 text-left">
-                    <th className="w-10 px-4 py-3">
-                      <input type="checkbox" checked={allOnPageSelected} onChange={(e) => toggleSelectAllOnPage(e.target.checked)} aria-label="Select all products on this page" className="size-3.5 accent-[#CEF17B] cursor-pointer" />
-                    </th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Product</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Type</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Vendor</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Price</th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">
-                  {/* Deliberately a cross-location total, the way Shopify's own
-                      product list works. The Inventory screen is the
-                      per-location view; saying so here stops the two figures
-                      reading as a contradiction. */}
-                  <Tip text="Total across every location. Open Inventory to see and edit stock at one location.">
-                    <span className="cursor-help underline decoration-dotted underline-offset-4">
-                      Stock · all locations
-                    </span>
-                  </Tip>
-                </th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">Status</th>
-                    {/* HSN and GST % used to sit here. They belong to the
-                        product's tax setup, not its listing, and are edited
-                        in the product codes dialog. */}
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground">
-                      <span className="inline-flex items-center gap-1.5">
-                        <ShopifyIcon width={14} height={14} />
-                        Shopify
-                      </span>
-                    </th>
-                    <th className="px-4 py-3 text-xs font-semibold text-muted-foreground text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {products.map((product) => {
-                    // Once per row: the Shopify cell and the row's button both
-                    // read it, so they cannot disagree or diverge in time.
-                    const syncSummary = describeProductShopifySync(product);
-                    return (
-                    <tr
-                      key={product.id}
-                      className={`hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer ${selected.has(product.id) ? "bg-[#CEF17B]/10" : ""
-                        }`}
-                      onClick={() => navigate(`/products/${product.id}`)}
-                    >
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={selected.has(product.id)}
-                          onChange={(e) => toggleSelect(product, e.target.checked)}
-                          className="size-3.5 accent-[#CEF17B] cursor-pointer"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          {product.image ? (
-                            <img
-                              src={product.image.src}
-                              alt={product.image.alt ?? product.title}
-                              className="size-9 shrink-0 rounded-lg object-cover bg-gray-100 dark:bg-gray-800"
-                            />
-                          ) : (
-                            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-400">
-                              <span className="text-lg">📦</span>
-                            </div>
-                          )}
-                          <div className="min-w-0">
-                            <span className="text-xs font-medium text-gray-900 dark:text-gray-100 line-clamp-1">
-                              {product.title}
-                            </span>
-                            {product.variantCount > 1 && (
-                              <p className="text-[11px] text-muted-foreground">{product.variantCount} variants</p>
-                            )}
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-muted-foreground">{product.productType ?? "—"}</td>
-                      <td className="px-4 py-3 text-xs text-muted-foreground">{product.vendor ?? "—"}</td>
-                      <td className="px-4 py-3 text-xs font-semibold text-gray-900 dark:text-gray-100 text-right">
-                        {/* A catalogue price is in the CHANNEL's currency, not
-                            the workspace's — a USD store's $749.95 snowboard
-                            was being listed as "₹749.95". Falls back to the org
-                            currency for a channel whose currency is not yet
-                            known (no order has arrived from it). */}
-                        {(() => {
-                          const priceCurrency = product.channel?.currency ?? orgCurrency;
-                          return product.priceRange.min === product.priceRange.max
-                            ? formatCurrency(product.priceRange.min, priceCurrency)
-                            : `${formatCurrency(product.priceRange.min, priceCurrency)} – ${formatCurrency(product.priceRange.max, priceCurrency)}`;
-                        })()}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        {/* Links into the per-location view, filtered to this
-                            product. The number used to be a dead end, which is
-                            why nobody found where stock was edited. */}
-                        <Link
-                          to={`/products/inventory?search=${encodeURIComponent(product.title)}`}
-                          // The whole row navigates to the product; without this
-                          // the row handler wins and the stock link never fires.
-                          onClick={(e) => e.stopPropagation()}
-                          className={`text-xs font-medium hover:underline ${product.totalStock === 0 ? "text-red-600" : product.totalStock <= lowStockThreshold ? "text-orange-600" : "text-gray-900 dark:text-gray-100"}`}
-                        >
-                          {product.totalStock.toLocaleString()}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${STATUS_CLASS[product.status]}`}>
-                          {product.totalStock === 0 && product.status === "ACTIVE" ? "Out of Stock" : STATUS_LABEL[product.status]}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <ShopifySyncCell
-                          summary={syncSummary}
-                          title={
-                            product.shopifySync?.shopifyProductId
-                              ? `Shopify product ID: ${product.shopifySync.shopifyProductId}`
-                              : undefined
-                          }
-                        />
-                      </td>
-                      <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
-                        <ProductRowActions
-                          product={product}
-                          syncAction={syncSummary.action}
-                          onEdit={() => setEditingFullProductId(product.id)}
-                          onArchive={() => {
-                            if (confirm(`Archive "${product.title}"? Existing orders will keep their record.`)) {
-                              deleteProduct.mutate(product.id);
-                            }
-                          }}
-                        />
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Pagination */}
-            <div className="flex items-center justify-between border-t px-4 py-3">
-              <p className="text-xs text-muted-foreground">
-                Showing {products.length} of {meta?.total ?? 0} products
-              </p>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => list.setPage(list.page - 1)}
-                  disabled={list.page === 1}
-                  className="inline-flex items-center gap-1 h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40 disabled:pointer-events-none"
-                >
-                  <ChevronLeft className="size-3" />Previous
-                </button>
-                <button
-                  onClick={() => list.setPage(list.page + 1)}
-                  disabled={list.page >= totalPages}
-                  className="inline-flex items-center gap-1 h-7 rounded-md border border-input bg-white dark:bg-gray-900 px-3 text-xs text-muted-foreground hover:text-gray-900 dark:hover:text-gray-100 disabled:opacity-40 disabled:pointer-events-none"
-                >
-                  Next<ChevronRight className="size-3" />
-                </button>
-              </div>
-            </div>
-          </>
         )}
-      </div>
+        actionsWidth={150}
+        emptyState={{
+          title: "No products yet",
+          description: "Connect a channel to sync your products, or add one here.",
+        }}
+      />
 
       {/* Create Product Dialog */}
       {creatingProduct && (
@@ -750,7 +544,7 @@ function ProductRowActions({
           title={productSyncActionTitle(sync)}
           disabled={syncMutation.isPending}
           onClick={() => syncMutation.mutate(product.id)}
-          className="mr-1 text-[#084734] dark:text-[#CEF17B]"
+          className="mr-1 text-brand-strong"
         >
           {thisRowSyncing ? (
             <Loader2 className="size-3 animate-spin" />
@@ -760,23 +554,19 @@ function ProductRowActions({
           {SYNC_ACTION_LABEL[syncAction]}
         </Button>
       )}
-      <button
-        type="button"
-        title="Edit product"
-        onClick={onEdit}
-        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100"
-      >
-        <Pencil className="size-3.5" />
-      </button>
-      <button
-        type="button"
+      <Button variant="ghost" size="icon-sm" title="Edit product" aria-label="Edit product" onClick={onEdit}>
+        <Pencil className="size-3.5 text-muted-foreground" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
         title="Archive product"
+        aria-label="Archive product"
         onClick={onArchive}
-        className="rounded-md p-1.5 text-muted-foreground hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-red-600"
+        className="hover:text-danger"
       >
         <Trash2 className="size-3.5" />
-      </button>
+      </Button>
     </div>
   );
 }
-

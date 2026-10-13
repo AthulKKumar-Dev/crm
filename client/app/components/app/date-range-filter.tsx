@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { DateRange } from "react-day-picker";
-import { CalendarDays, Check, ChevronDown } from "lucide-react";
+import { CalendarDays, Check, ChevronDown, X } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Calendar } from "~/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "~/components/ui/popover";
@@ -40,6 +40,9 @@ export function DateRangeFilter<T extends string>({
   onPresetChange,
   onCustomApply,
   className,
+  variant = "button",
+  active = false,
+  onClear,
 }: {
   presets: ReadonlyArray<DateRangePreset<T>>;
   preset: T;
@@ -50,6 +53,17 @@ export function DateRangeFilter<T extends string>({
   onPresetChange: (value: T) => void;
   onCustomApply: (range: CustomDateRange) => void;
   className?: string;
+  /**
+   * "button" — the page-header control (dashboard, customer detail).
+   * "chip" — the DataTable filter-row chip: "Date: <label>", tinted while a
+   * range other than the page's default is applied, with a × that calls
+   * `onClear`. Same popover either way.
+   */
+  variant?: "button" | "chip";
+  /** Chip only: whether a non-default range is applied (tint + clear button). */
+  active?: boolean;
+  /** Chip only: resets to the page's default range. */
+  onClear?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
@@ -73,22 +87,65 @@ export function DateRangeFilter<T extends string>({
     setOpen(false);
   }
 
+  const trigger =
+    variant === "chip" ? (
+      <button
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className="flex h-7 items-center gap-1.5 whitespace-nowrap rounded-full bg-transparent pl-2.5 pr-2 text-label focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
+      >
+        <CalendarDays className="size-3.5" />
+        <span className="font-medium">Date:</span>
+        <span>{label}</span>
+        {!active && <ChevronDown className="size-3 text-muted-foreground" />}
+      </button>
+    ) : (
+      <button
+        type="button"
+        className={cn(
+          "flex h-8 items-center gap-1.5 rounded-lg border border-input bg-card px-2.5 text-caption font-medium whitespace-nowrap shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50",
+          className,
+        )}
+      >
+        <CalendarDays className="size-3.5 text-muted-foreground" />
+        <span>{label}</span>
+        <ChevronDown className="size-3.5 text-muted-foreground" />
+      </button>
+    );
+
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
+      {variant === "chip" ? (
+        // The chip is one pill holding the trigger and, while a range is
+        // applied, a separate clear button — never a button inside a button.
+        <div
           className={cn(
-            "flex h-8 items-center gap-1.5 rounded-lg border border-input bg-card px-2.5 text-caption font-medium whitespace-nowrap shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50",
+            "inline-flex h-7 items-center rounded-full text-label",
+            active ? "bg-brand/30 text-brand-strong" : "bg-card text-foreground ring-1 ring-border",
             className,
           )}
         >
-          <CalendarDays className="size-3.5 text-muted-foreground" />
-          <span>{label}</span>
-          <ChevronDown className="size-3.5 text-muted-foreground" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent align="end" className="w-auto max-w-[calc(100vw-2rem)]">
+          <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+          {active && onClear && (
+            <button
+              type="button"
+              onClick={onClear}
+              aria-label="Clear date range"
+              title="Clear date range"
+              className="mr-0.5 flex size-6 items-center justify-center rounded-full hover:bg-brand-strong/10"
+            >
+              <X className="size-3" strokeWidth={2.5} />
+            </button>
+          )}
+        </div>
+      ) : (
+        <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      )}
+      <PopoverContent
+        align={variant === "chip" ? "start" : "end"}
+        className="w-auto max-w-[calc(100vw-2rem)]"
+      >
         <div className="flex flex-col sm:flex-row">
           <ul className="flex flex-col gap-0.5 border-border p-1 sm:w-36 sm:border-r">
             {presets.map((option) => (

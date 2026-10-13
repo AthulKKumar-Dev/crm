@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { pollWhile } from "~/lib/poll-while";
 import { isStalePendingSync, orderShopifySyncOf } from "~/lib/shopify-sync";
 import { orderService } from "~/services/order.service";
@@ -49,6 +49,8 @@ export function useOrders(params?: OrderListParams) {
     queryKey: orderKeys.list(params),
     queryFn: () => orderService.list(params),
     refetchInterval: pollWhileAnyOrderPushing,
+    // The previous page stays on screen, dimmed, while the next one loads.
+    placeholderData: keepPreviousData,
   });
 }
 

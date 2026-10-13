@@ -1,25 +1,23 @@
-import { useMemo, useState } from "react";
-import { isString, useSessionState } from "~/hooks/use-session-state";
+import { useMemo } from "react";
 import { History, MoveRight } from "lucide-react";
-import { Button } from "~/components/ui/button";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
-import { EmptyState } from "~/components/app/empty-state";
-import { QueryErrorState } from "~/components/app/query-error-state";
-import { TableSkeleton } from "~/components/app/table-skeleton";
+  DataTable,
+  DateCell,
+  MonoCell,
+  NumCell,
+  ProductCell,
+  TextCell,
+  useDataTableState,
+  type ColumnDef,
+  type FilterDef,
+} from "~/components/app/data-table";
+import { useListUrlState } from "~/hooks/use-list-url-state";
 import { useInventoryLedger } from "~/hooks/use-inventory-queries";
 import { useSelectedLocation } from "~/hooks/use-selected-location";
 import { InventoryTabs } from "~/components/app/inventory/inventory-tabs";
 import { LocationPicker } from "~/components/app/inventory/location-picker";
 import { bucketLabel, reasonLabel } from "~/lib/inventory-vocabulary";
 import type { InventoryEvent, LedgerParams } from "~/types/api";
-
-const PAGE_SIZE = 25;
 
 const REASONS = [
   "sale",
@@ -35,6 +33,13 @@ const REASONS = [
   "migration",
 ] as const;
 
+const REASON_FILTER: FilterDef = {
+  key: "reason",
+  label: "Reason",
+  options: REASONS.map((r) => ({ value: r, label: r.charAt(0).toUpperCase() + r.slice(1) })),
+};
+const FILTERS: ReadonlyArray<FilterDef> = [REASON_FILTER];
+
 /**
  * Human phrasing for a movement row. A null bucket means the stock entered or
  * left the business entirely, which reads as In/Out rather than as a blank.
@@ -48,24 +53,94 @@ function describeMovement(e: InventoryEvent): string {
   return e.changeAmount > 0 ? `+${e.changeAmount}` : String(e.changeAmount);
 }
 
+const COLUMNS: ColumnDef<InventoryEvent>[] = [
+  {
+    key: "when",
+    label: "When",
+    width: 170,
+    locked: true,
+    cell: (e) => <DateCell value={e.createdAt} time />,
+  },
+  {
+    key: "product",
+    label: "Product",
+    width: 260,
+    cell: (e) => (
+      <ProductCell
+        title={
+          e.productTitle ?? <span className="italic text-muted-foreground">deleted variant</span>
+        }
+        sub={e.variantTitle && e.variantTitle !== "Default Title" ? e.variantTitle : undefined}
+      />
+    ),
+  },
+  {
+    key: "sku",
+    label: "SKU",
+    width: 140,
+    cell: (e) => <MonoCell value={e.sku} />,
+  },
+  {
+    key: "movement",
+    label: "Movement",
+    width: 180,
+    cell: (e) => (
+      <span className="inline-flex max-w-full items-center gap-1 truncate rounded-full bg-muted px-2 py-0.5 text-micro font-medium">
+        {e.fromBucket || e.toBucket ? <MoveRight className="size-3 shrink-0" /> : null}
+        {describeMovement(e)}
+      </span>
+    ),
+  },
+  {
+    key: "qty",
+    label: "Qty",
+    width: 80,
+    align: "right",
+    cell: (e) => <NumCell value={e.movedQty ?? Math.abs(e.changeAmount)} />,
+  },
+  {
+    key: "available",
+    label: "Available",
+    width: 120,
+    align: "right",
+    cell: (e) => (
+      <span className="whitespace-nowrap tabular-nums text-muted-foreground">
+        {e.quantityBefore} → {e.quantityAfter}
+      </span>
+    ),
+  },
+  {
+    key: "reason",
+    label: "Reason",
+    width: 120,
+    cell: (e) => <TextCell>{reasonLabel(e.reason)}</TextCell>,
+  },
+];
+
 export default function InventoryLedgerPage() {
-  const [page, setPage] = useState(1);
-  const [reason, setReason] = useSessionState("ledger.reason", "all", isString);
+  // Page, reason and page size live in the URL; the location picker writes
+  // `warehouseId` there itself (useSelectedLocation).
+  const list = useListUrlState("ledger");
   const { locations, locationId, location, setLocationId } = useSelectedLocation();
+
+  const table = useDataTableState({
+    key: "ledger",
+    list,
+    columns: COLUMNS,
+    filters: FILTERS,
+  });
 
   const params: LedgerParams = useMemo(
     () => ({
-      page,
-      limit: PAGE_SIZE,
-      reason: reason === "all" ? undefined : reason,
+      page: table.page,
+      limit: table.limit,
+      reason: table.filters.reason?.[0],
       warehouseId: locationId,
     }),
-    [page, reason, locationId],
+    [table.page, table.limit, table.filters.reason, locationId],
   );
 
   const ledger = useInventoryLedger(params, Boolean(locationId));
-  const rows = ledger.data?.data ?? [];
-  const meta = ledger.data?.meta;
 
   return (
     <div className="space-y-4">
@@ -76,33 +151,7 @@ export default function InventoryLedgerPage() {
       <InventoryTabs />
 
       <div className="flex flex-wrap items-center gap-2">
-        <Select
-          value={reason}
-          onValueChange={(v) => {
-            setReason(v);
-            setPage(1);
-          }}
-        >
-          <SelectTrigger className="h-8 w-[150px] rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs shadow-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All reasons</SelectItem>
-            {REASONS.map((r) => (
-              <SelectItem key={r} value={r}>
-                {r.charAt(0).toUpperCase() + r.slice(1)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <LocationPicker
-          locations={locations}
-          value={locationId}
-          onChange={(id) => {
-            setLocationId(id);
-            setPage(1);
-          }}
-        />
+        <LocationPicker locations={locations} value={locationId} onChange={setLocationId} />
         {location && (
           <span className="ml-auto text-caption text-muted-foreground">
             Movements at {location.name}
@@ -110,85 +159,26 @@ export default function InventoryLedgerPage() {
         )}
       </div>
 
-      {ledger.isLoading ? (
-        <TableSkeleton rows={10} columns={6} />
-      ) : ledger.isError ? (
-        <QueryErrorState resource="the movement ledger" onRetry={() => ledger.refetch()} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={History}
-          title="No movements yet"
-          description="Every stock change — sales, restocks, adjustments, sync corrections — appears here with its before/after quantities."
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b text-muted-foreground">
-                <th className="px-3 py-2.5 font-medium">When</th>
-                <th className="px-3 py-2.5 font-medium">Product</th>
-                <th className="px-3 py-2.5 font-medium">SKU</th>
-                <th className="px-3 py-2.5 font-medium">Movement</th>
-                <th className="px-3 py-2.5 text-right font-medium">Qty</th>
-                <th className="px-3 py-2.5 text-right font-medium">Available</th>
-                <th className="px-3 py-2.5 font-medium">Reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((e) => (
-                <tr key={e.id} className="border-b last:border-b-0">
-                  <td className="px-3 py-2.5 whitespace-nowrap text-muted-foreground">
-                    {new Date(e.createdAt).toLocaleString()}
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <p className="font-medium text-gray-900 dark:text-gray-100">
-                      {e.productTitle ?? <span className="text-muted-foreground italic">deleted variant</span>}
-                    </p>
-                    {e.variantTitle && e.variantTitle !== "Default Title" && (
-                      <p className="text-[10px] text-muted-foreground">{e.variantTitle}</p>
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono">{e.sku ?? "—"}</td>
-                  <td className="px-3 py-2.5">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] font-medium">
-                      {e.fromBucket || e.toBucket ? <MoveRight className="size-3" /> : null}
-                      {describeMovement(e)}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
-                    {e.movedQty ?? Math.abs(e.changeAmount)}
-                  </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
-                    {e.quantityBefore} → {e.quantityAfter}
-                  </td>
-                  <td className="px-3 py-2.5">{reasonLabel(e.reason)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {meta && meta.totalPages > 1 && (
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>
-            Page {meta.page} of {meta.totalPages} · {meta.total} movements
-          </span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= meta.totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <DataTable
+        state={table}
+        rows={ledger.data?.data ?? []}
+        rowKey={(e) => e.id}
+        meta={ledger.data?.meta}
+        status={{
+          isLoading: !locationId || ledger.isLoading,
+          isError: ledger.isError,
+          isPlaceholderData: ledger.isPlaceholderData,
+          refetch: ledger.refetch,
+        }}
+        noun="movements"
+        searchable={false}
+        emptyState={{
+          icon: History,
+          title: "No movements yet",
+          description:
+            "Every stock change — sales, restocks, adjustments, sync corrections — appears here with its before/after quantities.",
+        }}
+      />
     </div>
   );
 }

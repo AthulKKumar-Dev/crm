@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigationType, useSearchParams } from "react-router";
 
 import { isString, useSessionState } from "~/hooks/use-session-state";
@@ -24,8 +24,13 @@ export interface ListUrlState {
   resetPage: () => void;
   search: string;
   setSearch: (value: string) => void;
-  /** `null`/"" deletes a key. Deletes `page` unless the patch carries one. */
+  /**
+   * `null`/"" deletes a key. Deletes `page` unless the patch carries one. A
+   * patch may carry the search key: the box then resets in the same write.
+   */
   patchParams: (patch: Record<string, string | null>) => void;
+  /** The URL key the search box writes (`q` unless overridden). */
+  searchKey: string;
 }
 
 /**
@@ -64,23 +69,34 @@ export function useListUrlState(
     if (navigationType !== "REPLACE") setSearchState(urlSearch);
   }
 
-  // One call per event handler: the functional updater closes over the params
-  // of the current render, so two calls in one handler overwrite each other.
+  // Patches build on the LAST WRITTEN params, not this render's. React Router's
+  // functional `setSearchParams(prev => …)` reads `prev` from the render
+  // closure too, so without this two patches in one event handler (clear the
+  // search AND drop a filter) would have the second overwrite the first. The
+  // ref is re-seeded from the router every render and advanced on every write.
   // A patch that changes nothing (resetting to page 1 while on page 1) is not
   // written at all — a navigation to the same address is wasted work and churns
   // the location key.
+  //
+  // A patch may carry the search key itself; the local copy is updated too so
+  // the box never disagrees with the address bar.
+  const latestParams = useRef(searchParams);
+  latestParams.current = searchParams;
   const patchParams = useCallback(
     (patch: Record<string, string | null>) => {
-      const next = new URLSearchParams(searchParams);
+      if (searchKey in patch) setSearchState(patch[searchKey] ?? "");
+      const base = latestParams.current;
+      const next = new URLSearchParams(base);
       for (const [name, value] of Object.entries(patch)) {
         if (value === null || value === "") next.delete(name);
         else next.set(name, value);
       }
       if (!("page" in patch)) next.delete("page");
-      if (next.toString() === searchParams.toString()) return;
+      if (next.toString() === base.toString()) return;
+      latestParams.current = next;
       setSearchParams(next, { replace: true });
     },
-    [searchParams, setSearchParams],
+    [searchKey, setSearchParams],
   );
 
   // Page 1 is the absence of the param, so the bare URL stays bare.
@@ -90,10 +106,7 @@ export function useListUrlState(
   );
   const resetPage = useCallback(() => patchParams({}), [patchParams]);
   const setSearch = useCallback(
-    (value: string) => {
-      setSearchState(value);
-      patchParams({ [searchKey]: value || null });
-    },
+    (value: string) => patchParams({ [searchKey]: value || null }),
     [patchParams, searchKey],
   );
 
@@ -113,7 +126,7 @@ export function useListUrlState(
     if (location.search !== saved) setSaved(location.search);
   }, [location.search, saved, setSaved]);
 
-  return { page, setPage, resetPage, search, setSearch, patchParams };
+  return { page, setPage, resetPage, search, setSearch, patchParams, searchKey };
 }
 
 /**

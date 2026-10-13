@@ -23,11 +23,17 @@ const STORAGE_PREFIX = "ui:";
 
 type Guard<T> = (value: unknown) => value is T;
 
-function read<T>(key: string, fallback: T, isValid: Guard<T>): T {
+type Store = "session" | "local";
+
+function storageOf(store: Store): Storage {
+  return store === "local" ? window.localStorage : window.sessionStorage;
+}
+
+function read<T>(store: Store, key: string, fallback: T, isValid: Guard<T>): T {
   // Private windows and blocked site data throw on access, and a saved value
   // can be an option that no longer exists — neither may break the page.
   try {
-    const raw = window.sessionStorage.getItem(key);
+    const raw = storageOf(store).getItem(key);
     if (raw === null) return fallback;
     const parsed: unknown = JSON.parse(raw);
     return isValid(parsed) ? parsed : fallback;
@@ -36,15 +42,16 @@ function read<T>(key: string, fallback: T, isValid: Guard<T>): T {
   }
 }
 
-function write(key: string, value: unknown) {
+function write(store: Store, key: string, value: unknown) {
   try {
-    window.sessionStorage.setItem(key, JSON.stringify(value));
+    storageOf(store).setItem(key, JSON.stringify(value));
   } catch {
     /* ignore — the choice still holds until the page unmounts */
   }
 }
 
-export function useSessionState<T>(
+function useStoredState<T>(
+  store: Store,
   key: string,
   fallback: T,
   isValid: Guard<T>,
@@ -57,7 +64,7 @@ export function useSessionState<T>(
 
   const [entry, setEntry] = useState(() => ({
     key: storageKey,
-    value: read(storageKey, fallback, isValid),
+    value: read(store, storageKey, fallback, isValid),
   }));
 
   // The key moved under a mounted component — an org switch that did not
@@ -65,13 +72,13 @@ export function useSessionState<T>(
   // own saved value rather than carrying the old one across.
   let value = entry.value;
   if (entry.key !== storageKey) {
-    value = read(storageKey, fallback, isValid);
+    value = read(store, storageKey, fallback, isValid);
     setEntry({ key: storageKey, value });
   }
 
   useEffect(() => {
-    if (entry.key === storageKey) write(storageKey, entry.value);
-  }, [entry, storageKey]);
+    if (entry.key === storageKey) write(store, storageKey, entry.value);
+  }, [entry, storageKey, store]);
 
   const setValue = useCallback(
     (next: T | ((previous: T) => T)) => {
@@ -87,6 +94,27 @@ export function useSessionState<T>(
   );
 
   return [value, setValue];
+}
+
+export function useSessionState<T>(
+  key: string,
+  fallback: T,
+  isValid: Guard<T>,
+): [T, (next: T | ((previous: T) => T)) => void] {
+  return useStoredState("session", key, fallback, isValid);
+}
+
+/**
+ * Same contract, but in localStorage: for preferences that should outlive the
+ * browser session — which columns a list shows, how many rows per page. Still
+ * keyed by org, so one organisation's layout never leaks into another's.
+ */
+export function useLocalState<T>(
+  key: string,
+  fallback: T,
+  isValid: Guard<T>,
+): [T, (next: T | ((previous: T) => T)) => void] {
+  return useStoredState("local", key, fallback, isValid);
 }
 
 /** Guard for a fixed set of options, e.g. `oneOf(DASHBOARD_RANGES)`. */

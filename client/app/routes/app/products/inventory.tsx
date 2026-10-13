@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { oneOf, useSessionState } from "~/hooks/use-session-state";
-import { useClampPage, useListUrlState } from "~/hooks/use-list-url-state";
+import { useListUrlState } from "~/hooks/use-list-url-state";
 import { AxiosError } from "axios";
 import { Link } from "react-router";
 import {
@@ -12,7 +11,6 @@ import {
   Barcode,
   MapPin,
   Warehouse as WarehouseIcon,
-  Search,
 } from "lucide-react";
 import { StatCard } from "~/components/app/stat-card";
 import { EmptyState } from "~/components/app/empty-state";
@@ -29,6 +27,14 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Separator } from "~/components/ui/separator";
+import {
+  DataTable,
+  DateCell,
+  MonoCell,
+  ProductCell,
+  useDataTableState,
+  type ColumnDef,
+} from "~/components/app/data-table";
 import { Skeleton } from "~/components/ui/skeleton";
 import { LocationPicker } from "~/components/app/inventory/location-picker";
 import { ProductCodesDialog } from "~/components/app/inventory/product-codes-dialog";
@@ -49,10 +55,8 @@ import {
   MANUAL_REASONS,
   STOCK_TERMS,
   reasonLabel,
-  type StockTerm,
 } from "~/lib/inventory-vocabulary";
 import { cn } from "~/lib/utils";
-import { useDebounced } from "~/hooks/use-debounced";
 import { useSelectedLocation } from "~/hooks/use-selected-location";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import {
@@ -68,9 +72,16 @@ import {
 } from "~/hooks/use-inventory-mutations";
 import type { StockBucket, StockLine, StockListParams } from "~/types/api";
 
-const PAGE_SIZE = 15;
-
 const BUCKETS: StockBucket[] = ["AVAILABLE", "RESERVED", "QC", "DAMAGED"];
+
+/** Stock-level tabs; the value is the API's `stockFilter` (absent for "all"). */
+const STOCK_TABS = [
+  { value: "all", label: "All stock" },
+  { value: "low", label: "Low stock" },
+  { value: "out", label: "Out of stock" },
+  { value: "oversold", label: "Oversold" },
+] as const;
+const STOCK_TAB_VALUES = STOCK_TABS.map((t) => t.value);
 
 export default function InventoryPage() {
   const status = useInventoryStatus();
@@ -159,7 +170,6 @@ function StockScreen() {
   // list and product page link a stock number straight here with it), so Back
   // from a product returns to the page the row was opened from.
   const list = useListUrlState("inventory", { searchKey: "search" });
-  const debouncedSearch = useDebounced(list.search, 350);
   const {
     locations,
     locationId,
@@ -167,11 +177,6 @@ function StockScreen() {
     setLocationId,
     isLoading: locationLoading,
   } = useSelectedLocation();
-  const [stockFilter, setStockFilter] = useSessionState<string>(
-    "inventory.stock-filter",
-    "all",
-    oneOf(["all", "low", "out", "oversold"]),
-  );
   const [adjusting, setAdjusting] = useState<StockLine | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [codesOpen, setCodesOpen] = useState(false);
@@ -183,12 +188,143 @@ function StockScreen() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const bulkAdjust = useBulkAdjustmentMutation();
 
+  const setDraft = (stockLineId: string, value: string | undefined) => {
+    setSaveError(null);
+    setDrafts((prev) => {
+      const next = { ...prev };
+      if (value === undefined) delete next[stockLineId];
+      else next[stockLineId] = value;
+      return next;
+    });
+  };
+
+  // The Available column closes over the drafts, so the definitions are
+  // rebuilt as they change; everything else in them is static.
+  const columns = useMemo<ColumnDef<StockLine>[]>(
+    () => [
+      {
+        key: "product",
+        label: "Product",
+        width: 260,
+        locked: true,
+        sortKey: "product",
+        sortType: "text",
+        cell: (line) => (
+          <ProductCell
+            title={line.productTitle}
+            sub={line.variantTitle !== "Default Title" ? line.variantTitle : undefined}
+            imageUrl={line.imageUrl}
+            to={`/products/${line.productId}`}
+          />
+        ),
+      },
+      {
+        key: "codes",
+        label: "SKU / Barcode",
+        width: 150,
+        sortKey: "sku",
+        sortType: "text",
+        cell: (line) => (
+          <div className="flex min-w-0 flex-col leading-[1.3]">
+            {line.sku ? (
+              <span className="truncate font-mono text-caption text-foreground">{line.sku}</span>
+            ) : (
+              <span className="text-caption text-muted-foreground">no SKU</span>
+            )}
+            {line.barcode && line.barcode !== line.sku && (
+              <span className="truncate font-mono text-micro text-muted-foreground">
+                {line.barcode}
+              </span>
+            )}
+          </div>
+        ),
+      },
+      {
+        key: "bin",
+        label: STOCK_TERMS.bin.label,
+        headerTooltip: STOCK_TERMS.bin.definition,
+        width: 110,
+        cell: (line) => <MonoCell value={line.defaultLocation} />,
+      },
+      {
+        key: "unavailable",
+        label: STOCK_TERMS.unavailable.label,
+        headerTooltip: STOCK_TERMS.unavailable.definition,
+        width: 110,
+        align: "right",
+        cell: (line) => <UnavailableCell line={line} />,
+      },
+      {
+        // Mirrored from Shopify's own committed figure — it is the one
+        // quantity the Admin API cannot write, so it is read, never computed.
+        key: "committed",
+        label: STOCK_TERMS.committed.label,
+        headerTooltip: STOCK_TERMS.committed.definition,
+        width: 100,
+        align: "right",
+        cell: (line) => (
+          <span className="tabular-nums text-muted-foreground">{line.reserved}</span>
+        ),
+      },
+      {
+        key: "available",
+        label: STOCK_TERMS.available.label,
+        headerTooltip: STOCK_TERMS.available.definition,
+        // Badge + struck-through old value + stepper + validation line.
+        width: 240,
+        minWidth: 240,
+        align: "right",
+        overflow: "visible",
+        sortKey: "available",
+        sortType: "number",
+        cell: (line) => (
+          <AvailableCell
+            line={line}
+            draft={drafts[line.id]}
+            onChange={(value) => setDraft(line.id, value)}
+          />
+        ),
+      },
+      {
+        key: "onHand",
+        label: STOCK_TERMS.onHand.label,
+        headerTooltip: STOCK_TERMS.onHand.definition,
+        width: 100,
+        align: "right",
+        sortKey: "onHand",
+        sortType: "number",
+        cell: (line) => <span className="font-semibold tabular-nums">{line.onHand}</span>,
+      },
+      {
+        key: "updated",
+        label: "Updated",
+        width: 120,
+        hiddenByDefault: true,
+        sortKey: "updatedAt",
+        sortType: "date",
+        cell: (line) => <DateCell value={line.updatedAt} />,
+      },
+    ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setDraft is stable in effect
+    [drafts],
+  );
+
+  const table = useDataTableState({
+    key: "inventory",
+    list,
+    columns,
+    tab: { param: "stock", default: "all", values: STOCK_TAB_VALUES },
+    sort: { default: { field: "product", dir: "asc" } },
+  });
+  const sortField = table.sort?.field;
+  const sortDir = table.sort?.dir;
+
   // Selection is by variant id and survives re-filtering, so without this the
   // "Print labels (n)" count keeps counting rows the user can no longer see —
   // and printing a sheet of labels for them is not a recoverable mistake.
   useEffect(() => {
     setSelectedIds(new Set());
-  }, [debouncedSearch, locationId, stockFilter, list.page]);
+  }, [table.debouncedSearch, locationId, table.tab, table.page, table.limit, sortField, sortDir]);
 
   // Same reasoning as the selection reset above, and more pointed: a draft
   // carried across a location switch would write one location's number onto
@@ -197,48 +333,45 @@ function StockScreen() {
     setDrafts({});
     setReviewOpen(false);
     setSaveError(null);
-  }, [debouncedSearch, locationId, stockFilter, list.page]);
+  }, [table.debouncedSearch, locationId, table.tab, table.page, table.limit, sortField, sortDir]);
 
   const params: StockListParams = useMemo(
     () => ({
-      page: list.page,
-      limit: PAGE_SIZE,
-      q: debouncedSearch || undefined,
+      page: table.page,
+      limit: table.limit,
+      q: table.debouncedSearch || undefined,
       warehouseId: locationId,
-      stockFilter: stockFilter === "all" ? undefined : (stockFilter as StockListParams["stockFilter"]),
+      stockFilter:
+        table.tab === "all" ? undefined : (table.tab as StockListParams["stockFilter"]),
+      sortBy: sortField as StockListParams["sortBy"],
+      sortOrder: sortDir,
     }),
-    [list.page, debouncedSearch, locationId, stockFilter],
+    [table.page, table.limit, table.debouncedSearch, locationId, table.tab, sortField, sortDir],
   );
 
   // Held until a location resolves. Querying without one returns a row per
   // variant PER location, so the table would flash every product several times
   // over before settling — the exact confusion this screen is fixing.
   const stock = useStock(params, Boolean(locationId));
-  // While keepPreviousData shows another query's rows, its page count is not
-  // this query's — clamping against it would bounce the page for nothing.
-  useClampPage(list, stock.isPlaceholderData ? undefined : stock.data?.meta?.totalPages);
   // Deliberately warehouse-only: `q` and `stockFilter` narrow the table, not
   // the tiles. Feeding the stock filter in would make "Low stock lines" merely
   // restate the row count and pin "Oversold lines" to 0.
   const stats = useStockStats({ warehouseId: params.warehouseId }, Boolean(locationId));
 
   const rows = stock.data?.data ?? [];
-  const meta = stock.data?.meta;
 
-  const toggleSelect = (variantId: string) => {
+  const toggleSelect = (line: StockLine, checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(variantId)) next.delete(variantId);
-      else next.add(variantId);
+      if (checked) next.add(line.variantId);
+      else next.delete(line.variantId);
       return next;
     });
   };
-  const toggleSelectAllOnPage = () => {
-    const pageIds = rows.map((r) => r.variantId);
-    const allSelected = pageIds.every((id) => selectedIds.has(id));
+  const toggleSelectAllOnPage = (pageRows: ReadonlyArray<StockLine>, checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      pageIds.forEach((id) => (allSelected ? next.delete(id) : next.add(id)));
+      pageRows.forEach((r) => (checked ? next.add(r.variantId) : next.delete(r.variantId)));
       return next;
     });
   };
@@ -308,15 +441,6 @@ function StockScreen() {
       codeStatus.data.missingBarcode +
       codeStatus.data.longBarcode
     : 0;
-  const setDraft = (stockLineId: string, value: string | undefined) => {
-    setSaveError(null);
-    setDrafts((prev) => {
-      const next = { ...prev };
-      if (value === undefined) delete next[stockLineId];
-      else next[stockLineId] = value;
-      return next;
-    });
-  };
 
   // Only rows whose typed value is a whole number AND differs from what is
   // stored. Typing a value back to its original is not a change.
@@ -458,159 +582,50 @@ function StockScreen() {
         />
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        {/* Location leads the row: everything to its right narrows what is
-            already scoped to it. */}
-        <LocationPicker
-          locations={locations}
-          value={locationId}
-          onChange={setLocationId}
-        />
-        <Separator orientation="vertical" className="h-5" />
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-gray-400" />
-          <Input
-            value={list.search}
-            onChange={(e) => list.setSearch(e.target.value)}
-            placeholder="Search by SKU, barcode or title…"
-            className="h-8 w-64 rounded-lg pl-8 text-xs"
-          />
-        </div>
-        <Select
-          value={stockFilter}
-          onValueChange={(value) => {
-            setStockFilter(value);
-            list.resetPage();
-          }}
-        >
-          <SelectTrigger className="h-8 w-[140px] rounded-lg border border-input bg-white dark:bg-gray-900 px-3 text-xs shadow-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All stock</SelectItem>
-            <SelectItem value="low">Low stock</SelectItem>
-            <SelectItem value="out">Out of stock</SelectItem>
-            <SelectItem value="oversold">Oversold</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+      {/* Location leads: everything in the table below narrows what is
+          already scoped to it. It keeps its own picker (full Shopify names,
+          unit counts) rather than the table's generic scope control. */}
+      <LocationPicker
+        locations={locations}
+        value={locationId}
+        onChange={setLocationId}
+      />
 
-      {/* Table */}
-      {locationLoading || !locationId || stock.isLoading ? (
-        <TableSkeleton rows={8} columns={8} />
-      ) : stock.isError ? (
-        <QueryErrorState resource="stock" onRetry={() => stock.refetch()} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={Boxes}
-          title="Nothing stocked here yet"
-          description={
-            location
-              ? `No product has stock recorded at ${location.name}. Clear the filters to check, or switch location — stock is held per location, so a product stocked elsewhere will not appear here.`
-              : "No stock lines match these filters."
-          }
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b text-muted-foreground">
-                <th className="w-8 px-3 py-2.5">
-                  <input
-                    type="checkbox"
-                    className="accent-[#CEF17B]"
-                    checked={rows.length > 0 && rows.every((r) => selectedIds.has(r.variantId))}
-                    onChange={toggleSelectAllOnPage}
-                  />
-                </th>
-                <th className="px-3 py-2.5 font-medium">Product</th>
-                <th className="px-3 py-2.5 font-medium">SKU / Barcode</th>
-                <th className="px-3 py-2.5 font-medium">
-                  <ColumnLabel term={STOCK_TERMS.bin} />
-                </th>
-                <th className="px-3 py-2.5 text-right font-medium">
-                  <ColumnLabel term={STOCK_TERMS.unavailable} align="right" />
-                </th>
-                <th className="px-3 py-2.5 text-right font-medium">
-                  <ColumnLabel term={STOCK_TERMS.committed} align="right" />
-                </th>
-                <th className="px-3 py-2.5 text-right font-medium text-foreground">
-                  <ColumnLabel term={STOCK_TERMS.available} align="right" />
-                </th>
-                <th className="px-3 py-2.5 text-right font-medium">
-                  <ColumnLabel term={STOCK_TERMS.onHand} align="right" />
-                </th>
-                <th className="px-3 py-2.5" />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((line) => (
-                <tr key={line.id} className="border-b last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50">
-                  <td className="px-3 py-2.5">
-                    <input
-                      type="checkbox"
-                      className="accent-[#CEF17B]"
-                      checked={selectedIds.has(line.variantId)}
-                      onChange={() => toggleSelect(line.variantId)}
-                    />
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-2">
-                      {line.imageUrl ? (
-                        <img src={line.imageUrl} alt="" className="size-8 rounded-md object-cover" />
-                      ) : (
-                        <div className="flex size-8 items-center justify-center rounded-md bg-gray-100 dark:bg-gray-800">
-                          <Boxes className="size-3.5 text-gray-400" />
-                        </div>
-                      )}
-                      <div>
-                        <Link
-                          to={`/products/${line.productId}`}
-                          className="font-medium text-gray-900 dark:text-gray-100 hover:underline"
-                        >
-                          {line.productTitle}
-                        </Link>
-                        {line.variantTitle !== "Default Title" && (
-                          <p className="text-[10px] text-muted-foreground">{line.variantTitle}</p>
-                        )}
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <p className="font-mono">{line.sku ?? <span className="text-muted-foreground">no SKU</span>}</p>
-                    {line.barcode && line.barcode !== line.sku && (
-                      <p className="font-mono text-[10px] text-muted-foreground">{line.barcode}</p>
-                    )}
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-[10px]">
-                    {line.defaultLocation ?? <span className="text-muted-foreground">—</span>}
-                  </td>
-                  <UnavailableCell line={line} />
-                  {/* Mirrored from Shopify's own committed figure — it is the
-                      one quantity the Admin API cannot write, so it is read,
-                      never computed here. */}
-                  <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">
-                    {line.reserved}
-                  </td>
-                  <AvailableCell
-                    line={line}
-                    draft={drafts[line.id]}
-                    onChange={(value) => setDraft(line.id, value)}
-                  />
-                  <td className="px-3 py-2.5 text-right font-semibold tabular-nums">{line.onHand}</td>
-                  <td className="px-3 py-2.5 text-right">
-                    <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={() => setAdjusting(line)}>
-                      Adjust
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        state={table}
+        rows={rows}
+        rowKey={(line) => line.id}
+        meta={stock.data?.meta}
+        status={{
+          isLoading: locationLoading || !locationId || stock.isLoading,
+          isError: stock.isError,
+          isPlaceholderData: stock.isPlaceholderData,
+          refetch: stock.refetch,
+        }}
+        noun="stock lines"
+        tabs={{ ariaLabel: "Filter by stock level", items: STOCK_TABS }}
+        searchPlaceholder="Search by SKU, barcode or title…"
+        selection={{
+          isSelected: (line) => selectedIds.has(line.variantId),
+          onToggle: toggleSelect,
+          onToggleAll: toggleSelectAllOnPage,
+          label: (line) => `Select ${line.productTitle}`,
+        }}
+        rowActions={(line) => (
+          <Button variant="outline" size="xs" onClick={() => setAdjusting(line)}>
+            Adjust
+          </Button>
+        )}
+        actionsWidth={90}
+        emptyState={{
+          icon: Boxes,
+          title: "Nothing stocked here yet",
+          description: location
+            ? `No product has stock recorded at ${location.name}. Switch location — stock is held per location, so a product stocked elsewhere will not appear here.`
+            : "No stock lines match these filters.",
+        }}
+      />
 
-      {/* Pagination */}
       {/* Says the quiet part out loud. The single most common misreading of
           this screen was taking a figure here as the company-wide total. */}
       {location && rows.length > 0 && (
@@ -618,27 +633,6 @@ function StockScreen() {
           Every quantity above is held at {location.name}. Editing one changes
           that location only.
         </p>
-      )}
-
-      {meta && meta.totalPages > 1 && (
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>
-            Page {meta.page} of {meta.totalPages} · {meta.total} lines
-          </span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={list.page <= 1} onClick={() => list.setPage(list.page - 1)}>
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={list.page >= meta.totalPages}
-              onClick={() => list.setPage(list.page + 1)}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
       )}
 
       <StockSaveBar
@@ -667,32 +661,6 @@ function StockScreen() {
 // ─────────────────────────── Adjust dialog ───────────────────────────
 
 /**
- * A column header that carries its own definition. The dotted underline is the
- * affordance — without it nobody discovers the tooltip, and these words
- * (Unavailable, On hand) are exactly the ones merchants were guessing at.
- */
-function ColumnLabel({
-  term,
-  align = "left",
-}: {
-  term: StockTerm;
-  align?: "left" | "right";
-}) {
-  return (
-    <Tip text={term.definition} side="top">
-      <span
-        className={cn(
-          "inline-flex cursor-help underline decoration-dotted underline-offset-4",
-          align === "right" && "justify-end",
-        )}
-      >
-        {term.label}
-      </span>
-    </Tip>
-  );
-}
-
-/**
  * QC and damaged as one figure, the way Shopify groups them under Unavailable,
  * with the split behind a click so the row stays readable. A zero is inert —
  * offering to break down two zeroes on every row of a healthy catalogue would
@@ -702,13 +670,11 @@ function UnavailableCell({ line }: { line: StockLine }) {
   const total = line.qc + line.damaged;
 
   if (total === 0) {
-    return (
-      <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground">0</td>
-    );
+    return <span className="tabular-nums text-muted-foreground">0</span>;
   }
 
   return (
-    <td className="px-3 py-2.5 text-right tabular-nums">
+    <span className="tabular-nums">
       <Popover>
         <PopoverTrigger className="underline decoration-dotted underline-offset-4 hover:text-foreground">
           {total}
@@ -741,7 +707,7 @@ function UnavailableCell({ line }: { line: StockLine }) {
           </p>
         </PopoverContent>
       </Popover>
-    </td>
+    </span>
   );
 }
 
@@ -776,7 +742,7 @@ function AvailableCell({
   };
 
   return (
-    <td className="px-2 py-2">
+    <div className="py-1">
       <div className="flex items-center justify-end gap-2">
         {/* Negative available is reachable by design: a counter sale is
             allowed even when THIS location was short, because the merchant has
@@ -834,7 +800,7 @@ function AvailableCell({
       {invalid && (
         <p className="mt-1 text-right text-[10px] text-danger">Whole numbers only.</p>
       )}
-    </td>
+    </div>
   );
 }
 

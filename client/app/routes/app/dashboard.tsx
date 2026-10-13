@@ -262,7 +262,7 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <OrdersTable orders={recentOrders} currency={orgCurrency} variant="compact" />
+              <OrdersTable orders={recentOrders} currency={orgCurrency} />
             </div>
           )}
         </SectionCard>

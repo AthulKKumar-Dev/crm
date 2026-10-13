@@ -19,7 +19,7 @@ const CALENDAR_DAY = /^\d{4}-\d{2}-\d{2}$/;
  * A real `YYYY-MM-DD` day. The shape alone is not enough: `2026-02-30` passes
  * the regex, and `Intl` then throws on it in the middle of a render.
  */
-function isCalendarDay(value: unknown): value is string {
+export function isCalendarDay(value: unknown): value is string {
   if (typeof value !== "string" || !CALENDAR_DAY.test(value)) return false;
   const time = Date.parse(`${value}T00:00:00Z`);
   return !Number.isNaN(time) && new Date(time).toISOString().startsWith(value);

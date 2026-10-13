@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { invoiceService } from "~/services/invoice.service";
 import type { InvoiceListParams, GstReturnParams } from "~/types/api";
 
@@ -22,6 +22,8 @@ export function useInvoices(params?: InvoiceListParams) {
   return useQuery({
     queryKey: invoiceKeys.list(params),
     queryFn: () => invoiceService.list(params),
+    // The previous page stays on screen, dimmed, while the next one loads.
+    placeholderData: keepPreviousData,
   });
 }
 
