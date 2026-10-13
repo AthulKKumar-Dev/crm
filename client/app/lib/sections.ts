@@ -1,4 +1,3 @@
-import { showPreviewModules } from "~/lib/feature-flags";
 import { useAuthStore } from "~/stores/auth.store";
 import type { UserRole } from "~/types/api";
 
@@ -28,8 +27,6 @@ interface SectionDef {
   label: string;
   /** Route prefix the section owns. Customers and Invoices sit under /orders. */
   prefix: string;
-  /** Preview module — absent from builds without them (see feature-flags.ts). */
-  preview?: boolean;
 }
 
 /** Nav order: also the order the landing page is picked in. */
@@ -39,16 +36,15 @@ const SECTIONS: SectionDef[] = [
   { id: "customers", label: "Customers", prefix: "/orders/customers" },
   { id: "invoices", label: "Invoices", prefix: "/orders/invoices" },
   { id: "products", label: "Products", prefix: "/products" },
-  { id: "chat", label: "Chat", prefix: "/conversation", preview: true },
-  { id: "campaigns", label: "Campaigns", prefix: "/campaigns", preview: true },
-  { id: "logistics", label: "Logistics", prefix: "/logistics", preview: true },
   { id: "analytics", label: "Analytics", prefix: "/analytics" },
 ];
 
-/** The sections this build actually has. */
-export const AVAILABLE_SECTIONS: SectionDef[] = showPreviewModules
-  ? SECTIONS
-  : SECTIONS.filter((s) => !s.preview);
+/**
+ * The sections this build actually has. Chat, Campaigns and Logistics are not
+ * on the production branch; their ids stay in `SectionId` because a grant list
+ * may still name them.
+ */
+export const AVAILABLE_SECTIONS: SectionDef[] = SECTIONS;
 
 const SECTION_PREFIX = "section.";
 
