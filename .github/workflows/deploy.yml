@@ -61,7 +61,8 @@ jobs:
             packages: read
 
         env:
-            SSH: ssh -i $HOME/.ssh/id_deploy -o IdentitiesOnly=yes root@${{ secrets.DROPLET_HOST }}
+            # Host alias defined in ~/.ssh/config by the Configure SSH step.
+            SSH: ssh droplet
         steps:
             - uses: actions/checkout@v4
               with:
@@ -69,13 +70,24 @@ jobs:
 
             - name: Configure SSH
               env:
+                HOST: ${{ secrets.DROPLET_HOST }}
                 KEY: ${{ secrets.DROPLET_SSH_KEY }}
                 KNOWN_HOSTS: ${{ secrets.DROPLET_KNOWN_HOSTS }}
-              
               run: |
                 install -d -m 700 ~/.ssh
-                printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+                printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
                 printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+                cat > ~/.ssh/config <<EOF
+                Host droplet
+                  HostName $HOST
+                  User root
+                  IdentityFile ~/.ssh/id_deploy
+                  IdentitiesOnly yes
+                EOF
+                chmod 600 ~/.ssh/config
+                # Fails here with a clear error if the secret is not a valid private key;
+                # the public half printed must match the droplet's authorized_keys.
+                echo "Deploy key: $(ssh-keygen -y -f ~/.ssh/id_deploy)"
 
             - name: Log the droplet in to GHCR (token expires when this job ends)
               env: 
