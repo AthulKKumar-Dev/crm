@@ -27,13 +27,16 @@ export interface IssueContext {
     knownMediaIds: Set<string> | null;
 }
 
+const TRIGGER_EVENTS = ['comment', 'dm'] as const;
+export type TriggerEvent = (typeof TRIGGER_EVENTS)[number];
+
 const StepId = z.string().min(1).max(64);
 
 const TriggerConfig = z.object({
     channel: z.enum(['instagram', 'whatsapp']),
-    /** Only comment triggers are live in this cut. */
-    event: z.literal('comment', {
-        error: 'Only "comment" triggers are available yet.',
+    /** `comment` needs a post; `dm` listens to every inbound direct message on the account. */
+    event: z.enum(TRIGGER_EVENTS, {
+        error: 'Only "comment" and "dm" triggers are available yet.',
     }),
     post: z.string().max(64).default(''),
     match: z.enum(['contains', 'exact', 'any']).default('contains'),
@@ -74,6 +77,7 @@ const DEFERRED_TYPES = new Set(['wait_reply', 'condition', 'split', 'update_cont
 const ALLOWED_VARIABLES = new Set(['first_name', 'product_name', 'order_number']);
 export const PLACEHOLDER_PATTERN = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
 const REPEATED_SPACES_PATTERN = /[ \t]{2,}/g;
+
 
 
 
@@ -180,14 +184,18 @@ export function collectIssues(steps: StepDef[], ctx: IssueContext): Issue[] {
 
     const trigger = steps[0];
     const t = trigger.config as z.infer<typeof TriggerConfig>;
+    const isCommentTrigger = t.event === 'comment';
 
-    if (!t.post) {
-        push(trigger.id, 'post_missing', 'Select a post', 'Select an Instagram post or reel before publishing this automation.');
-    } else if (ctx.knownMediaIds && !ctx.knownMediaIds.has(t.post)) {
-        push(trigger.id, 'post_not_found', 'Post not found', 'This post is not on the connected Instagram account.');
+    if (isCommentTrigger) {
+        if (!t.post) {
+            push(trigger.id, 'post_missing', 'Select a post', 'Select an Instagram post or reel before publishing this automation.');
+        } else if (ctx.knownMediaIds && !ctx.knownMediaIds.has(t.post)) {
+            push(trigger.id, 'post_not_found', 'Post not found', 'This post is not on the connected Instagram account.');
+        }
     }
     if (t.match !== 'any' && !t.keyword.trim()) {
-        push(trigger.id, 'keyword_missing', 'Keyword missing', 'Add the word a comment must contain.');
+        const noun = isCommentTrigger ? 'comment' : 'message';
+        push(trigger.id, 'keyword_missing', 'Keyword missing', `Add the word a ${noun} must contain.`);
     }
 
     const actions = steps.slice(1);
@@ -211,7 +219,7 @@ export function collectIssues(steps: StepDef[], ctx: IssueContext): Issue[] {
             if (c.product && !c.link) {
                 push(step.id, 'link_missing', 'Product link missing', 'Add the link customers should tap to buy this product.');
             }
-            if (messageCount === 2 && ctx.platform === 'INSTAGRAM') {
+            if (messageCount === 2 && ctx.platform === 'INSTAGRAM' && isCommentTrigger) {
                 push(step.id, 'second_message_needs_reply', 'A second Instagram message needs a reply first',
                     'Instagram allows one private reply per comment. A follow-up DM can only go out after the person replies, which needs the Wait for reply block.');
             }
@@ -247,14 +255,20 @@ export function keywordsFor(trigger: StepDef): string[] {
     );
 }
 
+const TRIGGER_TYPE_BY_EVENT: Record<TriggerEvent, string> = {
+    comment: 'instagram.comment',
+    dm: 'instagram.message',
+};
+
+
 export function triggerTypeFor(trigger: StepDef): string {
     const c = trigger.config as z.infer<typeof TriggerConfig>;
-    return `${c.channel}.${c.event}`; // "instagram.comment"
+    return TRIGGER_TYPE_BY_EVENT[c.event];
 }
 
 export function triggerPostFor(trigger: StepDef): string | null {
     const c = trigger.config as z.infer<typeof TriggerConfig>;
-    return c.post || null;
+    return c.event === 'comment' && c.post ? c.post : null;
 }
 
 export function triggerMatchFor(trigger: StepDef): string {

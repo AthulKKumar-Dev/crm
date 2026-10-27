@@ -116,13 +116,11 @@ export class InstagramIngestService {
             // 7. Hand the event to the engine. AFTER the transaction on purpose: a job
             // must never point at rows that rolled back. A lost enqueue is picked up
             // by WaitResumeScheduler's unprocessed-events sweep.
-            if (item.kind === 'comment') {
-                await this.eventsQueue.enqueueMatch(result.eventId, channel.organizationId).catch((err) =>
-                    this.logger.warn(
-                        `Enqueue for event ${result.eventId} failed: ${err instanceof Error ? err.message : String(err)}`,
-                    ),
-                );
-            }
+            await this.eventsQueue.enqueueMatch(result.eventId, channel.organizationId).catch((err) =>
+                this.logger.warn(
+                    `Enqueue for event ${result.eventId} failed: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+            );
             return 'stored';
         } catch (err) {
             // 7. Two deliveries raced past the checks in step 1: the DB unique index

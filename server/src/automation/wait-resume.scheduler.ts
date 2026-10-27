@@ -20,7 +20,11 @@ export class WaitResumeScheduler {
     async sweep() {
         const cutoff = new Date(Date.now() - GRACE_MS)
         const events = await this.prisma.automationEvent.findMany({
-            where: { processedAt: null, eventType: 'instagram.comment', createdAt: { lt: cutoff } },
+            where: {
+                processedAt: null,
+                eventType: { in: ['instagram.comment', 'instagram.message'] },
+                createdAt: { lt: cutoff },
+            },
             select: { id: true, organizationId: true },
             take: BATCH
         })

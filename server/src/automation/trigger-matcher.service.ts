@@ -173,17 +173,15 @@ export class TriggerMatcherService {
 
     /** One indexed query on (channel, type, subject, active), then keywords in code. */
     private async findMatchingAutomations(event: MatchableEvent): Promise<MatchedAutomation[]> {
+        if (!event.channelId) return [];
 
-        if (event.eventType !== 'instagram.comment' || !event.channelId) return []
-
-        const commentedPostId = (event.payload as { mediaExternalId?: string } | null)?.mediaExternalId;
-        if (!commentedPostId) return []
+        const triggerFilter = this.triggerFilterFor(event);
+        if (!triggerFilter) return [];
 
         const candidateTriggers = await this.prisma.automationTrigger.findMany({
             where: {
                 channelId: event.channelId,
-                triggerType: 'instagram.comment',
-                subjectId: commentedPostId,
+                ...triggerFilter,
                 isActive: true,
                 automation: { status: AutomationStatus.ACTIVE, publishedVersionId: { not: null } },
             },
@@ -206,7 +204,21 @@ export class TriggerMatcherService {
                 publishedVersionId: trigger.automation.publishedVersionId!,
                 settings: trigger.automation.settings,
             }));
+    }
 
+    /**
+     * Which trigger rows an event can start. A comment is tied to one post
+     * (subjectId = the Instagram media id); a DM has no subject.
+     */
+    private triggerFilterFor(event: MatchableEvent): { triggerType: string; subjectId: string | null } | null {
+        if (event.eventType === 'instagram.comment') {
+            const commentedPostId = (event.payload as { mediaExternalId?: string } | null)?.mediaExternalId;
+            return commentedPostId ? { triggerType: 'instagram.comment', subjectId: commentedPostId } : null;
+        }
+        if (event.eventType === 'instagram.message') {
+            return { triggerType: 'instagram.message', subjectId: null };
+        }
+        return null;
     }
 
     /**
