@@ -24,6 +24,7 @@ import {
 } from './channel-connection.util';
 import {
     INSTAGRAM_LOGIN_FLOW,
+    IG_GRAPH_HOST,
     INSTAGRAM_LONG_LIVED_FALLBACK_S,
     INSTAGRAM_REFRESH_AHEAD_MS,
     PROFESSIONAL_ACCOUNT_TYPES,
@@ -94,7 +95,6 @@ interface WebhookSubscriptionState {
 
 const AUTHORIZE_URL = 'https://www.instagram.com/oauth/authorize';
 const CODE_EXCHANGE_URL = 'https://api.instagram.com/oauth/access_token';
-const IG_GRAPH_HOST = 'https://graph.instagram.com';
 
 /** Refused without these: the account would connect and then be unable to message. */
 const REQUIRED_SCOPES = ['instagram_business_basic', 'instagram_business_manage_messages'];

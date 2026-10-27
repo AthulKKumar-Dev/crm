@@ -72,6 +72,8 @@ const MAX_STEPS = 20;
 const IG_MESSAGE_MAX_BYTES = 1000;
 const DEFERRED_TYPES = new Set(['wait_reply', 'condition', 'split', 'update_contact', 'add_segment']);
 const ALLOWED_VARIABLES = new Set(['first_name', 'product_name', 'order_number']);
+export const PLACEHOLDER_PATTERN = /\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g;
+const REPEATED_SPACES_PATTERN = /[ \t]{2,}/g;
 
 
 
@@ -93,6 +95,20 @@ export function defaultTriggerStep(platform: string | null): StepDef {
 
 export function newStepId(): string {
     return 's_' + Math.random().toString(36).slice(2, 8);
+}
+
+export function renderTemplate(
+    template: string,
+    variables: Record<string, string | number | null | undefined>,
+): string {
+    return template
+        .replace(PLACEHOLDER_PATTERN, (_placeholder, variableName: string) => {
+            const value = variables[variableName];
+            const isMissing = value === null || value === undefined;
+            return isMissing ? '' : String(value);
+        })
+        .replace(REPEATED_SPACES_PATTERN, ' ')
+        .trim();
 }
 
 // ─── Parse (runs on every save) ────────────────────────────────────────────

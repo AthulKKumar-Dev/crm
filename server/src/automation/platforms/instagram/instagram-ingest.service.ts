@@ -1,10 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ChannelPlatform, MessageKind, Prisma } from '@prisma/client';
+import { ChannelPlatform, MessageKind } from '@prisma/client';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ContactService } from '../../messaging/contact.service';
 import { MessageService } from '../../messaging/message.service';
 import { AutomationEventService, InboundEventType } from '../../automation-event.service';
+import { AutomationEventsQueue } from '../../automation-events.queue';
 import { InboundItem } from './instagram-webhook.parser';
+import { isUniqueViolation } from '../../../prisma/prisma-errors.util';
 
 export interface IngestChannel {
     id: string;
@@ -13,10 +15,6 @@ export interface IngestChannel {
 }
 
 export type IngestOutcome = 'stored' | 'redelivery';
-
-function isUniqueViolation(err: unknown): boolean {
-    return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-}
 
 /** Instagram attachment type → MessageKind. The schema only has IMAGE for media. */
 function messageKindFor(type?: string): MessageKind {
@@ -36,6 +34,7 @@ export class InstagramIngestService {
         private readonly contacts: ContactService,
         private readonly messages: MessageService,
         private readonly events: AutomationEventService,
+        private readonly eventsQueue: AutomationEventsQueue,
     ) { }
 
     async ingestItem(channel: IngestChannel, item: InboundItem): Promise<IngestOutcome> {
@@ -113,6 +112,17 @@ export class InstagramIngestService {
                 `Instagram ${item.kind} ${item.externalId}: contact ${result.contactId}, ` +
                 `event ${result.eventId}${result.messageId ? `, message ${result.messageId}` : ''}`,
             );
+
+            // 7. Hand the event to the engine. AFTER the transaction on purpose: a job
+            // must never point at rows that rolled back. A lost enqueue is picked up
+            // by WaitResumeScheduler's unprocessed-events sweep.
+            if (item.kind === 'comment') {
+                await this.eventsQueue.enqueueMatch(result.eventId, channel.organizationId).catch((err) =>
+                    this.logger.warn(
+                        `Enqueue for event ${result.eventId} failed: ${err instanceof Error ? err.message : String(err)}`,
+                    ),
+                );
+            }
             return 'stored';
         } catch (err) {
             // 7. Two deliveries raced past the checks in step 1: the DB unique index

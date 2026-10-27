@@ -8,6 +8,8 @@
 
 /** `credentials.authFlow` on every row connected through Instagram Login. */
 export const INSTAGRAM_LOGIN_FLOW = 'instagram_login';
+/** Host for every "Instagram API with Instagram Login" call. */
+export const IG_GRAPH_HOST = 'https://graph.instagram.com';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
