@@ -3,7 +3,30 @@ import { Navbar } from "~/components/app/navbar";
 import { ImpersonationBanner } from "~/components/app/impersonation-banner";
 import { AuthGuard } from "~/components/guards/auth-guard";
 import { useMembershipSync, useSectionAccess } from "~/hooks/use-section-access";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { cn } from "~/lib/utils";
+
+// Influencers are an outside party, so an allow list rather than a deny list:
+// a section added tomorrow must be closed to them until someone decides
+// otherwise. (Vendors are handled by lib/sections.ts, like every other role.)
+//
+// /settings is here on purpose: connecting their own Instagram is the whole
+// reason an influencer has an account. /campaigns is added at render time only
+// while they hold `campaigns.view`.
+const INFLUENCER_ALLOWED_PREFIXES = ["/settings", "/profile"];
+
+// Settings pages an influencer must not reach. Checked first, because the allow
+// list is a prefix match that would otherwise sweep every settings tab in —
+// including the team page, where they could see and manage other members.
+const INFLUENCER_DENIED_PREFIXES = [
+  "/settings/members",
+  "/settings/general",
+  "/settings/store-profile",
+  "/settings/products",
+  "/settings/orders",
+  "/settings/tax-gst",
+  "/settings/loyalty",
+];
 
 /** Prefix match on a segment boundary, so /orders never matches /ordersomething. */
 function isUnder(pathname: string, prefix: string) {
@@ -38,6 +61,7 @@ const FULL_HEIGHT_PREFIXES: string[] = [];
 const FULL_WIDTH_ROUTE_IDS = ["routes/app/orders/$id"];
 
 export default function AppLayout() {
+  const { isInfluencer, can } = useCurrentRole();
   const { canAccess, landingPath } = useSectionAccess();
   useMembershipSync();
   const location = useLocation();
@@ -50,9 +74,26 @@ export default function AppLayout() {
   // a page that would only 403). The navbar shows the same sections as locked.
   const accessBlocked = !canAccess(location.pathname);
 
-  // Back to the member's first open section — /orders for a vendor,
-  // /dashboard for most people.
-  const redirectTo = accessBlocked ? landingPath : null;
+  // Influencers reach their own settings, their profile, and whatever their
+  // permissions name. Campaigns is in the allow list only while they hold
+  // `campaigns.view` — revoking that grant removes the section with no edit
+  // here, which is the point of routing it through the permission model.
+  const influencerAllowed = [
+    ...INFLUENCER_ALLOWED_PREFIXES,
+    ...(can("campaigns.view") ? ["/campaigns"] : []),
+  ];
+  const influencerBlocked =
+    isInfluencer &&
+    (INFLUENCER_DENIED_PREFIXES.some((p) => isUnder(location.pathname, p)) ||
+      !influencerAllowed.some((p) => isUnder(location.pathname, p)));
+
+  // Influencers bounce to their channels page; everyone else back to their
+  // first open section — /orders for a vendor, /dashboard for most people.
+  const redirectTo = influencerBlocked
+    ? "/settings/channels"
+    : accessBlocked
+      ? landingPath
+      : null;
 
   // Print/document routes render bare (no navbar/sidebar) so the app chrome
   // never bleeds into the printed PDF. AuthGuard still gates them.

@@ -35,6 +35,7 @@ import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
 import { useSectionAccess } from "~/hooks/use-section-access";
+import { useCurrentRole } from "~/hooks/use-current-role";
 import { toast } from "sonner";
 
 type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
@@ -93,14 +94,21 @@ export function Navbar() {
     useAuthStore();
   const stopImpersonating = useStopImpersonating();
 
+  const { isInfluencer, can } = useCurrentRole();
   const { canAccess, landingPath, lockReason } = useSectionAccess();
 
   // Every member sees every pill; the ones they cannot open render locked
-  // rather than hidden (see lib/sections.ts for who can open what). An extra
-  // Super Admin link is visible to real Collabo-team super admins (never while
-  // impersonating — the impersonation token has isSuperAdmin=false).
-  const navLinks: NavItem[] =
-    user?.isSuperAdmin && !impersonatedBy
+  // rather than hidden (see lib/sections.ts for who can open what). Influencers
+  // are the exception: an outside party sees only what their PERMISSIONS name —
+  // Campaigns appears because they hold `campaigns.view`, and revoking that
+  // grant removes the pill with no change here. That indirection is deliberate:
+  // influencer campaign access is a temporary decision awaiting review, and it
+  // should be revisable as data. An extra Super Admin link is visible to real
+  // Collabo-team super admins (never while impersonating — the impersonation
+  // token has isSuperAdmin=false).
+  const navLinks: NavItem[] = isInfluencer
+    ? NAV_LINKS.filter((item) => item.href === "/campaigns" && can("campaigns.view"))
+    : user?.isSuperAdmin && !impersonatedBy
       ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
       : NAV_LINKS;
 

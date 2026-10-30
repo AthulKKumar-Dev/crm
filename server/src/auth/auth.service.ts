@@ -22,7 +22,7 @@ import { LoginDto } from './dto/login.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { AcceptInviteDto } from './dto/accept-invite.dto';
 import { EmailService } from '../email/email.service';
-import { extractGrants } from './permissions';
+import { defaultGrantsForRole, extractGrants } from './permissions';
 import { ACTIVE_MEMBERSHIP } from './active-membership';
 import { buildSessionPayload } from './session-payload.util';
 
@@ -393,12 +393,26 @@ export class AuthService {
       where: { token, organization: { deletedAt: null } },
       include: { organization: { select: { id: true, name: true, slug: true, logo: true } } },
     });
-    if (!invite) throw new NotFoundException('Invite not found');
-    if (invite.status !== InviteStatus.PENDING) throw new BadRequestException(`Invite has been ${invite.status.toLowerCase()}`);
-    if (invite.expiresAt < new Date()) throw new BadRequestException('Invite has expired');
+    if (!invite) throw new NotFoundException('Invitation not found');
+    if (invite.status !== InviteStatus.PENDING) {
+      throw new BadRequestException(
+        invite.status === InviteStatus.ACCEPTED
+          ? 'This invitation has already been used.'
+          : `This invitation has been ${invite.status.toLowerCase()}.`,
+      );
+    }
+    if (invite.expiresAt < new Date()) throw new BadRequestException('This invitation has expired.');
 
     const userExists = !!(await this.userService.findByEmail(invite.email));
-    return { email: invite.email, role: invite.role, vendorScope: invite.vendorScope, organization: invite.organization, userExists };
+    return {
+      email: invite.email,
+      name: invite.name,
+      role: invite.role,
+      vendorScope: invite.vendorScope,
+      organization: invite.organization,
+      userExists,
+      expiresAt: invite.expiresAt,
+    };
   }
 
   async acceptInvite(dto: AcceptInviteDto) {
@@ -408,9 +422,15 @@ export class AuthService {
       where: { token: dto.token, organization: { deletedAt: null } },
       include: { organization: true },
     });
-    if (!invite) throw new NotFoundException('Invite not found');
-    if (invite.status !== InviteStatus.PENDING) throw new BadRequestException(`Invite has been ${invite.status.toLowerCase()}`);
-    if (invite.expiresAt < new Date()) throw new BadRequestException('Invite has expired');
+    if (!invite) throw new NotFoundException('Invitation not found');
+    if (invite.status !== InviteStatus.PENDING) {
+      throw new BadRequestException(
+        invite.status === InviteStatus.ACCEPTED
+          ? 'This invitation has already been used.'
+          : `This invitation has been ${invite.status.toLowerCase()}.`,
+      );
+    }
+    if (invite.expiresAt < new Date()) throw new BadRequestException('This invitation has expired.');
 
     let user = await this.userService.findByEmail(invite.email);
     if (user) {
@@ -427,22 +447,53 @@ export class AuthService {
       user = await this.userService.create({
         email: invite.email, password: dto.password, firstName: dto.firstName, lastName: dto.lastName,
       });
+      // Holding the emailed token IS proof of address ownership, so there is
+      // nothing left for a verification code to establish.
       await this.prisma.user.update({
         where: { id: user.id },
         data: { emailVerified: true, emailVerifiedAt: new Date(), emailVerifyCode: null, emailVerifyExpires: null },
       });
     }
 
-    await this.prisma.organizationMember.create({
-      data: {
-        organizationId: invite.organizationId, userId: user.id, role: invite.role, vendorScope: invite.vendorScope,
-        // Section access chosen on the invite form travels with it.
-        ...(invite.permissions ? { permissions: invite.permissions as Prisma.InputJsonValue } : {}),
+    // Upsert, not create: removal from an organization is a soft `isActive:
+    // false`, so a returning member already has a row and `create` threw P2002
+    // — which made re-inviting anyone who had ever been removed impossible.
+    // The grants are the sections chosen on the invite form plus the role's
+    // defaults (an influencer's `campaigns.view`); re-joining re-seeds them so
+    // a returning member is not left with a stale permission set.
+    const grants = [
+      ...new Set([...extractGrants(invite.permissions), ...defaultGrantsForRole(invite.role)]),
+    ];
+    const permissions = { grants } as unknown as Prisma.InputJsonValue;
+    await this.prisma.organizationMember.upsert({
+      where: {
+        organizationId_userId: { organizationId: invite.organizationId, userId: user.id },
+      },
+      create: {
+        organizationId: invite.organizationId,
+        userId: user.id,
+        role: invite.role,
+        vendorScope: invite.vendorScope,
+        permissions,
+      },
+      update: {
+        role: invite.role,
+        vendorScope: invite.vendorScope,
+        isActive: true,
+        permissions,
       },
     });
+
     await this.prisma.teamInvite.update({
       where: { id: invite.id },
-      data: { status: InviteStatus.ACCEPTED, acceptedAt: new Date() },
+      // acceptedUserId is what ties the invitation to the account that claimed
+      // it — the influencer list joins on it, and the invited address alone
+      // could not answer "who actually joined".
+      data: {
+        status: InviteStatus.ACCEPTED,
+        acceptedAt: new Date(),
+        acceptedUserId: user.id,
+      },
     });
 
     // Invalidate session cache — stale orgId/memberships need to refresh
@@ -463,6 +514,7 @@ export class AuthService {
       },
     };
   }
+
 
   // ─── TOKEN MANAGEMENT ───
 

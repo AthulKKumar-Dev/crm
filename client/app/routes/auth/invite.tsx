@@ -131,6 +131,10 @@ export default function InvitePage() {
   }
 
   const { email, role, organization, userExists } = invite.data;
+  const isInfluencer = role === "INFLUENCER";
+  const roleLabel = isInfluencer ? "influencer" : role.toLowerCase();
+  // "an influencer", "an admin", "an agent" — every other role takes "a".
+  const roleArticle = /^[aeiou]/.test(roleLabel) ? "an" : "a";
 
   /* ── Invite loaded ── */
   return (
@@ -144,8 +148,8 @@ export default function InvitePage() {
         <p className="mt-2 text-sm text-gray-500">
           You've been invited to join{" "}
           <span className="font-semibold text-gray-700">{organization.name}</span>
-          {" "}as a{" "}
-          <span className="font-semibold text-gray-700">{role.toLowerCase()}</span>.
+          {" "}as {roleArticle}{" "}
+          <span className="font-semibold text-gray-700">{roleLabel}</span>.
         </p>
       </div>
 
@@ -160,7 +164,7 @@ export default function InvitePage() {
         )}
         <div>
           <p className="text-sm font-semibold text-gray-900">{organization.name}</p>
-          <p className="text-xs text-gray-400">Invited as {role.toLowerCase()}</p>
+          <p className="text-xs text-gray-400">Invited as {roleLabel}</p>
         </div>
       </div>
 
@@ -174,7 +178,9 @@ export default function InvitePage() {
         /* ── Existing user: confirm password + accept ── */
         <form onSubmit={handleAcceptExisting}>
           <p className="mb-4 text-sm text-gray-500">
-            You already have a Collabo account. Enter your password to join this workspace.
+            {isInfluencer
+              ? "You already have a Collabo account. Enter your password to join this organization and connect your Instagram account."
+              : "You already have a Collabo account. Enter your password to join this workspace."}
           </p>
 
           <div className="mb-4 space-y-1.5">
@@ -211,7 +217,7 @@ export default function InvitePage() {
             ) : (
               <>
                 <CheckCircle2 className="size-4" />
-                Accept & join workspace
+                Accept &amp; join {organization.name}
               </>
             )}
           </button>
