@@ -2,6 +2,27 @@ import axios from "axios";
 import { useAuthStore } from "~/stores/auth.store";
 
 /**
+ * Where the API lives.
+ *
+ * VITE_API_BASE_URL wins when it is an absolute URL. A production build that
+ * reaches here with nothing usable (the variable unset, blank, or relative,
+ * as happens when a hosting dashboard defines it empty and so overrides
+ * .env.production) must still talk to the real API: the SPA host answers
+ * every /api/v1 call with index.html, which crashed the app on first load.
+ * Dev keeps the relative base so the Vite proxy / local API apply.
+ */
+const PRODUCTION_API_BASE_URL = "https://api.collabo.store/api/v1";
+
+function resolveApiBaseUrl(): string {
+  const configured = (import.meta.env.VITE_API_BASE_URL ?? "").trim();
+  const isAbsolute = configured.startsWith("http://") || configured.startsWith("https://");
+  if (isAbsolute) return configured.endsWith("/") ? configured.slice(0, -1) : configured;
+  return import.meta.env.PROD ? PRODUCTION_API_BASE_URL : "/api/v1";
+}
+
+export const API_BASE_URL = resolveApiBaseUrl();
+
+/**
  * Pre-configured Axios instance for all API communication.
  *
  * - Attaches the access token to every outgoing request.
@@ -9,7 +30,7 @@ import { useAuthStore } from "~/stores/auth.store";
  * - Performs a silent token refresh on 401 responses (once per request).
  */
 export const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "/api/v1",
+  baseURL: API_BASE_URL,
   headers: { "Content-Type": "application/json" },
   withCredentials: true,
   timeout: 30_000,
@@ -55,11 +76,10 @@ async function refreshAccessToken(): Promise<string> {
   const sessionChanged = () =>
     useAuthStore.getState().refreshToken !== refreshToken;
 
-  const baseURL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
   let res;
   try {
     // Use a raw axios call to avoid interceptor loops
-    res = await axios.post(`${baseURL}/auth/refresh`, { refreshToken });
+    res = await axios.post(`${API_BASE_URL}/auth/refresh`, { refreshToken });
   } catch (error) {
     // A failure for the old session says nothing about the new one.
     if (sessionChanged()) throw new SessionChangedError();
