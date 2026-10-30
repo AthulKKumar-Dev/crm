@@ -5,3 +5,7 @@ node_modules
 !.env.example
 
 grep.exe
+
+# The client production env holds only the public API URL; it must ship with
+# the source so a Cloudflare build cannot silently fall back to a relative base.
+!/client/.env.production
