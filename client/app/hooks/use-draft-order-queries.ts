@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { draftOrderService } from "~/services/draft-order.service";
 import type { DraftOrderListParams } from "~/types/api";
 
@@ -16,6 +16,8 @@ export function useDraftOrders(params?: DraftOrderListParams) {
   return useQuery({
     queryKey: draftOrderKeys.list(params),
     queryFn: () => draftOrderService.list(params),
+    // The previous page stays on screen, dimmed, while the next one loads.
+    placeholderData: keepPreviousData,
   });
 }
 

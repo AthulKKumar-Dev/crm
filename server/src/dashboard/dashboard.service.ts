@@ -13,6 +13,12 @@ import {
   salesOrderWhere,
 } from '../common/utils/order-window.util';
 import {
+  resolveReportingTimeZone,
+  zonedDayEndExclusive,
+  zonedDayStart,
+  zonedParts,
+} from '../common/utils/zoned-date.util';
+import {
   computeBucket,
   emptyBucket,
   round2,
@@ -20,6 +26,13 @@ import {
   type ProfitBucket,
   type SalesProfitRow,
 } from './profit.util';
+import { lowStockVariantRows, toLowStockEntry } from './low-stock.util';
+
+/** Most order rows one CSV / JSON download will carry, newest first. */
+export const REPORT_ROW_CAP = 10_000;
+
+/** Longest custom range still charted day by day; beyond it, by month. */
+const MAX_DAILY_BUCKET_DAYS = 92;
 
 /** The window every figure on the dashboard is reported over. */
 interface Window {
@@ -48,8 +61,14 @@ export interface SalesProfitPoint extends ProfitBucket {
 export class DashboardService {
   constructor(private readonly prisma: PrismaService) { }
 
-  async getOverview(orgId: string, query: QueryDashboardDto) {
-    const window = await this.resolveWindow(orgId, query);
+  /**
+   * `sharedWindow` lets one caller (the JSON export) compute this and the
+   * row report over the SAME window. Resolved separately, each ends at its
+   * own `new Date()`, and an order placed between the two is in one and not
+   * the other.
+   */
+  async getOverview(orgId: string, query: QueryDashboardDto, sharedWindow?: Window) {
+    const window = sharedWindow ?? (await this.resolveWindow(orgId, query));
 
     const orderWhere: Prisma.OrderWhereInput = {
       organizationId: orgId,
@@ -74,7 +93,7 @@ export class DashboardService {
       topSellingProducts,
       recentOrders,
       totalCustomers,
-      lowStockProducts,
+      lowStock,
     ] = await Promise.all([
       // 1. Total sales over the window. NOTE: the dashboard CARD no longer
       //    reads this — it reads `totals.grossSales` off /monthly-sales, so the
@@ -156,7 +175,7 @@ export class DashboardService {
       }),
 
       // 9. Top 5 low-stock products (stock > 0 and <= org threshold)
-      this.getLowStockProducts(orgId, query.channelId, 5),
+      this.getLowStock(orgId, query.channelId, 5),
     ]);
 
     // Format fulfillment status breakdown
@@ -188,8 +207,10 @@ export class DashboardService {
       // Top 5 selling products
       topSellingProducts,
 
-      // Top 5 low-stock products
-      lowStockProducts,
+      // Top 5 low-stock products, and the top 5 low-stock VARIANTS the
+      // dashboard's Low Stock tab lists (it names the size to restock).
+      lowStockProducts: lowStock.products,
+      lowStockVariants: lowStock.variants,
 
       // Recent 5 orders
       recentOrders: recentOrders.map((order) => ({
@@ -210,29 +231,82 @@ export class DashboardService {
 
 
 
-  async getReportData(orgId: string, query: QueryDashboardDto) {
-    const baseWhere: Prisma.OrderWhereInput = {
+  /**
+   * The order rows behind the CSV / JSON downloads.
+   *
+   * Scoped to the SAME window the dashboard is showing. This used to read only
+   * `dateFrom`/`dateTo`, while the dashboard sends `range` — so every download
+   * loaded the org's entire order history (38k orders with line items for one
+   * merchant), ran past the client's timeout and surfaced as an intermittent
+   * "Failed to export". A request with neither a range nor dates is the Orders
+   * page's "All time" export and stays unbounded — but never uncapped.
+   */
+  async getReportData(orgId: string, query: QueryDashboardDto, sharedWindow?: Window) {
+    const bounded = Boolean(query.range || query.dateFrom || query.dateTo);
+    const window = bounded ? (sharedWindow ?? (await this.resolveWindow(orgId, query))) : null;
+
+    const where: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       ...(query.channelId && { channelId: query.channelId }),
-      ...(query.dateFrom || query.dateTo ? {
-        externalCreatedAt: {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo && { lte: new Date(query.dateTo) }),
-        },
-      } : {}),
+      ...(window && placedBetween(window.from, window.to)),
     };
 
     const orders = await this.prisma.order.findMany({
-      where: baseWhere,
+      where,
       include: {
         customer: { select: { firstName: true, lastName: true, email: true } },
         lineItems: { select: { title: true, quantity: true, price: true } },
         channel: { select: { name: true } },
       },
-      orderBy: { externalCreatedAt: 'desc' },
+      // NULLs last: Postgres puts them first in DESC, and `placedBetween`
+      // admits undated orders, so they would otherwise head a "newest first"
+      // file and take cap slots from the orders that are newest.
+      orderBy: [{ externalCreatedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+      // Bounded: the file is built in memory. Same cap as the Orders export.
+      take: REPORT_ROW_CAP,
     });
 
+    // How many orders matched in all. Only a full page can have been cut off,
+    // so the extra count runs only then. A capped file that does not say so
+    // reads as the complete period — the caller is told and tells the user.
+    const total =
+      orders.length < REPORT_ROW_CAP
+        ? orders.length
+        : await this.prisma.order.count({ where });
+
+    return {
+      period: window
+        ? { from: window.from.toISOString(), to: window.to.toISOString() }
+        : null,
+      orders: this.toReportRows(orders),
+      total,
+    };
+  }
+
+  /**
+   * The JSON export: the overview summary and the order rows over ONE window,
+   * resolved once. The two reads run in parallel; the file takes as long as
+   * the slower one, and neither can include an order the other missed.
+   */
+  async getExportReport(orgId: string, query: QueryDashboardDto) {
+    const sharedWindow = await this.resolveWindow(orgId, query);
+    const [overview, rowReport] = await Promise.all([
+      this.getOverview(orgId, query, sharedWindow),
+      this.getReportData(orgId, query, sharedWindow),
+    ]);
+    return { overview, ...rowReport };
+  }
+
+  private toReportRows(
+    orders: Array<Prisma.OrderGetPayload<{
+      include: {
+        customer: { select: { firstName: true; lastName: true; email: true } };
+        lineItems: { select: { title: true; quantity: true; price: true } };
+        channel: { select: { name: true } };
+      };
+    }>>,
+  ) {
     return orders.map((o) => ({
       orderNumber: o.orderNumber,
       name: o.name,
@@ -526,7 +600,9 @@ export class DashboardService {
       buckets AS (
         SELECT generate_series(
           date_trunc(${unit}, ${window.from}::timestamptz AT TIME ZONE ${tz}),
-          date_trunc(${unit}, ${window.to}::timestamptz   AT TIME ZONE ${tz}),
+          -- The window end is exclusive: step back off it, or an explicit range
+          -- gains an empty trailing bucket for the day after its end date.
+          date_trunc(${unit}, (${window.to}::timestamptz - interval '1 millisecond') AT TIME ZONE ${tz}),
           CAST(${step} AS interval)
         ) AS bucket
       )
@@ -592,21 +668,45 @@ export class DashboardService {
       select: { timezone: true, currency: true },
     });
 
+    // One zone for the window edges AND the bar boundaries. The untouched "UTC"
+    // default reads as IST — see `resolveReportingTimeZone`.
+    const timezone = resolveReportingTimeZone(org ?? {});
     const range = rangeToWindow(query.range);
     const explicit = Boolean(query.dateFrom || query.dateTo);
-    const to = query.dateTo ? new Date(query.dateTo) : new Date();
+    // A bare `YYYY-MM-DD` is a calendar day in that zone. `to` is exclusive, so
+    // an explicit end date covers the whole of that day rather than none of it.
+    const to = query.dateTo ? zonedDayEndExclusive(query.dateTo, timezone) : new Date();
     const from = query.dateFrom
-      ? new Date(query.dateFrom)
-      : windowStart(to, range);
+      ? zonedDayStart(query.dateFrom, timezone)
+      : windowStart(to, range, timezone);
+    // A custom 12-day range bucketed by month drew one bar.
+    const days = (to.getTime() - from.getTime()) / 86_400_000;
+    const unit = explicit ? (days <= MAX_DAILY_BUCKET_DAYS ? 'day' : 'month') : range.unit;
 
     return {
       from,
       to,
-      unit: explicit ? 'month' : range.unit,
-      label: explicit ? 'Selected range' : range.label,
-      timezone: org?.timezone || 'UTC',
+      unit,
+      label: explicit ? this.rangeLabel(from, to, timezone) : range.label,
+      timezone,
       currency: (org?.currency || 'USD').toUpperCase(),
     };
+  }
+
+  /** "1 Oct – 12 Oct 2026"; the year only once when both ends share it. */
+  private rangeLabel(from: Date, to: Date, timeZone: string): string {
+    const last = new Date(to.getTime() - 1); // `to` is exclusive
+    const format = (date: Date, withYear: boolean) =>
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone,
+        day: 'numeric',
+        month: 'short',
+        ...(withYear && { year: 'numeric' }),
+      }).format(date);
+    const end = format(last, true);
+    if (format(from, true) === end) return end;
+    const sameYear = zonedParts(from, timeZone).year === zonedParts(last, timeZone).year;
+    return `${format(from, !sameYear)} – ${end}`;
   }
 
   /** The equally long window ending where this one begins. */
@@ -766,9 +866,10 @@ export class DashboardService {
     });
   }
 
-  // Top N products with the lowest (non-zero) stock, flagged by the org's lowStockThreshold.
-  // Sort by lowest-stock variant ascending so the most urgent items surface first.
-  private async getLowStockProducts(orgId: string, channelId: string | undefined, limit: number) {
+  // Low stock against the org's lowStockThreshold, most urgent first — as the
+  // top N PRODUCTS (kept for existing consumers) and as the top N VARIANTS,
+  // which is what the dashboard's Low Stock tab lists.
+  private async getLowStock(orgId: string, channelId: string | undefined, limit: number) {
     const org = await this.prisma.organization.findUnique({
       where: { id: orgId },
       select: { lowStockThreshold: true },
@@ -785,29 +886,20 @@ export class DashboardService {
       },
       include: {
         images: { take: 1, orderBy: { position: 'asc' } },
-        variants: { select: { price: true, inventoryQuantity: true } },
+        // id/title/sku so the row can name WHICH variant is low.
+        variants: {
+          select: { id: true, title: true, sku: true, price: true, inventoryQuantity: true },
+        },
       },
     });
 
-    return products
-      .map((product) => {
-        const stocks = product.variants.map((v) => v.inventoryQuantity);
-        const totalStock = stocks.reduce((sum, s) => sum + s, 0);
-        const lowestVariantStock = stocks.length > 0 ? Math.min(...stocks) : 0;
-        const prices = product.variants.map((v) => parseFloat(String(v.price)));
+    const entries = products
+      .map((product) => toLowStockEntry(product, threshold))
+      .sort((a, b) => a.lowestVariantStock - b.lowestVariantStock);
 
-        return {
-          id: product.id,
-          title: product.title,
-          image: product.images[0]?.src ?? null,
-          currentStock: totalStock,
-          lowestVariantStock,
-          variantCount: product.variants.length,
-          price: prices.length > 0 ? Math.min(...prices).toFixed(2) : '0.00',
-          threshold,
-        };
-      })
-      .sort((a, b) => a.lowestVariantStock - b.lowestVariantStock)
-      .slice(0, limit);
+    return {
+      products: entries.slice(0, limit),
+      variants: lowStockVariantRows(entries, limit),
+    };
   }
 }

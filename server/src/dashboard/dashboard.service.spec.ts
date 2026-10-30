@@ -1,4 +1,4 @@
-import { DashboardService } from './dashboard.service';
+import { DashboardService, REPORT_ROW_CAP } from './dashboard.service';
 import type { SalesProfitRow } from './profit.util';
 
 /**
@@ -29,11 +29,31 @@ function datesOf(call: any[]): Date[] {
   return bindsOf(call).filter((v): v is Date => v instanceof Date);
 }
 
+/** Wall-clock parts of an instant as read in IST. */
+function istParts(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).formatToParts(date);
+  const pick = (type: string) => Number(parts.find((p) => p.type === type)?.value);
+  return {
+    year: pick('year'),
+    month: pick('month'),
+    day: pick('day'),
+    hour: pick('hour') % 24,
+    minute: pick('minute'),
+  };
+}
+
 function monthsBetween(from: Date, to: Date): number {
-  return (
-    (to.getUTCFullYear() - from.getUTCFullYear()) * 12 +
-    (to.getUTCMonth() - from.getUTCMonth())
-  );
+  const a = istParts(from);
+  const b = istParts(to);
+  return (b.year - a.year) * 12 + (b.month - a.month);
 }
 
 function profitRow(over: Partial<SalesProfitRow> = {}): SalesProfitRow {
@@ -136,7 +156,7 @@ describe('DashboardService.getSalesAndProfit', () => {
       expect(bindsOf($queryRaw.mock.calls[0])).toContain(ORG);
     });
 
-    it('defaults to twelve months, anchored to the start of a month', async () => {
+    it('defaults to twelve months, anchored to 00:00 IST on the 1st', async () => {
       const { service, $queryRaw } = build();
       const { period } = await service.getSalesAndProfit(ORG, {});
       const from = new Date(period.from);
@@ -146,24 +166,38 @@ describe('DashboardService.getSalesAndProfit', () => {
       // Measuring "12 months" as now − 365 days starts the window mid-month, so
       // the first bar covers a part-month and reads as a slump that never
       // happened — and the series runs to a thirteenth bucket.
-      expect(from.getUTCDate()).toBe(1);
-      expect(from.getUTCHours()).toBe(0);
+      expect(istParts(from)).toMatchObject({ day: 1, hour: 0, minute: 0 });
       expect(monthsBetween(from, to)).toBe(11);
       expect(datesOf($queryRaw.mock.calls[0]).length).toBeGreaterThan(0);
     });
 
-    it('anchors the 30-day range to the start of a day', async () => {
+    it('covers 30 full days plus today for the 30-day range, from 00:00 IST', async () => {
       const { service } = build();
       const { period } = await service.getSalesAndProfit(ORG, { range: '30d' });
       const from = new Date(period.from);
 
       expect(period.label).toBe('Last 30 days');
-      expect(from.getUTCHours()).toBe(0);
-      expect(from.getUTCMinutes()).toBe(0);
-      // 30 daily buckets: 29 whole days plus today, still in progress.
+      expect(istParts(from)).toMatchObject({ hour: 0, minute: 0 });
       const days = (new Date(period.to).getTime() - from.getTime()) / 86_400_000;
-      expect(days).toBeGreaterThanOrEqual(29);
-      expect(days).toBeLessThan(30);
+      expect(days).toBeGreaterThanOrEqual(30);
+      expect(days).toBeLessThan(31);
+    });
+
+    it('covers 7 full days plus today for the 7-day range, from 00:00 IST', async () => {
+      const { service } = build();
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+      const from = new Date(period.from);
+
+      expect(period.label).toBe('Last 7 days');
+      // Midnight IST is 18:30 UTC the evening before. Starting at UTC midnight
+      // (05:30 IST) dropped each window's first morning of orders.
+      expect(istParts(from)).toMatchObject({ hour: 0, minute: 0 });
+      expect(from.getUTCHours()).toBe(18);
+      expect(from.getUTCMinutes()).toBe(30);
+      // Same span as the Orders page, which sends today − 7 as its dateFrom.
+      const days = (new Date(period.to).getTime() - from.getTime()) / 86_400_000;
+      expect(days).toBeGreaterThanOrEqual(7);
+      expect(days).toBeLessThan(8);
     });
 
     it('buckets in the organization timezone, not the server one', async () => {
@@ -174,6 +208,23 @@ describe('DashboardService.getSalesAndProfit', () => {
 
       expect(bindsOf($queryRaw.mock.calls[0])).toContain('Asia/Kolkata');
       expect(sqlOf($queryRaw.mock.calls[0])).toContain('AT TIME ZONE');
+    });
+
+    it('reads the untouched UTC default as IST', async () => {
+      const { service, $queryRaw } = build({ timezone: 'UTC' });
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+
+      expect(period.timezone).toBe('Asia/Kolkata');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('Asia/Kolkata');
+    });
+
+    it('keeps an explicitly-set non-UTC timezone', async () => {
+      const { service } = build({ timezone: 'Asia/Tokyo' });
+      const { period } = await service.getSalesAndProfit(ORG, { range: '7d' });
+
+      expect(period.timezone).toBe('Asia/Tokyo');
+      // 00:00 JST is 15:00 UTC the day before.
+      expect(new Date(period.from).getUTCHours()).toBe(15);
     });
 
     it('compares against the immediately preceding window of equal length', async () => {
@@ -201,6 +252,68 @@ describe('DashboardService.getSalesAndProfit', () => {
         (v: any) => v?.values?.includes?.('ch_1'),
       );
       expect(fragment).toBeDefined();
+    });
+  });
+
+  describe('explicit dates (custom range)', () => {
+    it('charts a short custom range by day and labels it with its dates', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-10-01',
+        dateTo: '2026-10-12',
+      });
+
+      expect(period.label).toBe('1 Oct – 12 Oct 2026');
+      // Whole days in IST: 00:00 on the 1st up to (not including) the 13th.
+      expect(period.from).toBe('2026-09-30T18:30:00.000Z');
+      expect(period.to).toBe('2026-10-12T18:30:00.000Z');
+      // Bucketed by month, twelve days drew a single bar.
+      const binds = bindsOf($queryRaw.mock.calls[0]);
+      expect(binds).toContain('day');
+      expect(binds).not.toContain('month');
+    });
+
+    it('charts a long custom range by month', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-01-01',
+        dateTo: '2026-10-12',
+      });
+
+      expect(period.label).toBe('1 Jan – 12 Oct 2026');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('month');
+    });
+
+    it('labels a single day once, and a range across years with both years', async () => {
+      const single = build();
+      const one = await single.service.getSalesAndProfit(ORG, {
+        dateFrom: '2026-10-12',
+        dateTo: '2026-10-12',
+      });
+      expect(one.period.label).toBe('12 Oct 2026');
+
+      const across = build();
+      const two = await across.service.getSalesAndProfit(ORG, {
+        dateFrom: '2025-12-28',
+        dateTo: '2026-01-03',
+      });
+      expect(two.period.label).toBe('28 Dec 2025 – 3 Jan 2026');
+    });
+
+    it('ends the bucket series before the exclusive end, so no empty trailing bar', async () => {
+      const { service, $queryRaw } = build();
+      await service.getSalesAndProfit(ORG, { dateFrom: '2026-10-01', dateTo: '2026-10-12' });
+
+      // `to` is 00:00 on the 13th; date_trunc of it is a 13th bucket nobody asked for.
+      expect(sqlOf($queryRaw.mock.calls[0])).toMatch(/- interval '1 millisecond'\) AT TIME ZONE/);
+    });
+
+    it('leaves preset ranges on their own unit and label', async () => {
+      const { service, $queryRaw } = build();
+      const { period } = await service.getSalesAndProfit(ORG, { range: '6m' });
+
+      expect(period.label).toBe('Last 6 months');
+      expect(bindsOf($queryRaw.mock.calls[0])).toContain('month');
     });
   });
 
@@ -352,6 +465,120 @@ describe('DashboardService.getSalesAndProfit', () => {
           expect.objectContaining({ baseCurrency: expect.objectContaining({ not: 'USD' }) }),
         ]),
       );
+    });
+  });
+});
+
+/**
+ * The CSV / JSON downloads. The dashboard sends `range`, but the export read
+ * only `dateFrom`/`dateTo` — so every download loaded the org's whole order
+ * history with no row limit, outran the client timeout on a large store and
+ * surfaced as an intermittent "Failed to export".
+ */
+describe('DashboardService.getReportData', () => {
+  function buildReport(opts: { rows?: number; matched?: number } = {}) {
+    const findMany = jest.fn().mockResolvedValue(
+      Array.from({ length: opts.rows ?? 0 }, (_, i) => reportOrder(i)),
+    );
+    const count = jest.fn().mockResolvedValue(opts.matched ?? 0);
+    const prisma = {
+      order: { findMany, count },
+      organization: {
+        findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC', currency: 'INR' }),
+      },
+    };
+    return { findMany, count, service: new DashboardService(prisma as any) };
+  }
+
+  const reportOrder = (i: number) => ({
+    orderNumber: i, name: `SJ${i}`, externalCreatedAt: new Date('2026-09-01T00:00:00Z'),
+    createdAt: new Date('2026-09-01T00:00:00Z'), customer: null, channel: { name: 'Shopify' },
+    lineItems: [], subtotalPrice: 1, totalTax: 0, totalShippingPrice: 0, totalDiscounts: 0,
+    totalPrice: 1, currency: 'INR', financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED',
+  });
+
+  it('builds the JSON export over one window, resolved once', async () => {
+    const { service, findMany } = buildReport();
+    const overviewSpy = jest
+      .spyOn(service, 'getOverview')
+      .mockResolvedValue({ totalSales: 0, totalOrders: 0, totalCustomers: 0, totalProducts: 0 } as any);
+    const organizationLookup = (service as any).prisma.organization.findUnique as jest.Mock;
+
+    const { period } = await service.getExportReport(ORG, { range: '7d' });
+
+    // Each method resolving its own window would end at its own `new Date()`
+    // and hit the organisation table once each.
+    expect(organizationLookup).toHaveBeenCalledTimes(1);
+    const windowGivenToOverview = overviewSpy.mock.calls[0][2];
+    expect(windowGivenToOverview).toBeDefined();
+    expect(period).toEqual({
+      from: windowGivenToOverview!.from.toISOString(),
+      to: windowGivenToOverview!.to.toISOString(),
+    });
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('exports only the period the dashboard is showing', async () => {
+    const { service, findMany } = buildReport();
+    const { period } = await service.getReportData(ORG, { range: '7d' });
+
+    const where = findMany.mock.calls[0][0].where;
+    // `placedBetween`: Shopify time, falling back to the CRM row time, so
+    // CRM-created orders are in the file too.
+    expect(where.OR).toEqual([
+      { externalCreatedAt: { gte: expect.any(Date), lt: expect.any(Date) } },
+      { externalCreatedAt: null, createdAt: { gte: expect.any(Date), lt: expect.any(Date) } },
+    ]);
+    const from: Date = where.OR[0].externalCreatedAt.gte;
+    const days = (where.OR[0].externalCreatedAt.lt.getTime() - from.getTime()) / 86_400_000;
+    expect(days).toBeGreaterThanOrEqual(7);
+    expect(days).toBeLessThan(8);
+    expect(period).toEqual({ from: from.toISOString(), to: expect.any(String) });
+  });
+
+  it('stays unbounded for a request with no range and no dates', async () => {
+    // The Orders page's "All time" export calls this endpoint with nothing.
+    const { service, findMany } = buildReport();
+    const { period } = await service.getReportData(ORG, {});
+
+    expect(findMany.mock.calls[0][0].where).not.toHaveProperty('OR');
+    expect(period).toBeNull();
+  });
+
+  it('never loads more than the row cap', async () => {
+    const { service, findMany } = buildReport();
+    await service.getReportData(ORG, {});
+    await service.getReportData(ORG, { range: '12m' });
+
+    expect(findMany.mock.calls.map((c) => c[0].take)).toEqual([REPORT_ROW_CAP, REPORT_ROW_CAP]);
+  });
+
+  it('reports the full match count when the cap cut the file off', async () => {
+    const { service, count, findMany } = buildReport({ rows: REPORT_ROW_CAP, matched: 10_871 });
+    const { orders, total } = await service.getReportData(ORG, { range: '12m' });
+
+    expect(orders).toHaveLength(REPORT_ROW_CAP);
+    expect(total).toBe(10_871);
+    // Counted over exactly the rows the export selected from.
+    expect(count.mock.calls[0][0].where).toBe(findMany.mock.calls[0][0].where);
+  });
+
+  it('does not run the extra count for a file that fits under the cap', async () => {
+    const { service, count } = buildReport({ rows: 3 });
+    const { total } = await service.getReportData(ORG, { range: '7d' });
+
+    expect(total).toBe(3);
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it('scopes to the organization and skips deleted orders', async () => {
+    const { service, findMany } = buildReport();
+    await service.getReportData(ORG, { range: '30d', channelId: 'ch_1' });
+
+    expect(findMany.mock.calls[0][0].where).toMatchObject({
+      organizationId: ORG,
+      deletedAt: null,
+      channelId: 'ch_1',
     });
   });
 });

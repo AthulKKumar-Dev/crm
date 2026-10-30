@@ -128,6 +128,9 @@ export function ChartLineDefault({
                         stroke="var(--color-value)"
                         strokeWidth={2}
                         fill={`url(#${gradientId})`}
+                        // Recharts' default is a 1.5s draw-in, replayed on every
+                        // range change — on a sparkline that reads as slowness.
+                        isAnimationActive={false}
                     />
                 </AreaChart>
             ) : (
@@ -140,6 +143,7 @@ export function ChartLineDefault({
                         stroke="var(--color-value)"
                         strokeWidth={2}
                         dot={false}
+                        isAnimationActive={false}
                     />
                 </LineChart>
             )}

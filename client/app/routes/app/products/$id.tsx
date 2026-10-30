@@ -6,7 +6,13 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  ProductSavePill,
+  type PendingChange,
+} from "~/components/app/product-save-pill";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Link, useBlocker, useParams } from "react-router";
+import { useListReturnPath } from "~/hooks/use-list-url-state";
 import {
   Loader2,
   Check,
@@ -28,31 +34,45 @@ import {
   useSyncProductMutation,
   useUpdateOptionsMutation,
   useUpdateProductMutation,
-  useUpdateVariantMutation,
 } from "~/hooks/use-product-mutations";
+import { useCreateAdjustmentMutation } from "~/hooks/use-inventory-mutations";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { useOrganizationSettings } from "~/hooks/use-settings-queries";
 import { useInventoryStatus } from "~/hooks/use-inventory-queries";
+import { STOCK_TERMS } from "~/lib/inventory-vocabulary";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
 import { calcMargin, cn, formatCurrency } from "~/lib/utils";
 import { formatDate, formatDateTime } from "~/lib/format-date";
 import { handleMutationError } from "~/lib/handle-mutation-error";
+import {
+  canSyncProduct,
+  isProductPushInFlight,
+  isProductPushStuck,
+  productSyncActionTitle,
+} from "~/lib/product-shopify-sync";
 import {
   newOptionUid,
   normalizeProductOptions,
   type EditableOption,
 } from "~/lib/product-options";
 import {
-  areVariantDraftsDirty,
   buildVariantDrafts,
-  isVariantDraftDirty,
+  buildVariantPatch,
+  changedVariantFields,
+  seedVariantDraft,
   toGstRateOption,
-  toInputNumber,
-  toNullableNumber,
+  VARIANT_DRAFT_KEYS,
+  VARIANT_FIELD_LABELS,
   type VariantDraft,
 } from "~/lib/variant-draft";
-import { VariantOptionsCard } from "~/components/app/product-variants/variant-options-card";
+import { formatVariantTitle } from "~/lib/variant-grouping";
+import {
+  detectRenames,
+  OptionRenameDialog,
+  VariantOptionsCard,
+} from "~/components/app/product-variants/variant-options-card";
 import { VariantPriceStockCard } from "~/components/app/product-variants/variant-price-stock-card";
+import type { WarehouseDraft } from "~/components/app/product-variants/variant-inline-editor";
 import { COMMON_UQC, GST_RATE_OPTIONS, GST_SUPPLY_TYPES } from "~/lib/gst-uqc";
 import { toast } from "sonner";
 import type {
@@ -93,6 +113,7 @@ import {
   BreadcrumbSeparator,
 } from "~/components/ui/breadcrumb";
 import { Button } from "~/components/ui/button";
+import { Tip } from "~/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -145,6 +166,12 @@ const PRODUCT_TABS = [
 
 type ProductTab = (typeof PRODUCT_TABS)[number]["id"];
 
+/** Remembers the Save pill's Shopify toggle per browser. Off unless chosen. */
+const SYNC_ON_SAVE_KEY = "collabo.pill.shopify";
+
+/** ArrayMaxSize on the server's BulkUpdateVariantsDto. */
+const BULK_VARIANT_LIMIT = 100;
+
 function optionsEqual(a: ProductOption[], b: ProductOption[]): boolean {
   return (
     JSON.stringify(normalizeProductOptions(a)) === JSON.stringify(normalizeProductOptions(b))
@@ -164,20 +191,6 @@ type FormBaseline = {
   vendor: string;
   tags: string[];
   status: ProductStatus;
-  price: string;
-  compareAtPrice: string;
-  cost: string;
-  taxable: boolean;
-  sku: string;
-  barcode: string;
-  trackQuantity: boolean;
-  continueSelling: boolean;
-  inventoryQuantity: string;
-  requiresShipping: boolean;
-  weight: string;
-  weightUnit: string;
-  hsCode: string;
-  countryOfOrigin: string;
   hsnCode: string;
   gstRate: string;
   unitOfMeasure: string;
@@ -186,8 +199,12 @@ type FormBaseline = {
   variantDrafts: Record<string, VariantDraft>;
 };
 
+/**
+ * The saved state every edit is diffed against. Variant fields — the default
+ * variant's included, which simple products edit on Overview — live only in
+ * `variantDrafts`, so there is one copy of each.
+ */
 function captureBaseline(p: ProductDetail): FormBaseline {
-  const defaultVariant = p.variants?.[0];
   return {
     title: p.title,
     bodyHtml: normalizeBodyHtml(p.bodyHtml ?? ""),
@@ -195,20 +212,6 @@ function captureBaseline(p: ProductDetail): FormBaseline {
     vendor: p.vendor ?? "",
     tags: [...(p.tags ?? [])],
     status: p.status,
-    price: toInputNumber(defaultVariant?.price),
-    compareAtPrice: toInputNumber(defaultVariant?.compareAtPrice),
-    cost: toInputNumber(defaultVariant?.cost),
-    taxable: defaultVariant?.taxable ?? true,
-    sku: defaultVariant?.sku ?? "",
-    barcode: defaultVariant?.barcode ?? "",
-    trackQuantity: defaultVariant?.trackQuantity ?? true,
-    continueSelling: defaultVariant?.continueSellingWhenOutOfStock ?? false,
-    inventoryQuantity: toInputNumber(defaultVariant?.inventoryQuantity ?? 0),
-    requiresShipping: defaultVariant?.requiresShipping ?? true,
-    weight: toInputNumber(defaultVariant?.weight),
-    weightUnit: defaultVariant?.weightUnit ?? "kg",
-    hsCode: defaultVariant?.hsCode ?? "",
-    countryOfOrigin: defaultVariant?.countryOfOrigin ?? "",
     hsnCode: p.hsnCode ?? "",
     gstRate: toGstRateOption(p.gstRate),
     unitOfMeasure: p.unitOfMeasure ?? "",
@@ -220,6 +223,8 @@ function captureBaseline(p: ProductDetail): FormBaseline {
 
 export default function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
+  // Back to the list as it was left: same page, search and filters.
+  const productsPath = useListReturnPath("products", "/products");
   const { isVendor } = useCurrentRole();
   const { data: product, isLoading, isError, refetch } = useProduct(id);
   const { data: org } = useCurrentOrg();
@@ -244,27 +249,16 @@ export default function ProductDetailPage() {
   const [vendor, setVendor] = useState("");
   const [tags, setTags] = useState<string[]>([]);
   const [status, setStatus] = useState<ProductStatus>("ACTIVE");
-  const [price, setPrice] = useState("");
-  const [compareAtPrice, setCompareAtPrice] = useState("");
-  const [cost, setCost] = useState("");
-  const [taxable, setTaxable] = useState(true);
-  const [sku, setSku] = useState("");
-  const [barcode, setBarcode] = useState("");
-  const [trackQuantity, setTrackQuantity] = useState(true);
-  const [continueSelling, setContinueSelling] = useState(false);
-  const [inventoryQuantity, setInventoryQuantity] = useState("0");
-  // Shipping / customs of the default variant (simple products only).
-  const [requiresShipping, setRequiresShipping] = useState(true);
-  const [weight, setWeight] = useState("");
-  const [weightUnit, setWeightUnit] = useState("kg");
-  const [hsCode, setHsCode] = useState("");
-  const [countryOfOrigin, setCountryOfOrigin] = useState("");
   // Product-level GST fields.
   const [hsnCode, setHsnCode] = useState("");
   const [gstRate, setGstRate] = useState("");
   const [unitOfMeasure, setUnitOfMeasure] = useState("");
   const [supplyType, setSupplyType] = useState<GstSupplyType>("TAXABLE");
-  const [activeTab, setActiveTab] = useState<ProductTab>("overview");
+  const [activeTab, setActiveTab] = useSessionState<ProductTab>(
+    "product.tab",
+    "overview",
+    oneOf(PRODUCT_TABS.map((tab) => tab.id)),
+  );
   const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
   const [options, setOptions] = useState<EditableOption[]>([]);
   const [optionValueDrafts, setOptionValueDrafts] = useState<string[]>([]);
@@ -276,13 +270,63 @@ export default function ProductDetailPage() {
   );
   const [editorReady, setEditorReady] = useState(false);
   const baselineRef = useRef<FormBaseline | null>(null);
-  // All save-flow mutations run silent: handleSaveProduct owns the single
-  // success/error toast for the whole save.
+  // Per-warehouse AVAILABLE typed in the variant panel, keyed by variant id.
+  // Held here rather than in the panel so closing it loses nothing and the
+  // page Save sends it with everything else.
+  const [warehouseDrafts, setWarehouseDrafts] = useState<Record<string, WarehouseDraft>>({});
+  const [isSavingAll, setIsSavingAll] = useState(false);
+  // State updates land a render late; this blocks a double click or a held ⌘S
+  // from starting a second save in the meantime.
+  const savingRef = useRef(false);
+  const [renameConfirmOpen, setRenameConfirmOpen] = useState(false);
+  // "Saved to Collabo · Shopify not updated" state of the Save pill.
+  const [afterSave, setAfterSave] = useState(false);
+  const [syncOnSave, setSyncOnSave] = useState(() => {
+    try {
+      return localStorage.getItem(SYNC_ON_SAVE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  // All save-flow mutations run silent: saveAll owns the single success/error
+  // toast for the whole save.
   const updateMutation = useUpdateProductMutation({ silent: true });
-  const updateVariantMutation = useUpdateVariantMutation(id ?? "", { silent: true });
   const bulkUpdateVariantsMutation = useBulkUpdateVariantsMutation(id ?? "", { silent: true });
   const updateOptionsMutation = useUpdateOptionsMutation(id ?? "", { silent: true });
   const generateVariantsMutation = useGenerateVariantsMutation(id ?? "", { silent: true });
+  const adjustMutation = useCreateAdjustmentMutation({ silent: true });
+  const syncMutation = useSyncProductMutation();
+
+  // Moved up from the variant panel. Runs when a variant's stock levels first
+  // arrive and whenever its set of locations changes. Only locations in the
+  // seed survive (a quantity typed for a removed location would otherwise
+  // write an adjustment that puts it straight back); typed values are kept.
+  const seedWarehouses = useCallback(
+    (variantId: string, seed: Record<string, string>) => {
+      setWarehouseDrafts((prev) => {
+        const form: Record<string, string> = {};
+        for (const warehouseId of Object.keys(seed)) {
+          form[warehouseId] = prev[variantId]?.form[warehouseId] ?? seed[warehouseId];
+        }
+        return { ...prev, [variantId]: { baseline: seed, form } };
+      });
+    },
+    [],
+  );
+
+  // ⌘S / Ctrl+S. Declared above the early returns like the blocker below, so
+  // it reads the current handler through a ref; null means nothing to save.
+  const saveShortcutRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
+      if (!saveShortcutRef.current) return;
+      e.preventDefault();
+      if (!e.repeat) saveShortcutRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   /**
    * Re-seed ONLY the options and the variant table from a freshly saved
@@ -295,17 +339,30 @@ export default function ProductDetailPage() {
    */
   const hydrateVariantsFromProduct = useCallback((p: ProductDetail) => {
     const nextOptions = normalizeProductOptions(p.options ?? []);
-    const nextDrafts = buildVariantDrafts(p.variants ?? []);
+    const fresh = buildVariantDrafts(p.variants ?? []);
     setOptions(nextOptions.map((option) => ({ ...option, uid: newOptionUid() })));
     setOptionValueDrafts(nextOptions.map(() => ""));
-    setVariantDrafts(nextDrafts);
-    if (baselineRef.current) {
-      baselineRef.current = {
-        ...baselineRef.current,
-        options: nextOptions,
-        variantDrafts: nextDrafts,
-      };
+    const base = baselineRef.current;
+    if (!base) {
+      setVariantDrafts(fresh);
+      return;
     }
+    // Variant edits wait for the page Save, so existing rows keep their draft
+    // and baseline as a pair; only rows new to this payload are seeded.
+    // Server-side changes to untouched fields still arrive through the
+    // absorb effect below.
+    setVariantDrafts((prev) => {
+      const next: Record<string, VariantDraft> = {};
+      for (const [id, seed] of Object.entries(fresh)) {
+        next[id] = prev[id] && base.variantDrafts[id] ? prev[id] : seed;
+      }
+      return next;
+    });
+    const nextBaseline: Record<string, VariantDraft> = {};
+    for (const [id, seed] of Object.entries(fresh)) {
+      nextBaseline[id] = base.variantDrafts[id] ?? seed;
+    }
+    baselineRef.current = { ...base, options: nextOptions, variantDrafts: nextBaseline };
   }, []);
 
   const hydrateFormFromProduct = useCallback((p: ProductDetail) => {
@@ -319,21 +376,6 @@ export default function ProductDetailPage() {
     setOptions(nextOptions.map((option) => ({ ...option, uid: newOptionUid() })));
     setOptionValueDrafts(nextOptions.map(() => ""));
     setVariantDrafts(buildVariantDrafts(p.variants ?? []));
-    const defaultVariant = p.variants?.[0];
-    setPrice(toInputNumber(defaultVariant?.price));
-    setCompareAtPrice(toInputNumber(defaultVariant?.compareAtPrice));
-    setCost(toInputNumber(defaultVariant?.cost));
-    setTaxable(defaultVariant?.taxable ?? true);
-    setSku(defaultVariant?.sku ?? "");
-    setBarcode(defaultVariant?.barcode ?? "");
-    setTrackQuantity(defaultVariant?.trackQuantity ?? true);
-    setContinueSelling(defaultVariant?.continueSellingWhenOutOfStock ?? false);
-    setInventoryQuantity(toInputNumber(defaultVariant?.inventoryQuantity ?? 0));
-    setRequiresShipping(defaultVariant?.requiresShipping ?? true);
-    setWeight(toInputNumber(defaultVariant?.weight));
-    setWeightUnit(defaultVariant?.weightUnit ?? "kg");
-    setHsCode(defaultVariant?.hsCode ?? "");
-    setCountryOfOrigin(defaultVariant?.countryOfOrigin ?? "");
     setHsnCode(p.hsnCode ?? "");
     setGstRate(toGstRateOption(p.gstRate));
     setUnitOfMeasure(p.unitOfMeasure ?? "");
@@ -360,12 +402,59 @@ export default function ProductDetailPage() {
     }
     setEditorReady(false);
     hydrateFormFromProduct(product);
+    setWarehouseDrafts({});
+    setAfterSave(false);
     setHydratedProductId(product.id);
     // Keyed on the id only: refetches of the SAME product (invalidations,
     // sync polling) must not overwrite the user's in-progress edits. Explicit
-    // re-sync after a save happens in handleSaveProduct.
+    // re-sync after a save happens in saveAll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product?.id, hydrateFormFromProduct]);
+
+  // Server-side writes to the SAME product (Create SKU, stock adjustments)
+  // still have to reach fields the merchant hasn't touched. Without this the
+  // variant table kept showing the pre-refetch empty SKU — "Create SKU did
+  // nothing" — and the next page Save sent that stale "" back as sku: null,
+  // erasing the SKU the server had just minted. Only untouched fields move
+  // (draft === baseline), so in-progress edits are never overwritten.
+  useEffect(() => {
+    if (!product || hydratedProductId !== product.id) return;
+    const base = baselineRef.current;
+    if (!base) return;
+
+    const server = buildVariantDrafts(product.variants ?? []);
+    const nextDrafts = { ...variantDrafts };
+    const nextBaseline = { ...base.variantDrafts };
+    let changed = false;
+    for (const [variantId, fresh] of Object.entries(server)) {
+      const draft = variantDrafts[variantId];
+      const was = base.variantDrafts[variantId];
+      // A variant that appeared after hydration (webhook, sync, generation
+      // elsewhere) gets its draft and baseline here. Without both, its panel
+      // would not open and an edit to it would never be counted or saved.
+      if (!draft || !was) {
+        nextDrafts[variantId] = draft ?? fresh;
+        nextBaseline[variantId] = was ?? fresh;
+        changed = true;
+        continue;
+      }
+      for (const key of VARIANT_DRAFT_KEYS) {
+        if (draft[key] === was[key] && was[key] !== fresh[key]) {
+          nextDrafts[variantId] = { ...nextDrafts[variantId], [key]: fresh[key] };
+          nextBaseline[variantId] = { ...nextBaseline[variantId], [key]: fresh[key] };
+          changed = true;
+        }
+      }
+    }
+
+    // The default variant is in `server` too, so a simple product's
+    // Overview SKU is covered by the same loop.
+    if (!changed) return;
+    baselineRef.current = { ...base, variantDrafts: nextBaseline };
+    setVariantDrafts(nextDrafts);
+    // Keyed on the product payload only; the drafts are read from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product, hydratedProductId]);
 
   useEffect(() => {
     const images =
@@ -471,34 +560,14 @@ export default function ProductDetailPage() {
         (!!v.option1 && v.option1 !== "Default Title"),
     );
   const isSimpleProduct = !hasVariantOptions;
-  const pricingMargin = calcMargin(price, cost);
+  // Simple products edit the default variant on Overview, through the same
+  // draft the variant panel uses — one copy, so the two can't disagree.
+  const dv = defaultVariant ? variantDrafts[defaultVariant.id] : undefined;
+  const setDv = (patch: Partial<VariantDraft>) => {
+    if (defaultVariant) patchVariantDraft(defaultVariant, patch);
+  };
+  const pricingMargin = calcMargin(dv?.price ?? "", dv?.cost ?? "");
   const baseline = baselineRef.current;
-
-  const isPricingDirty =
-    isSimpleProduct &&
-    !!baseline &&
-    (price !== baseline.price ||
-      compareAtPrice !== baseline.compareAtPrice ||
-      cost !== baseline.cost ||
-      taxable !== baseline.taxable);
-
-  const isInventoryDirty =
-    isSimpleProduct &&
-    !!baseline &&
-    (sku !== baseline.sku ||
-      barcode !== baseline.barcode ||
-      trackQuantity !== baseline.trackQuantity ||
-      continueSelling !== baseline.continueSelling ||
-      inventoryQuantity !== baseline.inventoryQuantity);
-
-  const isShippingDirty =
-    isSimpleProduct &&
-    !!baseline &&
-    (requiresShipping !== baseline.requiresShipping ||
-      weight !== baseline.weight ||
-      weightUnit !== baseline.weightUnit ||
-      hsCode !== baseline.hsCode ||
-      countryOfOrigin !== baseline.countryOfOrigin);
 
   const isTaxDirty =
     !!baseline &&
@@ -507,40 +576,80 @@ export default function ProductDetailPage() {
       unitOfMeasure !== baseline.unitOfMeasure ||
       supplyType !== baseline.supplyType);
 
-  const isVariantDirty = isPricingDirty || isInventoryDirty || isShippingDirty;
   const isOptionsDirty = baseline
     ? !optionsEqual(options, baseline.options)
     : false;
-  const isVariantsTableDirty = baseline
-    ? areVariantDraftsDirty(variantDrafts, baseline.variantDrafts)
-    : false;
+
+  const warehouseChanged = (d: WarehouseDraft | undefined) =>
+    !!d && Object.keys(d.form).some((id) => d.form[id] !== d.baseline[id]);
+
+  /** What changed on one variant, as labels; empty when nothing did. */
+  function variantChangeLabels(variant: ProductVariant): string[] {
+    const was = baseline?.variantDrafts[variant.id];
+    const draft = variantDrafts[variant.id];
+    const labels =
+      was && draft
+        ? changedVariantFields(was, draft, { warehousingEnabled }).map(
+          (key) => VARIANT_FIELD_LABELS[key],
+        )
+        : [];
+    if (warehouseChanged(warehouseDrafts[variant.id])) labels.push("stock");
+    return Array.from(new Set(labels));
+  }
+
+  // Computed once per render and shared by the dirty flag and the Save pill.
+  const changedVariants = (product.variants ?? [])
+    .map((variant) => ({ variant, labels: variantChangeLabels(variant) }))
+    .filter((entry) => entry.labels.length > 0);
+  const isVariantsDirty = changedVariants.length > 0;
+
+  // Quill normalises the HTML when it mounts, so the description can't be
+  // compared until it has. Only the description depends on it: the editor
+  // lives on the Overview tab, and gating the whole flag on it hid every edit
+  // made on the Variants tab until Overview had been opened.
+  const isBodyDirty =
+    editorReady && !!baseline && normalizeBodyHtml(bodyHtml) !== baseline.bodyHtml;
 
   const isFormReady =
     hydratedProductId === product.id && baselineRef.current != null;
   const isProductDirty =
     isFormReady &&
-    editorReady &&
     !!baseline &&
     (title !== baseline.title ||
-      normalizeBodyHtml(bodyHtml) !== baseline.bodyHtml ||
+      isBodyDirty ||
       productType !== baseline.productType ||
       vendor !== baseline.vendor ||
       !tagsEqual(tags, baseline.tags) ||
       status !== baseline.status ||
       isTaxDirty ||
-      isVariantDirty ||
       isOptionsDirty ||
-      isVariantsTableDirty);
+      isVariantsDirty);
 
   const isSaving =
+    isSavingAll ||
     updateMutation.isPending ||
-    updateVariantMutation.isPending ||
     bulkUpdateVariantsMutation.isPending ||
+    adjustMutation.isPending ||
     updateOptionsMutation.isPending ||
     generateVariantsMutation.isPending;
 
-  // Keep the navigation blocker in sync with the latest dirty state.
+  // Only for products already on Shopify: for anything else a push would
+  // publish a new Shopify product, which stays the header button's job.
+  const isOnShopify =
+    product.channel?.platform === "SHOPIFY" || !!sync?.shopifyProductId;
+  const committedOptionNames = (product.options ?? []).map((o) => o.name);
+  // "Shopify not updated" stops being true once a push starts or lands —
+  // including one started from the header's Sync button.
+  const showAfterSave =
+    afterSave &&
+    !isProductDirty &&
+    !isProductPushInFlight(sync) &&
+    sync?.status !== "SYNCED";
+
+  // Keep the navigation blocker and the save shortcut in sync with the
+  // latest dirty state.
   dirtyNavRef.current = isProductDirty && !isSaving;
+  saveShortcutRef.current = isProductDirty && !isSaving ? requestSave : null;
 
   function patchVariantDraft(
     variant: ProductVariant,
@@ -550,30 +659,51 @@ export default function ProductDetailPage() {
       ...prev,
       // Variants that appeared after hydration (generated, webhook-created)
       // have no draft yet — seed from the variant itself, never from blanks.
-      [variant.id]: {
-        ...(prev[variant.id] ?? buildVariantDrafts([variant])[variant.id]),
-        ...patch,
+      [variant.id]: { ...(prev[variant.id] ?? seedVariantDraft(variant)), ...patch },
+    }));
+  }
+
+  function patchWarehouseDraft(variantId: string, warehouseId: string, value: string) {
+    setWarehouseDrafts((prev) => ({
+      ...prev,
+      [variantId]: {
+        baseline: prev[variantId]?.baseline ?? {},
+        form: { ...prev[variantId]?.form, [warehouseId]: value },
       },
     }));
-    if (defaultVariant && variant.id === defaultVariant.id) {
-      if (patch.price !== undefined) setPrice(patch.price);
-      if (patch.cost !== undefined) setCost(patch.cost);
-      if (patch.inventoryQuantity !== undefined) {
-        setInventoryQuantity(patch.inventoryQuantity);
-      }
-      if (patch.sku !== undefined) setSku(patch.sku);
-    }
+  }
+
+  function revertVariant(variantId: string) {
+    const was = baselineRef.current?.variantDrafts[variantId];
+    if (was) setVariantDrafts((prev) => ({ ...prev, [variantId]: was }));
+    setWarehouseDrafts((prev) =>
+      prev[variantId]
+        ? { ...prev, [variantId]: { ...prev[variantId], form: prev[variantId].baseline } }
+        : prev,
+    );
+  }
+
+  function resetOptions() {
+    const base = baselineRef.current;
+    if (!base) return;
+    setOptions(base.options.map((option) => ({ ...option, uid: newOptionUid() })));
+    setOptionValueDrafts(base.options.map(() => ""));
   }
 
   function handleDiscardChanges() {
     if (!product) return;
     hydrateFormFromProduct(product);
+    setWarehouseDrafts((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).map(([variantId, d]) => [variantId, { ...d, form: d.baseline }]),
+      ),
+    );
   }
 
-  async function handleSaveProduct() {
-    if (!product || !isProductDirty) return;
-
+  /** Product-level fields that differ from the saved product. */
+  function buildProductPatch(): UpdateProductRequest {
     const data: UpdateProductRequest = {};
+    if (!product) return data;
 
     if (title !== product.title) {
       data.title = title;
@@ -602,8 +732,10 @@ export default function ProductDetailPage() {
     if (hsnCode !== (product.hsnCode ?? "")) {
       data.hsnCode = hsnCode.trim();
     }
-    if (gstRate !== toGstRateOption(product.gstRate) && gstRate !== "") {
-      data.gstRate = Number(gstRate);
+    // "" is the "Not set" option: send null so the rate can be cleared, not
+    // just changed. The server's UpdateProductDto accepts null here.
+    if (gstRate !== toGstRateOption(product.gstRate)) {
+      data.gstRate = gstRate === "" ? null : Number(gstRate);
     }
     if (unitOfMeasure !== (product.unitOfMeasure ?? "")) {
       data.unitOfMeasure = unitOfMeasure;
@@ -611,143 +743,109 @@ export default function ProductDetailPage() {
     if (supplyType !== (product.supplyType ?? "TAXABLE")) {
       data.supplyType = supplyType;
     }
+    return data;
+  }
 
-    const hasProductChanges = Object.keys(data).length > 0;
-
-    let variantData: UpdateVariantRequest | null = null;
-    if (isVariantDirty && defaultVariant) {
-      variantData = {};
-      const parsedPrice = Number(price);
-      if (
-        price.trim() &&
-        Number.isFinite(parsedPrice) &&
-        price !== toInputNumber(defaultVariant.price)
-      ) {
-        variantData.price = parsedPrice;
-      }
-      if (compareAtPrice !== toInputNumber(defaultVariant.compareAtPrice)) {
-        const next = toNullableNumber(compareAtPrice);
-        if (next !== undefined) variantData.compareAtPrice = next;
-      }
-      if (cost !== toInputNumber(defaultVariant.cost)) {
-        const next = toNullableNumber(cost);
-        if (next !== undefined) variantData.cost = next;
-      }
-      if (taxable !== (defaultVariant.taxable ?? true)) {
-        variantData.taxable = taxable;
-      }
-      if (sku !== (defaultVariant.sku ?? "")) {
-        variantData.sku = sku.trim() || null;
-      }
-      if (barcode !== (defaultVariant.barcode ?? "")) {
-        variantData.barcode = barcode.trim() || null;
-      }
-      if (trackQuantity !== (defaultVariant.trackQuantity ?? true)) {
-        variantData.trackQuantity = trackQuantity;
-      }
-      if (
-        continueSelling !==
-        (defaultVariant.continueSellingWhenOutOfStock ?? false)
-      ) {
-        variantData.continueSellingWhenOutOfStock = continueSelling;
-      }
-      // Warehousing orgs must not send a bare quantity: the server needs a
-      // warehouseId with it and 409s the whole save without one. Those edits
-      // belong to the variant editor's adjustment path.
-      if (
-        !warehousingEnabled &&
-        inventoryQuantity !==
-        toInputNumber(defaultVariant.inventoryQuantity ?? 0)
-      ) {
-        const parsedQty = Number.parseInt(inventoryQuantity, 10);
-        // Blank/garbage input is skipped — never silently zeroed.
-        if (Number.isFinite(parsedQty)) {
-          variantData.inventoryQuantity = parsedQty;
-        }
-      }
-      if (requiresShipping !== (defaultVariant.requiresShipping ?? true)) {
-        variantData.requiresShipping = requiresShipping;
-      }
-      if (weight !== toInputNumber(defaultVariant.weight)) {
-        const next = toNullableNumber(weight);
-        if (next !== undefined) variantData.weight = next;
-      }
-      if (
-        weightUnit !== (defaultVariant.weightUnit ?? "kg") &&
-        weight.trim() !== ""
-      ) {
-        variantData.weightUnit = weightUnit as UpdateVariantRequest["weightUnit"];
-      }
-      if (hsCode !== (defaultVariant.hsCode ?? "")) {
-        variantData.hsCode = hsCode.trim() || null;
-      }
-      if (countryOfOrigin !== (defaultVariant.countryOfOrigin ?? "")) {
-        variantData.countryOfOrigin =
-          countryOfOrigin.trim().toUpperCase() || null;
-      }
-      if (Object.keys(variantData).length === 0) {
-        variantData = null;
+  /** The Save pill and ⌘S. Checks first, then saves everything at once. */
+  function requestSave() {
+    // isSaving also covers a "Generate variants" still in flight, which a
+    // concurrent page save would race.
+    if (!isProductDirty || isSaving || savingRef.current) return;
+    // A quantity that can't be sent must not be reported as saved — the
+    // input would keep showing it while the warehouse kept the old figure.
+    for (const variant of product?.variants ?? []) {
+      const d = warehouseDrafts[variant.id];
+      if (!d) continue;
+      const bad = Object.keys(d.form).some(
+        (id) => d.form[id] !== d.baseline[id] && !/^\d+$/.test(d.form[id].trim()),
+      );
+      if (bad) {
+        toast.error(
+          `${formatVariantTitle(variant, product!.title)}: stock must be a whole number, 0 or more.`,
+        );
+        setActiveTab("variants");
+        return;
       }
     }
+    if (isOptionsDirty) {
+      // The options card's own button used to enforce these; it no longer
+      // saves, so the page does.
+      if (options.some((o) => !o.name.trim() || o.values.length === 0)) {
+        toast.error("Every option needs a name and at least one value.");
+        setActiveTab("variants");
+        return;
+      }
+      const names = options.map((o) => o.name.trim());
+      if (new Set(names).size !== names.length) {
+        toast.error("Two options can't share a name.");
+        setActiveTab("variants");
+        return;
+      }
+      // A rename is a delete + re-create (and a productOptionsDelete on
+      // Shopify). The page Save used to send one without asking.
+      if (detectRenames(options, committedOptionNames).length > 0) {
+        setRenameConfirmOpen(true);
+        return;
+      }
+    }
+    void saveAll();
+  }
 
+  /**
+   * Persist every pending change on the page, in order: product fields, all
+   * edited variants in one transactional request, per-warehouse stock, then
+   * options (generation needs the saved structure).
+   */
+  async function saveAll() {
+    const base = baselineRef.current;
+    if (!product || !base || savingRef.current) return;
+    savingRef.current = true;
+    setIsSavingAll(true);
     try {
-      if (hasProductChanges) {
+      const data = buildProductPatch();
+      if (Object.keys(data).length > 0) {
         await updateMutation.mutateAsync({ id: product.id, data });
       }
-      if (variantData && defaultVariant) {
-        await updateVariantMutation.mutateAsync({
-          variantId: defaultVariant.id,
-          data: variantData,
-        });
-      }
 
-      const variantUpdates: Array<UpdateVariantRequest & { variantId: string }> =
-        [];
+      // The default variant of a simple product is included: Overview edits
+      // the same draft the variant panel does.
+      const variantUpdates: Array<UpdateVariantRequest & { variantId: string }> = [];
       for (const variant of product.variants ?? []) {
-        // On simple products, default variant price/cost/stock are saved via Overview.
-        if (
-          isSimpleProduct &&
-          defaultVariant &&
-          variant.id === defaultVariant.id
-        ) {
-          continue;
-        }
+        const was = base.variantDrafts[variant.id];
         const draft = variantDrafts[variant.id];
-        if (!isVariantDraftDirty(variant, draft) || !draft) continue;
-
-        const update: UpdateVariantRequest & { variantId: string } = {
-          variantId: variant.id,
-        };
-        if (draft.price !== toInputNumber(variant.price)) {
-          const parsedPrice = Number(draft.price);
-          if (draft.price.trim() && Number.isFinite(parsedPrice)) {
-            update.price = parsedPrice;
-          }
-        }
-        if (draft.cost !== toInputNumber(variant.cost)) {
-          const next = toNullableNumber(draft.cost);
-          if (next !== undefined) update.cost = next;
-        }
-        // Same warehousing guard as the default-variant branch above.
-        if (
-          !warehousingEnabled &&
-          draft.inventoryQuantity !==
-          toInputNumber(variant.inventoryQuantity ?? 0)
-        ) {
-          const parsedQty = Number.parseInt(draft.inventoryQuantity, 10);
-          if (Number.isFinite(parsedQty)) {
-            update.inventoryQuantity = parsedQty;
-          }
-        }
-        if (draft.sku !== (variant.sku ?? "")) {
-          update.sku = draft.sku.trim() || null;
-        }
-        if (Object.keys(update).length > 1) {
-          variantUpdates.push(update);
+        if (!was || !draft) continue;
+        const patch = buildVariantPatch(was, draft, { isVendor, warehousingEnabled });
+        if (Object.keys(patch).length > 0) {
+          variantUpdates.push({ variantId: variant.id, ...patch });
         }
       }
-      if (variantUpdates.length > 0) {
-        await bulkUpdateVariantsMutation.mutateAsync(variantUpdates);
+      // The bulk endpoint takes at most BULK_VARIANT_LIMIT rows. Each chunk is
+      // its own transaction; a later chunk failing leaves earlier ones saved,
+      // and a retry resends identical values, so it is safe to repeat.
+      for (let i = 0; i < variantUpdates.length; i += BULK_VARIANT_LIMIT) {
+        await bulkUpdateVariantsMutation.mutateAsync(
+          variantUpdates.slice(i, i + BULK_VARIANT_LIMIT),
+        );
+      }
+
+      // Never as inventoryQuantity on the variant PATCH, which the server
+      // rejects without a warehouseId — one adjustment per changed warehouse.
+      // Sequential on purpose: each movement recomputes the variant's sellable
+      // cache, so parallel writes to one variant race each other.
+      for (const [variantId, d] of Object.entries(warehouseDrafts)) {
+        for (const [warehouseId, qty] of Object.entries(d.form)) {
+          if (qty === d.baseline[warehouseId]) continue;
+          const setTo = Number.parseInt(qty, 10);
+          if (!Number.isInteger(setTo) || setTo < 0) continue;
+          await adjustMutation.mutateAsync({
+            variantId,
+            warehouseId,
+            bucket: "AVAILABLE",
+            setTo,
+            reason: "correction",
+            note: "Edited from product variants",
+          });
+        }
       }
 
       if (isOptionsDirty) {
@@ -758,20 +856,56 @@ export default function ProductDetailPage() {
       // (and newly generated variants) land in local state deterministically.
       const { data: refreshed } = await refetch();
       if (refreshed) hydrateFormFromProduct(refreshed);
+      setWarehouseDrafts((prev) =>
+        Object.fromEntries(
+          Object.entries(prev).map(([variantId, d]) => [
+            variantId,
+            { baseline: d.form, form: d.form },
+          ]),
+        ),
+      );
 
       toast.success("Product saved.");
+      afterSuccessfulSave();
     } catch (error) {
       handleMutationError(
         error,
         "Save failed — some changes may not have been applied. Please review and save again.",
       );
+    } finally {
+      savingRef.current = false;
+      setIsSavingAll(false);
     }
+  }
+
+  /** Saving never pushes on its own; the pill's toggle opts in. */
+  function afterSuccessfulSave() {
+    if (!product || !isOnShopify) return;
+    if (!syncOnSave) {
+      setAfterSave(true);
+      return;
+    }
+    // A failed push lands in the "Shopify not updated" state, so it can be
+    // retried from the pill.
+    syncMutation.mutate(product.id, { onError: () => setAfterSave(true) });
+  }
+
+  function toggleSyncOnSave() {
+    setSyncOnSave((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SYNC_ON_SAVE_KEY, next ? "1" : "0");
+      } catch {
+        // Private window or blocked storage: the toggle still works for this visit.
+      }
+      return next;
+    });
   }
 
   /**
    * Persist the option structure, then fill in any combination that has no
    * variant yet. Shared by the page-level Save and the Variants tab's own
-   * "Save and generate" so the two can't drift apart.
+   * "Generate" so the two can't drift apart.
    */
   async function persistOptionsAndGenerate(): Promise<{ created: number } | null> {
     const normalized = normalizeProductOptions(options);
@@ -783,6 +917,7 @@ export default function ProductDetailPage() {
     return canGenerate ? await generateVariantsMutation.mutateAsync() : null;
   }
 
+  /** The options card's "Generate N variants" — only offered with nothing unsaved. */
   async function handleSaveAndGenerate() {
     if (!product) return;
     try {
@@ -801,49 +936,80 @@ export default function ProductDetailPage() {
     }
   }
 
-  async function handleSaveVariant(variantId: string, data: UpdateVariantRequest) {
-    await updateVariantMutation.mutateAsync({ variantId, data });
-    // The editor writes fields the Overview cards mirror (compare-at, barcode,
-    // the switches). Sync them so the page-level dirty check doesn't resurrect
-    // the stale values on the next Save.
-    if (defaultVariant && variantId === defaultVariant.id) {
-      if (data.compareAtPrice !== undefined) {
-        setCompareAtPrice(toInputNumber(data.compareAtPrice));
-      }
-      if (data.barcode !== undefined) setBarcode(data.barcode ?? "");
-      if (data.taxable !== undefined) setTaxable(data.taxable);
-      if (data.trackQuantity !== undefined) setTrackQuantity(data.trackQuantity);
-      if (data.continueSellingWhenOutOfStock !== undefined) {
-        setContinueSelling(data.continueSellingWhenOutOfStock);
-      }
-    }
-  }
-
-  /**
-   * Called after the editor's save has fully landed.
-   *
-   * Moves the baseline as well as the draft: hydration is keyed on the product
-   * id, so a per-variant save never refreshes `baselineRef`, and without this
-   * the Save/Discard bar would light up and stay lit immediately after a
-   * successful "Variant updated". Safe to trust — these values just round
-   * tripped through the server.
-   */
-  function handleVariantPersisted(
-    variant: ProductVariant,
-    patch: Partial<VariantDraft>,
-  ) {
-    patchVariantDraft(variant, patch);
-    const base = baselineRef.current;
-    if (!base) return;
-    base.variantDrafts = {
-      ...base.variantDrafts,
-      [variant.id]: {
-        ...(base.variantDrafts[variant.id] ??
-          buildVariantDrafts([variant])[variant.id]),
-        ...patch,
-      },
+  // One row per pending change for the Save pill, each with its own Undo.
+  const pendingChanges: PendingChange[] = [];
+  if (isFormReady && baseline) {
+    const add = (
+      id: string,
+      label: string,
+      dirty: boolean,
+      value: string,
+      undo: () => void,
+    ) => {
+      if (dirty) pendingChanges.push({ id, label, value, undo });
     };
-    toast.success("Variant updated.");
+    add("title", "Title", title !== baseline.title, title || "—", () =>
+      setTitle(baseline.title),
+    );
+    add("description", "Description", isBodyDirty, "Edited", () =>
+      setBodyHtml(baseline.bodyHtml),
+    );
+    add("status", "Status", status !== baseline.status, STATUS_LABEL[status], () =>
+      setStatus(baseline.status),
+    );
+    add(
+      "type",
+      "Product type",
+      productType !== baseline.productType,
+      productType || "—",
+      () => setProductType(baseline.productType),
+    );
+    add("vendor", "Vendor", vendor !== baseline.vendor, vendor || "—", () =>
+      setVendor(baseline.vendor),
+    );
+    add("tags", "Tags", !tagsEqual(tags, baseline.tags), tags.join(", ") || "—", () =>
+      setTags([...baseline.tags]),
+    );
+    add("hsn", "HSN / SAC", hsnCode !== baseline.hsnCode, hsnCode || "—", () =>
+      setHsnCode(baseline.hsnCode),
+    );
+    add(
+      "gst-rate",
+      "GST rate",
+      gstRate !== baseline.gstRate,
+      gstRate ? `${gstRate}%` : "Not set",
+      () => setGstRate(baseline.gstRate),
+    );
+    add(
+      "uqc",
+      "UQC",
+      unitOfMeasure !== baseline.unitOfMeasure,
+      unitOfMeasure || "Default (NOS)",
+      () => setUnitOfMeasure(baseline.unitOfMeasure),
+    );
+    add(
+      "supply-type",
+      "Supply type",
+      supplyType !== baseline.supplyType,
+      GST_SUPPLY_TYPES.find((t) => t.value === supplyType)?.label ?? supplyType,
+      () => setSupplyType(baseline.supplyType),
+    );
+    add(
+      "options",
+      "Options",
+      isOptionsDirty,
+      options.map((o) => o.name.trim()).filter(Boolean).join(", ") || "None",
+      resetOptions,
+    );
+    for (const { variant, labels } of changedVariants) {
+      add(
+        `variant:${variant.id}`,
+        isSimpleProduct ? "Pricing & stock" : formatVariantTitle(variant, product.title),
+        true,
+        labels.join(", "),
+        () => revertVariant(variant.id),
+      );
+    }
   }
 
   function handleAddOption() {
@@ -899,7 +1065,13 @@ export default function ProductDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
+    // Bottom padding while the Save pill is up, so it never covers the last card.
+    <div
+      className={cn(
+        "space-y-6",
+        (pendingChanges.length > 0 || isSaving || showAfterSave) && "pb-24",
+      )}
+    >
       {/* Header */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 flex-1 flex-col gap-3">
@@ -907,7 +1079,7 @@ export default function ProductDetailPage() {
             <BreadcrumbList>
               <BreadcrumbItem>
                 <BreadcrumbLink asChild>
-                  <Link to="/products">Products</Link>
+                  <Link to={productsPath}>Products</Link>
                 </BreadcrumbLink>
               </BreadcrumbItem>
               <BreadcrumbSeparator />
@@ -949,11 +1121,14 @@ export default function ProductDetailPage() {
                     CRM (Manual)
                   </span>
                 ) : (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300">
-                    <Check className="size-3" />
-                    Synced from {product.channel?.platform}
+                  // Source only — the sync state is its own pill below. This
+                  // used to read "Synced from SHOPIFY" in green even while the
+                  // product had unpushed edits or a failed push.
+                  <span className="inline-flex items-center rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-[10px] font-medium text-gray-700 dark:text-gray-300">
+                    From {product.channel?.platform === "SHOPIFY" ? "Shopify" : product.channel?.platform}
                   </span>
                 )}
+                <ShopifySyncStatusPill sync={sync} />
                 {product.status === "DRAFT" && product.publishedAt && new Date(product.publishedAt) > new Date() && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
                     <Calendar className="size-3" />
@@ -972,31 +1147,15 @@ export default function ProductDetailPage() {
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {isProductDirty && (
-            <>
-              <Button
-                type="button"
-                variant="outline"
-                size="action"
-                onClick={handleDiscardChanges}
-                disabled={isSaving}
-              >
-                Discard
-              </Button>
-              <Button
-                type="button"
-                variant="brand"
-                size="action"
-                onClick={handleSaveProduct}
-                disabled={isSaving}
-              >
-                {isSaving && (
-                  <Loader2 className="size-3.5 animate-spin" />
-                )}
-                Save
-              </Button>
-            </>
-          )}
+          {/* Independent of Save on purpose: saving never pushes, so a
+              merchant can keep an edit CRM-only for as long as they want. */}
+          <ProductSyncHeaderAction
+            product={product}
+            sync={sync}
+            hasUnsavedChanges={isProductDirty || isSaving}
+          />
+          {/* Save and Discard live in the floating Save pill at the bottom,
+              which every tab reports into. */}
         </div>
       </div>
 
@@ -1041,8 +1200,16 @@ export default function ProductDetailPage() {
           );
         })}
       </nav>
-      {/* Left side */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+      {/* Left side. Locked while saving: the save ends by re-hydrating every
+          field from the server, so anything typed meanwhile would be lost. */}
+      <div
+        className={cn(
+          "grid grid-cols-1 gap-6 transition-opacity lg:grid-cols-3",
+          isSaving && "opacity-60",
+        )}
+        inert={isSaving}
+        aria-busy={isSaving}
+      >
         <div
           className="space-y-6 lg:col-span-2"
           role="tabpanel"
@@ -1167,14 +1334,8 @@ export default function ProductDetailPage() {
                             min="0"
                             step="0.01"
                             placeholder="0.00"
-                            value={price}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setPrice(next);
-                              if (defaultVariant) {
-                                patchVariantDraft(defaultVariant, { price: next });
-                              }
-                            }}
+                            value={dv?.price ?? ""}
+                            onChange={(e) => setDv({ price: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1192,8 +1353,8 @@ export default function ProductDetailPage() {
                             min="0"
                             step="0.01"
                             placeholder="0.00"
-                            value={compareAtPrice}
-                            onChange={(e) => setCompareAtPrice(e.target.value)}
+                            value={dv?.compareAtPrice ?? ""}
+                            onChange={(e) => setDv({ compareAtPrice: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1211,14 +1372,8 @@ export default function ProductDetailPage() {
                             min="0"
                             step="0.01"
                             placeholder="0.00"
-                            value={cost}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setCost(next);
-                              if (defaultVariant) {
-                                patchVariantDraft(defaultVariant, { cost: next });
-                              }
-                            }}
+                            value={dv?.cost ?? ""}
+                            onChange={(e) => setDv({ cost: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1257,8 +1412,8 @@ export default function ProductDetailPage() {
                         </FieldContent>
                         <Switch
                           id="product-taxable"
-                          checked={taxable}
-                          onCheckedChange={setTaxable}
+                          checked={dv?.taxable ?? true}
+                          onCheckedChange={(v) => setDv({ taxable: v })}
                           disabled={!defaultVariant}
                         />
                       </Field>
@@ -1282,14 +1437,8 @@ export default function ProductDetailPage() {
                           <Input
                             id="product-sku"
                             placeholder="SKU"
-                            value={sku}
-                            onChange={(e) => {
-                              const next = e.target.value;
-                              setSku(next);
-                              if (defaultVariant) {
-                                patchVariantDraft(defaultVariant, { sku: next });
-                              }
-                            }}
+                            value={dv?.sku ?? ""}
+                            onChange={(e) => setDv({ sku: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1303,8 +1452,8 @@ export default function ProductDetailPage() {
                           <Input
                             id="product-barcode"
                             placeholder="Barcode"
-                            value={barcode}
-                            onChange={(e) => setBarcode(e.target.value)}
+                            value={dv?.barcode ?? ""}
+                            onChange={(e) => setDv({ barcode: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1324,8 +1473,8 @@ export default function ProductDetailPage() {
                         </FieldContent>
                         <Switch
                           id="product-track-quantity"
-                          checked={trackForced ? true : trackQuantity}
-                          onCheckedChange={setTrackQuantity}
+                          checked={trackForced ? true : (dv?.trackQuantity ?? true)}
+                          onCheckedChange={(v) => setDv({ trackQuantity: v })}
                           disabled={!defaultVariant || trackForced}
                         />
                       </Field>
@@ -1348,21 +1497,47 @@ export default function ProductDetailPage() {
                         </FieldContent>
                         <Switch
                           id="product-continue-selling"
-                          checked={oversellForced ? true : continueSelling}
-                          onCheckedChange={setContinueSelling}
+                          checked={oversellForced ? true : (dv?.continueSelling ?? false)}
+                          onCheckedChange={(v) => setDv({ continueSelling: v })}
                           disabled={!defaultVariant || oversellForced}
                         />
                       </Field>
 
+                      {/* Committed and On hand used to sit here: Committed was
+                          hard-coded to a dash (nothing writes the reserved
+                          bucket yet) and On hand simply echoed whatever was
+                          typed into Available, so neither told the truth.
+                          They come back when reservations do. */}
                       <div className="flex flex-row gap-2 items-center justify-between">
                         <div className="flex flex-col flex-1 gap-1 bg-[#f5f5f5] p-2 rounded-lg dark:bg-gray-800/60">
                           <Label
                             htmlFor="product-inventory-available"
                             className="text-[12px] font-medium text-muted-foreground"
                           >
-                            Available inventory
+                            {STOCK_TERMS.available.label}
+                            {warehousingEnabled && " · all locations"}
                           </Label>
-                          {trackQuantity ? (
+                          {!(dv?.trackQuantity ?? true) ? (
+                            <span className="text-[12px] font-medium text-muted-foreground">
+                              Not tracked
+                            </span>
+                          ) : warehousingEnabled ? (
+                            // Read-only on purpose. Stock is held per location
+                            // here, and the save path drops a bare quantity —
+                            // an editable box was accepting input and silently
+                            // discarding it.
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-[12px] font-semibold text-foreground tabular-nums">
+                                {dv?.inventoryQuantity || "0"}
+                              </span>
+                              <Link
+                                to={`/products/inventory?search=${encodeURIComponent(product?.title ?? "")}`}
+                                className="text-[12px] font-medium text-brand-strong underline underline-offset-2 hover:no-underline"
+                              >
+                                Edit per location
+                              </Link>
+                            </div>
+                          ) : (
                             <Input
                               id="product-inventory-available"
                               type="number"
@@ -1370,39 +1545,11 @@ export default function ProductDetailPage() {
                               min="0"
                               step="1"
                               className="h-8 bg-white dark:bg-gray-900"
-                              value={inventoryQuantity}
-                              onChange={(e) => {
-                                const next = e.target.value;
-                                setInventoryQuantity(next);
-                                if (defaultVariant) {
-                                  patchVariantDraft(defaultVariant, {
-                                    inventoryQuantity: next,
-                                  });
-                                }
-                              }}
+                              value={dv?.inventoryQuantity ?? ""}
+                              onChange={(e) => setDv({ inventoryQuantity: e.target.value })}
                               disabled={!defaultVariant}
                             />
-                          ) : (
-                            <span className="text-[12px] font-medium text-muted-foreground">
-                              Not tracked
-                            </span>
                           )}
-                        </div>
-                        <div className="flex flex-col flex-1 gap-1 bg-[#f5f5f5] p-2 rounded-lg dark:bg-gray-800/60">
-                          <Label className="text-[12px] font-medium text-muted-foreground">
-                            Committed
-                          </Label>
-                          <span className="text-[12px] font-medium text-muted-foreground">
-                            —
-                          </span>
-                        </div>
-                        <div className="flex flex-col flex-1 gap-1 bg-[#f5f5f5] p-2 rounded-lg dark:bg-gray-800/60">
-                          <Label className="text-[12px] font-medium text-muted-foreground">
-                            On hand
-                          </Label>
-                          <span className="text-[12px] font-medium text-muted-foreground">
-                            {trackQuantity ? inventoryQuantity || "0" : "—"}
-                          </span>
                         </div>
                       </div>
                     </div>
@@ -1424,12 +1571,12 @@ export default function ProductDetailPage() {
                       </FieldContent>
                       <Switch
                         id="product-physical"
-                        checked={requiresShipping}
-                        onCheckedChange={setRequiresShipping}
+                        checked={dv?.requiresShipping ?? true}
+                        onCheckedChange={(v) => setDv({ requiresShipping: v })}
                         disabled={!defaultVariant}
                       />
                     </Field>
-                    {requiresShipping && (
+                    {(dv?.requiresShipping ?? true) && (
                       <div className="flex flex-row gap-2">
                         <div className="flex flex-col flex-1 gap-1">
                           <Label
@@ -1446,8 +1593,8 @@ export default function ProductDetailPage() {
                             step="0.01"
                             placeholder="0.0"
                             className="h-8 bg-white dark:bg-gray-900"
-                            value={weight}
-                            onChange={(e) => setWeight(e.target.value)}
+                            value={dv?.weight ?? ""}
+                            onChange={(e) => setDv({ weight: e.target.value })}
                             disabled={!defaultVariant}
                           />
                         </div>
@@ -1460,8 +1607,8 @@ export default function ProductDetailPage() {
                           </Label>
                           <select
                             id="product-weight-unit"
-                            value={weightUnit}
-                            onChange={(e) => setWeightUnit(e.target.value)}
+                            value={dv?.weightUnit ?? "kg"}
+                            onChange={(e) => setDv({ weightUnit: e.target.value })}
                             disabled={!defaultVariant}
                             className="h-8 w-full rounded-md border border-input bg-white dark:bg-gray-900 px-2 text-[12px] focus:outline-none focus:ring-2 focus:ring-[#CEF17B]/50"
                           >
@@ -1491,8 +1638,8 @@ export default function ProductDetailPage() {
                         id="product-hs-code"
                         placeholder="6109.10"
                         className="h-8 bg-white dark:bg-gray-900 font-mono"
-                        value={hsCode}
-                        onChange={(e) => setHsCode(e.target.value)}
+                        value={dv?.hsCode ?? ""}
+                        onChange={(e) => setDv({ hsCode: e.target.value })}
                         disabled={!defaultVariant}
                       />
                     </div>
@@ -1508,8 +1655,10 @@ export default function ProductDetailPage() {
                         placeholder="IN"
                         maxLength={2}
                         className="h-8 bg-white dark:bg-gray-900 font-mono uppercase"
-                        value={countryOfOrigin}
-                        onChange={(e) => setCountryOfOrigin(e.target.value.toUpperCase())}
+                        value={dv?.countryOfOrigin ?? ""}
+                        onChange={(e) =>
+                          setDv({ countryOfOrigin: e.target.value.toUpperCase() })
+                        }
                         disabled={!defaultVariant}
                       />
                       <span className="text-[11px] text-muted-foreground">
@@ -1565,9 +1714,13 @@ export default function ProductDetailPage() {
                   unitOfMeasure: product.unitOfMeasure ?? null,
                   supplyType: product.supplyType ?? "TAXABLE",
                 }}
-                onSaveVariant={handleSaveVariant}
-                onVariantPersisted={handleVariantPersisted}
-                isSavingVariant={updateVariantMutation.isPending}
+                baselineDrafts={baseline?.variantDrafts ?? {}}
+                warehouseDrafts={warehouseDrafts}
+                onDraftChange={patchVariantDraft}
+                onWarehouseChange={patchWarehouseDraft}
+                onLevelsLoaded={seedWarehouses}
+                onRevertVariant={revertVariant}
+                disabled={isSaving}
                 warehousingEnabled={warehousingEnabled}
                 trackForced={trackForced}
                 oversellForced={oversellForced}
@@ -1625,11 +1778,9 @@ export default function ProductDetailPage() {
                   <DescRow label="Variants" value={String(product.variants.length)} />
                 </dl>
               </Section>
-              {sync && (
-                <Section title="Shopify Sync">
-                  <ShopifySyncCard sync={sync} productId={product.id} />
-                </Section>
-              )}
+              <Section title="Shopify Sync">
+                <ShopifySyncCard sync={sync} />
+              </Section>
             </>
           )}
 
@@ -1875,41 +2026,186 @@ export default function ProductDetailPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <OptionRenameDialog
+        open={renameConfirmOpen}
+        renames={detectRenames(options, committedOptionNames)}
+        variantCount={product.variants.length}
+        isSyncedToShopify={!!sync}
+        onCancel={() => setRenameConfirmOpen(false)}
+        onConfirm={() => {
+          setRenameConfirmOpen(false);
+          void saveAll();
+        }}
+      />
+
+      <ProductSavePill
+        changes={pendingChanges}
+        isSaving={isSaving}
+        canSync={isOnShopify}
+        syncOnSave={syncOnSave}
+        onToggleSync={toggleSyncOnSave}
+        onSave={requestSave}
+        onDiscard={handleDiscardChanges}
+        afterSave={showAfterSave}
+        isSyncing={syncMutation.isPending}
+        onSyncNow={() =>
+          syncMutation.mutate(product.id, { onSuccess: () => setAfterSave(false) })
+        }
+        onDismissAfterSave={() => setAfterSave(false)}
+      />
     </div >
   );
 }
 
-function ShopifySyncCard({
+const PILL_BASE =
+  "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium";
+
+/** Title-row pill for the states that need attention; nothing otherwise. */
+function ShopifySyncStatusPill({
   sync,
-  productId,
 }: {
-  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error">;
-  productId: string;
+  sync: Pick<ProductShopifySync, "status" | "error" | "queuedAt"> | null;
+}) {
+  if (isProductPushStuck(sync)) {
+    return (
+      <span
+        title="This sync never finished. Retry it."
+        className={cn(PILL_BASE, "bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Sync stuck
+      </span>
+    );
+  }
+  if (sync?.status === "OUT_OF_SYNC") {
+    return (
+      <span
+        title="Saved edits haven't been pushed to Shopify yet"
+        className={cn(PILL_BASE, "bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Out of sync
+      </span>
+    );
+  }
+  if (sync?.status === "FAILED") {
+    return (
+      <span
+        title={`Shopify sync failed: ${sync.error ?? "unknown"}`}
+        className={cn(PILL_BASE, "bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-300")}
+      >
+        <AlertTriangle className="size-3" />
+        Sync failed
+      </span>
+    );
+  }
+  return null;
+}
+
+/**
+ * Header counterpart of the list row's cloud icon (same visibility rule via
+ * canSyncProduct). Sync pushes the SAVED product, so it is disabled while the
+ * page holds unsaved edits — otherwise the merchant would think those went to
+ * Shopify too. Save stays a separate button that never pushes.
+ */
+function ProductSyncHeaderAction({
+  product,
+  sync,
+  hasUnsavedChanges,
+}: {
+  product: { id: string; channel?: { platform: string } | null };
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "queuedAt"> | null;
+  hasUnsavedChanges: boolean;
 }) {
   const syncMutation = useSyncProductMutation();
-  // Same action as the list page's cloud icon. The card used to tell the
-  // merchant to "click Sync to Shopify" while the only button lived on the
-  // list — so an out-of-sync product had no way to push from its own page.
-  const syncButton = (
-    <button
+
+  // Only a push that is really under way locks the button. A claim nobody is
+  // working any more falls through to "Retry sync".
+  if (isProductPushInFlight(sync)) {
+    return (
+      <Button type="button" variant="outline" size="action" disabled>
+        <Loader2 className="size-3.5 animate-spin" />
+        Syncing…
+      </Button>
+    );
+  }
+
+  if (!canSyncProduct(product, sync)) {
+    return (
+      <span
+        title={
+          sync?.shopifyProductId
+            ? `Shopify product ID: ${sync.shopifyProductId}`
+            : "Synced to Shopify"
+        }
+        className={cn(PILL_BASE, "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300")}
+      >
+        <Check className="size-3" />
+        Synced to Shopify
+      </span>
+    );
+  }
+
+  const button = (
+    <Button
       type="button"
-      disabled={syncMutation.isPending}
-      onClick={() => syncMutation.mutate(productId)}
-      className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+      variant="outline"
+      size="action"
+      disabled={hasUnsavedChanges || syncMutation.isPending}
+      onClick={() => syncMutation.mutate(product.id)}
     >
       {syncMutation.isPending ? (
         <Loader2 className="size-3.5 animate-spin" />
       ) : (
         <UploadCloud className="size-3.5" />
       )}
-      {sync.status === "FAILED" ? "Retry sync" : "Sync to Shopify"}
-    </button>
+      {sync?.status === "FAILED" || isProductPushStuck(sync)
+        ? "Retry sync"
+        : "Sync to Shopify"}
+    </Button>
   );
 
+  // A disabled <button> swallows pointer events, so the tooltip hangs off a
+  // focusable wrapper instead.
+  return (
+    <Tip
+      text={
+        hasUnsavedChanges
+          ? "Save your changes first — Sync pushes the saved product"
+          : productSyncActionTitle(sync)
+      }
+      side="bottom"
+    >
+      <span tabIndex={hasUnsavedChanges ? 0 : -1} className="inline-flex">
+        {button}
+      </span>
+    </Tip>
+  );
+}
+
+/** Channels tab: status only — the single sync action lives in the header. */
+function ShopifySyncCard({
+  sync,
+}: {
+  sync: Pick<ProductShopifySync, "status" | "shopifyProductId" | "error" | "queuedAt"> | null;
+}) {
+  if (!sync) {
+    return (
+      <div className="space-y-2 text-xs">
+        <span className={cn(PILL_BASE, "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300")}>
+          Not synced yet
+        </span>
+        <p className="text-[10px] text-muted-foreground">
+          Use Sync to Shopify at the top of the page to push this product.
+        </p>
+      </div>
+    );
+  }
   if (sync.status === "SYNCED") {
     return (
       <div className="space-y-2 text-xs">
-        <span className="inline-flex items-center gap-1 rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-0.5 text-[10px] font-medium text-green-700 dark:text-green-300">
+        <span className={cn(PILL_BASE, "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-300")}>
           <Check className="size-3" />
           Synced
         </span>
@@ -1921,9 +2217,19 @@ function ShopifySyncCard({
       </div>
     );
   }
+  if (isProductPushStuck(sync)) {
+    return (
+      <div className="space-y-2 text-xs">
+        <ShopifySyncStatusPill sync={sync} />
+        <p className="text-[10px] text-muted-foreground">
+          This sync never finished. Use Retry sync at the top of the page.
+        </p>
+      </div>
+    );
+  }
   if (sync.status === "PENDING") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 text-[10px] font-medium text-blue-700 dark:text-blue-300">
+      <span className={cn(PILL_BASE, "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300")}>
         <Loader2 className="size-3 animate-spin" />
         Syncing
       </span>
@@ -1932,25 +2238,17 @@ function ShopifySyncCard({
   if (sync.status === "OUT_OF_SYNC") {
     return (
       <div className="space-y-2 text-xs">
-        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="size-3" />
-          Out of sync
-        </span>
+        <ShopifySyncStatusPill sync={sync} />
         <p className="text-[10px] text-muted-foreground">
-          Local edits haven't been pushed yet.
+          Saved edits haven't been pushed yet. Use Sync to Shopify at the top of the page.
         </p>
-        {syncButton}
       </div>
     );
   }
   return (
     <div className="space-y-2 text-xs">
-      <span className="inline-flex items-center gap-1 rounded-full bg-red-50 dark:bg-red-900/30 px-2 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">
-        <AlertTriangle className="size-3" />
-        Sync failed
-      </span>
+      <ShopifySyncStatusPill sync={sync} />
       {sync.error && <p className="text-[10px] text-red-700 dark:text-red-400">{sync.error}</p>}
-      {syncButton}
     </div>
   );
 }

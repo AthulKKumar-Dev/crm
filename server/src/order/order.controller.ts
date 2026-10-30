@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
-import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
+import { Body, Controller, ForbiddenException, Get, Param, Patch, Post, Query, Res } from '@nestjs/common';
+import type { JwtPayload, SessionPayload } from '../auth/interfaces/jwt-payload.interface';
+import { canListOrders } from '../auth/permissions';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AllowVendor } from '../auth/decorators/allow-vendor.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import {
   ORG_MANAGERS,
   ORG_OPERATORS,
@@ -20,15 +22,27 @@ import { CreateFulfillmentDto } from './dto/create-fulfillment.dto';
 import { UpdateTrackingDto } from './dto/update-tracking.dto';
 import { SetItemsStatusDto } from './dto/mark-in-progress.dto';
 import type { Response } from 'express';
+import {
+  EXPORT_ROWS_HEADER,
+  EXPORT_TOTAL_HEADER,
+} from '../common/utils/export-headers.util';
 
+@RequireSection('orders')
 @Controller('orders')
 export class OrderController {
   constructor(private readonly orderService: OrderService) { }
 
   // GET /api/v1/orders?page=1&limit=20&financialStatus=PAID&search=1001
+  // Also read by customer detail, product detail and the logistics queue.
   @Get()
+  @RequireSection('orders', 'customers', 'products', 'logistics')
   @AllowVendor()
-  findAll(@CurrentUser() user: JwtPayload, @Query() query: QueryOrdersDto) {
+  findAll(@CurrentUser() user: SessionPayload, @Query() query: QueryOrdersDto) {
+    // Customers / Products members get this list only for one customer or
+    // product — never the whole order book.
+    if (user.role && !canListOrders(user.role, user.permissions ?? [], query)) {
+      throw new ForbiddenException('Section access denied: orders');
+    }
     return this.orderService.findAll(user.orgId!, query, vendorScopeFor(user));
   }
 
@@ -56,14 +70,19 @@ export class OrderController {
   }
 
   // GET /api/v1/orders/export/csv
+  // Not called by the app since the Orders page moved to the JSON export
+  // (2026-10-06). Kept for API consumers; the page's CSV is the dashboard's.
   @Get('export/csv')
   async exportCsv(
     @CurrentUser() user: JwtPayload,
     @Query() query: QueryOrdersDto,
     @Res() res: Response,
   ) {
-    const data = await this.orderService.getExportData(user.orgId!, query);
-    const csv = this.orderService.generateCsv(data);
+    const { orders, total } = await this.orderService.getExportData(user.orgId!, query);
+    const csv = this.orderService.generateCsv(orders);
+    // Lets the page say so when the file holds fewer orders than matched.
+    res.setHeader(EXPORT_ROWS_HEADER, String(orders.length));
+    res.setHeader(EXPORT_TOTAL_HEADER, String(total));
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename=orders-export.csv');
     res.send(csv);
@@ -76,7 +95,9 @@ export class OrderController {
     @Query() query: QueryOrdersDto,
     @Res() res: Response,
   ) {
-    const data = await this.orderService.getExportData(user.orgId!, query);
+    const { orders: data, total } = await this.orderService.getExportData(user.orgId!, query);
+    res.setHeader(EXPORT_ROWS_HEADER, String(data.length));
+    res.setHeader(EXPORT_TOTAL_HEADER, String(total));
     const report = {
       generatedAt: new Date().toISOString(),
       filters: {
@@ -86,6 +107,10 @@ export class OrderController {
         dateTo: query.dateTo || 'all',
       },
       totalOrders: data.length,
+      // Said in the file too, so it still reads correctly away from the page.
+      ...(data.length < total && {
+        truncated: { ordersIncluded: data.length, ordersMatched: total, order: 'newest first' },
+      }),
       orders: data,
     };
     res.setHeader('Content-Type', 'application/json');
@@ -114,6 +139,7 @@ export class OrderController {
 
   // GET /api/v1/orders/:id
   @Get(':id')
+  @RequireSection('orders', 'customers', 'products', 'logistics')
   @AllowVendor()
   findOne(@Param('id') id: string, @CurrentUser() user: JwtPayload) {
     const scope = vendorScopeFor(user);

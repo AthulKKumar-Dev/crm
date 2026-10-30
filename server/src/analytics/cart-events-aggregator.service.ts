@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { rememberProductId } from './product-image-match.util';
 
 /// Latest cart / checkout snapshot we've seen for a given session token.
 /// Used to dedupe noisy `carts/update` events (Shopify fires one on every
@@ -190,6 +191,14 @@ export class CartEventsAggregator {
       }
     }
 
+    // Shopify product id per title, kept so the Analytics page can show its image.
+    const productIdByTitle = new Map<string, string>();
+    for (const snap of [...bucket.cartsCreated.values(), ...bucket.checkoutsStarted.values()]) {
+      for (const li of snap.lineItems) {
+        if (li.title) rememberProductId(productIdByTitle, li.title, li.product_id);
+      }
+    }
+
     const date = new Date(`${bucket.date}T00:00:00.000Z`);
     const existing = await this.prisma.analyticsSnapshot.findUnique({
       where: {
@@ -211,6 +220,7 @@ export class CartEventsAggregator {
       (existingMetrics.byProduct as
         | Array<{
             productTitle: string;
+            productId?: string;
             productViews?: number;
             addToCarts?: number;
             checkouts?: number;
@@ -219,6 +229,7 @@ export class CartEventsAggregator {
         | undefined) ?? [],
       cartCountByTitle,
       checkoutCountByTitle,
+      productIdByTitle,
     );
 
     const nextMetrics = {
@@ -264,6 +275,7 @@ export class CartEventsAggregator {
   private mergeProductBreakdown(
     existing: Array<{
       productTitle: string;
+      productId?: string;
       productViews?: number;
       addToCarts?: number;
       checkouts?: number;
@@ -271,8 +283,10 @@ export class CartEventsAggregator {
     }>,
     cartCountByTitle: Map<string, number>,
     checkoutCountByTitle: Map<string, number>,
+    productIdByTitle: Map<string, string>,
   ): Array<{
     productTitle: string;
+    productId?: string;
     productViews: number;
     addToCarts: number;
     checkouts: number;
@@ -280,10 +294,11 @@ export class CartEventsAggregator {
   }> {
     const merged = new Map<
       string,
-      { productViews: number; addToCarts: number; checkouts: number; orders: number }
+      { productId?: string; productViews: number; addToCarts: number; checkouts: number; orders: number }
     >();
     for (const row of existing) {
       merged.set(row.productTitle, {
+        productId: row.productId,
         productViews: row.productViews ?? 0,
         addToCarts: row.addToCarts ?? 0,
         checkouts: row.checkouts ?? 0,
@@ -314,8 +329,13 @@ export class CartEventsAggregator {
       slot.checkouts = n;
       merged.set(title, slot);
     }
+    for (const [title, id] of productIdByTitle) {
+      const slot = merged.get(title);
+      if (slot && !slot.productId) slot.productId = id;
+    }
     return Array.from(merged.entries()).map(([productTitle, v]) => ({
       productTitle,
+      ...(v.productId && { productId: v.productId }),
       productViews: v.productViews,
       addToCarts: v.addToCarts,
       checkouts: v.checkouts,

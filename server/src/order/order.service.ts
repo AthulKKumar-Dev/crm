@@ -39,14 +39,12 @@ import { GstCalculatorService } from '../gst/gst-calculator.service';
 import { TaxResolverService } from '../gst/tax-resolver.service';
 import { InvoiceService } from '../invoice/invoice.service';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
-import { ShopifyPushService, isStalePendingSync } from '../channel/shopify-push.service';
-
-/// Recorded on `metadata.shopifySync.error` when a push could not even be
-/// queued. Distinct wording from a worker failure so the audit can tell the
-/// two apart; `attempts` is not incremented because nothing ran.
-const QUEUE_UNAVAILABLE_ERROR =
-  'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
-import { ShopifyGraphqlClient } from '../channel/shopify-graphql.client';
+import {
+  ShopifyPushService,
+  isStalePendingSync,
+  QUEUE_UNAVAILABLE_ERROR,
+} from '../channel/shopify-push.service';
+import { ShopifyGraphqlClient, ShopifyGraphqlError } from '../channel/shopify-graphql.client';
 import { ShopifyOAuthService } from '../channel/shopify-oauth.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
@@ -58,10 +56,20 @@ import { PUSH_JOB_OPTS, SHOPIFY_PUSH_QUEUE, pushJobId } from '../channel/shopify
 import { Priority } from '../rate-limit/rate-limit.types';
 import { displayVariantTitle } from '../product/variant-title.util';
 import {
+  resolveReportingTimeZone,
+  zonedDayEndExclusive,
+  zonedDayStart,
+} from '../common/utils/zoned-date.util';
+import {
   retryOnNumberingConflict,
   uniqueViolationTargets,
 } from '../common/utils/serialization-retry.util';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { placedBetween } from '../common/utils/order-window.util';
+import { extractOrderShopifySync } from './order-shopify-sync.util';
+import { countryCodeOf, phoneLookupVariants } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from '../channel/shopify-address.util';
+import { normalizeTrackingUrl } from './tracking-url.util';
 import {
   FulfillmentCancelResponse,
   FulfillmentCancelVariables,
@@ -69,7 +77,6 @@ import {
   FulfillmentCreateVariables,
   FulfillmentTrackingInfoUpdateResponse,
   FulfillmentTrackingInfoUpdateVariables,
-  MailingAddressInput,
   OrderCancelResponse,
   OrderCancelVariables,
   OrderCapturableTransactionsResponse,
@@ -155,6 +162,9 @@ const FULFILLMENT_ORDER_PAGE_SIZE = 25;
 const MAX_SLIP_ORDERS = 100;
 
 /** The window a comparison reports on, plus the one immediately before it. */
+/** Most order rows one CSV / JSON export will carry, newest first. */
+export const ORDER_EXPORT_ROW_CAP = 10_000;
+
 interface ComparisonPeriods {
   currentStart: Date;
   currentEnd: Date;
@@ -254,11 +264,26 @@ export class OrderService {
       ];
     }
 
-    // Date range filter
+    // Date range filter. Bare dates are calendar days in the reporting zone, so
+    // the list covers the same orders as the stats tiles above it.
+    //
+    // `placedBetween` is the "when was it placed" rule the dashboard and both
+    // export routes use (`externalCreatedAt`, else `createdAt`). Every write
+    // path sets `externalCreatedAt` today, so this changes nothing on current
+    // data; it keeps the list and its downloads on one definition should a
+    // null-dated order ever appear. The stats tiles above still filter on the
+    // bare column (see getComparison) — aligning them is a separate change.
+    //
+    // Under AND, not spread: `placedBetween` is an OR and would overwrite the
+    // search `where.OR` above.
     if (query.dateFrom || query.dateTo) {
-      where.externalCreatedAt = {};
-      if (query.dateFrom) where.externalCreatedAt.gte = new Date(query.dateFrom);
-      if (query.dateTo) where.externalCreatedAt.lte = new Date(query.dateTo);
+      const timeZone = await this.reportingTimeZone(orgId);
+      where.AND = [
+        placedBetween(
+          query.dateFrom ? zonedDayStart(query.dateFrom, timeZone) : undefined,
+          query.dateTo ? zonedDayEndExclusive(query.dateTo, timeZone) : undefined,
+        ),
+      ];
     }
 
     const page = query.page ?? 1;
@@ -350,7 +375,13 @@ export class OrderService {
         createdAt: order.externalCreatedAt || order.createdAt,
         customer: order.customer,
         channel: order.channel,
+        sourceName: order.sourceName,
+        sourceLabel: order.sourceLabel,
         itemCount: order._count.lineItems,
+        // The push record only, not the whole metadata blob: the table's
+        // Shopify column needs it to tell a pushed Collabo order from one
+        // never pushed.
+        shopifySync: extractOrderShopifySync(order.metadata),
       })),
       meta,
     };
@@ -401,9 +432,14 @@ export class OrderService {
         // The order's live GST invoice (at most one — enforced by the partial
         // unique index invoices_order_id_active_key). Lets the client show the
         // invoice card / gate the Generate button without scanning the
-        // paginated invoice list.
+        // paginated invoice list. Credit notes carry the original's orderId
+        // and are created after it, so they must be excluded here exactly as
+        // the index excludes them — otherwise the newest one is shown as "the
+        // invoice".
         invoices: {
-          where: { status: { not: InvoiceStatus.CANCELLED } },
+          where: {
+            status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+          },
           select: {
             id: true,
             invoiceNumber: true,
@@ -433,7 +469,10 @@ export class OrderService {
   }
 
   async getComparison(orgId: string, query: QueryDashboardDto) {
-    const periods = this.comparisonPeriods(query);
+    const periods = this.comparisonPeriods(
+      query,
+      await this.reportingTimeZone(orgId),
+    );
     const { currentStart, currentEnd, previousStart, previousEnd } = periods;
 
     const channelFilter = query.channelId ? { channelId: query.channelId } : {};
@@ -574,7 +613,10 @@ export class OrderService {
     query: QueryDashboardDto,
     vendorScope: string,
   ) {
-    const periods = this.comparisonPeriods(query);
+    const periods = this.comparisonPeriods(
+      query,
+      await this.reportingTimeZone(orgId),
+    );
     const { currentStart, currentEnd, previousStart, previousEnd } = periods;
 
     const channelFilter = query.channelId ? { channelId: query.channelId } : {};
@@ -733,9 +775,25 @@ export class OrderService {
    * The window to report on, plus the same-length window immediately before it.
    * Shared by the org-wide and vendor comparisons so both quote the same dates.
    */
-  private comparisonPeriods(query: QueryDashboardDto): ComparisonPeriods {
+  /** The zone date filters are read in — see `resolveReportingTimeZone`. */
+  private async reportingTimeZone(orgId: string): Promise<string> {
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true },
+    });
+    return resolveReportingTimeZone(org ?? {});
+  }
+
+  private comparisonPeriods(
+    query: QueryDashboardDto,
+    timeZone: string,
+  ): ComparisonPeriods {
     const now = new Date();
-    const currentEnd = query.dateTo ? new Date(query.dateTo) : now;
+    // Inclusive (`lte`) end: a bare end date covers that whole day, so stop 1ms
+    // before the next day starts.
+    const currentEnd = query.dateTo
+      ? new Date(zonedDayEndExclusive(query.dateTo, timeZone).getTime() - 1)
+      : now;
 
     // No `dateFrom` means the caller asked for ALL TIME — the Orders page's
     // own "All Time" option sends nothing. This used to default to the 1st of
@@ -758,7 +816,9 @@ export class OrderService {
       };
     }
 
-    const currentStart = new Date(query.dateFrom);
+    // The Orders page sends today − N as a bare date; that means 00:00 on that
+    // day in the reporting zone, not UTC midnight (05:30 IST).
+    const currentStart = zonedDayStart(query.dateFrom, timeZone);
 
     // Previous period = same duration, shifted back
     const duration = currentEnd.getTime() - currentStart.getTime();
@@ -909,17 +969,30 @@ export class OrderService {
   }
 
   async getExportData(orgId: string, query: QueryOrdersDto) {
+    const timeZone =
+      query.dateFrom || query.dateTo ? await this.reportingTimeZone(orgId) : '';
     const where: Prisma.OrderWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       ...(query.financialStatus && { financialStatus: query.financialStatus }),
       ...(query.fulfillmentStatus && { fulfillmentStatus: query.fulfillmentStatus }),
       ...(query.channelId && { channelId: query.channelId }),
+      // The same "when the sale happened" test as the dashboard's report
+      // (`externalCreatedAt`, else `createdAt`). A bare `externalCreatedAt`
+      // filter here put a NULL-dated order in one of the Orders page's two
+      // files and not the other for the same range.
+      //
+      // Under AND, not spread: `placedBetween` is an OR, and `findAll` writes
+      // its search as `where.OR = [...]`. Copy that in here and a spread
+      // window would be overwritten without a type error — an all-time file
+      // that says it covers a range.
       ...((query.dateFrom || query.dateTo) && {
-        externalCreatedAt: {
-          ...(query.dateFrom && { gte: new Date(query.dateFrom) }),
-          ...(query.dateTo && { lte: new Date(query.dateTo) }),
-        },
+        AND: [
+          placedBetween(
+            query.dateFrom ? zonedDayStart(query.dateFrom, timeZone) : undefined,
+            query.dateTo ? zonedDayEndExclusive(query.dateTo, timeZone) : undefined,
+          ),
+        ],
       }),
     };
 
@@ -930,30 +1003,43 @@ export class OrderService {
         lineItems: { select: { title: true, quantity: true, price: true } },
         channel: { select: { name: true } },
       },
-      orderBy: { externalCreatedAt: 'desc' },
+      // Postgres sorts NULL first in DESC, so without `nulls: 'last'` every
+      // undated (legacy CRM) order sat at the top and, on a capped file,
+      // took slots the "newest first" note promised to the newest orders.
+      orderBy: [{ externalCreatedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
       // Bounded: the export builds the whole CSV/JSON in memory, so an
       // unlimited query on a large tenant could OOM the process for everyone.
-      take: 10_000,
+      take: ORDER_EXPORT_ROW_CAP,
     });
 
-    return orders.map((o) => ({
-      orderNumber: o.orderNumber,
-      name: o.name,
-      date: (o.externalCreatedAt || o.createdAt).toISOString(),
-      customer: o.customer ? `${o.customer.firstName || ''} ${o.customer.lastName || ''}`.trim() : 'Guest',
-      email: o.customer?.email || '',
-      channel: o.channel?.name || '',
-      items: o.lineItems.map((li) => `${li.title} x${li.quantity}`).join('; '),
-      itemCount: o.lineItems.length,
-      subtotal: o.subtotalPrice.toString(),
-      tax: o.totalTax.toString(),
-      shipping: o.totalShippingPrice.toString(),
-      discounts: o.totalDiscounts.toString(),
-      total: o.totalPrice.toString(),
-      currency: o.currency,
-      financialStatus: o.financialStatus,
-      fulfillmentStatus: o.fulfillmentStatus,
+    // How many orders matched in all. Only a full page can have been cut off,
+    // so the extra count runs only then. A capped file that does not say so
+    // reads as complete — the controller passes both numbers to the client.
+    const total =
+      orders.length < ORDER_EXPORT_ROW_CAP
+        ? orders.length
+        : await this.prisma.order.count({ where });
+
+    const exportRows = orders.map((order) => ({
+      orderNumber: order.orderNumber,
+      name: order.name,
+      date: (order.externalCreatedAt || order.createdAt).toISOString(),
+      customer: order.customer ? `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim() : 'Guest',
+      email: order.customer?.email || '',
+      channel: order.channel?.name || '',
+      items: order.lineItems.map((lineItem) => `${lineItem.title} x${lineItem.quantity}`).join('; '),
+      itemCount: order.lineItems.length,
+      subtotal: order.subtotalPrice.toString(),
+      tax: order.totalTax.toString(),
+      shipping: order.totalShippingPrice.toString(),
+      discounts: order.totalDiscounts.toString(),
+      total: order.totalPrice.toString(),
+      currency: order.currency,
+      financialStatus: order.financialStatus,
+      fulfillmentStatus: order.fulfillmentStatus,
     }));
+
+    return { orders: exportRows, total };
   }
 
   generateCsv(data: any[]): string {
@@ -1049,11 +1135,30 @@ export class OrderService {
 
     const runSale = () => this.prisma.$transaction(
       async (tx) => {
+        // Variants whose stock this sale actually moved. Declared per attempt,
+        // not outside `runSale`, because a numbering collision re-runs the
+        // whole transaction and a shared array would accumulate duplicates.
+        const soldVariantIds: string[] = [];
+
         // 1. Resolve or lazy-create the org's MANUAL channel.
         const channel = await ensureManualChannel(tx, orgId);
 
         // 2. Resolve customer (existing by id/email/phone, else create).
         const customer = await this.resolveCustomer(tx, orgId, channel.id, dto);
+
+        // 2b. Remember where this customer's goods go, so picking them on the
+        //     next order pre-fills it. Fill-if-empty: a saved address (e.g.
+        //     Shopify's default) is never overwritten by one order's.
+        const deliveredTo = dto.shippingAddress ?? dto.billingAddress;
+        if (deliveredTo && customer.defaultAddress == null) {
+          await tx.customer.update({
+            where: { id: customer.id },
+            data: {
+              defaultAddress: deliveredTo as Prisma.InputJsonValue,
+              addresses: [deliveredTo] as Prisma.InputJsonValue,
+            },
+          });
+        }
 
         // 3. Fetch variants — used for line-item snapshots, tax math, AND
         //    inventory gating (Phase 2: trackQuantity / continueSellingWhenOutOfStock).
@@ -1379,8 +1484,15 @@ export class OrderService {
             name: `#M${nextNumber}`,
             financialStatus:
               dto.financialStatus ?? OrderFinancialStatus.PAID,
+            // UNFULFILLED, not FULFILLED: nothing has shipped yet. The old
+            // FULFILLED default put a header on every counter sale that its
+            // own lines (0 shipped) contradicted, and the Shopify push read
+            // it and fulfilled the whole order on the store. The header is
+            // re-derived from the lines just below, the same way every
+            // fulfil / unfulfil path does; an explicit `dto.fulfillmentStatus`
+            // is still honoured for API callers.
             fulfillmentStatus:
-              dto.fulfillmentStatus ?? OrderFulfillmentStatus.FULFILLED,
+              dto.fulfillmentStatus ?? OrderFulfillmentStatus.UNFULFILLED,
             currency: orderCurrency,
             // A counter sale is priced in the org's own currency by
             // construction (the line above), so it converts at exactly 1 — no
@@ -1443,6 +1555,12 @@ export class OrderService {
           include: { lineItems: true },
         });
 
+        // 7b. The header follows the lines from the first moment, so the
+        //     table, the pill and the per-line counts can never disagree.
+        //     With nothing shipped this is UNFULFILLED; a caller that passed
+        //     a status but no shipped lines gets the truth, not its claim.
+        await this.refreshOrderFulfillmentStatus(tx, order.id);
+
         // 8. Inventory decrement + audit trail. Skipped per-variant when
         //    trackQuantity=false AND the org-level trackQuantityGlobally
         //    override is off (e.g. digital goods / made-to-order). Each
@@ -1491,6 +1609,7 @@ export class OrderService {
         for (const li of saleLines) {
           const v = variantById.get(li.productVariantId)!;
           if (!trackGlobally && v.trackQuantity === false) continue;
+          soldVariantIds.push(v.id);
 
           if (saleWarehousing) {
             await this.ledger.applyMovement(
@@ -1625,7 +1744,7 @@ export class OrderService {
           });
         }
 
-        return { order, invoice, invoiceError };
+        return { order, invoice, invoiceError, soldVariantIds };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
@@ -1654,6 +1773,7 @@ export class OrderService {
     // via the channels-page Sync action.
     // OUTSIDE the transaction so a queue/Redis hiccup never rolls back the
     // local sale.
+    let orderPushedToShopify = false;
     try {
       const orderSettings = await this.settings.getOrderSettings(orgId);
       if (orderSettings.autoSyncToShopify) {
@@ -1661,6 +1781,7 @@ export class OrderService {
           orgId,
         );
         if (shopifyChannel?.status === 'CONNECTED') {
+          orderPushedToShopify = true;
           // Mark as PENDING immediately so the UI shows "Syncing to Shopify…"
           // even before the worker picks the job up.
           await this.markPendingSync(result.order.id, orgId);
@@ -1686,6 +1807,35 @@ export class OrderService {
       this.logger.warn(
         `Skipping Shopify push enqueue for order ${result.order.id}: ${err}`,
       );
+    }
+
+    // An offline sale moves real stock, and Shopify wins on the next pull — so
+    // without this push the decrement is silently reverted the next time the
+    // per-location reconcile runs, and the units reappear as if never sold.
+    //
+    // Deliberately skipped when the order itself went to Shopify: Shopify
+    // decrements its own inventory for an order it received, so setting
+    // availability on top of that would take the units off twice. In that case
+    // the pull reconciles us to Shopify's figure, which is already correct.
+    //
+    // Outside the transaction and non-fatal, exactly like the restock push in
+    // `cancel`: a queue outage must not roll back a completed sale.
+    if (result.soldVariantIds.length > 0 && !orderPushedToShopify) {
+      try {
+        await this.shopifyPushQueue.add(
+          'push-availability',
+          {
+            type: 'push-availability',
+            organizationId: orgId,
+            variantIds: [...new Set(result.soldVariantIds)],
+          },
+          { attempts: 5, backoff: { type: 'exponential', delay: 10_000 } },
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to enqueue availability push after offline sale ${result.order.id}: ${err}`,
+        );
+      }
     }
 
     // The sale just moved ordersCount/totalSpent, and the loyalty tier is
@@ -1908,7 +2058,12 @@ export class OrderService {
 
     if (input.phone) {
       const byPhone = await tx.customer.findFirst({
-        where: { organizationId: orgId, phone: input.phone },
+        where: {
+          organizationId: orgId,
+          // Matches the E.164 the form now sends AND the as-typed form older
+          // customers were saved under — see phoneLookupVariants.
+          phone: { in: phoneLookupVariants(input.phone, countryCodeOf(input.address)) },
+        },
       });
       if (byPhone) {
         return this.fillMissingCustomerFields(tx, byPhone, input);
@@ -1950,6 +2105,7 @@ export class OrderService {
       lastName: string | null;
       gstin: string | null;
       billingStateCode: string | null;
+      defaultAddress: Prisma.JsonValue | null;
     },
     input: CreateOfflineOrderDto['customer'],
   ) {
@@ -2004,7 +2160,8 @@ export class OrderService {
       if (dto.tags !== undefined) input.tags = dto.tags;
       if (dto.note !== undefined) input.note = dto.note;
       if (dto.shippingAddress !== undefined) {
-        input.shippingAddress = this.toShopifyAddress(dto.shippingAddress);
+        const shopifyAddress = toShopifyAddress(dto.shippingAddress, defaultCountryFor(order.currency));
+        if (shopifyAddress) input.shippingAddress = shopifyAddress;
       }
       const result = await this.graphql.request<OrderUpdateResponse, OrderUpdateVariables>(
         { shopDomain, accessToken: token },
@@ -3439,6 +3596,8 @@ export class OrderService {
     dto: CreateFulfillmentDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    if (dto.tracking) dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3907,6 +4066,8 @@ export class OrderService {
     dto: UpdateTrackingDto,
     vendorScope?: string,
   ) {
+    // Before any Shopify call: a scheme-less URL fails GraphQL coercion as a 500.
+    dto.tracking.url = normalizeTrackingUrl(dto.tracking.url) ?? undefined;
     const order = await this.loadOrderWithChannel(orderId, orgId);
 
     if (vendorScope) {
@@ -3924,26 +4085,36 @@ export class OrderService {
 
     if (isShopifyFulfillment) {
       const { token, shopDomain } = await this.shopifyOAuth.getAccessToken(order.channel.id);
-      const result = await this.graphql.request<
-        FulfillmentTrackingInfoUpdateResponse,
-        FulfillmentTrackingInfoUpdateVariables
-      >(
-        { shopDomain, accessToken: token },
-        FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
-        {
-          fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
-          trackingInfoInput: {
-            number: dto.tracking.number ?? null,
-            url: dto.tracking.url ?? null,
-            company: dto.tracking.company ?? null,
+      // Same treatment as createFulfillment: Shopify refusing the input is the
+      // merchant's to fix, so surface it as a 400 rather than an opaque 500.
+      // Transport/auth failures are left alone — those are genuinely ours.
+      try {
+        const result = await this.graphql.request<
+          FulfillmentTrackingInfoUpdateResponse,
+          FulfillmentTrackingInfoUpdateVariables
+        >(
+          { shopDomain, accessToken: token },
+          FULFILLMENT_TRACKING_INFO_UPDATE_MUTATION,
+          {
+            fulfillmentId: ShopifyGraphqlClient.toGid('Fulfillment', fulfillment.externalId!),
+            trackingInfoInput: {
+              number: dto.tracking.number ?? null,
+              url: dto.tracking.url ?? null,
+              company: dto.tracking.company ?? null,
+            },
+            notifyCustomer: dto.notifyCustomer ?? true,
           },
-          notifyCustomer: dto.notifyCustomer ?? true,
-        },
-      );
-      ShopifyGraphqlClient.throwIfUserErrors(
-        result.fulfillmentTrackingInfoUpdate.userErrors,
-        'fulfillmentTrackingInfoUpdate',
-      );
+        );
+        ShopifyGraphqlClient.throwIfUserErrors(
+          result.fulfillmentTrackingInfoUpdate.userErrors,
+          'fulfillmentTrackingInfoUpdate',
+        );
+      } catch (e) {
+        if (!(e instanceof ShopifyGraphqlError) || e.code !== 'GRAPHQL_ERROR') throw e;
+        const detail = e.message.replace(/^(fulfillmentTrackingInfoUpdate|GraphQL errors): /, '');
+        this.logger.warn(`fulfillmentTrackingInfoUpdate rejected for order ${orderId}: ${detail}`);
+        throw new BadRequestException(`Shopify rejected this tracking update: ${detail}`);
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -4149,32 +4320,4 @@ export class OrderService {
     return order;
   }
 
-  /**
-   * Map an arbitrary address object (accepts both REST snake_case and the
-   * camelCase shape Shopify GraphQL expects) into a MailingAddressInput.
-   * Unknown fields fall through; the merchant DB stores addresses as raw
-   * JSON so we tolerate variation.
-   */
-  private toShopifyAddress(addr: Record<string, unknown>): MailingAddressInput {
-    const pick = (...keys: string[]): string | null => {
-      for (const k of keys) {
-        const v = addr[k];
-        if (typeof v === 'string') return v;
-      }
-      return null;
-    };
-    return {
-      address1: pick('address1'),
-      address2: pick('address2'),
-      city: pick('city'),
-      province: pick('province'),
-      country: pick('country'),
-      countryCode: pick('countryCode', 'country_code'),
-      zip: pick('zip'),
-      firstName: pick('firstName', 'first_name'),
-      lastName: pick('lastName', 'last_name'),
-      phone: pick('phone'),
-      company: pick('company'),
-    };
-  }
 }

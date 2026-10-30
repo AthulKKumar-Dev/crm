@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 import { ArrowLeft, Package, Printer } from "lucide-react";
 import { useOrder } from "~/hooks/use-order-queries";
@@ -131,33 +131,30 @@ export function OrderSlip({ variant }: { variant: "packing" | "pick" }) {
  */
 function PackingSlipView() {
   const { id } = useParams<{ id: string }>();
-  const { data, isLoading, isError } = useOrder(id);
+  const { data, isLoading, isError, refetch } = useOrder(id);
   const { store, isLoading: storeLoading } = useSlipStore();
 
-  if (isError) {
-    return (
-      <div className="p-8 text-sm text-red-700">
-        Could not load this order. Go back and try again.
-      </div>
-    );
-  }
-
-  if (isLoading || storeLoading || !data) {
-    return (
-      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        Loading slip…
-      </div>
-    );
-  }
+  // Error before loading: a failed request leaves isLoading false and data
+  // undefined, which would otherwise read as still loading forever.
+  const status = isError ? "error" : isLoading || storeLoading || !data ? "loading" : "ready";
+  // Stable identity: the editor memoises its paging and its print sheet on it.
+  const orders = useMemo(
+    () => (status === "ready" && data ? [data as unknown as OrderSlipData] : []),
+    [status, data],
+  );
 
   return (
     <PackageSlipSheet
-      orders={[data as unknown as OrderSlipData]}
+      mode="single"
+      status={status}
+      onRetry={() => refetch()}
+      orders={orders}
       store={store}
       storageKey="package-slip-single-opts"
       defaultPaperId={SLIP_DEFAULT_PAPER_ID}
       defaultLayout={SLIP_DEFAULT_LAYOUT}
       backTo={`/orders/${id}`}
+      backLabel="Back to order"
     />
   );
 }

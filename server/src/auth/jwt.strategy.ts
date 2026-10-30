@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { JwtPayload, SessionPayload } from './interfaces/jwt-payload.interface';
 import { extractGrants } from './permissions';
+import { ACTIVE_MEMBERSHIP } from './active-membership';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
@@ -22,6 +23,22 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     }
 
     async validate(payload: JwtPayload): Promise<SessionPayload> {
+        // The signature only proves we issued this token. The session lookup
+        // proves it has not been logged out or revoked since — without it an
+        // access token kept working after logout, password reset and admin
+        // force-logout until it expired.
+        //
+        // Fails closed, but a Redis outage is a 503, not a 401: the client
+        // treats 401 as "refresh, then sign out", which would log every user
+        // out on a Redis blip.
+        let active: boolean;
+        try {
+            active = !!payload.sid && (await this.redis.isAuthSessionActive(payload.sid, payload.sub));
+        } catch {
+            throw new ServiceUnavailableException('Authentication is temporarily unavailable');
+        }
+        if (!active) throw new UnauthorizedException('Session expired');
+
         // Try Redis cache first (sub-millisecond) — but ONLY when it holds the
         // org this token was minted for.
         //
@@ -36,10 +53,22 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         // the membership for `payload.orgId` and re-caches. Tokens minted
         // before any org exists (onboarding) carry no orgId and still use the
         // fast path.
+        // Privilege flags come from the signed token, never the shared cache.
+        // The cache is keyed by userId alone, so the session written by
+        // `startImpersonation` was also served to the target user's OWN token:
+        // it carried `impersonatedBy`, passed SuperAdminGuard and let them call
+        // `stop-impersonating` to receive the super admin's tokens.
+        const flags = {
+            sid: payload.sid,
+            isSuperAdmin: payload.isSuperAdmin === true,
+            impersonatedBy: payload.impersonatedBy,
+            impersonatorSid: payload.impersonatorSid,
+        };
+
         try {
             const cached = await this.redis.getSession<SessionPayload>(payload.sub);
             if (cached && (!payload.orgId || cached.orgId === payload.orgId)) {
-                return cached;
+                return { ...cached, ...flags };
             }
         } catch {
             // Redis down — fall through to DB
@@ -50,7 +79,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
             where: { id: payload.sub, deletedAt: null },
             include: {
                 memberships: {
-                    where: { isActive: true },
+                    where: ACTIVE_MEMBERSHIP,
                     include: { organization: true },
                 },
             },
@@ -60,12 +89,17 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
 
         // Honour the org the token was minted for (login/switchOrg set
         // payload.orgId) — otherwise a cache miss silently snaps a multi-org
-        // user back to their first org (and its role). Tamper-proof: the
-        // claim is signed, and a forged/deactivated orgId finds no active
-        // membership so we fall back to the first one.
-        const membership =
-            user.memberships.find((m) => m.organizationId === payload.orgId) ??
-            user.memberships[0];
+        // user back to their first org (and its role). A token naming an org
+        // the user is no longer an active member of is rejected: falling back
+        // to another membership ran the request in a different tenant while
+        // the UI still showed the old one. Only tokens minted before any org
+        // existed (onboarding) carry no orgId and take the first membership.
+        const membership = payload.orgId
+            ? user.memberships.find((m) => m.organizationId === payload.orgId)
+            : user.memberships[0];
+        if (payload.orgId && !membership) {
+            throw new UnauthorizedException('You no longer have access to this workspace');
+        }
         const session: SessionPayload = {
             sub: user.id,
             email: user.email,
@@ -85,6 +119,6 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         // Cache for subsequent requests (ignore errors)
         this.redis.setSession(user.id, session as unknown as Record<string, unknown>).catch(() => {});
 
-        return session;
+        return { ...session, ...flags };
     }
 }

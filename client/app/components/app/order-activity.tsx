@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
+import { oneOf, useSessionState } from "~/hooks/use-session-state";
 import { Package } from "lucide-react";
 
 import { cn, formatCurrency } from "~/lib/utils";
@@ -23,6 +24,7 @@ const EVENT_CATEGORY: Record<string, EventCategory> = {
   closed: "order",
   reopened: "order",
   sync_queued: "order",
+  invoice_edited: "order",
   paid: "payment",
   captured: "payment",
   payment_status_changed: "payment",
@@ -119,7 +121,11 @@ export function OrderActivity({
   /** From `useOrgMembers` — already fetched by the page for the Owner row. */
   members?: OrgMember[];
 }) {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useSessionState<Filter>(
+    "order-activity.filter",
+    "all",
+    oneOf(["all", "order", "payment", "fulfilment"]),
+  );
   const timeline = order.timeline ?? [];
 
   const counts = useMemo(() => {

@@ -1,6 +1,6 @@
 import { apiClient } from "~/lib/api-client";
 
-export type AnalyticsRange = "30d" | "6m" | "12m";
+export type AnalyticsRange = "7d" | "30d" | "6m" | "12m";
 export type AnalyticsChannelFilter = "all" | "shopify" | "instagram" | "whatsapp";
 
 export interface AnalyticsQueryParams {
@@ -33,11 +33,14 @@ export interface DashboardPageRow {
 export interface DashboardProductRow {
   title: string;
   addToCarts: number;
+  /** First product image; null when none is set or the title is ambiguous. */
+  image?: string | null;
 }
 
 export interface DashboardViewedProductRow {
   title: string;
   views: number;
+  image?: string | null;
 }
 
 export interface AnalyticsDashboard {

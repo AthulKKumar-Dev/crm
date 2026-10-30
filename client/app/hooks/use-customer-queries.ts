@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { customerService } from "~/services/customer.service";
 import type { CustomerListParams } from "~/types/api";
 
@@ -17,6 +17,8 @@ export function useCustomers(params?: CustomerListParams) {
   return useQuery({
     queryKey: customerKeys.list(params),
     queryFn: () => customerService.list(params),
+    // The previous page stays on screen, dimmed, while the next one loads.
+    placeholderData: keepPreviousData,
   });
 }
 

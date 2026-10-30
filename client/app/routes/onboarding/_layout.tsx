@@ -1,6 +1,6 @@
 import { Outlet, Link } from "react-router";
-import { Leaf } from "lucide-react";
 import { OnboardingGuard } from "~/components/guards/onboarding-guard";
+import { BrandLogo } from "~/components/app/brand-logo";
 
 /**
  * Shared layout for the onboarding flow (account type, create org, invite team).
@@ -13,11 +13,8 @@ export default function OnboardingLayout() {
 
         {/* Top bar */}
         <header className="flex h-[64px] shrink-0 items-center justify-between px-6 sm:px-10">
-          <Link to="/" className="flex items-center gap-2.5">
-            <div className="flex size-8 items-center justify-center rounded-xl bg-[#CEF17B]">
-              <Leaf className="size-4 text-gray-900" />
-            </div>
-            <span className="text-base font-bold text-gray-900">Collabo</span>
+          <Link to="/" className="flex items-center">
+            <BrandLogo variant="color" className="h-6" />
           </Link>
 
           <Link

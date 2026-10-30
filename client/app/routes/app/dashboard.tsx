@@ -1,15 +1,10 @@
-import { useState } from "react";
-import { ArrowRight, Download, Upload, Target, Users, ShoppingBag } from "lucide-react";
+import { lazy, Suspense } from "react";
+import { type DateRangePreset, useDateRangeFilter } from "~/hooks/use-date-range-filter";
+import { ArrowRight, Download, Loader2, Upload, Target, Users, ShoppingBag } from "lucide-react";
 import { Link } from "react-router";
 
 import { Button } from "~/components/ui/button";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { DateRangeFilter } from "~/components/app/date-range-filter";
 import {
   PageHeader,
   PageHeaderContent,
@@ -17,8 +12,7 @@ import {
   PageHeaderDescription,
   PageHeaderActions,
 } from "~/components/ui/page-header";
-import { ProfitBarChart } from "~/components/app/profit-bar-chart";
-import { SalesDonutChart } from "~/components/app/sales-donut-chart";
+import { Skeleton } from "~/components/ui/skeleton";
 import { OrdersTable } from "~/components/app/orders-table";
 import { TopProductsPanel } from "~/components/app/top-products-panel";
 import { LowStockProductsPanel } from "~/components/app/low-stock-products-panel";
@@ -33,11 +27,30 @@ import type { SparklinePoint } from "~/components/app/chart-line-default";
 import type { SalesProfitPoint } from "~/services/dashboard.service";
 import type { DashboardQueryParams, DashboardRange } from "~/types/api";
 import { useCurrentOrg } from "~/hooks/use-org-queries";
-import { formatCurrency } from "~/lib/utils";
+import { reportingTimeZone, todayIn } from "~/lib/reporting-date";
+import { cn, formatCurrency } from "~/lib/utils";
 import { StatCard } from "~/components/app/stat-card";
 import { MoneyTotal } from "~/components/app/money-total";
 import { ProductsPanel } from "~/components/app/products-panel";
 import { SectionCard } from "~/components/app/section-card";
+
+// Lazy so the page shell renders and both data requests start while the
+// recharts chunk is still downloading. The hooks stay in this route, so the
+// chart finds its data already in the query cache when it mounts.
+const ProfitBarChart = lazy(() =>
+  import("~/components/app/profit-bar-chart").then((m) => ({
+    default: m.ProfitBarChart,
+  }))
+);
+
+/** Same card shell as ProfitBarChart, so the column doesn't jump when it lands. */
+const profitChartFallback = (
+  <div className="flex h-full flex-col rounded-xl bg-card p-5 shadow-sm ring-1 ring-border">
+    <p className="mb-3 text-body font-semibold text-foreground">Gross Profit</p>
+    <Skeleton className="mb-3 h-7 w-32" />
+    <Skeleton className="min-h-40 flex-1" />
+  </div>
+);
 
 export function meta() {
   return [
@@ -46,7 +59,8 @@ export function meta() {
   ];
 }
 
-const RANGE_OPTIONS: ReadonlyArray<{ value: DashboardRange; label: string }> = [
+const RANGE_OPTIONS: ReadonlyArray<DateRangePreset<DashboardRange>> = [
+  { value: "7d", label: "Last 7 days" },
   { value: "30d", label: "Last 30 days" },
   { value: "6m", label: "Last 6 months" },
   { value: "12m", label: "Last 12 months" },
@@ -56,15 +70,30 @@ export default function DashboardPage() {
   // One window for the whole page. Total Sales used to be an all-time figure
   // sitting beside a chart hard-coded to a rolling 12 months, so the two could
   // never be reconciled and neither said which period it covered.
-  const [range, setRange] = useState<DashboardRange>("12m");
-  const params: DashboardQueryParams = { range };
+  // Opens on 7 days: the narrowest window is the cheapest first load. A wider
+  // choice, or a custom range, is remembered for the browser session.
+  const range = useDateRangeFilter<DashboardRange>("dashboard.range", "7d", RANGE_OPTIONS);
+  // A preset sends `range`, a custom range sends its dates; never both, since
+  // the server lets explicit dates win and the two would disagree silently.
+  const params: DashboardQueryParams = range.custom
+    ? { dateFrom: range.custom.from, dateTo: range.custom.to }
+    : { range: range.preset };
 
-  const { data: dashboard, isLoading } = useDashboard(params);
-  const { exportCsv, exportJson } = useExportDashboard();
+  const {
+    data: dashboard,
+    isLoading,
+    isPlaceholderData: overviewStale,
+  } = useDashboard(params);
+  const { downloadReport, exportJson, exporting } = useExportDashboard();
   const { data: org } = useCurrentOrg();
+  const timeZone = reportingTimeZone(org?.timezone);
   // Same params as the chart below, so React Query serves both from one
   // request and the cards cannot disagree with the bars.
-  const { data: sales, isLoading: salesLoading } = useSalesAndProfit(params);
+  const {
+    data: sales,
+    isLoading: salesLoading,
+    isPlaceholderData: salesStale,
+  } = useSalesAndProfit(params);
   const orgCurrency = org?.currency ?? "USD";
   const recentOrders = dashboard?.recentOrders ?? [];
   const series = sales?.data;
@@ -84,33 +113,44 @@ export default function DashboardPage() {
             </PageHeaderDescription>
           </PageHeaderContent>
           <PageHeaderActions>
-            <Select value={range} onValueChange={(v) => setRange(v as DashboardRange)}>
-              <SelectTrigger className="h-8 w-36 rounded-lg text-caption font-medium shadow-sm">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {RANGE_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <DateRangeFilter
+              presets={RANGE_OPTIONS}
+              preset={range.preset}
+              custom={range.custom}
+              label={range.label}
+              today={todayIn(timeZone)}
+              onPresetChange={range.selectPreset}
+              onCustomApply={range.applyCustom}
+            />
+            {/* One download at a time: both lock while either runs, and the
+                clicked one shows progress until its file arrives or fails. */}
             <Button
               size="action"
               variant="outline"
-              onClick={() => exportCsv(params)}
+              onClick={() => exportJson(params)}
+              disabled={exporting !== null}
+              aria-busy={exporting === "json"}
             >
-              <Upload className="size-3.5" />
-              Export CSV
+              {exporting === "json" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Upload className="size-3.5" />
+              )}
+              {exporting === "json" ? "Exporting…" : "Export JSON"}
             </Button>
             <Button
               variant="brand"
               size="action"
-              onClick={() => exportJson(params)}
+              onClick={() => downloadReport(params)}
+              disabled={exporting !== null}
+              aria-busy={exporting === "report"}
             >
-              <Download className="size-3.5" />
-              Download Report
+              {exporting === "report" ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Download className="size-3.5" />
+              )}
+              {exporting === "report" ? "Preparing…" : "Download Report"}
             </Button>
           </PageHeaderActions>
         </PageHeader>
@@ -118,7 +158,14 @@ export default function DashboardPage() {
 
       {/* Stat cards row */}
       <div className="flex gap-3 ">
-        <div className="flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
+        {/* On a range switch the previous window's figures stay up, dimmed,
+            until the new ones land — no drop back to skeletons. */}
+        <div
+          className={cn(
+            "flex flex-col flex-1 overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border transition-opacity",
+            (overviewStale || salesStale) && "opacity-50"
+          )}
+        >
           {/* Reads the SAME payload as the profit chart — this is the figure the
               chart's reconciliation strip walks down from. */}
           <StatCard
@@ -178,13 +225,20 @@ export default function DashboardPage() {
 
         {/* Charts row — 2 equal columns */}
         <div className="flex flex-col flex-2  overflow-hidden rounded-lg ring-1 ring-border divide-y divide-border">
-          <ProfitBarChart currency={orgCurrency} params={params} />
+          <Suspense fallback={profitChartFallback}>
+            <ProfitBarChart currency={orgCurrency} params={params} />
+          </Suspense>
           {/* <SalesDonutChart currency={orgCurrency} /> */}
         </div>
       </div>
 
       {/* Bottom row — recent orders table and top products */}
-      <div className="flex gap-3 justify-between">
+      <div
+        className={cn(
+          "flex gap-3 justify-between transition-opacity",
+          overviewStale && "opacity-50"
+        )}
+      >
         <SectionCard
           className="flex flex-2 flex-col"
           title="Recent Orders"
@@ -208,7 +262,7 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <OrdersTable orders={recentOrders} currency={orgCurrency} variant="compact" />
+              <OrdersTable orders={recentOrders} currency={orgCurrency} />
             </div>
           )}
         </SectionCard>
@@ -216,6 +270,8 @@ export default function DashboardPage() {
           <ProductsPanel
             topProducts={dashboard?.topSellingProducts}
             lowStockProducts={dashboard?.lowStockProducts}
+            lowStockVariants={dashboard?.lowStockVariants}
+            periodLabel={range.label}
             isLoading={isLoading}
             currency={orgCurrency}
             className="flex-1"

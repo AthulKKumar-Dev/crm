@@ -85,7 +85,7 @@ export function ProfitBarChart({
   currency: string;
   params?: DashboardQueryParams;
 }) {
-  const { data: sales, isLoading } = useSalesAndProfit(params);
+  const { data: sales, isLoading, isPlaceholderData } = useSalesAndProfit(params);
 
   const chartData = sales?.data ?? [];
   const totals = sales?.totals;
@@ -130,7 +130,14 @@ export function ProfitBarChart({
           <Loader2 className="size-5 animate-spin text-muted-foreground" />
         </div>
       ) : (
-        <>
+        // Dimmed while a new range loads: the previous window's figures stay
+        // readable instead of being replaced by a spinner.
+        <div
+          className={cn(
+            "flex flex-1 flex-col transition-opacity",
+            isPlaceholderData && "opacity-50"
+          )}
+        >
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <p
               className={cn(
@@ -242,10 +249,10 @@ export function ProfitBarChart({
                   <YAxis hide domain={["auto", "auto"]} />
                   <ReferenceLine y={0} stroke="var(--border)" />
                   <Tooltip content={<CustomTooltip currency={reportingCurrency} />} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
-                  <Bar dataKey="netSales" fill="var(--border)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="netSales" fill="var(--border)" radius={[4, 4, 0, 0]} animationDuration={300} />
                   {/* Recharts skips null, so a month with no cost data draws a
                       sales bar and no profit bar — which is the truth. */}
-                  <Bar dataKey="grossProfit" fill="var(--brand)" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="grossProfit" fill="var(--brand)" radius={[4, 4, 0, 0]} animationDuration={300} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -254,7 +261,7 @@ export function ProfitBarChart({
               No sales data available yet
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

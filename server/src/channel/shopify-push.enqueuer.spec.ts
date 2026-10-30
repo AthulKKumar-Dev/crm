@@ -123,3 +123,48 @@ describe('ShopifyPushEnqueuer — priority and de-duplication on every add', () 
     expect(queue.add).toHaveBeenCalled();
   });
 });
+
+/**
+ * Product pushes had neither a per-product job id nor a return value: a Sync
+ * press between the worker's retries queued a second job (a second Shopify
+ * product), and a queue outage was swallowed while the caller stamped the
+ * product PENDING — "Syncing" for ever.
+ */
+describe('ShopifyPushEnqueuer — product push', () => {
+  const data = { type: 'product' as const, productId: 'prod_1', organizationId: 'org_1' };
+
+  it('queues under one id per product', async () => {
+    const { queue, enqueuer } = build();
+
+    await expect(enqueuer.enqueueProductPush(data)).resolves.toBe(true);
+
+    expect(queue.add.mock.calls[0][2].jobId).toBe('push-product-prod_1');
+  });
+
+  it('does not queue a second job while one is waiting on a retry', async () => {
+    const { queue, enqueuer } = build();
+    queue.getJob.mockResolvedValue({ getState: () => Promise.resolve('delayed') });
+
+    await expect(enqueuer.enqueueProductPush(data)).resolves.toBe(true);
+
+    expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('replaces a finished job so a later retry is not ignored', async () => {
+    const { queue, enqueuer } = build();
+    const remove = jest.fn<Promise<void>, []>().mockResolvedValue(undefined);
+    queue.getJob.mockResolvedValue({ getState: () => Promise.resolve('failed'), remove });
+
+    await expect(enqueuer.enqueueProductPush(data)).resolves.toBe(true);
+
+    expect(remove).toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a queue failure instead of swallowing it', async () => {
+    const { queue, enqueuer } = build();
+    queue.add.mockRejectedValue(new Error('redis down'));
+
+    await expect(enqueuer.enqueueProductPush(data)).resolves.toBe(false);
+  });
+});

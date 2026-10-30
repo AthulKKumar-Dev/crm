@@ -227,3 +227,149 @@ describe('OrderService.setVendorItemsStatus (released)', () => {
     expect(updated[0].data.fulfillmentStatus).toBeNull();
   });
 });
+
+describe('OrderService.computeFulfillmentStatus', () => {
+  // The one rule every header is derived from; it had no direct test.
+  const compute = (items: any[]) =>
+    (new OrderService(
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    ) as any).computeFulfillmentStatus(items);
+
+  it('is UNFULFILLED when no unit has shipped', () => {
+    expect(compute([{ fulfillmentStatus: null, quantity: 2, fulfilledQuantity: 0 }])).toBe('UNFULFILLED');
+  });
+
+  it('is FULFILLED when every unit has shipped', () => {
+    expect(
+      compute([
+        { fulfillmentStatus: 'fulfilled', quantity: 2, fulfilledQuantity: 2 },
+        { fulfillmentStatus: 'delivered', quantity: 1, fulfilledQuantity: 1 },
+      ]),
+    ).toBe('FULFILLED');
+  });
+
+  it('is PARTIAL when some but not all units have shipped', () => {
+    expect(
+      compute([
+        { fulfillmentStatus: 'partial', quantity: 3, fulfilledQuantity: 1 },
+        { fulfillmentStatus: null, quantity: 1, fulfilledQuantity: 0 },
+      ]),
+    ).toBe('PARTIAL');
+  });
+
+  it('counts a zero-count line whose status says shipped as fully shipped (Shopify lines)', () => {
+    expect(compute([{ fulfillmentStatus: 'fulfilled', quantity: 4, fulfilledQuantity: 0 }])).toBe('FULFILLED');
+  });
+
+  it('never counts more than the line ordered', () => {
+    expect(compute([{ fulfillmentStatus: 'fulfilled', quantity: 2, fulfilledQuantity: 5 }])).toBe('FULFILLED');
+  });
+});
+
+/**
+ * The order's invoice card. Credit notes are stored with the ORIGINAL
+ * invoice's orderId and are created after it, so a filter that only dropped
+ * CANCELLED returned the newest credit note as "the invoice" (#M1001 showed
+ * CN-26-27/000001 instead of INV-26-27/000001 on dev).
+ */
+describe('OrderService.findOne invoice', () => {
+  /** Applies a Prisma `status` filter the way the database would. */
+  const allows = (status: string, filter: any) =>
+    filter?.notIn ? !filter.notIn.includes(status) : filter?.not ? status !== filter.not : true;
+
+  function build(invoices: Array<{ id: string; status: string; createdAt: Date }>) {
+    const prisma = {
+      order: {
+        findFirst: jest.fn((args: any) => {
+          const rel = args.include.invoices;
+          const live = invoices
+            .filter((i) => allows(i.status, rel.where.status))
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+            .slice(0, rel.take);
+          return Promise.resolve({ id: ORDER_ID, lineItems: [], fulfillments: [], invoices: live });
+        }),
+      },
+    };
+    const service = new OrderService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return service;
+  }
+
+  it('shows the original invoice, not a later credit note against it', async () => {
+    const service = build([
+      { id: 'inv_1', status: 'ISSUED', createdAt: new Date('2026-09-01T00:00:00Z') },
+      { id: 'cn_1', status: 'CREDIT_NOTE', createdAt: new Date('2026-09-10T00:00:00Z') },
+    ]);
+
+    const order = await service.findOne(ORDER_ID, ORG);
+
+    expect(order.invoices.map((i: any) => i.id)).toEqual(['inv_1']);
+  });
+
+  it('shows no invoice once the original is cancelled, even with a credit note left', async () => {
+    const service = build([
+      { id: 'inv_1', status: 'CANCELLED', createdAt: new Date('2026-09-01T00:00:00Z') },
+      { id: 'cn_1', status: 'CREDIT_NOTE', createdAt: new Date('2026-09-10T00:00:00Z') },
+    ]);
+
+    const order = await service.findOne(ORDER_ID, ORG);
+
+    expect(order.invoices).toEqual([]);
+  });
+});
+
+describe('OrderService.findAll date range', () => {
+  function build() {
+    const prisma = {
+      order: {
+        findMany: jest.fn().mockResolvedValue([]),
+        count: jest.fn().mockResolvedValue(0),
+      },
+      organization: { findUnique: jest.fn().mockResolvedValue({ timezone: 'UTC' }) },
+    };
+    const service = new OrderService(
+      prisma as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return { service, prisma };
+  }
+
+  it('windows on placedBetween, the same rule as the exports', async () => {
+    const { service, prisma } = build();
+    await service.findAll(ORG, { dateFrom: '2026-10-01', dateTo: '2026-10-12' } as any);
+
+    const { where } = prisma.order.findMany.mock.calls[0][0];
+    // A bare `externalCreatedAt` range never matches NULL. No write path leaves
+    // it NULL today, but the list and its downloads must share one definition
+    // of "placed", or a null-dated order would land in one and not the other.
+    expect(where.externalCreatedAt).toBeUndefined();
+    const range = { gte: expect.any(Date), lt: expect.any(Date) };
+    expect(where.AND).toEqual([
+      {
+        OR: [
+          { externalCreatedAt: range },
+          { externalCreatedAt: null, createdAt: range },
+        ],
+      },
+    ]);
+    // Bare dates are whole days in the reporting zone (UTC default → IST).
+    const [{ OR: [{ externalCreatedAt: bounds }] }] = where.AND;
+    expect(bounds.gte.toISOString()).toBe('2026-09-30T18:30:00.000Z');
+    expect(bounds.lt.toISOString()).toBe('2026-10-12T18:30:00.000Z');
+    expect(prisma.order.count).toHaveBeenCalledWith({ where });
+  });
+
+  it('does not let the date window overwrite the search OR', async () => {
+    const { service, prisma } = build();
+    await service.findAll(ORG, { dateFrom: '2026-10-01', search: 'shirt' } as any);
+
+    const { where } = prisma.order.findMany.mock.calls[0][0];
+    expect(where.OR).toEqual(
+      expect.arrayContaining([{ name: { contains: 'shirt', mode: 'insensitive' } }]),
+    );
+    expect(where.AND).toHaveLength(1);
+  });
+});

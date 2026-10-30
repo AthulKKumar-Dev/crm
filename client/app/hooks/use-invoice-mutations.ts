@@ -6,7 +6,10 @@ import { orderKeys } from "~/hooks/use-order-queries";
 import { handleMutationError } from "~/lib/handle-mutation-error";
 import type {
   CreateCreditNoteRequest,
-  MarkFiledRequest, CreateInvoiceRequest } from "~/types/api";
+  MarkFiledRequest,
+  CreateInvoiceRequest,
+  UpdateInvoiceRequest,
+} from "~/types/api";
 
 /** Mutation hook for generating a GST invoice from an order. */
 export function useCreateInvoiceMutation() {
@@ -14,15 +17,62 @@ export function useCreateInvoiceMutation() {
 
   return useMutation({
     mutationFn: (data: CreateInvoiceRequest) => invoiceService.create(data),
-    onSuccess: () => {
+    onSuccess: (invoice) => {
       queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
       // The order detail embeds its live invoice — refresh it so the invoice
       // card appears and the Generate button hides.
       queryClient.invalidateQueries({ queryKey: orderKeys.all });
-      toast.success("GST invoice generated successfully.");
+      // The date is the GST filing month. It is the order's date, or today when
+      // the order's month was already filed — say which, so neither surprises.
+      const dated = new Date(invoice.invoiceDate).toLocaleDateString("en-IN", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+      });
+      toast.success(`GST invoice ${invoice.invoiceNumber} issued, dated ${dated}.`);
     },
     onError: (error) =>
       handleMutationError(error, "Failed to generate invoice."),
+  });
+}
+
+/**
+ * POST /invoices/bulk — the Orders list's bulk action. The caller shows the
+ * per-order outcome, so this only toasts the headline.
+ */
+export function useBulkCreateInvoicesMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (orderIds: string[]) => invoiceService.bulkCreate(orderIds),
+    onSuccess: ({ issued }) => {
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      queryClient.invalidateQueries({ queryKey: orderKeys.all });
+      if (issued.length > 0) {
+        toast.success(
+          `${issued.length} GST invoice${issued.length === 1 ? "" : "s"} issued.`,
+        );
+      }
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to generate invoices."),
+  });
+}
+
+/** PATCH /invoices/:id — buyer block and notes only; amounts are immutable. */
+export function useUpdateInvoiceMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateInvoiceRequest }) =>
+      invoiceService.update(id, data),
+    onSuccess: (invoice) => {
+      // Seed the detail so the page shows the saved state before the refetch.
+      queryClient.setQueryData(invoiceKeys.detail(invoice.id), invoice);
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.all });
+      toast.success("Invoice updated.");
+    },
+    onError: (error) =>
+      handleMutationError(error, "Failed to update the invoice."),
   });
 }
 

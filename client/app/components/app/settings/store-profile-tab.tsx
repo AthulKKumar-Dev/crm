@@ -23,18 +23,18 @@ const FIELDS: ReadonlyArray<{
   /** Renders in the two-column grid rather than full width. */
   half?: boolean;
 }> = [
-  { key: "storeName", label: "Trading name", placeholder: "Bibin John Store" },
-  { key: "address1", label: "Address line 1", placeholder: "Melange Lane, Opp. Metro Pillar No. 668" },
-  { key: "address2", label: "Address line 2", placeholder: "M.G. Road" },
-  { key: "city", label: "City", half: true, placeholder: "Ernakulam" },
-  { key: "province", label: "State / province", half: true, placeholder: "Kerala" },
-  { key: "zip", label: "PIN / postcode", half: true, placeholder: "682035" },
-  { key: "country", label: "Country", half: true, placeholder: "India" },
-  { key: "supportPhone", label: "Phone", half: true, placeholder: "+91 95673 64499" },
-  { key: "whatsappPhone", label: "WhatsApp", half: true, placeholder: "+91 95673 64499" },
-  { key: "supportEmail", label: "Support email", half: true, placeholder: "support@example.com" },
-  { key: "website", label: "Website", half: true, placeholder: "https://www.example.com" },
-  { key: "logoUrl", label: "Logo URL", placeholder: "https://…/logo.png" },
+  { key: "storeName", label: "Trading name", placeholder: "Your store name" },
+  { key: "address1", label: "Address line 1", placeholder: "Building, street" },
+  { key: "address2", label: "Address line 2", placeholder: "Area, landmark (optional)" },
+  { key: "city", label: "City", half: true, placeholder: "City" },
+  { key: "province", label: "State / province", half: true, placeholder: "State" },
+  { key: "zip", label: "PIN / postcode", half: true, placeholder: "PIN / postcode" },
+  { key: "country", label: "Country", half: true, placeholder: "Country" },
+  { key: "supportPhone", label: "Phone", half: true, placeholder: "+91 XXXXX XXXXX" },
+  { key: "whatsappPhone", label: "WhatsApp", half: true, placeholder: "+91 XXXXX XXXXX" },
+  { key: "supportEmail", label: "Support email", half: true, placeholder: "support@yourstore.com" },
+  { key: "website", label: "Website", half: true, placeholder: "https://yourstore.com" },
+  { key: "logoUrl", label: "Logo URL", placeholder: "https://yourstore.com/logo.png" },
 ];
 
 export function StoreProfileTab() {

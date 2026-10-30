@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { useSendInviteMutation } from "~/hooks/use-org-mutations";
+import { AVAILABLE_SECTIONS, isSectionScopedRole, sectionKey } from "~/lib/sections";
 import type { UserRole } from "~/types/api";
 
 export function meta() {
@@ -102,7 +103,15 @@ export default function InviteTeamPage() {
       );
 
       try {
-        await sendInvite.mutateAsync({ email: inviteRow.email.trim(), role: inviteRow.role });
+        await sendInvite.mutateAsync({
+          email: inviteRow.email.trim(),
+          role: inviteRow.role,
+          // No per-section picker during onboarding: start with every section,
+          // narrowed later from Settings → Team Members.
+          grants: isSectionScopedRole(inviteRow.role)
+            ? AVAILABLE_SECTIONS.map((s) => sectionKey(s.id))
+            : undefined,
+        });
         setRows((previousRows) =>
           previousRows.map((row) => (row.id === inviteRow.id ? { ...row, status: "sent" } : row))
         );

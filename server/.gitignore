@@ -36,13 +36,8 @@ lerna-debug.log*
 !.vscode/extensions.json
 
 # dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
-# Hand-made backups of .env - plaintext secrets, never commit.
-.env.bak*
+.env*
+!.env.example
 
 # temp directory
 .temp

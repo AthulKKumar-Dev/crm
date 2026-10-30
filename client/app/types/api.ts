@@ -125,8 +125,9 @@ export interface OrganizationMembership {
   /** For VENDOR role: the Product.vendor value this membership is scoped to. */
   vendorScope?: string | null;
   /**
-   * Fine-grained capability keys on this membership. Absent when the session
-   * predates them, in which case the role's defaults apply.
+   * Fine-grained grants on this membership (`section.*`, `inventory.*`,
+   * `campaigns.*`) — see lib/sections.ts and lib/permissions.ts. Absent when
+   * the session predates them, in which case the role's defaults apply.
    */
   permissions?: string[];
   isActive: boolean;
@@ -246,7 +247,6 @@ export interface ResendVerificationRequest {
 export interface SignupResponse {
   userId: string;
   email: string;
-  verifyCode: string;
   message: string;
   nextStep: "verify-email";
 }
@@ -259,6 +259,7 @@ export interface AuthOrganization {
   type: "PERSONAL" | "ORGANIZATION";
   role: UserRole;
   vendorScope?: string | null;
+  permissions?: string[];
 }
 
 /** Response returned after successful login, including tokens and user info. */
@@ -443,6 +444,8 @@ export interface RecomputeLoyaltyResponse {
 export interface OrgMember {
   id: string;
   role: UserRole;
+  /** The member's full grant list; no `section.*` entry means full section access. */
+  permissions?: string[];
   joinedAt: string;
   user: {
     id: string;
@@ -469,6 +472,13 @@ export interface SendInviteRequest {
   role: UserRole;
   /** Required when role is VENDOR: the Product.vendor value to scope them to. */
   vendorScope?: string;
+  /** For AGENT / VIEWER: the `section.*` grants the member starts with. */
+  grants?: string[];
+}
+
+/** Payload for replacing a member's grant list (PATCH …/members/:id/permissions). */
+export interface UpdateMemberPermissionsRequest {
+  grants: string[];
 }
 
 /** Payload for inviting an influencer. The role is fixed by the endpoint. */
@@ -491,7 +501,9 @@ export interface OrgInvite {
   email: string;
   name: string | null;
   role: UserRole;
+  permissions?: string[];
   status: InviteState;
+  token?: string;
   invitedBy: string;
   expiresAt: string;
   createdAt: string;
@@ -580,6 +592,10 @@ export interface AcceptInviteResponse {
     id: string;
     name: string;
     slug: string;
+    type?: "PERSONAL" | "ORGANIZATION";
+    role?: UserRole;
+    vendorScope?: string | null;
+    permissions?: string[];
   };
 }
 
@@ -916,6 +932,8 @@ export interface ProductShopifySync {
   shopifyProductId?: string;
   error?: string;
   syncedAt?: string;
+  /** When the PENDING claim was stamped; absent on rows claimed before it existed. */
+  queuedAt?: string;
   attempts: number;
 }
 
@@ -1066,9 +1084,11 @@ export interface CreateProductRequest {
 
 /** Payload for editing a MANUAL-channel product. All fields optional. */
 export type UpdateProductRequest = Partial<
-  Omit<CreateProductRequest, "variant">
+  Omit<CreateProductRequest, "variant" | "gstRate">
 > & {
   variant?: Partial<ProductVariantInput>;
+  /** null clears the rate back to "Not set". */
+  gstRate?: number | null;
 };
 
 /** Variant CRUD payloads (for /products/:id/variants and /variants/:id endpoints). */
@@ -1230,11 +1250,21 @@ export interface Order {
   billingAddress?: Record<string, unknown> | null;
   customer: OrderCustomer | null;
   channel: ChannelRef;
+  /** Shopify's raw source code (`web`, `pos`, `collabo-crm`, …). Null until a sync stores it. */
+  sourceName?: string | null;
+  /** Shopify's display name for the app that created the order. Null on webhook-only orders. */
+  sourceLabel?: string | null;
   /**
    * Computed via `_count` on the LIST endpoint only — `undefined` on detail
    * responses despite the non-optional type. Fall back to `lineItems.length`.
    */
   itemCount: number;
+  /**
+   * The push record, on the LIST endpoint only (the detail endpoint carries
+   * the whole `metadata` blob instead). Null when the order was never pushed.
+   * Read it through `orderShopifySyncOf`, which handles both shapes.
+   */
+  shopifySync?: OrderShopifySync | null;
   /**
    * Row insert time. On the DETAIL endpoint this is the local DB timestamp, not
    * when the order was placed — the list and vendor endpoints map
@@ -1939,7 +1969,13 @@ export interface DraftOrderStats {
 /** Response from POST /draft-orders/:id/complete. */
 export interface CompleteDraftResponse {
   draftId: string;
-  order: OrderDetail;
+  /**
+   * Null when the draft was completed in Shopify and the order hasn't synced
+   * into the CRM yet — the server waits a few seconds for it, not forever.
+   */
+  order: OrderDetail | null;
+  /** Shopify's order name ("#1015") when completed via Shopify. */
+  shopifyOrderName?: string | null;
   invoice: InvoiceDetail | null;
   invoiceError: string | null;
 }
@@ -2034,6 +2070,12 @@ export interface CustomerDetail extends Customer {
   orders: CustomerOrderSummary[];
   /** Capped at the 20 most recent by the server. */
   activityLogs: CustomerActivityLog[];
+  /**
+   * What the order form pre-fills when this customer is picked: their saved
+   * address, else their last order's delivery address — normalised to the
+   * form's shape (GST `stateCode` resolved, phone in E.164). Null if none.
+   */
+  prefillAddress?: OrderAddressInput | null;
 }
 
 /** Query parameters for the customer list endpoint. */
@@ -2119,7 +2161,7 @@ export interface OrderStatsResponse {
 
 /** Query parameters for the dashboard overview endpoint. */
 /** Pre-canned windows offered by the dashboard's period selector. */
-export const DASHBOARD_RANGES = ["30d", "6m", "12m"] as const;
+export const DASHBOARD_RANGES = ["7d", "30d", "6m", "12m"] as const;
 export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
 
 export interface DashboardQueryParams {
@@ -2164,6 +2206,19 @@ export interface DashboardTopProduct {
   price: string;
 }
 
+/** One low-stock variant — what the dashboard's Low Stock tab lists. */
+export interface DashboardLowStockVariant {
+  variantId: string;
+  productId: string;
+  productTitle: string;
+  /** Null for a single-variant product — there is no variant to name. */
+  variantTitle: string | null;
+  sku: string | null;
+  stock: number;
+  image: string | null;
+  threshold: number;
+}
+
 /** A low-stock product returned by the dashboard endpoint. */
 export interface DashboardLowStockProduct {
   id: string;
@@ -2174,6 +2229,15 @@ export interface DashboardLowStockProduct {
   variantCount: number;
   price: string;
   threshold: number;
+  /** The variants at or below `threshold`, lowest stock first. */
+  lowVariants: Array<{
+    id: string;
+    /** Null for a single-variant product — there is no variant to name. */
+    title: string | null;
+    sku: string | null;
+    stock: number;
+  }>;
+  lowVariantCount: number;
 }
 
 /** A recent order returned by the dashboard endpoint (subset of full Order). */
@@ -2209,6 +2273,9 @@ export interface DashboardOverview {
   fulfillmentBreakdown: FulfillmentBreakdown;
   topSellingProducts: DashboardTopProduct[];
   lowStockProducts: DashboardLowStockProduct[];
+  /** The 5 most urgent low-stock variants across all products. Optional:
+   *  absent from servers that predate it. */
+  lowStockVariants?: DashboardLowStockVariant[];
   recentOrders: DashboardRecentOrder[];
 }
 
@@ -2414,6 +2481,22 @@ export interface InvoiceDetail extends Invoice {
 }
 
 /** Payload for generating a new invoice. */
+/** PATCH /invoices/:id — the non-tax fields an issued invoice may correct. */
+export interface UpdateInvoiceRequest {
+  buyerName?: string;
+  /** Empty or null clears it; the invoice becomes B2C. */
+  buyerGstin?: string | null;
+  buyerAddress?: {
+    address1?: string;
+    address2?: string;
+    city?: string;
+    province?: string;
+    zip?: string;
+    country?: string;
+  } | null;
+  notes?: string | null;
+}
+
 export interface CreateInvoiceRequest {
   orderId: string;
   sellerGstinId?: string;
@@ -2430,6 +2513,24 @@ export interface CreateInvoiceRequest {
    * the default and the declaration could only ever say "No".
    */
   reverseCharge?: boolean;
+}
+
+/**
+ * POST /invoices/bulk — one entry per requested order. Mirrors
+ * `BulkInvoiceResult` in `server/src/invoice/invoice.service.ts`.
+ */
+export interface BulkInvoiceResult {
+  issued: Array<{
+    orderId: string;
+    orderName: string;
+    invoiceId: string;
+    invoiceNumber: string;
+    invoiceDate: string;
+  }>;
+  /** Not attempted, or already invoiced. */
+  skipped: Array<{ orderId: string; orderName: string | null; reason: string }>;
+  /** Attempted and rejected; `reason` is the server's message. */
+  failed: Array<{ orderId: string; orderName: string; reason: string }>;
 }
 
 /** A refunded order whose invoice still needs a credit note. */
@@ -3033,6 +3134,8 @@ export interface Warehouse {
   isActive: boolean;
   locationCount: number;
   stockLineCount: number;
+  /** Sellable units held here — shown beside the name in the location picker. */
+  unitsAvailable: number;
   createdAt: string;
 }
 
@@ -3084,7 +3187,7 @@ export interface StockListParams {
   warehouseId?: string;
   q?: string;
   stockFilter?: "low" | "out" | "oversold";
-  sortBy?: "available" | "onHand" | "updatedAt" | "sku";
+  sortBy?: "product" | "available" | "onHand" | "updatedAt" | "sku";
   sortOrder?: "asc" | "desc";
 }
 
@@ -3119,14 +3222,65 @@ export interface LedgerParams {
   dateTo?: string;
 }
 
+/** Keep in step with ADJUSTMENT_REASONS on the server. */
+export type AdjustmentReason =
+  | "adjustment"
+  | "count"
+  | "damage"
+  | "found"
+  | "correction"
+  | "received"
+  | "restock"
+  | "shrinkage"
+  | "quality"
+  | "other";
+
 export interface CreateAdjustmentRequest {
   variantId: string;
-  warehouseId?: string;
+  /** Required for warehousing orgs — the location the write lands on. */
+  warehouseId: string;
   bucket: StockBucket;
   delta?: number;
   setTo?: number;
-  reason?: "adjustment" | "count" | "damage" | "found" | "correction";
+  reason?: AdjustmentReason;
   note?: string;
+}
+
+/** The full set of locations a variant is stocked at — sent whole. */
+export interface SetVariantLocationsRequest {
+  warehouseIds: string[];
+}
+
+export interface SetVariantLocationsResponse {
+  ok: boolean;
+  added: number;
+  removed: number;
+  /** A Shopify location changed, so the product now needs a sync. */
+  needsShopifySync: boolean;
+}
+
+export interface BulkAdjustmentRequest {
+  warehouseId: string;
+  items: Array<{
+    variantId: string;
+    bucket: StockBucket;
+    delta?: number;
+    setTo?: number;
+  }>;
+  reason?: AdjustmentReason;
+  note?: string;
+}
+
+export interface BulkAdjustmentResponse {
+  ok: boolean;
+  applied: number;
+  results: Array<{
+    variantId: string;
+    bucket: StockBucket;
+    delta: number;
+    changed: boolean;
+    inventoryQuantity: number;
+  }>;
 }
 
 export interface GenerateCodesRequest {
@@ -3140,11 +3294,30 @@ export interface GenerateCodesRequest {
   filter?: "missing-sku" | "missing-barcode" | "missing-or-generated" | "all";
   overwrite?: boolean;
   /**
-   * Barcode value shape (generate-barcodes only). "sku" copies the SKU
-   * verbatim (default); "short" mints a 6-digit numeric code that fits small
-   * and jewellery label stock, which an 18-character SKU cannot.
+   * Barcode value shape (generate-barcodes only). "short" mints a 6-digit
+   * numeric code that fits small and jewellery label stock, which an
+   * 18-character SKU cannot — it is the default. "sku" copies the SKU
+   * verbatim, the original behaviour.
    */
   format?: "sku" | "short";
+}
+
+/**
+ * Org-wide code coverage, behind the "Product codes" dialog. Each figure is
+ * the exact target set of one action, so a zero means that action has nothing
+ * to do and is not offered.
+ */
+export interface CodeStatus {
+  totalVariants: number;
+  missingSku: number;
+  missingBarcode: number;
+  /** CRM-generated barcodes too long to print on small label stock. */
+  longBarcode: number;
+  /**
+   * The prefix a generated SKU will actually start with — already resolved
+   * through the org-name fallback, so do not re-derive it here.
+   */
+  skuPrefix: string;
 }
 
 export interface GenerateCodesResult {
@@ -3276,835 +3449,4 @@ export interface LabelData {
   barcode: string | null;
   price: number | string;
   defaultQty: number;
-}
-
-// ─── Conversation Types ──────────────────────────────────────────────────────
-
-/**
- * The subset of ChannelPlatform that can carry a two-way conversation.
- *
- * Deliberately a subset of the real enum rather than a parallel vocabulary, so
- * ChannelBadge and CHANNEL_ICON (components/app/channel-badge.tsx:15) work
- * unmodified. The placeholder set this replaces (email|sms|whatsapp|chat)
- * matched nothing the backend can support.
- */
-export type ConversationChannel = "WHATSAPP" | "INSTAGRAM" | "FACEBOOK";
-
-export type ConversationStatus = "OPEN" | "SNOOZED" | "RESOLVED";
-
-/** Left-rail buckets. Server-computed — the client never re-derives the rules. */
-export type ConversationFolder =
-  | "INBOX"
-  | "UNASSIGNED"
-  | "MINE"
-  | "SNOOZED"
-  | "RESOLVED";
-
-export type MessageDirection = "INBOUND" | "OUTBOUND";
-
-/** Outbound lifecycle. QUEUED is the optimistic state; FAILED is terminal-until-retry. */
-export type MessageStatus = "QUEUED" | "SENT" | "DELIVERED" | "READ" | "FAILED";
-
-export type MessageKind =
-  | "TEXT"
-  | "IMAGE"
-  | "TEMPLATE"
-  | "CATALOG"
-  | "ORDER_CARD"
-  | "SYSTEM";
-
-/** An agent who can be assigned a conversation. `id` joins to OrgMember.user.id. */
-export interface Assignee {
-  id: string;
-  name: string;
-  avatarUrl: string | null;
-}
-
-/**
- * The WhatsApp 24h customer-service window.
- *
- * Carries an ABSOLUTE expiry, never a remaining-milliseconds number: a duration
- * is stale the instant it leaves the server, and a client that decrements it
- * drifts on every dropped frame and freezes outright when the laptop sleeps.
- * The client recomputes from `expiresAt` on each tick.
- *
- * `isOpen` is the server's own view at response time — advisory only.
- */
-export interface SessionWindow {
-  openedAt: string;
-  /** Null on channels that have no window concept. */
-  expiresAt: string | null;
-  isOpen: boolean;
-}
-
-/**
- * A conversation tag.
- *
- * The server sends a semantic TONE, never a colour: a hex on the wire would
- * land in a component (which DESIGN.md rule 1 forbids) and would not flip for
- * dark mode. The client maps tone → token classes in exactly one place.
- */
-export interface ConversationTag {
-  id: string;
-  label: string;
-  tone: "brand" | "info" | "success" | "warning" | "danger" | "neutral";
-}
-
-/** The person on the other end. `customerId` is null for an unmatched number. */
-export interface ConversationCustomer {
-  customerId: string | null;
-  name: string;
-  phone: string | null;
-  email: string | null;
-  avatarUrl: string | null;
-}
-
-export interface MessageAttachment {
-  id: string;
-  type: "IMAGE" | "FILE" | "AUDIO";
-  url: string;
-  name: string | null;
-}
-
-/**
- * A product shared into a conversation.
- *
- * Denormalised on purpose — title, price and image are COPIED at send time
- * rather than resolved from the catalogue on read. A shared product is a
- * statement about what was offered at that moment; re-resolving it later would
- * silently rewrite history when the price changes, and would blank the card
- * entirely once the product is archived or deleted.
- */
-export interface MessageProduct {
-  productId: string;
-  /** Null when shared without pinning a variant. */
-  variantId: string | null;
-  title: string;
-  /** e.g. "L / Olive". Null when no variant was pinned. */
-  variantTitle: string | null;
-  sku: string | null;
-  /** The exact price when a variant is pinned; null when it is not. */
-  price: number | null;
-  /** The product's spread, used when no variant is pinned. */
-  priceRange: { min: number; max: number } | null;
-  currency: string;
-  imageUrl: string | null;
-}
-
-export interface ConversationMessage {
-  id: string;
-  conversationId: string;
-  /**
-   * Echoed back from SendMessageRequest so an optimistic bubble is reconciled
-   * rather than duplicated. Null on anything we did not send.
-   */
-  clientId: string | null;
-  direction: MessageDirection;
-  kind: MessageKind;
-  body: string;
-  attachments: MessageAttachment[];
-  /**
-   * Products shared in this message. Always an array — an optional field would
-   * force a `?? []` at every render site for no gain.
-   */
-  products: MessageProduct[];
-  /** Meaningful for OUTBOUND only. */
-  status: MessageStatus;
-  /** Null for inbound and for automation. */
-  author: Assignee | null;
-  createdAt: string;
-  deliveredAt: string | null;
-  readAt: string | null;
-  failureReason: string | null;
-}
-
-/**
- * An internal note.
- *
- * Its own entity, deliberately NOT a MessageKind: a note has no channel, no
- * delivery status, and must never be sendable to the customer. Folding it into
- * ConversationMessage makes "accidentally sent the internal note" a one-line
- * bug. The thread merges the two streams by createdAt on the client.
- */
-export interface InternalNote {
-  id: string;
-  conversationId: string;
-  body: string;
-  author: Assignee;
-  createdAt: string;
-}
-
-/** List-row projection of a conversation. */
-export interface Conversation {
-  id: string;
-  channel: ConversationChannel;
-  status: ConversationStatus;
-  folders: ConversationFolder[];
-  customer: ConversationCustomer;
-  assignee: Assignee | null;
-  tags: ConversationTag[];
-  /** Denormalised so a 50-row list is one request, not 51. */
-  lastMessage: {
-    preview: string;
-    direction: MessageDirection;
-    createdAt: string;
-  } | null;
-  unreadCount: number;
-  snoozedUntil: string | null;
-  sessionWindow: SessionWindow | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface ConversationDetail extends Conversation {
-  messages: ConversationMessage[];
-  notes: InternalNote[];
-  insights: ConversationInsights;
-}
-
-/** Commerce snapshot for the right rail. */
-export interface ConversationInsights {
-  currency: string;
-  lifetimeSpend: number;
-  ordersCount: number;
-  lastOrder: ConversationLastOrder | null;
-}
-
-export interface ConversationLastOrder {
-  /** Real Order id — the panel links to /orders/:id. */
-  id: string;
-  name: string;
-  /** Reuses the existing enums so lib/order-status.ts renders the badge. */
-  financialStatus: FinancialStatus;
-  fulfillmentStatus: FulfillmentStatus;
-  totalPrice: number;
-  placedAt: string;
-  items: {
-    title: string;
-    variantTitle: string | null;
-    quantity: number;
-    price: number;
-    imageUrl: string | null;
-  }[];
-  shipping: {
-    carrier: string | null;
-    trackingNumber: string | null;
-    etaLabel: string | null;
-  } | null;
-}
-
-// ── Conversation requests / responses ──
-
-export type ConversationSort = "NEWEST" | "OLDEST" | "UNREAD_FIRST";
-
-export interface ConversationListParams {
-  folder?: ConversationFolder;
-  tagId?: string;
-  search?: string;
-  sort?: ConversationSort;
-  page?: number;
-  limit?: number;
-}
-
-/**
- * Folder and tag counts, on their own endpoint.
- *
- * NOT part of the list response: the rail must read "Inbox 12" while you are
- * looking at Unassigned. Counts riding on the list would be scoped to the
- * active filter and every number would collapse to the visible row count.
- */
-export interface ConversationInboxSummary {
-  folders: { folder: ConversationFolder; count: number }[];
-  tags: (ConversationTag & { count: number })[];
-}
-
-/** `assigneeId: null` unassigns. */
-export interface AssignConversationRequest {
-  assigneeId: string | null;
-}
-
-export interface SnoozeConversationRequest {
-  /** ISO timestamp. */
-  until: string;
-}
-
-/** Whole array, matching the UpdateCustomerRequest.tags convention. */
-export interface UpdateConversationTagsRequest {
-  tagIds: string[];
-}
-
-export interface SendMessageRequest {
-  /** May be empty when `products` is not — a product card is a message on its own. */
-  body: string;
-  /** Defaults to TEXT; send CATALOG when products are attached. */
-  kind?: MessageKind;
-  /** Required — see ConversationMessage.clientId. */
-  clientId: string;
-  products?: MessageProduct[];
-}
-
-export interface AddNoteRequest {
-  body: string;
-}
-
-export interface MarkReadRequest {
-  upToMessageId?: string;
-}
-
-export interface MarkReadResponse {
-  conversationId: string;
-  unreadCount: number;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ─── Logistics Types ───
-//
-// There is no logistics module on the server: no Shipment table, no courier
-// integration, no AWB anywhere. Everything below describes the API this module
-// WILL have, and is currently served by `lib/mock/logistics-store.ts` through
-// `services/logistics.service.ts` — the same arrangement the Conversation
-// section uses. See that service's header for the swap contract.
-//
-// The one piece of real shipment data in the app today is the tracking triple
-// on `OrderFulfillment` (trackingNumber / trackingUrl / trackingCompany).
-// `Shipment.fulfillmentId` is where the two will meet.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Prepaid vs cash-on-delivery. Drives COD amount, courier eligibility and remittance. */
-export type PaymentMode = "PREPAID" | "COD";
-
-/**
- * The forward-journey states, in the order they occur.
- *
- * `DELAYED` is a stored state rather than a derived one: a courier can report a
- * delay while the parcel is still in transit, and operators filter on it
- * directly. `NDR` likewise — an undelivered attempt is its own state, not a flag
- * on OUT_FOR_DELIVERY, because the shipment stops moving until someone acts.
- */
-export type ShipmentStatus =
-  | "DRAFT"
-  | "COURIER_ASSIGNED"
-  | "AWB_ASSIGNED"
-  | "READY_TO_SHIP"
-  | "PICKUP_SCHEDULED"
-  | "PICKED_UP"
-  | "IN_TRANSIT"
-  | "OUT_FOR_DELIVERY"
-  | "DELIVERED"
-  | "DELAYED"
-  | "NDR"
-  | "RTO_INITIATED"
-  | "RTO_IN_TRANSIT"
-  | "RTO_DELIVERED"
-  | "CANCELLED";
-
-/**
- * Coarse buckets for the shipment list's tab strip. Fifteen statuses will not
- * fit a segmented control, so the tabs filter by group and the filter drawer
- * offers the full status list as a multi-select.
- */
-export type ShipmentStatusGroup =
-  | "ALL"
-  | "READY"
-  | "IN_TRANSIT"
-  | "OUT_FOR_DELIVERY"
-  | "DELIVERED"
-  | "EXCEPTION";
-
-export type ShipmentServiceType = "SURFACE" | "EXPRESS" | "AIR" | "SAME_DAY";
-
-/** What an order in the "Orders to Ship" queue is waiting on. */
-export type ShippableOrderStatus =
-  | "UNFULFILLED"
-  | "READY_TO_PROCESS"
-  | "ON_HOLD"
-  | "EXCEPTION"
-  | "PARTIALLY_SHIPPED";
-
-/** A postal address as logistics needs it — flattened, always with a pincode. */
-export interface ShippingAddress {
-  name: string;
-  phone: string;
-  email?: string;
-  line1: string;
-  line2?: string;
-  city: string;
-  state: string;
-  pincode: string;
-  country: string;
-  /** Set when a courier or the operator has corrected the original address. */
-  isVerified?: boolean;
-}
-
-/** One physical box. A shipment can hold several. */
-export interface ShipmentPackage {
-  id: string;
-  /** Free-form label the operator picked — "Bag", "Box", a custom preset name. */
-  type: string;
-  /** Centimetres. */
-  length: number;
-  width: number;
-  height: number;
-  /** Kilograms, as weighed. */
-  weight: number;
-  /** How many identical boxes this row represents. */
-  count: number;
-}
-
-export interface ShipmentLineItem {
-  id: string;
-  productId: string;
-  variantId: string;
-  title: string;
-  variantTitle?: string;
-  sku: string;
-  quantity: number;
-  price: number;
-  imageUrl?: string | null;
-}
-
-/** One tracking scan or internal state change. Powers the vertical timeline. */
-export interface ShipmentEvent {
-  id: string;
-  status: ShipmentStatus;
-  label: string;
-  /** Courier remark, verbatim. Absent for internal (CRM-generated) events. */
-  remark?: string;
-  location?: string;
-  occurredAt: string;
-  /** COURIER events came off a scan; SYSTEM ones we generated. */
-  source: "COURIER" | "SYSTEM" | "USER";
-  /** Renders the node in danger and offers an inline action. */
-  isException?: boolean;
-}
-
-/** List-row shape. */
-export interface Shipment {
-  id: string;
-  /** Human-facing id, e.g. "SHP-10452". */
-  reference: string;
-  orderId: string;
-  /** Shopify order name, e.g. "#10452". */
-  orderName: string;
-  /** Links back to the real OrderFulfillment once a backend exists. */
-  fulfillmentId: string | null;
-  customerId: string | null;
-  customerName: string;
-  customerPhone: string;
-  courierId: string | null;
-  courierName: string | null;
-  serviceType: ShipmentServiceType | null;
-  /** Null until AWB generation succeeds. */
-  awb: string | null;
-  trackingUrl: string | null;
-  status: ShipmentStatus;
-  paymentMode: PaymentMode;
-  /** Only meaningful when paymentMode is COD. */
-  codAmount: number;
-  orderValue: number;
-  currency: string;
-  packageCount: number;
-  /** Kilograms — the billable figure, max(actual, volumetric). */
-  chargeableWeight: number;
-  shippingCost: number;
-  pickupLocationId: string;
-  pickupLocationName: string;
-  destinationCity: string;
-  destinationState: string;
-  destinationPincode: string;
-  channel: ChannelRef | null;
-  createdAt: string;
-  expectedDeliveryAt: string | null;
-  deliveredAt: string | null;
-  /** Set when the courier promise date has passed with no delivery scan. */
-  isDelayed: boolean;
-  ndrCaseId: string | null;
-  rtoCaseId: string | null;
-  returnRequestId: string | null;
-}
-
-export interface ShipmentDetail extends Shipment {
-  origin: ShippingAddress;
-  destination: ShippingAddress;
-  packages: ShipmentPackage[];
-  lineItems: ShipmentLineItem[];
-  events: ShipmentEvent[];
-  manifestId: string | null;
-  manifestReference: string | null;
-  pickupRequestId: string | null;
-  /** Freight + COD fee + fuel surcharge, so the cost card can break it down. */
-  costBreakdown: { label: string; amount: number }[];
-  /** Present once a label has been generated. */
-  labelUrl: string | null;
-  customerTags: string[];
-  notes: string | null;
-}
-
-export interface ShipmentListParams {
-  page?: number;
-  limit?: number;
-  search?: string;
-  group?: ShipmentStatusGroup;
-  status?: ShipmentStatus[];
-  courierId?: string[];
-  paymentMode?: PaymentMode;
-  pickupLocationId?: string[];
-  channelId?: string;
-  destinationState?: string[];
-  dateFrom?: string;
-  dateTo?: string;
-  /** Convenience flags the filter drawer exposes as checkboxes. */
-  delayedOnly?: boolean;
-  ndrOnly?: boolean;
-  rtoOnly?: boolean;
-}
-
-/** A Shopify order sitting in the fulfillment queue. */
-export interface ShippableOrder {
-  id: string;
-  orderName: string;
-  customerId: string | null;
-  customerName: string;
-  customerPhone: string;
-  destinationCity: string;
-  destinationState: string;
-  destinationPincode: string;
-  itemCount: number;
-  items: ShipmentLineItem[];
-  orderValue: number;
-  currency: string;
-  paymentMode: PaymentMode;
-  isPaid: boolean;
-  pickupLocationId: string | null;
-  pickupLocationName: string | null;
-  channel: ChannelRef | null;
-  createdAt: string;
-  /** When this order breaches its ship-by promise. Drives the SLA column. */
-  shipBy: string;
-  status: ShippableOrderStatus;
-  /** Why it is on hold or in exception — shown as the row sub-label. */
-  holdReason: string | null;
-}
-
-export interface ShippableOrderListParams {
-  page?: number;
-  limit?: number;
-  search?: string;
-  status?: ShippableOrderStatus | "ALL";
-  pickupLocationId?: string[];
-  paymentMode?: PaymentMode;
-  channelId?: string;
-  sla?: "breached" | "at-risk" | "ok";
-}
-
-export interface CourierPartner {
-  id: string;
-  name: string;
-  /** Two-letter mark used as the avatar fallback — no logo assets exist. */
-  initials: string;
-  isActive: boolean;
-  supportsCod: boolean;
-  serviceTypes: ShipmentServiceType[];
-  /** Rough coverage figure for the setup screen. */
-  pincodesServed: number;
-  /** Average turnaround in days, one decimal. */
-  avgTat: number;
-  deliveryRate: number;
-  ndrRate: number;
-  rtoRate: number;
-  avgCost: number;
-  /** Out of 5. */
-  rating: number;
-  shipmentCount: number;
-  /** Manual ordering used by the shipping rules fallback chain. */
-  priority: number;
-}
-
-export interface CourierZone {
-  zone: string;
-  description: string;
-  tat: string;
-  baseRate: number;
-  additionalRate: number;
-}
-
-/** One courier's offer for a specific shipment. */
-export interface CourierQuote {
-  courierId: string;
-  courierName: string;
-  initials: string;
-  serviceType: ShipmentServiceType;
-  /** Total the merchant pays. */
-  cost: number;
-  breakdown: { label: string; amount: number }[];
-  estimatedPickupAt: string;
-  estimatedDeliveryAt: string;
-  supportsCod: boolean;
-  rating: number;
-  deliveryRate: number;
-  rtoRate: number;
-  /** False renders the card greyed with unavailableReason shown, not hidden. */
-  isServiceable: boolean;
-  unavailableReason?: string;
-  /** Why the recommender picked this one. Shown on the ribbon. */
-  recommendationReason?: string;
-}
-
-/**
- * A warehouse in its logistics role. Mirrors the real Warehouse record rather
- * than replacing it — warehouse CRUD stays on the Inventory screens, and this
- * page links there instead of offering a second place to edit the same row.
- */
-export interface PickupLocation {
-  id: string;
-  warehouseId: string;
-  name: string;
-  code: string;
-  address: ShippingAddress;
-  isDefault: boolean;
-  isActive: boolean;
-  contactName: string;
-  contactPhone: string;
-  /** Local time, HH:mm — after this, pickups roll to the next day. */
-  cutoffTime: string;
-  operatingHours: string;
-  /** Parcels this location can hand over per day. */
-  dailyCapacity: number;
-  usedCapacity: number;
-  serviceablePincodes: number;
-  skuCount: number;
-  ordersAwaiting: number;
-  shipmentsProcessed30d: number;
-}
-
-/** Counts for the section rail and the overview pipeline strip. */
-export interface LogisticsSummary {
-  ordersToShip: number;
-  readyToShip: number;
-  pickupPending: number;
-  inTransit: number;
-  outForDelivery: number;
-  deliveredToday: number;
-  delayed: number;
-}
-
-export interface CourierPerformanceRow {
-  courierId: string;
-  courierName: string;
-  initials: string;
-  shipments: number;
-  deliveryRate: number;
-  ndrRate: number;
-  rtoRate: number;
-  avgTat: number;
-  avgCost: number;
-}
-
-export interface LogisticsOverview {
-  summary: LogisticsSummary;
-  courierPerformance: CourierPerformanceRow[];
-}
-
-// ─── Logistics write payloads ───
-
-export interface CreateShipmentRequest {
-  orderIds: string[];
-  pickupLocationId: string;
-  packages: Omit<ShipmentPackage, "id">[];
-  paymentMode: PaymentMode;
-  codAmount?: number;
-  courierId: string;
-  serviceType: ShipmentServiceType;
-  /** Runs AWB + label generation as part of the create call. */
-  generateAwb?: boolean;
-}
-
-export interface CreateShipmentResult {
-  shipments: Shipment[];
-  /** Per-order outcome, so bulk mode can report partial success. */
-  results: {
-    orderId: string;
-    orderName: string;
-    shipmentId: string | null;
-    error: string | null;
-  }[];
-}
-
-export interface CourierQuoteRequest {
-  orderIds: string[];
-  pickupLocationId: string;
-  packages: Omit<ShipmentPackage, "id">[];
-  paymentMode: PaymentMode;
-  codAmount?: number;
-}
-
-export interface BulkOrderActionRequest {
-  orderIds: string[];
-  action: "HOLD" | "RELEASE_HOLD" | "ASSIGN_LOCATION";
-  pickupLocationId?: string;
-  reason?: string;
-}
-
-export interface GenerateAwbResult {
-  shipmentId: string;
-  awb: string;
-  trackingUrl: string;
-  labelUrl: string;
-}
-
-// ─── Logistics: Returns & RTO ───
-
-/** Whether a parcel is coming back because the customer sent it or because it never landed. */
-export type ReturnKind = "CUSTOMER_RETURN" | "RTO";
-
-export type ReturnStage =
-  | "REQUESTED"
-  | "IN_TRANSIT"
-  | "OUT_FOR_DELIVERY"
-  | "RECEIVED"
-  | "REFUNDED"
-  | "EXCEPTION";
-
-export interface ReturnRecord {
-  id: string;
-  orderId: string;
-  orderName: string;
-  customerName: string;
-  reason: string;
-  kind: ReturnKind;
-  stage: ReturnStage;
-  refundAmount: number;
-  currency: string;
-  /** The one thing to do next, e.g. "Issue refund". */
-  actionLabel: string;
-  requestedAt: string;
-}
-
-/** One bar in the "why parcels come back" panel. */
-export interface ReturnReasonShare {
-  label: string;
-  /** 0-100. */
-  percent: number;
-  tone: "brand" | "danger" | "warning" | "neutral" | "info";
-}
-
-export interface ReturnsOverview {
-  openReturns: number;
-  rtoInTransit: number;
-  rtoRate: number;
-  refundsPending: number;
-  currency: string;
-  returns: ReturnRecord[];
-  reasons: ReturnReasonShare[];
-  /** Total the reason breakdown is drawn from. */
-  reasonSampleSize: number;
-  insight: string;
-}
-
-// ─── Logistics: Carriers & rates ───
-
-export type CarrierAccountState = "CONNECTED" | "RATE_LIMITED" | "NOT_LINKED";
-
-export interface CarrierAccount {
-  id: string;
-  name: string;
-  initials: string;
-  /** e.g. "acct 4820", or "not linked". */
-  accountLabel: string;
-  state: CarrierAccountState;
-  onTimeRate: number;
-  avgCost: number;
-  volume30d: number;
-  /** e.g. "Surface · Express · COD". */
-  services: string;
-}
-
-export interface RateCardRow {
-  id: string;
-  service: string;
-  carrierName: string;
-  base: number;
-  additional: number;
-  /** Free text — carriers quote COD as "₹28 or 1.5%". */
-  codFee: string;
-  rtoCharge: string;
-  transit: string;
-}
-
-export interface CarrierRule {
-  id: string;
-  position: number;
-  when: string;
-  then: string;
-  state: "ACTIVE" | "FALLBACK";
-}
-
-export interface CarriersOverview {
-  carriers: CarrierAccount[];
-  rateCard: RateCardRow[];
-  rules: CarrierRule[];
-  currency: string;
-}
-
-// ─── Logistics: Zones & delivery areas ───
-
-export interface ZoneRate {
-  id: string;
-  name: string;
-  /** e.g. "Orders over 999". */
-  condition: string;
-  price: number;
-}
-
-export interface DeliveryZone {
-  id: string;
-  name: string;
-  tone: "brand" | "success" | "neutral" | "muted";
-  coverage: string;
-  transit: string;
-  rates: ZoneRate[];
-}
-
-export interface ZoneShare {
-  zoneId: string;
-  name: string;
-  tone: DeliveryZone["tone"];
-  orders: number;
-  /** 0-100. */
-  percent: number;
-}
-
-export interface NonServiceablePincode {
-  pincode: string;
-  place: string;
-  note: string;
-  blockedLabel: string;
-}
-
-export interface ZonesOverview {
-  zones: DeliveryZone[];
-  share: ZoneShare[];
-  nonServiceable: NonServiceablePincode[];
-  currency: string;
-}
-
-// ─── Logistics: Delivery analytics ───
-
-export interface DeliveryAnalytics {
-  onTimeRate: number;
-  avgTransitDays: number;
-  spend: number;
-  costPerParcel: number;
-  currency: string;
-  /** One entry a day, oldest first. */
-  daily: { date: string; onTime: number; late: number }[];
-  carrierScores: { carrierId: string; name: string; onTimePct: number; cost: number }[];
-  slowestRoutes: { route: string; days: number; volume: number }[];
-  spendBreakdown: {
-    label: string;
-    amount: number;
-    percent: number;
-    tone: "brand" | "info" | "warning" | "neutral";
-  }[];
-  carrierInsight: string;
 }

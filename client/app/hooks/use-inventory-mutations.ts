@@ -5,6 +5,7 @@ import { handleMutationError } from "~/lib/handle-mutation-error";
 import { inventoryKeys } from "./use-inventory-queries";
 import { productKeys } from "./use-product-queries";
 import type {
+  BulkAdjustmentRequest,
   BulkLocationsRequest,
   CreateAdjustmentRequest,
   CreateWarehouseRequest,
@@ -54,6 +55,30 @@ export function useCreateAdjustmentMutation(options: { silent?: boolean } = {}) 
 }
 
 /**
+ * Saves a screenful of edited quantities in one call.
+ *
+ * The server applies them atomically, so a rejection means nothing was written
+ * and the merchant's edits are all still on screen to correct or discard —
+ * which is why the error is handed back to the caller rather than toasted here.
+ */
+export function useBulkAdjustmentMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: BulkAdjustmentRequest) =>
+      inventoryService.createAdjustmentsBulk(data),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
+      queryClient.invalidateQueries({ queryKey: productKeys.all });
+      toast.success(
+        res.applied === 1
+          ? "1 quantity updated."
+          : `${res.applied} quantities updated.`,
+      );
+    },
+  });
+}
+
+/**
  * The response cannot tell us how many were left alone: the service filters
  * out anything that already has a code BEFORE counting, so `skipped` comes
  * back as `variants.length - generated` — always 0. When the caller named an
@@ -75,13 +100,19 @@ export function useGenerateSkusMutation() {
   return useMutation({
     mutationFn: (data: GenerateCodesRequest) => inventoryService.generateSkus(data),
     onSuccess: (res, variables) => {
-      queryClient.invalidateQueries({ queryKey: inventoryKeys.all });
-      queryClient.invalidateQueries({ queryKey: productKeys.all });
       const unchanged = unchangedCount(variables, res.generated);
       toast.success(
         `Generated ${res.generated} SKU${res.generated === 1 ? "" : "s"}` +
           (unchanged > 0 ? ` · ${unchanged} unchanged` : "") + ".",
       );
+      // Returned so the mutation stays pending until the refetch lands: the
+      // response carries counts, not codes, so the new SKU only reaches the
+      // screen via the product query — a "Create SKU" button that re-enabled
+      // on a still-empty field read as "nothing happened".
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: inventoryKeys.all }),
+        queryClient.invalidateQueries({ queryKey: productKeys.all }),
+      ]);
     },
     onError: (error) => handleMutationError(error, "Failed to generate SKUs."),
   });

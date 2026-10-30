@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isAxiosError } from "axios";
 import { Search, Plus } from "lucide-react";
 import { useProducts } from "~/hooks/use-product-queries";
 import { useOrganizationSettings } from "~/hooks/use-settings-queries";
@@ -25,6 +26,22 @@ export type CartLineSeed = {
 };
 
 
+/**
+ * One line for the picker's error state. Nest's ValidationPipe returns
+ * `message` as an array (e.g. "property priceIn should not exist" when the
+ * API build is older than the client), so the first entry is shown as-is.
+ */
+function describeLoadError(error: unknown): string {
+  if (isAxiosError(error)) {
+    if (!error.response) return "the server could not be reached.";
+    const message = (error.response.data as { message?: string | string[] } | undefined)
+      ?.message;
+    const text = Array.isArray(message) ? message[0] : message;
+    return text || `request failed (${error.response.status}).`;
+  }
+  return "something went wrong.";
+}
+
 export function ProductPicker({
   onAdd,
   currency,
@@ -41,7 +58,7 @@ export function ProductPicker({
   // the picker showed a $749.95 snowboard as "₹749.95" and seeded the cart with
   // 749.95 — about a ninety-fourth of the real price. The server re-converts at
   // submit, so what is shown here is what gets charged.
-  const { data, isLoading } = useProducts({
+  const { data, isLoading, isError, error, refetch, isFetching } = useProducts({
     search: debounced || undefined,
     limit: 8,
     status: "ACTIVE",
@@ -54,7 +71,9 @@ export function ProductPicker({
     orgSettings?.productSettings?.trackQuantityGlobally === true;
 
   const rows: Array<{ product: Product; variant: ProductVariant }> = [];
-  for (const product of data?.data ?? []) {
+  // On error, `keepPreviousData` would still hand back the last good page —
+  // rows for a different search term. Show none rather than stale matches.
+  for (const product of isError ? [] : (data?.data ?? [])) {
     for (const variant of product.variants) {
       if (excludedVariantIds.has(variant.id)) continue;
       rows.push({ product, variant });
@@ -110,6 +129,22 @@ export function ProductPicker({
       <div className="rounded-lg border bg-white dark:bg-gray-900 max-h-72 overflow-y-auto">
         {isLoading ? (
           <p className="p-3 text-xs text-muted-foreground">Searching…</p>
+        ) : isError ? (
+          // A failed request used to fall through to "No products match",
+          // which read as an empty catalogue and hid the real problem.
+          <div className="flex items-center justify-between gap-3 p-3">
+            <p className="text-xs text-red-600">
+              Couldn't load products: {describeLoadError(error)}
+            </p>
+            <button
+              type="button"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              className="shrink-0 rounded-lg border px-2.5 py-1 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {isFetching ? "Retrying…" : "Retry"}
+            </button>
+          </div>
         ) : rows.length === 0 ? (
           <p className="p-3 text-xs text-muted-foreground">
             {debounced

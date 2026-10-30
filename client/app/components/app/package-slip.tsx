@@ -46,10 +46,30 @@ export interface PackageSlipProps {
   showBarcodeZone?: boolean;
   /** Optional contents list. Off by default — the reference design has none. */
   showItems?: boolean;
+  /**
+   * Editor preview only: mark where an optional zone sits while its checkbox
+   * row is hovered. The print sheet never passes it, so nothing here can reach
+   * paper.
+   */
+  highlight?: SlipZone | null;
 }
+
+/** The optional zones a merchant can switch on and off. */
+export type SlipZone = "barcode" | "items";
 
 /** Warm dark used for the header band and the care tiles. */
 const INK = "#3f3a35";
+
+/**
+ * Inset, so the slip root's `overflow: hidden` cannot clip the sides. An
+ * outline and a background only — neither takes part in layout, so hovering
+ * cannot move anything or change what AutoFitText measures.
+ */
+const HIGHLIGHT: React.CSSProperties = {
+  outline: "2px solid #94E802",
+  outlineOffset: "-2px",
+  background: "rgba(206, 241, 123, 0.35)",
+};
 
 /**
  * Shrink text until it stops overflowing its box.
@@ -186,6 +206,7 @@ export function PackageSlip({
   scale,
   showBarcodeZone = true,
   showItems = false,
+  highlight = null,
 }: PackageSlipProps) {
   /** Font size in points, scaled to the stock. */
   const pt = (base: number) => `${(base * scale).toFixed(2)}pt`;
@@ -371,6 +392,7 @@ export function PackageSlip({
             padding: mm(2),
             height: mm(18),
             boxSizing: "border-box",
+            ...(highlight === "items" ? HIGHLIGHT : null),
           }}
         >
           <AutoFitText
@@ -404,11 +426,29 @@ export function PackageSlip({
 
       {/* Reserved barcode strip — intentionally blank, see showBarcodeZone. */}
       {showBarcodeZone && (
-        <div style={{ padding: `${mm(2.4)} 0 ${mm(1.2)}` }}>
+        <div
+          style={{
+            padding: `${mm(2.4)} 0 ${mm(1.2)}`,
+            ...(highlight === "barcode" ? HIGHLIGHT : null),
+          }}
+        >
           <p style={{ margin: 0, fontSize: pt(6), fontWeight: 700, letterSpacing: "0.04em" }}>
             Barcode :
           </p>
-          <div style={{ height: mm(16) }} />
+          <div
+            style={{
+              height: mm(16),
+              boxSizing: "border-box",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: pt(5),
+              color: "#3d6000",
+              border: highlight === "barcode" ? "1px dashed #3d6000" : undefined,
+            }}
+          >
+            {highlight === "barcode" ? "Courier label goes here" : null}
+          </div>
         </div>
       )}
 

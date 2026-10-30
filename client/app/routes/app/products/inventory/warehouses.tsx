@@ -1,7 +1,6 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router";
 import {
-  ArrowLeft,
   Grid3x3,
   Pencil,
   Plus,
@@ -19,15 +18,23 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { useGstins, useIndianStates } from "~/hooks/use-gst-queries";
-import { EmptyState } from "~/components/app/empty-state";
-import { QueryErrorState } from "~/components/app/query-error-state";
-import { TableSkeleton } from "~/components/app/table-skeleton";
+import { useChannels } from "~/hooks/use-channel-queries";
+import { Tip } from "~/components/ui/tooltip";
 import { ModalShell, DialogFooter } from "~/components/app/order-dialog-primitives";
+import {
+  DataTable,
+  MonoCell,
+  NumCell,
+  useDataTableState,
+  type ColumnDef,
+} from "~/components/app/data-table";
+import { useListUrlState } from "~/hooks/use-list-url-state";
 import {
   useInventoryStatus,
   useWarehouseLocations,
   useWarehouses,
 } from "~/hooks/use-inventory-queries";
+import { InventoryTabs } from "~/components/app/inventory/inventory-tabs";
 import {
   useBulkCreateLocationsMutation,
   useCreateWarehouseMutation,
@@ -231,24 +238,145 @@ export default function WarehousesPage() {
   const rows = warehouses.data ?? [];
   const shopifyMapped = rows.filter((w) => w.shopifyLocationId).length;
 
+  // Once for the page rather than once per row: the Registration column
+  // reads the linked GSTIN's state and last four digits.
+  const gstins = useGstins();
+  const columns = useMemo<ColumnDef<Warehouse>[]>(
+    () => [
+      {
+        key: "warehouse",
+        label: "Warehouse",
+        width: 260,
+        locked: true,
+        cell: (w) => (
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+              <WarehouseIcon className="size-3.5 text-muted-foreground" />
+            </span>
+            {/* The name opens the Stock tab at this location: `useSelectedLocation`
+                reads `?warehouseId` ahead of the saved choice. The Stock tab
+                lists active locations only, so an inactive one stays plain
+                text — its link would silently land on the default instead. */}
+            {w.isActive ? (
+              <Link
+                to={`/products/inventory?warehouseId=${encodeURIComponent(w.id)}`}
+                title={`View stock at ${w.name}`}
+                // Dotted at rest, like the "Stock" header on the products
+                // table, so the name reads as a link before hover.
+                className="truncate font-medium text-foreground underline decoration-dotted underline-offset-4 hover:decoration-solid"
+              >
+                {w.name}
+              </Link>
+            ) : (
+              <span
+                title="Inactive — the Stock tab shows active locations only"
+                className="truncate font-medium text-foreground"
+              >
+                {w.name}
+              </span>
+            )}
+            {w.isDefault && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-brand px-2 py-0.5 text-[10px] font-semibold text-brand-foreground">
+                <Star className="size-2.5" /> Default
+              </span>
+            )}
+          </div>
+        ),
+      },
+      { key: "code", label: "Code", width: 120, cell: (w) => <MonoCell value={w.code} /> },
+      {
+        key: "source",
+        label: "Source",
+        width: 170,
+        cell: (w) =>
+          w.shopifyLocationId ? (
+            <span className="inline-flex min-w-0 items-center gap-1 truncate text-caption text-muted-foreground">
+              <ShoppingBag className="size-3 shrink-0" /> Shopify · {w.shopifyLocationId}
+            </span>
+          ) : (
+            <span className="text-caption text-muted-foreground">Manual</span>
+          ),
+      },
+      {
+        key: "registration",
+        label: "Registration",
+        width: 170,
+        cell: (w) => {
+          if (!w.gstinId) {
+            return <span className="text-caption text-muted-foreground">Not linked</span>;
+          }
+          const linked = (gstins.data ?? []).find((g: OrganizationGstin) => g.id === w.gstinId);
+          const label = linked ? `${linked.stateName} · ${linked.gstin.slice(-4)}` : "Linked";
+          return (
+            <span className="min-w-0 truncate text-caption text-muted-foreground">
+              {label}
+              {!w.apobDeclared && (
+                <span className="ml-1 rounded bg-warning-subtle px-1 py-0.5 text-[10px] text-warning">
+                  not declared
+                </span>
+              )}
+            </span>
+          );
+        },
+      },
+      {
+        key: "locations",
+        label: "Locations",
+        width: 100,
+        align: "right",
+        cell: (w) => <NumCell value={w.locationCount} />,
+      },
+      {
+        key: "stockLines",
+        label: "Stock lines",
+        width: 100,
+        align: "right",
+        cell: (w) => <NumCell value={w.stockLineCount} />,
+      },
+      {
+        key: "state",
+        label: "State",
+        width: 90,
+        cell: (w) => (
+          <span className={w.isActive ? "text-success" : "text-muted-foreground"}>
+            {w.isActive ? "Active" : "Inactive"}
+          </span>
+        ),
+      },
+    ],
+    [gstins.data],
+  );
+  // The whole list arrives at once; the table state only carries column
+  // visibility here.
+  const list = useListUrlState("warehouses");
+  const table = useDataTableState({ key: "warehouses", list, columns });
+
+  // Creating a warehouse here is withheld while a Shopify store is connected.
+  // The CRM cannot create a Shopify location, and the stock push only sends
+  // warehouses that carry a Shopify location id, so a hand-made one would
+  // hold stock Shopify never hears about — a silent split, not an error.
+  // Locations are made in Shopify and arrive on the next sync. Treated as
+  // connected until the channels query answers, so the button never flashes
+  // enabled on load; a workspace with no Shopify store keeps it.
+  const channels = useChannels();
+  const shopifyConnected =
+    !channels.isSuccess ||
+    channels.data.some((c) => c.platform === "SHOPIFY" && c.status !== "DISCONNECTED");
+  const canCreateWarehouse = !shopifyConnected;
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Button asChild variant="ghost" size="sm" className="text-xs text-muted-foreground">
-            <Link to="/products/inventory">
-              <ArrowLeft className="size-3.5" /> Inventory
-            </Link>
-          </Button>
-          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Warehouses</h1>
+        <div className="flex flex-col gap-3">
+          <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">Locations</h1>
+          <InventoryTabs />
         </div>
-        <Button
+        <NewWarehouseButton
+          enabled={canCreateWarehouse}
+          onClick={() => setCreating(true)}
           variant="brand"
           size="action"
-          onClick={() => setCreating(true)}
-        >
-          <Plus className="size-3.5" /> New warehouse
-        </Button>
+        />
       </div>
 
       {shopifyMapped > 0 && (
@@ -259,53 +387,42 @@ export default function WarehousesPage() {
         </p>
       )}
 
-      {warehouses.isLoading ? (
-        <TableSkeleton rows={4} columns={6} />
-      ) : warehouses.isError ? (
-        <QueryErrorState resource="warehouses" onRetry={() => warehouses.refetch()} />
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={WarehouseIcon}
-          title="No warehouses yet"
-          description={
-            status.data?.warehousingEnabled
-              ? "Connect Shopify to mirror its locations automatically, or create one by hand."
-              : "Enable warehousing from the Inventory page to start tracking stock per warehouse."
-          }
-          action={
-            <Button size="sm" onClick={() => setCreating(true)}>
-              <Plus className="size-3.5" /> New warehouse
-            </Button>
-          }
-        />
-      ) : (
-        <div className="overflow-x-auto rounded-xl bg-white dark:bg-gray-900 shadow-sm ring-1 ring-border">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b text-muted-foreground">
-                <th className="px-3 py-2.5 font-medium">Warehouse</th>
-                <th className="px-3 py-2.5 font-medium">Code</th>
-                <th className="px-3 py-2.5 font-medium">Source</th>
-                <th className="px-3 py-2.5 font-medium">Registration</th>
-                <th className="px-3 py-2.5 text-right font-medium">Locations</th>
-                <th className="px-3 py-2.5 text-right font-medium">Stock lines</th>
-                <th className="px-3 py-2.5 font-medium">State</th>
-                <th className="px-3 py-2.5" />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((w) => (
-                <WarehouseRow
-                  key={w.id}
-                  warehouse={w}
-                  onEdit={() => setEditing(w)}
-                  onGenerateGrid={() => setGriddingFor(w)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <DataTable
+        state={table}
+        rows={rows}
+        rowKey={(w) => w.id}
+        meta={undefined}
+        status={{
+          isLoading: warehouses.isLoading,
+          isError: warehouses.isError,
+          refetch: warehouses.refetch,
+        }}
+        noun="warehouses"
+        searchable={false}
+        paginated={false}
+        rowActions={(w) => (
+          <WarehouseRowActions
+            warehouse={w}
+            onEdit={() => setEditing(w)}
+            onGenerateGrid={() => setGriddingFor(w)}
+          />
+        )}
+        actionsWidth={300}
+        emptyState={{
+          icon: WarehouseIcon,
+          title: "No warehouses yet",
+          description: status.data?.warehousingEnabled
+            ? "Connect Shopify to mirror its locations automatically, or create one by hand."
+            : "Enable warehousing from the Inventory page to start tracking stock per warehouse.",
+          action: (
+            <NewWarehouseButton
+              enabled={canCreateWarehouse}
+              onClick={() => setCreating(true)}
+              size="sm"
+            />
+          ),
+        }}
+      />
 
       {creating && <CreateWarehouseDialog onClose={() => setCreating(false)} />}
       {editing && <EditWarehouseDialog warehouse={editing} onClose={() => setEditing(null)} />}
@@ -316,7 +433,43 @@ export default function WarehousesPage() {
   );
 }
 
-function WarehouseRow({
+const CREATE_WITHHELD_REASON =
+  "Locations are created in Shopify and appear here on the next sync. A warehouse made here could not be pushed to Shopify, so its stock would never reach the store.";
+
+/**
+ * The "New warehouse" button, in the header and in the empty state. Disabled
+ * with a reason while a Shopify store is connected (see `canCreateWarehouse`).
+ * A disabled <button> swallows pointer events, so the tooltip hangs off a
+ * focusable wrapper, the same way the product page's Sync button does it.
+ */
+function NewWarehouseButton({
+  enabled,
+  onClick,
+  variant,
+  size,
+}: {
+  enabled: boolean;
+  onClick: () => void;
+  variant?: "brand";
+  size: "action" | "sm";
+}) {
+  const button = (
+    <Button variant={variant} size={size} disabled={!enabled} onClick={onClick}>
+      <Plus className="size-3.5" /> New warehouse
+    </Button>
+  );
+  if (enabled) return button;
+  return (
+    <Tip text={CREATE_WITHHELD_REASON} side="bottom">
+      <span tabIndex={0} className="inline-flex">
+        {button}
+      </span>
+    </Tip>
+  );
+}
+
+/** Locations / Edit / Make default. Owns the mutation so each row shows its own pending state. */
+function WarehouseRowActions({
   warehouse: w,
   onEdit,
   onGenerateGrid,
@@ -326,78 +479,26 @@ function WarehouseRow({
   onGenerateGrid: () => void;
 }) {
   const update = useUpdateWarehouseMutation();
-  const gstins = useGstins();
-  const linked = (gstins.data ?? []).find((g: OrganizationGstin) => g.id === w.gstinId);
-  const gstinLabel = linked ? `${linked.stateName} · ${linked.gstin.slice(-4)}` : "Linked";
 
   return (
-    <tr className="border-b last:border-b-0 hover:bg-gray-50 dark:hover:bg-gray-800/50">
-      <td className="px-3 py-2.5">
-        <div className="flex items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-md bg-gray-100 dark:bg-gray-800">
-            <WarehouseIcon className="size-3.5 text-gray-400" />
-          </div>
-          <span className="font-medium text-gray-900 dark:text-gray-100">{w.name}</span>
-          {w.isDefault && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-[#CEF17B] px-2 py-0.5 text-[10px] font-semibold text-gray-900">
-              <Star className="size-2.5" /> Default
-            </span>
-          )}
-        </div>
-      </td>
-      <td className="px-3 py-2.5 font-mono">{w.code}</td>
-      <td className="px-3 py-2.5">
-        {w.shopifyLocationId ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-            <ShoppingBag className="size-3" /> Shopify · {w.shopifyLocationId}
-          </span>
-        ) : (
-          <span className="text-[11px] text-muted-foreground">Manual</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5">
-        {w.gstinId ? (
-          <span className="text-[11px] text-muted-foreground">
-            {gstinLabel}
-            {!w.apobDeclared && (
-              <span className="ml-1 rounded bg-amber-50 px-1 py-0.5 text-[10px] text-amber-700">
-                not declared
-              </span>
-            )}
-          </span>
-        ) : (
-          <span className="text-[11px] text-muted-foreground">Not linked</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5 text-right tabular-nums">{w.locationCount}</td>
-      <td className="px-3 py-2.5 text-right tabular-nums">{w.stockLineCount}</td>
-      <td className="px-3 py-2.5">
-        <span className={w.isActive ? "text-green-600" : "text-muted-foreground"}>
-          {w.isActive ? "Active" : "Inactive"}
-        </span>
-      </td>
-      <td className="px-3 py-2.5">
-        <div className="flex items-center justify-end gap-1.5">
-          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={onGenerateGrid}>
-            <Grid3x3 className="size-3" /> Locations
-          </Button>
-          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={onEdit}>
-            <Pencil className="size-3" /> Edit
-          </Button>
-          {!w.isDefault && w.isActive && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-[11px]"
-              disabled={update.isPending}
-              onClick={() => update.mutate({ id: w.id, data: { isDefault: true } })}
-            >
-              Make default
-            </Button>
-          )}
-        </div>
-      </td>
-    </tr>
+    <div className="flex items-center justify-end gap-1.5">
+      <Button variant="outline" size="xs" onClick={onGenerateGrid}>
+        <Grid3x3 className="size-3" /> Locations
+      </Button>
+      <Button variant="outline" size="xs" onClick={onEdit}>
+        <Pencil className="size-3" /> Edit
+      </Button>
+      {!w.isDefault && w.isActive && (
+        <Button
+          variant="outline"
+          size="xs"
+          disabled={update.isPending}
+          onClick={() => update.mutate({ id: w.id, data: { isDefault: true } })}
+        >
+          Make default
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -503,7 +604,7 @@ function EditWarehouseDialog({
   const isShopify = !!w.shopifyLocationId;
 
   return (
-    <ModalShell title="Edit warehouse" subtitle={`${w.name} · ${w.code}`} onClose={onClose}>
+    <ModalShell title="Edit location" subtitle={`${w.name} · ${w.code}`} onClose={onClose}>
       <div className="space-y-4 px-6 py-4 text-xs">
         <label className="block space-y-1">
           <span className="font-medium text-gray-700 dark:text-gray-300">Name</span>
@@ -513,11 +614,20 @@ function EditWarehouseDialog({
             className="h-8 text-xs"
             autoFocus
           />
+          {/* Said at the point of renaming, not only in a banner further down:
+              the sync re-adopts Shopify's name on every run, so a rename here
+              silently disappears and looks like the save failed. */}
+          {isShopify && (
+            <span className="block text-[11px] text-amber-700 dark:text-amber-500">
+              Renaming here will not stick — the next sync restores the Shopify
+              name. Rename the location in Shopify instead.
+            </span>
+          )}
         </label>
 
         {isShopify && (
           <p className="rounded-md bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-            This warehouse mirrors Shopify location {w.shopifyLocationId}. Its active
+            This location mirrors Shopify location {w.shopifyLocationId}. Its active
             state follows that location on every sync, so deactivate it in Shopify
             rather than here. The address below was seeded from Shopify once and is
             yours to edit — syncing never overwrites it.

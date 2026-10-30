@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import {
   ChannelPlatform,
@@ -23,6 +24,7 @@ import {
   BulkUpdateVariantsDto,
   CreateVariantDto,
   ReorderVariantsDto,
+  SetVariantLocationsDto,
   UpdateVariantDto,
 } from './dto/variant.dto';
 import { DEFAULT_VARIANT_TITLE } from './variant-title.util';
@@ -34,9 +36,17 @@ import {
 import { ProductOptionDto } from './dto/option.dto';
 import { ensureManualChannel } from '../channel/ensure-manual-channel';
 import { ShopifyPushEnqueuer } from '../channel/shopify-push.enqueuer';
+import {
+  ShopifyPushService,
+  isStalePendingSync,
+  QUEUE_UNAVAILABLE_ERROR,
+} from '../channel/shopify-push.service';
+import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { productsOutOfSyncStampSql } from '../channel/product-sync-stamp.util';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
 import { SkuGeneratorService } from '../inventory/sku-generator.service';
+import { mutatePendingLocationChanges } from '../inventory/pending-location-changes';
 import { FxRateService } from '../common/fx/fx-rate.service';
 import { normalizeUqc } from '../gst/constants/uqc';
 import {
@@ -73,6 +83,13 @@ type ShopifySyncPatch = Partial<{
   attempts: number;
 }>;
 
+/** What became of a request to push one product to Shopify. */
+type ShopifyPushOutcome =
+  | 'QUEUED'
+  | 'ALREADY_SYNCED'
+  | 'ALREADY_QUEUED'
+  | 'QUEUE_UNAVAILABLE';
+
 @Injectable()
 export class ProductService {
   private readonly logger = new Logger(ProductService.name);
@@ -87,6 +104,7 @@ export class ProductService {
     // multi-channel catalogue — see `QueryProductsDto.priceIn`.
     private readonly fx: FxRateService,
     @Inject(IMAGE_STORAGE) private readonly imageStorage: IImageStorage,
+    private readonly shopifyPush: ShopifyPushService,
   ) { }
 
   /**
@@ -295,6 +313,8 @@ export class ProductService {
       shopifyProductId?: string;
       error?: string;
       syncedAt?: string;
+      /** When the PENDING claim was stamped; lets the UI spot an abandoned one. */
+      queuedAt?: string;
       attempts: number;
     };
   }
@@ -616,7 +636,29 @@ export class ProductService {
       return created;
     });
 
-    // Give every new variant a scannable barcode before anything can push.
+    // Give every new variant a SKU, then a scannable barcode, before anything
+    // can push.
+    //
+    // The SKU is minted for the same reason the barcode below it is: a code
+    // the merchant never had to ask for. Until this existed, barcodes appeared
+    // by themselves and SKUs did not, so the Inventory screen carried a
+    // permanent "Generate all missing SKUs" button that nobody could interpret.
+    // The generator only fills gaps (`loadTargets` defaults to `missing-sku`),
+    // so a SKU supplied in the create payload survives untouched.
+    //
+    // SKU first: both draw from one `claimSequence` run, so the two codes for
+    // a variant read consecutively rather than interleaved with its siblings'.
+    try {
+      await this.skuGenerator.generateSkus(orgId, {
+        variantIds: product.variants.map((v) => v.id),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for new product ${product.id}: ${(err as Error).message}`,
+      );
+    }
+
+    // Then the barcode.
     //
     // Labels are printed from `barcode`, falling back to `sku` — and the SKU
     // shape ({PREFIX}-{PRODUCTCODE}-{SEQ}-{OPTIONS}) needs ~48 mm of label, so
@@ -652,21 +694,12 @@ export class ProductService {
           where: { organizationId: orgId, platform: ChannelPlatform.SHOPIFY },
         });
         if (shopify?.status === ChannelStatus.CONNECTED) {
-          await this.shopifyPushEnqueuer.enqueueProductPush({
-            type: 'product',
-            productId: product.id,
-            organizationId: orgId,
-          });
-          shopifyPushQueued = true;
-          await this.prisma.product.update({
-            where: { id: product.id },
-            data: {
-              metadata: this.mergeShopifySync(product.metadata, {
-                status: 'PENDING',
-                attempts: 0,
-              }),
-            },
-          });
+          const outcome = await this.queueShopifyPush(
+            product.id,
+            orgId,
+            product.metadata,
+          );
+          shopifyPushQueued = outcome === 'QUEUED';
         }
       }
     } catch (err) {
@@ -778,33 +811,111 @@ export class ProductService {
       );
     }
 
-    const meta = (product.metadata as Prisma.JsonObject) ?? {};
-    const sync = (meta.shopifySync ?? null) as {
-      status: ShopifySyncStatus;
-    } | null;
-
-    if (sync?.status === 'SYNCED') {
-      return { status: 'ALREADY_SYNCED' as const, productId: product.id };
+    const outcome = await this.queueShopifyPush(
+      product.id,
+      orgId,
+      product.metadata,
+    );
+    if (outcome === 'QUEUE_UNAVAILABLE') {
+      throw new ServiceUnavailableException(
+        'The Shopify sync queue is unavailable right now. The product is marked as failed to sync — try again in a few minutes.',
+      );
     }
-    if (sync?.status === 'PENDING') {
-      return { status: 'ALREADY_QUEUED' as const, productId: product.id };
+    return { status: outcome, productId: product.id };
+  }
+
+  /**
+   * Queue one product for a push to Shopify: decide, claim, then enqueue —
+   * in that order.
+   *
+   * The three call sites used to enqueue FIRST and stamp PENDING afterwards
+   * with a whole-metadata overwrite from an old snapshot. Either half could
+   * strand the product on "Syncing" for good: a worker that finished first
+   * had its SYNCED / FAILED result overwritten with PENDING, and a queue
+   * outage (swallowed by the enqueuer) left PENDING with no job behind it.
+   * Nothing ever cleared it — the server answered ALREADY_QUEUED, the bulk
+   * sweep skipped it, and the UI showed a spinner with no action.
+   *
+   * `metadata` is the caller's snapshot; it only short-circuits the cases
+   * that need no write. The claim itself is atomic and re-checks in SQL.
+   */
+  private async queueShopifyPush(
+    productId: string,
+    orgId: string,
+    metadata: Prisma.JsonValue | null,
+  ): Promise<ShopifyPushOutcome> {
+    const sync = this.extractShopifySync(metadata);
+
+    if (sync?.status === 'SYNCED') return 'ALREADY_SYNCED';
+    // A PENDING claim is trusted only while it is young enough to still be in
+    // flight. An older one means the job never ran or was lost — let it be
+    // re-claimed. The enqueuer's per-product job id keeps that safe even if
+    // the old job is somehow still live.
+    if (sync?.status === 'PENDING' && !isStalePendingSync(sync)) {
+      return 'ALREADY_QUEUED';
     }
 
-    await this.shopifyPushEnqueuer.enqueueProductPush({
+    const claimed = await this.claimShopifyPush(
+      productId,
+      orgId,
+      sync?.shopifyProductId,
+    );
+    // The snapshot above was stale: a worker marked it SYNCED in between.
+    if (!claimed) return 'ALREADY_SYNCED';
+
+    const queued = await this.shopifyPushEnqueuer.enqueueProductPush({
       type: 'product',
-      productId: product.id,
+      productId,
       organizationId: orgId,
     });
-    await this.prisma.product.update({
-      where: { id: product.id },
-      data: {
-        metadata: this.mergeShopifySync(product.metadata, {
+    if (!queued) {
+      // The claim is only honest while a job exists.
+      await this.shopifyPush.recordProductFailure(
+        productId,
+        orgId,
+        QUEUE_UNAVAILABLE_ERROR,
+        /* incrementAttempt */ false,
+      );
+      return 'QUEUE_UNAVAILABLE';
+    }
+    return 'QUEUED';
+  }
+
+  /**
+   * Claim a product for a Shopify push by stamping
+   * metadata.shopifySync = { status: 'PENDING', attempts: 0, queuedAt }.
+   *
+   * Atomic JSONB merge — it does not read-modify-write the whole blob — and
+   * guarded so it can never demote a product a worker has already marked
+   * SYNCED. `queuedAt` dates the claim so `isStalePendingSync` can tell a
+   * lost job from one still working through its retries.
+   *
+   * The merge replaces the `shopifySync` key wholesale, so the Shopify id is
+   * carried over explicitly.
+   *
+   * Returns true when this call won the claim.
+   */
+  private async claimShopifyPush(
+    productId: string,
+    orgId: string,
+    shopifyProductId?: string,
+  ): Promise<boolean> {
+    const updated = await mergeJsonMetadata(
+      this.prisma,
+      'products',
+      productId,
+      orgId,
+      {
+        shopifySync: {
           status: 'PENDING',
           attempts: 0,
-        }),
+          queuedAt: new Date().toISOString(),
+          ...(shopifyProductId ? { shopifyProductId } : {}),
+        },
       },
-    });
-    return { status: 'QUEUED' as const, productId: product.id };
+      Prisma.sql`AND COALESCE("metadata" -> 'shopifySync' ->> 'status', '') <> 'SYNCED'`,
+    );
+    return updated > 0;
   }
 
   // ─── UPDATE PRODUCT (top-level fields + optional default-variant fields) ───
@@ -976,6 +1087,77 @@ export class ProductService {
    * Resolve a variant scoped to the org and assert MANUAL editability. Returns
    * the loaded variant + parent product. Throws 404 / 403 as appropriate.
    */
+  /**
+   * Sets which locations a variant is stocked at ("Edit locations").
+   *
+   * The CRM rows change here and now. Shopify changes on the next product
+   * sync, like every other product edit: each change at a Shopify location is
+   * remembered on the product for the push to apply, and the product is marked
+   * out of sync. A change at a CRM-only location stays in the CRM.
+   */
+  async setVariantLocations(variantId: string, orgId: string, dto: SetVariantLocationsDto) {
+    if (!(await this.inventoryLedger.isWarehousingEnabled(orgId))) {
+      throw new BadRequestException('Warehousing is not enabled for this organization.');
+    }
+    const variant = await this.loadVariantForEdit(variantId, orgId);
+    // An untracked variant deliberately has no stock rows (ensureStockRows
+    // skips it); giving it one here would make it appear on stock screens with
+    // a quantity nothing maintains.
+    if (!variant.trackQuantity) {
+      const productSettings = await this.settings.getProductSettings(orgId);
+      if (productSettings.trackQuantityGlobally !== true) {
+        throw new BadRequestException(
+          'This variant does not track quantity. Turn tracking on before choosing locations.',
+        );
+      }
+    }
+    const productId = variant.product.id;
+
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const locationChange = await this.inventoryLedger.setVariantLocations(
+        tx,
+        orgId,
+        variantId,
+        dto.warehouseIds,
+      );
+
+      // CRM-only locations have nothing on Shopify to change.
+      const shopifyChanges = [
+        ...locationChange.added.map((location) => ({ ...location, action: 'add' as const })),
+        ...locationChange.removed.map((location) => ({ ...location, action: 'remove' as const })),
+      ].filter(
+        (entry): entry is typeof entry & { shopifyLocationId: string } =>
+          !!entry.shopifyLocationId,
+      );
+      if (shopifyChanges.length === 0) return { locationChange, needsShopifySync: false };
+
+      // The latest edit for a location replaces whatever was waiting for it:
+      // ticking a location again cancels its queued removal, and vice versa.
+      const changedWarehouseIds = new Set(shopifyChanges.map((entry) => entry.warehouseId));
+      await mutatePendingLocationChanges(tx, productId, orgId, (pendingChanges) => [
+        ...pendingChanges.filter(
+          (pending) =>
+            !(pending.variantId === variantId && changedWarehouseIds.has(pending.warehouseId)),
+        ),
+        ...shopifyChanges.map((entry) => ({
+          variantId,
+          warehouseId: entry.warehouseId,
+          shopifyLocationId: entry.shopifyLocationId,
+          action: entry.action,
+        })),
+      ]);
+      await this.markOutOfSyncIfNeeded(productId, tx);
+      return { locationChange, needsShopifySync: true };
+    });
+
+    return {
+      ok: true,
+      added: outcome.locationChange.added.length,
+      removed: outcome.locationChange.removed.length,
+      needsShopifySync: outcome.needsShopifySync,
+    };
+  }
+
   private async loadVariantForEdit(
     variantId: string,
     orgId: string,
@@ -1102,9 +1284,17 @@ export class ProductService {
       return row;
     });
 
-    // Same reasoning as create(): a variant without a barcode cannot be
-    // labelled on small stock, and the SKU is too long to stand in for one.
-    // No-ops when the caller supplied a barcode (the generator only fills gaps).
+    // Same reasoning as create(): both codes arrive with the variant rather
+    // than from a button the merchant has to find. Each no-ops when the caller
+    // supplied that code — the generator only fills gaps.
+    try {
+      await this.skuGenerator.generateSkus(orgId, { variantIds: [created.id] });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for new variant ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     try {
       await this.skuGenerator.generateBarcodes(orgId, {
         variantIds: [created.id],
@@ -1219,6 +1409,16 @@ export class ProductService {
       warehouseId: dto.warehouseId,
     });
 
+    // Turning tracking ON is a creation event as far as stock is concerned:
+    // `ensureStockRows` skips untracked variants, so a variant that has always
+    // been untracked has no row anywhere. Without this it would stay invisible
+    // on the Inventory screen — no row to list, no Adjust control, no way to
+    // ever give it stock — which is the state that made products permanently
+    // unsellable before. Idempotent, so flipping the switch twice is harmless.
+    if (dto.trackQuantity === true && variant.trackQuantity === false) {
+      await this.inventoryLedger.ensureStockRows(this.prisma, orgId, [updated]);
+    }
+
     await this.markOutOfSyncIfNeeded(variant.product.id);
     // A stock change has to reach Shopify: the pull treats Shopify as
     // authoritative, so an un-pushed local edit is reverted by the next sync.
@@ -1287,6 +1487,21 @@ export class ProductService {
       await this.markOutOfSyncIfNeeded(product.id, tx);
       return updated;
     });
+
+    // Same rule as updateVariant: turning tracking ON is a creation event for
+    // stock. ensureStockRows skips untracked variants, so without this the
+    // variant has no row anywhere and can never be given stock. The product
+    // page sends every variant edit through here, not the single PATCH.
+    const trackingTurnedOn = variants.filter(
+      (v) => v.trackQuantity === true && byId.get(v.id)?.trackQuantity === false,
+    );
+    if (trackingTurnedOn.length > 0) {
+      await this.inventoryLedger.ensureStockRows(
+        this.prisma,
+        orgId,
+        trackingTurnedOn,
+      );
+    }
 
     const movedStock = dto.updates
       .filter((u) => u.inventoryQuantity !== undefined)
@@ -1864,30 +2079,13 @@ export class ProductService {
     return tx ? run(tx) : this.prisma.$transaction(run);
   }
 
-  /** Bulk restamp SYNCED → OUT_OF_SYNC. One read + one batched transaction. */
+  /**
+   * Bulk restamp SYNCED → OUT_OF_SYNC. One guarded UPDATE, shared with the
+   * code generators so every bulk local write flags products the same way.
+   */
   private async markManyOutOfSync(ids: string[]) {
     if (ids.length === 0) return;
-    const rows = await this.prisma.product.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, metadata: true },
-    });
-    const updates = rows.flatMap((r) => {
-      const sync = (r.metadata as Prisma.JsonObject)?.shopifySync as
-        | { status?: ShopifySyncStatus }
-        | undefined;
-      if (sync?.status !== 'SYNCED') return [];
-      return [
-        this.prisma.product.update({
-          where: { id: r.id },
-          data: {
-            metadata: this.mergeShopifySync(r.metadata, {
-              status: 'OUT_OF_SYNC',
-            }),
-          },
-        }),
-      ];
-    });
-    if (updates.length > 0) await this.prisma.$transaction(updates);
+    await this.prisma.$executeRaw(productsOutOfSyncStampSql(ids));
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2085,46 +2283,31 @@ export class ProductService {
       );
     }
 
-    const results = await Promise.allSettled(
-      ok.map((id) =>
-        this.shopifyPushEnqueuer.enqueueProductPush({
-          type: 'product',
-          productId: id,
-          organizationId: orgId,
-        }),
-      ),
-    );
-
-    const queuedIds: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        queuedIds.push(ok[i]);
-      } else {
-        skipped.push({
-          id: ok[i],
-          reason: `Failed to enqueue: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        });
-      }
+    const rows = await this.prisma.product.findMany({
+      where: { id: { in: ok }, organizationId: orgId },
+      select: { id: true, metadata: true },
     });
 
-    if (queuedIds.length > 0) {
-      const rows = await this.prisma.product.findMany({
-        where: { id: { in: queuedIds } },
-        select: { id: true, metadata: true },
-      });
-      await this.prisma.$transaction(
-        rows.map((p) =>
-          this.prisma.product.update({
-            where: { id: p.id },
-            data: {
-              metadata: this.mergeShopifySync(p.metadata, {
-                status: 'PENDING',
-                attempts: 0,
-              }),
-            },
-          }),
-        ),
-      );
+    // Each product is claimed and queued on its own, so one that cannot be
+    // queued is reported rather than left stamped PENDING with no job.
+    const outcomes = await Promise.all(
+      rows.map(async (row) => ({
+        id: row.id,
+        outcome: await this.queueShopifyPush(row.id, orgId, row.metadata),
+      })),
+    );
+
+    const SKIP_REASON: Record<Exclude<ShopifyPushOutcome, 'QUEUED'>, string> = {
+      ALREADY_SYNCED: 'Already synced to Shopify',
+      ALREADY_QUEUED: 'Sync already in progress',
+      QUEUE_UNAVAILABLE:
+        'The Shopify sync queue is unavailable — try again in a few minutes',
+    };
+
+    const queuedIds: string[] = [];
+    for (const { id, outcome } of outcomes) {
+      if (outcome === 'QUEUED') queuedIds.push(id);
+      else skipped.push({ id, reason: SKIP_REASON[outcome] });
     }
 
     return { ok: queuedIds, skipped, queued: queuedIds.length };
@@ -2182,7 +2365,15 @@ export class ProductService {
             organizationId: orgId,
             externalId: `manual_${randomUUID()}`,
             title: v.title,
-            sku: v.sku,
+            // Never clone the SKU either, for a stronger reason than the
+            // barcode below: a SKU is the merchant's OWN identifier for one
+            // item, so two products sharing one is never meaningful — and
+            // `assertCodeFree` enforces exactly that uniqueness on every other
+            // write path. This path skipped it, so duplicating a product used
+            // to mint a guaranteed collision that the scan resolver
+            // (`findFirst` over sku and barcode alike) would resolve
+            // arbitrarily. A fresh SKU is generated below.
+            sku: null,
             // Never clone a barcode we minted — that guarantees a duplicate,
             // and with no DB unique constraint the scan resolver (findFirst)
             // would silently pick whichever row Postgres returned. The copy is
@@ -2241,10 +2432,28 @@ export class ProductService {
       'product_duplicate',
       created.id,
     );
+    // ...and give them a stock row, or a warehousing org gets a variant whose
+    // cached quantity says N while no location holds any of it — invisible on
+    // the Inventory screen, and unsellable until something else moves it.
+    await this.inventoryLedger.ensureStockRows(
+      this.prisma,
+      orgId,
+      created.variants,
+    );
 
-    // Replace the generated barcodes deliberately dropped above with fresh
-    // ones, so the copy is labellable immediately instead of inheriting the
-    // original's code.
+    // Replace the SKU and the generated barcode deliberately dropped above
+    // with fresh ones, so the copy is identifiable and labellable immediately
+    // instead of inheriting — and colliding with — the original's codes.
+    try {
+      await this.skuGenerator.generateSkus(orgId, {
+        variantIds: created.variants.map((v) => v.id),
+      });
+    } catch (err) {
+      this.logger.warn(
+        `SKU generation failed for duplicated product ${created.id}: ${(err as Error).message}`,
+      );
+    }
+
     try {
       await this.skuGenerator.generateBarcodes(orgId, {
         variantIds: created.variants.map((v) => v.id),
@@ -2537,6 +2746,13 @@ export class ProductService {
       'initial',
       'csv_import',
       created.id,
+    );
+    // Same reason as `duplicate`: without a stock row the imported quantity
+    // exists only as a cache nothing backs.
+    await this.inventoryLedger.ensureStockRows(
+      this.prisma,
+      orgId,
+      created.variants,
     );
     return created;
   }

@@ -1,5 +1,6 @@
-import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
+import { extractGrants, sectionGrants, SECTION_SCOPED_ROLES } from '../auth/permissions';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 
@@ -34,6 +35,7 @@ export class MembersService {
         return members.map((m) => ({
             id: m.id,
             role: m.role,
+            permissions: extractGrants(m.permissions),
             joinedAt: m.joinedAt,
             user: m.user,
         }));
@@ -84,6 +86,11 @@ export class MembersService {
         if (!member) throw new NotFoundException('Member not found');
         if (member.role === UserRole.OWNER) {
             throw new ForbiddenException('The organization owner already has full access');
+        }
+        // No section at all would read as "not configured" = full access —
+        // never what an admin clearing the last checkbox meant.
+        if (SECTION_SCOPED_ROLES.includes(member.role) && sectionGrants(grants).length === 0) {
+            throw new BadRequestException('Select at least one section this member can access.');
         }
 
         const updated = await this.prisma.organizationMember.update({

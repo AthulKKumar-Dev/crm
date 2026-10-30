@@ -14,7 +14,7 @@ import { ChannelManageDialog } from "~/components/app/channels/channel-manage-di
 import { ChannelDisconnectDialog } from "~/components/app/channels/channel-disconnect-dialog";
 import { InstagramConnectDialog } from "~/components/app/channels/instagram-connect-dialog";
 import { InstagramAccountPickerDialog } from "~/components/app/channels/instagram-account-picker-dialog";
-import { useChannels, channelKeys } from "~/hooks/use-channel-queries";
+import { useChannels, useRefreshAfterChannelSync, channelKeys } from "~/hooks/use-channel-queries";
 import { orgKeys } from "~/hooks/use-org-queries";
 import { useCurrentRole } from "~/hooks/use-current-role";
 import { CHANNEL_PROVIDERS, connectErrorMessage, type ChannelProvider } from "~/lib/channel-providers";
@@ -59,6 +59,9 @@ export function ChannelSettingsTab() {
     : CHANNEL_PROVIDERS;
 
   const { data: channels, isLoading, isError, refetch } = useChannels();
+  // Keeps the sync status column live while a run is in progress; the table
+  // itself owns the Sync button and the disconnect dialog owns its mutation.
+  useRefreshAfterChannelSync(channels);
 
   // Everything an OAuth round trip can hand back arrives as query params, since
   // the provider redirects the browser rather than returning to our code.

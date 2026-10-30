@@ -24,47 +24,37 @@ export function meta() {
 export default function SlipsPrintRoute() {
   const [searchParams] = useSearchParams();
   const orderIds = useMemo(
-    () => (searchParams.get("orderIds") ?? "").split(",").filter(Boolean),
+    // De-duplicated: the editor compares how many it asked for with how many
+    // came back, and a repeated id would read as an order that failed to load.
+    () => [...new Set((searchParams.get("orderIds") ?? "").split(",").filter(Boolean))],
     [searchParams],
   );
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: orderKeys.slipData(orderIds),
     queryFn: () => orderService.slipData(orderIds),
     enabled: orderIds.length > 0,
   });
   const { store, isLoading: storeLoading } = useSlipStore();
 
-  if (orderIds.length === 0) {
-    return (
-      <div className="p-8 text-sm text-muted-foreground">
-        No orders selected. Open this page from the Orders list with rows selected.
-      </div>
-    );
-  }
-
   // Error before loading: a failed request leaves isLoading false and data
-  // undefined, which would otherwise render an empty sheet that looks like a
-  // successful print of nothing.
-  if (isError) {
-    return (
-      <div className="p-8 text-sm text-red-700">
-        Could not load these orders. Go back to the Orders list and try again.
-      </div>
-    );
-  }
-
-  if (isLoading || storeLoading || !data) {
-    return (
-      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        Loading slips…
-      </div>
-    );
-  }
+  // undefined, which would otherwise read as still loading forever.
+  const status =
+    orderIds.length === 0
+      ? "empty"
+      : isError
+        ? "error"
+        : isLoading || storeLoading || !data
+          ? "loading"
+          : "ready";
 
   return (
     <PackageSlipSheet
-      orders={data}
+      mode="batch"
+      status={status}
+      onRetry={() => refetch()}
+      orders={status === "ready" && data ? data : []}
+      requestedCount={orderIds.length}
       store={store}
       storageKey="package-slip-batch-opts"
       defaultPaperId={SLIP_DEFAULT_PAPER_ID}

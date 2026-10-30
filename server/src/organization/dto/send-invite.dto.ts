@@ -1,6 +1,7 @@
-import { IsEmail, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsArray, IsEmail, IsEnum, IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { UserRole } from '@prisma/client';
+import { PERMISSION_KEYS, PermissionKey } from '../../auth/permissions';
 
 export class SendInviteDto {
     // Normalised here rather than in the service so every caller — invite,
@@ -29,4 +30,11 @@ export class SendInviteDto {
     @IsOptional()
     @IsString()
     vendorScope?: string;
+
+    // For AGENT / VIEWER invites: the sections (and any other grants) the
+    // member starts with. Omitted = not configured, i.e. full section access.
+    @IsOptional()
+    @IsArray()
+    @IsIn(PERMISSION_KEYS as readonly string[], { each: true })
+    grants?: PermissionKey[];
 }

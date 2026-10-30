@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { LoyaltyService } from '../loyalty/loyalty.service';
 import { QueryCustomersDto } from './dto/query-customers.dto';
 import { UpdateCustomerDto } from './dto/update-customer.dto';
+import { pickPrefillAddress } from './prefill-address.util';
 
 @Injectable()
 export class CustomerService {
@@ -74,7 +75,36 @@ export class CustomerService {
       },
     });
     if (!customer) throw new NotFoundException('Customer not found');
-    return customer;
+
+    // What the order form fills in when this customer is picked: their saved
+    // address, else where their last order went. CRM-made customers rarely
+    // have a saved address, so without the order fallback most would never
+    // fill.
+    const addresses = Array.isArray(customer.addresses) ? customer.addresses : [];
+    let prefillAddress = pickPrefillAddress([customer.defaultAddress, ...addresses], customer);
+    if (!prefillAddress) {
+      const lastOrder = await this.prisma.order.findFirst({
+        where: {
+          customerId: id,
+          organizationId: orgId,
+          deletedAt: null,
+          OR: [
+            { shippingAddress: { not: Prisma.AnyNull } },
+            { billingAddress: { not: Prisma.AnyNull } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { shippingAddress: true, billingAddress: true },
+      });
+      if (lastOrder) {
+        prefillAddress = pickPrefillAddress(
+          [lastOrder.shippingAddress, lastOrder.billingAddress],
+          customer,
+        );
+      }
+    }
+
+    return { ...customer, prefillAddress };
   }
 
   async update(id: string, orgId: string, userId: string, dto: UpdateCustomerDto) {

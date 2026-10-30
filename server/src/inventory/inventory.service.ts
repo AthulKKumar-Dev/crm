@@ -19,7 +19,10 @@ import {
   pushJobId,
 } from '../channel/shopify-push.queue';
 import { Priority } from '../rate-limit/rate-limit.types';
-import { CreateAdjustmentDto } from './dto/adjustment.dto';
+import {
+  BulkAdjustmentDto,
+  CreateAdjustmentDto,
+} from './dto/adjustment.dto';
 import { QueryLedgerDto, QueryStockDto } from './dto/query-stock.dto';
 
 @Injectable()
@@ -279,12 +282,24 @@ export class InventoryService {
       where.available = { gt: 0, lte: org?.lowStockThreshold ?? 10 };
     }
 
-    const orderBy: Prisma.StockLevelOrderByWithRelationInput =
-      query.sortBy === 'sku'
-        ? { variant: { sku: query.sortOrder ?? 'asc' } }
+    // Default matches Shopify's inventory list: product title A→Z, a
+    // product's variants in their own position order. The trailing id keeps
+    // pages stable when titles tie — without it rows can repeat or vanish
+    // across page boundaries.
+    const byProduct: Prisma.StockLevelOrderByWithRelationInput[] = [
+      { variant: { product: { title: query.sortOrder ?? 'asc' } } },
+      { variant: { position: 'asc' } },
+    ];
+    const orderBy: Prisma.StockLevelOrderByWithRelationInput[] = [
+      ...(query.sortBy === 'sku'
+        ? [{ variant: { sku: query.sortOrder ?? 'asc' } }]
         : query.sortBy === 'updatedAt'
-          ? { updatedAt: query.sortOrder ?? 'desc' }
-          : { available: query.sortOrder ?? 'asc' };
+          ? [{ updatedAt: query.sortOrder ?? 'desc' }]
+          : query.sortBy === 'available' || query.sortBy === 'onHand'
+            ? [{ available: query.sortOrder ?? 'asc' }]
+            : byProduct),
+      { id: 'asc' },
+    ];
 
     const [rows, total] = await Promise.all([
       this.prisma.stockLevel.findMany({
@@ -425,6 +440,12 @@ export class InventoryService {
           warehouse: { select: { id: true, name: true, code: true } },
           defaultLocation: { select: { fullCode: true } },
         },
+        // Stable order, or the per-location boxes on the product page shuffle
+        // between loads and the merchant edits the wrong one.
+        orderBy: [
+          { warehouse: { isDefault: 'desc' } },
+          { warehouse: { name: 'asc' } },
+        ],
       }),
       this.prisma.stockReservation.findMany({
         where: { variantId, status: 'ACTIVE' },
@@ -455,12 +476,7 @@ export class InventoryService {
     });
     if (!variant) throw new NotFoundException('Variant not found');
 
-    const warehouse = dto.warehouseId
-      ? await this.prisma.warehouse.findFirst({
-          where: { id: dto.warehouseId, organizationId: orgId, isActive: true },
-        })
-      : await this.warehouses.getDefault(orgId);
-    if (!warehouse) throw new NotFoundException('Warehouse not found');
+    const warehouse = await this.resolveWarehouse(orgId, dto.warehouseId);
 
     let delta = dto.delta ?? 0;
     if (dto.setTo !== undefined) {
@@ -493,6 +509,150 @@ export class InventoryService {
       await this.enqueueAvailabilityPush(orgId, [dto.variantId]);
     }
     return { ok: true, changed: !result.skipped, inventoryQuantity: result.inventoryQuantity };
+  }
+
+  /**
+   * Saves a screenful of edited quantities at ONE location in one transaction.
+   *
+   * All-or-nothing on purpose. The caller is a merchant correcting a stocktake,
+   * and a half-applied stocktake is worse than a rejected one — so a line that
+   * fails rolls the whole batch back and comes back named in the error, which
+   * is what lets the UI flag that row without discarding the other edits.
+   */
+  async createAdjustmentsBulk(
+    orgId: string,
+    userId: string,
+    dto: BulkAdjustmentDto,
+  ) {
+    await this.assertWarehousing(orgId);
+    const warehouse = await this.resolveWarehouse(orgId, dto.warehouseId);
+
+    const seen = new Set<string>();
+    for (const item of dto.items) {
+      if ((item.delta === undefined) === (item.setTo === undefined)) {
+        throw new BadRequestException(
+          'Each line must provide exactly one of `delta` or `setTo`.',
+        );
+      }
+      // One line per variant+bucket, or two lines would each compute their
+      // delta from the same pre-batch quantity and the second would win.
+      const key = item.variantId + ':' + item.bucket;
+      if (seen.has(key)) {
+        throw new BadRequestException(
+          'Variant ' + item.variantId + ' appears twice for the same bucket.',
+        );
+      }
+      seen.add(key);
+    }
+
+    const variantIds = [...new Set(dto.items.map((i) => i.variantId))];
+    const known = await this.prisma.productVariant.findMany({
+      where: {
+        id: { in: variantIds },
+        product: { organizationId: orgId, deletedAt: null },
+      },
+      select: { id: true },
+    });
+    if (known.length !== variantIds.length) {
+      const found = new Set(known.map((v) => v.id));
+      const missing = variantIds.filter((id) => !found.has(id));
+      throw new NotFoundException('Variant not found: ' + missing.join(', '));
+    }
+
+    // Current quantities for every line in one read, so the `setTo` deltas are
+    // all computed against the same snapshot.
+    const levels = await this.prisma.stockLevel.findMany({
+      where: {
+        variantId: { in: variantIds },
+        warehouseId: warehouse.id,
+        locationId: null,
+      },
+    });
+    const levelByVariant = new Map(levels.map((l) => [l.variantId, l]));
+
+    const planned = dto.items
+      .map((item) => {
+        let delta = item.delta ?? 0;
+        if (item.setTo !== undefined) {
+          const level = levelByVariant.get(item.variantId);
+          const current = level
+            ? level[item.bucket.toLowerCase() as 'available']
+            : 0;
+          delta = item.setTo - current;
+        }
+        return { ...item, delta };
+      })
+      // A no-op line is dropped rather than rejected: the UI sends whatever is
+      // dirty, and typing a value back to its original is not an error.
+      .filter((p) => p.delta !== 0)
+      // applyMovement requires multi-variant transactions to take their locks
+      // in a stable order, or two concurrent batches sharing a variant deadlock.
+      .sort((a, b) => a.variantId.localeCompare(b.variantId));
+
+    if (planned.length === 0) {
+      return { ok: true, applied: 0, results: [] };
+    }
+
+    const reason = dto.reason ?? 'correction';
+    const results = await this.prisma.$transaction(async (tx) => {
+      const out: {
+        variantId: string;
+        bucket: StockBucket;
+        delta: number;
+        changed: boolean;
+        inventoryQuantity: number;
+      }[] = [];
+      for (const line of planned) {
+        const result = await this.ledger.applyMovement(
+          {
+            orgId,
+            variantId: line.variantId,
+            warehouseId: warehouse.id,
+            fromBucket: line.delta < 0 ? line.bucket : null,
+            toBucket: line.delta > 0 ? line.bucket : null,
+            quantity: Math.abs(line.delta),
+            reason,
+            referenceType: 'manual_adjustment',
+            referenceId: dto.note ?? undefined,
+            actorId: userId,
+          },
+          tx,
+        );
+        out.push({
+          variantId: line.variantId,
+          bucket: line.bucket,
+          delta: line.delta,
+          changed: !result.skipped,
+          inventoryQuantity: result.inventoryQuantity,
+        });
+      }
+      return out;
+    });
+
+    // One push for the whole batch. The queue de-dupes on a hash of the id
+    // list, so N enqueues would collapse anyway but cost N round trips.
+    const pushed = results
+      .filter((r) => r.bucket === StockBucket.AVAILABLE)
+      .map((r) => r.variantId);
+    if (pushed.length > 0) {
+      await this.enqueueAvailabilityPush(orgId, pushed);
+    }
+
+    return { ok: true, applied: results.length, results };
+  }
+
+  /**
+   * The location an adjustment writes to. Explicit only: this endpoint is
+   * warehousing-only and a merchant works one location at a time, so falling
+   * back to the org default would quietly write somewhere other than the
+   * location on screen.
+   */
+  private async resolveWarehouse(orgId: string, warehouseId: string) {
+    const warehouse = await this.prisma.warehouse.findFirst({
+      where: { id: warehouseId, organizationId: orgId, isActive: true },
+    });
+    if (!warehouse) throw new NotFoundException('Warehouse not found');
+    return warehouse;
   }
 
   // ─────────────────────────── ledger + lookup ───────────────────────────

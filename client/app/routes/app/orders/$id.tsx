@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
+import { useListReturnPath } from "~/hooks/use-list-url-state";
 import {
   AlertTriangle,
   ChevronRight,
@@ -17,6 +18,7 @@ import { GenerateInvoiceDialog } from "~/components/app/generate-invoice-dialog"
 import { useUpdateOrderMutation } from "~/hooks/use-order-mutations";
 import {
   OrderActionsMenu,
+  OrderSyncButton,
   CancelOrderDialog,
   CapturePaymentDialog,
   useOrderActionGates,
@@ -27,6 +29,7 @@ import {
   type LineGroupKey,
 } from "~/components/app/order-items-fulfillment";
 import { ChannelBadge } from "~/components/app/channel-badge";
+import { orderSourceLabel } from "~/lib/order-source";
 import { OrderActivity } from "~/components/app/order-activity";
 import { VendorOrderDetail } from "~/components/app/vendor-order-detail";
 import { useCurrentRole } from "~/hooks/use-current-role";
@@ -50,8 +53,8 @@ import type {
   CustomerDetail,
   OrderDetail,
   OrderFulfillment,
-  OrderShopifySync,
 } from "~/types/api";
+import { orderShopifySyncOf } from "~/lib/shopify-sync";
 
 export function meta() {
   return [{ title: "Order Detail | Collabo CRM" }];
@@ -85,6 +88,9 @@ export default function OrderDetailPage() {
 
 function OwnerOrderDetail({ id }: { id: string }) {
   const { data: order, isLoading, isError, refetch } = useOrder(id);
+  // Back to the list as it was left: same page and search, even after walking
+  // Previous/Next through other orders.
+  const ordersPath = useListReturnPath("orders", "/orders");
   const { data: org } = useCurrentOrg();
 
   const { data: adjacent } = useAdjacentOrders(id);
@@ -134,7 +140,8 @@ function OwnerOrderDetail({ id }: { id: string }) {
   const metadata = (order.metadata ?? {}) as Record<string, unknown>;
   const paymentMethod = typeof metadata.paymentMethod === "string" ? metadata.paymentMethod : null;
   const source = typeof metadata.source === "string" ? metadata.source : null;
-  const shopifySync = (metadata.shopifySync ?? null) as OrderShopifySync | null;
+  // Through the one reader every page uses, not a cast on the blob.
+  const shopifySync = orderShopifySyncOf(order) ?? null;
 
   // `findOne` returns the raw row, so `createdAt` is the local insert time.
   // The list endpoint shows `externalCreatedAt` — match it or the two pages
@@ -247,7 +254,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
       {/* Breadcrumb + prev/next rail */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-caption">
-          <Link to="/orders" className="text-muted-foreground hover:text-foreground">
+          <Link to={ordersPath} className="text-muted-foreground hover:text-foreground">
             Orders
           </Link>
           <ChevronRight className="size-3 text-muted-foreground" />
@@ -265,13 +272,17 @@ function OwnerOrderDetail({ id }: { id: string }) {
           <Button asChild={!!nextId} variant="outline" size="sm" disabled={!nextId}>
             {nextId ? <Link to={`/orders/${nextId}`}>Next order</Link> : <span>Next order</span>}
           </Button>
+          <OrderSyncButton order={order} />
           <OrderActionsMenu order={order} />
         </div>
       </div>
 
       <div className="flex gap-4">
         {/* ── Left rail: order meta ─────────────────────────────────────── */}
-        <aside className="flex flex-1 flex-col gap-4.5 rounded-xl bg-card p-4">
+        {/* Sticky like the right rail. It runs taller than short screens, so
+            cap it to the viewport and let it scroll itself — otherwise its
+            bottom (metadata) would be unreachable while pinned. */}
+        <aside className="flex flex-1 flex-col gap-4.5 rounded-xl bg-card p-4 lg:sticky lg:top-6 lg:self-start lg:max-h-[calc(100vh-3rem)] lg:overflow-y-auto">
           {/* Header */}
           <div className="flex flex-col gap-2">
             <h1 className="text-subhead text-foreground">{order.name}</h1>
@@ -288,7 +299,11 @@ function OwnerOrderDetail({ id }: { id: string }) {
               variant="chip"
               size={13}
               platform={order.channel?.platform as ChannelPlatform | undefined}
-              name={order.channel?.name}
+              name={
+                [...new Set([orderSourceLabel(order), order.channel?.name])]
+                  .filter(Boolean)
+                  .join(" · ") || undefined
+              }
             />
           </div>
 
@@ -528,7 +543,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
             )}
             {invoice ? (
               <Button asChild variant="outline" className="w-full">
-                <Link to={`/orders/invoices/${invoice.id}/print`} target="_blank">
+                <Link to={`/orders/invoices/${invoice.id}`}>
                   <Receipt className="size-3.5" />
                   View GST invoice
                 </Link>
@@ -585,7 +600,7 @@ function OwnerOrderDetail({ id }: { id: string }) {
             phone={phone}
           />
 
-          <InternalNote order={order} canEdit={canEdit} />
+          <InternalNote key={order.id} order={order} canEdit={canEdit} />
         </aside>
       </div>
 
@@ -663,10 +678,10 @@ function StatusPill({ className, children }: { className?: string; children: Rea
  * Order lifecycle pill.
  *
  * There is no state column on `Order` — the whole vocabulary is
- * `financialStatus`, `fulfillmentStatus`, `cancelledAt`, `closedAt`. Note we do
- * NOT derive a "Completed" state from `fulfillmentStatus`: offline orders are
- * created with PAID/FULFILLED defaults, so every manual order would read as
- * finished the instant it was made.
+ * `financialStatus`, `fulfillmentStatus`, `cancelledAt`, `closedAt`. This pill
+ * deliberately does NOT derive a "Completed" state from `fulfillmentStatus`:
+ * fulfilment has its own pill in the rail, and an order that is fully shipped
+ * is still open to refunds, notes and archiving until someone closes it.
  */
 function deriveOrderState(order: OrderDetail): { label: string; className: string } {
   if (order.cancelledAt) return { label: "Cancelled", className: "bg-danger-subtle text-danger" };
@@ -1138,8 +1153,17 @@ function CustomerRail({
  */
 function InternalNote({ order, canEdit }: { order: OrderDetail; canEdit: boolean }) {
   const mutation = useUpdateOrderMutation(order.id);
-  const [note, setNote] = useState(order.note ?? "");
-  const dirty = note !== (order.note ?? "");
+  const serverNote = order.note ?? "";
+  const [note, setNote] = useState(serverNote);
+  const [baseline, setBaseline] = useState(serverNote);
+  // The server value moved (refetch, webhook, Edit dialog, our own save).
+  // Adopt it unless the user is mid-edit — otherwise a stale empty box makes
+  // "Save note" live and one click wipes the real note (on Shopify too).
+  if (serverNote !== baseline) {
+    if (note === baseline) setNote(serverNote);
+    setBaseline(serverNote);
+  }
+  const dirty = note !== serverNote;
 
   // Read-only roles still see the note — they just cannot write it. An empty
   // block would hide real order context from a VIEWER for no reason.

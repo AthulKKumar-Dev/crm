@@ -27,6 +27,11 @@ import { DEFAULT_UQC, isUqcCode } from '../constants/uqc';
 export class IsUqcConstraint implements ValidatorConstraintInterface {
     validate(value: unknown): boolean {
         if (typeof value !== 'string') return false;
+        // Blank means "no unit of its own — use the default". The edit forms
+        // send "" for the "Default (NOS)" choice, and `@IsOptional()` only
+        // skips null/undefined, so rejecting it failed every save of a product
+        // that had no unit set. `normalizeUqc` stores it as null.
+        if (value.trim() === '') return true;
         return isUqcCode(value.trim().toUpperCase());
     }
 

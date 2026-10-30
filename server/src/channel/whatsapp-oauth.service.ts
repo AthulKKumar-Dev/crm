@@ -156,6 +156,8 @@ export class WhatsAppOAuthService {
     async handleSignupCallback(
         code: string,
         state: string,
+        callerOrgId: string,
+        callerUserId: string,
     ): Promise<{
         channelId: string;
         redirectUrl: string;
@@ -169,6 +171,11 @@ export class WhatsAppOAuthService {
             reconnectChannelId?: string;
         }>(stateKey);
         if (!stateData) {
+            throw new UnauthorizedException('Invalid or expired state parameter');
+        }
+        // The channel is created in the state's org, so the state must have
+        // been issued to this same caller in this same org.
+        if (stateData.orgId !== callerOrgId || stateData.userId !== callerUserId) {
             throw new UnauthorizedException('Invalid or expired state parameter');
         }
         await this.redis.del(stateKey);

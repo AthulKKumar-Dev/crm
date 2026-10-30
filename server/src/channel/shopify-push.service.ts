@@ -1,12 +1,19 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ChannelPlatform, ChannelStatus, Prisma } from '@prisma/client';
+import { ChannelPlatform, ChannelStatus, OrderFulfillmentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { mergeJsonMetadata } from '../common/utils/jsonb-merge.util';
+import { countryCodeOf, normalizePhone } from '../common/phone.util';
+import { defaultCountryFor, toShopifyAddress } from './shopify-address.util';
 import { ShopifyOAuthService } from './shopify-oauth.service';
 import { ShopifyGraphqlClient, ShopifyGraphqlError, ShopifyAuthContext } from './shopify-graphql.client';
 import { Priority } from '../rate-limit/rate-limit.types';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { InventoryLedgerService } from '../inventory/inventory-ledger.service';
+import {
+  PendingLocationChange,
+  mutatePendingLocationChanges,
+  readPendingLocationChanges,
+} from '../inventory/pending-location-changes';
 import {
   LOCATIONS_QUERY,
   LocationsResponse,
@@ -34,6 +41,13 @@ import {
   ShopifyLiveVariantOptions,
   INVENTORY_SET_QUANTITIES_MUTATION,
   InventorySetQuantitiesResponse,
+  INVENTORY_ACTIVATE_MUTATION,
+  InventoryActivateResponse,
+  INVENTORY_DEACTIVATE_MUTATION,
+  InventoryDeactivateResponse,
+  INVENTORY_LEVEL_AT_LOCATION_QUERY,
+  InventoryLevelAtLocationResponse,
+  ShopifyUserError,
   VARIANT_INVENTORY_ITEM_QUERY,
   VariantInventoryItemResponse,
   ORDER_FULFILLMENT_ORDERS_QUERY,
@@ -49,6 +63,7 @@ import {
   isPlaceholderRemoteOptions,
   LocalOption,
   planOptionReconcile,
+  withAllOptionValues,
 } from './product-options-reconcile.util';
 import { DEFAULT_VARIANT_TITLE } from '../product/variant-title.util';
 
@@ -92,8 +107,15 @@ export interface ShopifySyncMetadata {
  */
 export const STALE_PENDING_SYNC_MS = 15 * 60 * 1000;
 
+/// Recorded on `metadata.shopifySync.error` when a push could not even be
+/// queued. Distinct wording from a worker failure so the audit can tell the
+/// two apart; `attempts` is not incremented because nothing ran.
+export const QUEUE_UNAVAILABLE_ERROR =
+  'Could not queue the Shopify push (queue unavailable). Use "Sync to Shopify" to retry.';
+
+/** Orders and products share the rule; only `status` and `queuedAt` matter. */
 export function isStalePendingSync(
-  sync: Pick<ShopifySyncMetadata, 'status' | 'queuedAt'> | null | undefined,
+  sync: { status?: string; queuedAt?: string } | null | undefined,
   now: number = Date.now(),
 ): boolean {
   if (sync?.status !== 'PENDING') return false;
@@ -101,6 +123,15 @@ export function isStalePendingSync(
   if (!sync.queuedAt) return true;
   const at = Date.parse(sync.queuedAt);
   return !Number.isFinite(at) || now - at > STALE_PENDING_SYNC_MS;
+}
+
+/** inventorySetQuantities rejected a write because the item is not stocked
+ *  at that location. Message fallback covers responses without `code`. */
+export function isNotStockedError(e: ShopifyUserError): boolean {
+  return (
+    e.code === 'ITEM_NOT_STOCKED_AT_LOCATION' ||
+    /not stocked at the location/i.test(e.message)
+  );
 }
 
 /**
@@ -128,6 +159,71 @@ export function readStoredTaxLines(value: Prisma.JsonValue | null | undefined): 
     out.push({ title, rate, price });
   }
   return out;
+}
+
+/**
+ * The customer phone as `orderCreate` will accept it: E.164, or null.
+ *
+ * Shopify rejects the WHOLE order ("Order Phone is invalid") for anything
+ * else, and the CRM stored phones as typed — a counter sale's "9847586793"
+ * with no country code failed every retry. The country comes from the order's
+ * address; a counter sale usually has none, and an INR order is an Indian
+ * sale. `raw` is kept so the caller can tell "no phone" from "unusable phone".
+ */
+export function shopifyOrderPhone(order: {
+  currency: string;
+  shippingAddress?: Prisma.JsonValue | null;
+  billingAddress?: Prisma.JsonValue | null;
+  customer?: { phone: string | null } | null;
+}): { raw: string | null; e164: string | null } {
+  const raw = order.customer?.phone?.trim() || null;
+  if (!raw) return { raw: null, e164: null };
+  const country =
+    countryCodeOf(order.shippingAddress) ??
+    countryCodeOf(order.billingAddress) ??
+    (order.currency?.toUpperCase() === 'INR' ? 'IN' : null);
+  return { raw, e164: normalizePhone(raw, country) };
+}
+
+/**
+ * The `orderCreate` customer block.
+ *
+ * A customer that came from Shopify is associated by GID. A CRM customer used
+ * to ride only as the order's email/phone, so Shopify created a NAMELESS
+ * customer for it — and that nameless customer echoed back over the CRM
+ * row's name ("Guest order"). `toUpsert` carries the name.
+ *
+ * `toUpsert` needs an `id` or `email` — Shopify rejects the whole order with
+ * a phone alone ("requires at least one of id, email"), whatever its docs say
+ * about matching on phone. It also errors on a phone that clashes with
+ * another customer's, so the upsert keys on the email only and the phone
+ * stays on the order. Without an email there is no block, as before; the
+ * CRM keeps its own buyer on the echo either way (see `crmBuyerOf` in the
+ * sync service).
+ */
+export function shopifyOrderCustomer(
+  customer: {
+    externalId: string | null;
+    email: string | null;
+    firstName: string | null;
+    lastName: string | null;
+  } | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!customer) return undefined;
+  const externalId = customer.externalId;
+  if (externalId && !externalId.startsWith('manual_') && /^\d+$/.test(externalId)) {
+    return { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', externalId) } };
+  }
+
+  const email = customer.email?.trim() || null;
+  if (!email) return undefined;
+  return {
+    toUpsert: {
+      email,
+      ...(customer.firstName?.trim() && { firstName: customer.firstName.trim() }),
+      ...(customer.lastName?.trim() && { lastName: customer.lastName.trim() }),
+    },
+  };
 }
 
 /**
@@ -281,22 +377,31 @@ export class ShopifyPushService {
         : { title: li.variantTitle ? `${li.title} — ${li.variantTitle}` : li.title, ...base };
     });
 
-    // Customers originally synced from Shopify are associated by GID so no
-    // duplicate is created; manual customers ride as email/phone on the order.
-    const customerExternalId = order.customer?.externalId;
-    const customerBlock =
-      customerExternalId && !customerExternalId.startsWith('manual_') && /^\d+$/.test(customerExternalId)
-        ? { toAssociate: { id: ShopifyGraphqlClient.toGid('Customer', customerExternalId) } }
-        : undefined;
-
     const grandTotal = order.totalPrice.toString();
+
+    // A phone Shopify can't parse must not block the sale reaching Shopify —
+    // send the order without it. The number itself stays out of the log.
+    const phone = shopifyOrderPhone(order);
+    if (phone.raw && !phone.e164) {
+      this.logger.warn(
+        `Order ${order.name} (${orderId}): customer phone is not a valid number — pushed without it`,
+      );
+    }
+
+    const customerBlock = shopifyOrderCustomer(order.customer);
+    // The delivery/billing address the merchant entered. Never sent before,
+    // so every pushed counter sale reached Shopify with no address.
+    const shippingAddress = toShopifyAddress(order.shippingAddress, defaultCountryFor(order.currency));
+    const billingAddress = toShopifyAddress(order.billingAddress ?? order.shippingAddress, defaultCountryFor(order.currency));
 
     const orderInput: Record<string, unknown> = {
       currency,
       // Line prices are pre-tax; the tax rides on `taxLines` above.
       taxesIncluded: false,
       email: order.customer?.email ?? undefined,
-      phone: order.customer?.phone ?? undefined,
+      phone: phone.e164 ?? undefined,
+      ...(shippingAddress && { shippingAddress }),
+      ...(billingAddress && { billingAddress }),
       note: order.note ?? undefined,
       tags: ['offline', 'collabo-crm', 'pos'],
       sourceName: 'collabo-crm',
@@ -333,11 +438,13 @@ export class ShopifyPushService {
 
     await this.adoptShopifyLineItemIds(order.lineItems, remoteOrder);
 
-    // Mirror the local PAID + FULFILLED state by fulfilling the new order's
-    // fulfillment orders at the resolved location. Best-effort — if locations
-    // couldn't be read (missing read_locations) or fulfillment fails, the
-    // order still lands paid but unfulfilled.
-    if (locationId) {
+    // Mirror the local fulfilment state. Only an order whose header says
+    // FULFILLED is fulfilled on Shopify; one still unshipped in the CRM lands
+    // paid and unfulfilled, which is the truth. This used to fulfil every
+    // pushed order because counter sales were stamped FULFILLED at creation.
+    // Best-effort — if locations couldn't be read (missing read_locations) or
+    // fulfillment fails, the order still lands paid but unfulfilled.
+    if (locationId && order.fulfillmentStatus === OrderFulfillmentStatus.FULFILLED) {
       try {
         await this.fulfillEntireOrder(auth, remoteOrder.id);
       } catch (err) {
@@ -725,6 +832,12 @@ export class ShopifyPushService {
         pushGeneratedBarcodes,
         priority,
       );
+      // Throws when Shopify refuses one, which fails the push with Shopify's
+      // own reason instead of reporting a sync that did not fully happen.
+      await this.applyPendingLocationChanges(product, orgId, {
+        shopDomain,
+        accessToken: token,
+      });
       await this.recordProductSuccess(productId, orgId, product.externalId);
       this.logger.log(
         `Pushed update for Shopify product "${product.title}" (${product.externalId}).`,
@@ -835,6 +948,10 @@ export class ShopifyPushService {
     if (await this.inventoryLedger.isWarehousingEnabled(orgId)) {
       await this.pushAvailability(orgId, product.variants.map((v) => v.id));
     }
+    // Locations chosen before the product was ever on Shopify. The quantity
+    // push above only stocks a location that holds something; this stocks the
+    // empty ones the merchant ticked.
+    await this.applyPendingLocationChanges(product, orgId, auth);
 
     this.logger.log(
       `Pushed CRM product "${product.title}" → Shopify product ${remoteProductId} (${product.variants.length} variants, ${product.images.length} images)`,
@@ -1236,6 +1353,170 @@ export class ShopifyPushService {
   }
 
   /**
+   * Apply the location changes made in the CRM's "Edit locations" dialog to
+   * Shopify — stock a variant at a location, or stop stocking it there — and
+   * forget each one once Shopify agrees with it.
+   *
+   * Only explicit edits are applied; see pending-location-changes.ts for why
+   * the two sides are never simply diffed.
+   *
+   * Shopify can refuse a removal (the location is the variant's only one, or
+   * it has committed stock). A refused change stays pending and the push
+   * fails with Shopify's reason, so the merchant sees why rather than a
+   * product that claims to be synced.
+   */
+  private async applyPendingLocationChanges(
+    product: { id: string; metadata: Prisma.JsonValue | null },
+    orgId: string,
+    auth: ShopifyAuthContext,
+  ): Promise<void> {
+    const pendingChanges = readPendingLocationChanges(product.metadata);
+    if (pendingChanges.length === 0) return;
+
+    // Re-read rather than trust the caller's copy: on a first push the
+    // variants were loaded before Shopify assigned their ids.
+    const variants = await this.prisma.productVariant.findMany({
+      where: { productId: product.id, organizationId: orgId },
+      select: { id: true, externalId: true, inventoryItemId: true },
+    });
+    const inventoryItemIdByVariant = await this.resolveInventoryItemIds(auth, variants);
+
+    const changeKey = (change: PendingLocationChange) =>
+      `${change.variantId}:${change.warehouseId}:${change.action}`;
+    const settledChangeKeys = new Set<string>();
+    const refusalMessages: string[] = [];
+
+    for (const change of pendingChanges) {
+      try {
+        const refusalMessage = await this.applyLocationChange(
+          change,
+          inventoryItemIdByVariant.get(change.variantId),
+          auth,
+        );
+        if (refusalMessage) refusalMessages.push(refusalMessage);
+        else settledChangeKeys.add(changeKey(change));
+      } catch (err) {
+        refusalMessages.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // Drop only what was settled above. Anything else — a refusal, or a change
+    // the merchant made while this push was running — stays for the next one.
+    const stillPending = await this.prisma.$transaction((tx) =>
+      mutatePendingLocationChanges(tx, product.id, orgId, (currentChanges) =>
+        currentChanges.filter((change) => !settledChangeKeys.has(changeKey(change))),
+      ),
+    );
+
+    if (refusalMessages.length > 0) {
+      throw new Error(
+        `Shopify did not accept ${refusalMessages.length} location change(s): ` +
+        [...new Set(refusalMessages)].join('; '),
+      );
+    }
+    if (stillPending.length > 0) {
+      // recordProductSuccess would stamp SYNCED over a product that still has
+      // changes waiting; failing here lets the retry pick them up.
+      throw new Error('Locations were changed while this sync was running. Sync again to apply them.');
+    }
+  }
+
+  /** One pending change. Returns Shopify's refusal, or null once it is settled. */
+  private async applyLocationChange(
+    change: PendingLocationChange,
+    inventoryItemId: string | undefined,
+    auth: ShopifyAuthContext,
+  ): Promise<string | null> {
+    const crmStockRow = await this.prisma.stockLevel.findFirst({
+      where: { variantId: change.variantId, warehouseId: change.warehouseId, locationId: null },
+      select: { id: true, available: true, reserved: true, qc: true, damaged: true },
+    });
+    const crmHoldsStock =
+      !!crmStockRow &&
+      (crmStockRow.available !== 0 ||
+        crmStockRow.reserved !== 0 ||
+        crmStockRow.qc !== 0 ||
+        crmStockRow.damaged !== 0);
+
+    // The CRM has moved on since this was recorded: nothing left to do.
+    if (change.action === 'add' && !crmStockRow) return null;
+    if (change.action === 'remove' && crmHoldsStock) return null;
+    // Variant deleted, or not on Shopify: nothing there to change.
+    if (!inventoryItemId) return null;
+
+    const inventoryItemGid = ShopifyGraphqlClient.toGid('InventoryItem', inventoryItemId);
+    const locationGid = ShopifyGraphqlClient.toGid('Location', change.shopifyLocationId);
+    const levelLookup = await this.graphql.request<InventoryLevelAtLocationResponse>(
+      auth,
+      INVENTORY_LEVEL_AT_LOCATION_QUERY,
+      { inventoryItemId: inventoryItemGid, locationId: locationGid },
+    );
+    const shopifyLevel = levelLookup.inventoryItem?.inventoryLevel ?? null;
+
+    if (change.action === 'add') {
+      // Already stocked there — and activating again with a quantity is an
+      // error on Shopify's side, so do not send it.
+      if (shopifyLevel) return null;
+      const activation = await this.graphql.request<InventoryActivateResponse>(
+        auth,
+        INVENTORY_ACTIVATE_MUTATION,
+        {
+          inventoryItemId: inventoryItemGid,
+          locationId: locationGid,
+          available: Math.max(crmStockRow!.available, 0),
+        },
+      );
+      const activationErrors = activation.inventoryActivate?.userErrors ?? [];
+      if (activationErrors.length > 0 || !activation.inventoryActivate?.inventoryLevel) {
+        return (
+          activationErrors.map((e) => e.message).join('; ') ||
+          'Shopify did not stock the item at the location.'
+        );
+      }
+      this.logger.log(
+        `Activated inventory item ${inventoryItemId} at location ${change.shopifyLocationId}`,
+      );
+      return null;
+    }
+
+    if (shopifyLevel) {
+      // Stock arrived on Shopify after the location was unticked here.
+      // Deactivating would discard it, and Shopify is the authority on its
+      // own quantities — so the removal is dropped and the next pull brings
+      // the location, with that stock, back into the CRM.
+      const quantityHeldOnShopify = shopifyLevel.quantities.find((q) => q.quantity !== 0);
+      if (quantityHeldOnShopify) {
+        this.logger.warn(
+          `Not removing inventory item ${inventoryItemId} from location ${change.shopifyLocationId}: ` +
+          `Shopify holds ${quantityHeldOnShopify.quantity} ${quantityHeldOnShopify.name} there`,
+        );
+        return null;
+      }
+      const deactivation = await this.graphql.request<InventoryDeactivateResponse>(
+        auth,
+        INVENTORY_DEACTIVATE_MUTATION,
+        { inventoryLevelId: shopifyLevel.id },
+      );
+      const deactivationErrors = deactivation.inventoryDeactivate?.userErrors ?? [];
+      if (deactivationErrors.length > 0) {
+        return deactivationErrors.map((e) => e.message).join('; ');
+      }
+      this.logger.log(
+        `Deactivated inventory item ${inventoryItemId} at location ${change.shopifyLocationId}`,
+      );
+    }
+
+    // A pull between the edit and this push puts the empty row back, because
+    // Shopify still stocked the item then. It no longer does.
+    if (crmStockRow) {
+      await this.prisma.stockLevel.deleteMany({
+        where: { id: crmStockRow.id, available: 0, reserved: 0, qc: 0, damaged: 0 },
+      });
+    }
+    return null;
+  }
+
+  /**
    * Push the current sellable quantity (variant.inventoryQuantity — for
    * warehousing orgs the SUM of StockLevel.available) for specific variants to
    * the primary Shopify location. Runs as a `push-availability` queue job
@@ -1413,7 +1694,18 @@ export class ShopifyPushService {
     // was created after the enable seed, or has trackQuantity:false so the
     // seed skipped it. It used to push its cached quantity; without this it
     // would silently stop syncing the moment warehousing was switched on.
-    const covered = new Set(levels.map((l) => l.variantId));
+    //
+    // "Anywhere" has to mean anywhere. Testing only the mapped rows read above
+    // also caught a variant stocked solely at CRM-only (or deactivated)
+    // locations, and wrote its org-wide total onto the primary Shopify
+    // location — stock that is not there. Once "Edit locations" could take a
+    // variant out of its last Shopify location, every sync of it did that.
+    const variantsStockedAnywhere = await this.prisma.stockLevel.findMany({
+      where: { variantId: { in: variants.map((v) => v.id) } },
+      select: { variantId: true },
+      distinct: ['variantId'],
+    });
+    const covered = new Set(variantsStockedAnywhere.map((level) => level.variantId));
     const uncovered = variants.filter((v) => !covered.has(v.id));
     if (uncovered.length > 0) {
       perLocation.push(...(await pushAtPrimary(uncovered)));
@@ -1422,26 +1714,52 @@ export class ShopifyPushService {
     return perLocation;
   }
 
-  /** Set absolute available quantities in one mutation. Best-effort — a
-   *  failure is logged and never aborts the push. */
+  /**
+   * Set absolute available quantities in one mutation. Best-effort — a
+   * failure is logged and never aborts the push.
+   *
+   * A write to a location the item is not stocked at is rejected by Shopify,
+   * and the CRM stocks it there the moment a mapped warehouse holds a row for
+   * it. So on ITEM_NOT_STOCKED_AT_LOCATION the pair is activated at that
+   * location (with its quantity, in the same call) and the rest re-sent once.
+   * A zero for an unstocked pair is dropped instead: "not stocked" already
+   * reads as zero, and activating would plant empty levels at every location.
+   */
   private async setInventoryQuantities(
     auth: ShopifyAuthContext,
     quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }>,
   ): Promise<void> {
     try {
-      const res = await this.graphql.request<InventorySetQuantitiesResponse>(
-        auth,
-        INVENTORY_SET_QUANTITIES_MUTATION,
-        {
-          input: {
-            name: 'available',
-            reason: 'correction',
-            ignoreCompareQuantity: true,
-            quantities,
-          },
-        },
-      );
-      const errors = res.inventorySetQuantities?.userErrors ?? [];
+      let errors = await this.sendInventoryQuantities(auth, quantities);
+
+      const unstocked = errors.filter(isNotStockedError);
+      if (unstocked.length > 0) {
+        // Shopify reports the offending write as field ['input','quantities','<i>',…].
+        // If any index is unreadable, treat every write as a candidate —
+        // activating an already-stocked pair is a no-op.
+        const indexes = unstocked.map((e) => Number(e.field?.[2]));
+        const precise = indexes.every((i) => Number.isInteger(i) && quantities[i]);
+        const candidates = precise ? new Set(indexes) : new Set(quantities.map((_, i) => i));
+
+        const handled = new Set<number>();
+        for (const i of candidates) {
+          const q = quantities[i];
+          // Only a write KNOWN to be unstocked may be dropped as zero; in the
+          // imprecise case a zero may be a real write to a stocked location.
+          if (q.quantity <= 0) {
+            if (precise) handled.add(i);
+            continue;
+          }
+          if (await this.activateInventoryAt(auth, q)) handled.add(i);
+        }
+
+        const remaining = quantities.filter((_, i) => !handled.has(i));
+        errors = remaining.length > 0
+          ? await this.sendInventoryQuantities(auth, remaining)
+          : [];
+        quantities = remaining;
+      }
+
       if (errors.length > 0) {
         // Logged at ERROR, not WARN: a rejected push leaves Shopify holding a
         // number the CRM believes it changed, and the two only reconverge on
@@ -1462,6 +1780,49 @@ export class ShopifyPushService {
         `Inventory update failed for ${quantities.length} quantity write(s): ${err instanceof Error ? err.message : err}`,
       );
     }
+  }
+
+  private async sendInventoryQuantities(
+    auth: ShopifyAuthContext,
+    quantities: Array<{ inventoryItemId: string; locationId: string; quantity: number }>,
+  ): Promise<ShopifyUserError[]> {
+    const res = await this.graphql.request<InventorySetQuantitiesResponse>(
+      auth,
+      INVENTORY_SET_QUANTITIES_MUTATION,
+      {
+        input: {
+          name: 'available',
+          reason: 'correction',
+          ignoreCompareQuantity: true,
+          quantities,
+        },
+      },
+    );
+    return res.inventorySetQuantities?.userErrors ?? [];
+  }
+
+  /** Stock an item at a location with its available quantity. True on success. */
+  private async activateInventoryAt(
+    auth: ShopifyAuthContext,
+    q: { inventoryItemId: string; locationId: string; quantity: number },
+  ): Promise<boolean> {
+    const res = await this.graphql.request<InventoryActivateResponse>(
+      auth,
+      INVENTORY_ACTIVATE_MUTATION,
+      { inventoryItemId: q.inventoryItemId, locationId: q.locationId, available: q.quantity },
+    );
+    const errors = res.inventoryActivate?.userErrors ?? [];
+    if (errors.length > 0 || !res.inventoryActivate?.inventoryLevel) {
+      this.logger.warn(
+        `inventoryActivate failed for ${q.inventoryItemId} at ${q.locationId}: ` +
+        (errors.map((e) => e.message).join('; ') || 'no inventory level returned'),
+      );
+      return false;
+    }
+    this.logger.log(
+      `Activated ${q.inventoryItemId} at ${q.locationId} with available=${q.quantity}`,
+    );
+    return true;
   }
 
   /**
@@ -1628,7 +1989,7 @@ export class ShopifyPushService {
         `Shopify product ${product.externalId} no longer exists — cannot push local edits`,
       );
     }
-    let remoteOptions: ShopifyLiveOption[] = snapshot.product.options;
+    let remoteOptions: ShopifyLiveOption[] = withAllOptionValues(snapshot.product.options);
     let remoteVariants: ShopifyLiveVariantOptions[] = snapshot.product.variants.nodes;
     const adopt = (
       p:
@@ -1637,7 +1998,7 @@ export class ShopifyPushService {
         | undefined,
     ) => {
       if (!p) return;
-      remoteOptions = p.options;
+      remoteOptions = withAllOptionValues(p.options);
       remoteVariants = p.variants.nodes;
     };
 
@@ -1715,7 +2076,7 @@ export class ShopifyPushService {
           `productOptionUpdate "${add.optionName}" ${ctx}`,
         );
         if (res.productOptionUpdate?.product) {
-          remoteOptions = res.productOptionUpdate.product.options;
+          remoteOptions = withAllOptionValues(res.productOptionUpdate.product.options);
         }
         this.logger.log(
           `Added value(s) ${add.values.map((v) => `"${v.name}"`).join(', ')} to option "${add.optionName}" on ${ctx}.`,
@@ -1966,14 +2327,19 @@ export class ShopifyPushService {
       const sync = this.readProductSyncMeta(p.metadata);
       const status = sync?.status;
       // Skip in-flight + already-good states regardless of channel.
-      if (status === 'PENDING' || status === 'SYNCED') return false;
+      if (status === 'SYNCED') return false;
+      // A PENDING claim nobody is working (queue was down, job lost) is not
+      // in flight. Skipping it for ever left the product "Syncing" with no
+      // way out; treat it like a failed attempt.
+      const abandoned = isStalePendingSync(sync);
+      if (status === 'PENDING' && !abandoned) return false;
       if (p.channel.platform === ChannelPlatform.MANUAL) {
         // MANUAL: push if never pushed or last attempt failed.
-        return !status || status === 'FAILED';
+        return !status || status === 'FAILED' || abandoned;
       }
       if (p.channel.platform === ChannelPlatform.SHOPIFY) {
         // SHOPIFY-rebadged: push only when there's something to send.
-        return status === 'OUT_OF_SYNC' || status === 'FAILED';
+        return status === 'OUT_OF_SYNC' || status === 'FAILED' || abandoned;
       }
       return false;
     });
@@ -2077,7 +2443,7 @@ export class ShopifyPushService {
   }
 
   private readProductSyncMeta(metadata: Prisma.JsonValue | null | undefined):
-    | { status: string; shopifyProductId?: string; error?: string; attempts: number }
+    | { status: string; shopifyProductId?: string; error?: string; queuedAt?: string; attempts: number }
     | null {
     if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
     const m = (metadata as Record<string, unknown>).shopifySync;

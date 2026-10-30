@@ -72,6 +72,61 @@ export function resolveGstTimeZone(org: {
   return 'UTC';
 }
 
+/**
+ * Timezone that reporting windows are cut in — what "today" and "last 7 days"
+ * mean on the dashboard and the Orders page stats.
+ *
+ * Same reasoning as `resolveGstTimeZone`: `Organization.timezone` defaults to
+ * "UTC" and most merchants never change it, which started every window at
+ * 05:30 IST and cut the daily bars 05:30→05:30. An explicitly-set, valid
+ * non-UTC timezone wins; the untouched default reads as IST, GST or not.
+ *
+ * The client mirrors this rule in `client/app/lib/reporting-date.ts` so the
+ * calendar day it sends is the one the server resolves — keep the two in step.
+ */
+export function resolveReportingTimeZone(org: {
+  timezone?: string | null;
+}): string {
+  const configured = org.timezone?.trim();
+  if (configured && configured !== 'UTC' && isValidTimeZone(configured)) {
+    return configured;
+  }
+  return INDIA_TZ;
+}
+
+/** 00:00 in `timeZone` on the calendar day `days` before the one `now` falls on. */
+export function zonedDayStartDaysAgo(
+  now: Date,
+  days: number,
+  timeZone: string,
+): Date {
+  const { year, month, day } = zonedParts(now, timeZone);
+  // Day arithmetic via UTC so month/year rollover is Date's problem, not ours.
+  const target = new Date(Date.UTC(year, month - 1, day - days));
+  return zonedTimeToUtc(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    target.getUTCDate(),
+    timeZone,
+  );
+}
+
+/** 00:00 in `timeZone` on the 1st of the month `months` before the one `now` falls in. */
+export function zonedMonthStartMonthsAgo(
+  now: Date,
+  months: number,
+  timeZone: string,
+): Date {
+  const { year, month } = zonedParts(now, timeZone);
+  const target = new Date(Date.UTC(year, month - 1 - months, 1));
+  return zonedTimeToUtc(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    1,
+    timeZone,
+  );
+}
+
 /** True when `value` is a bare calendar day (`YYYY-MM-DD`) rather than an instant. */
 function isCalendarDay(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value.trim());

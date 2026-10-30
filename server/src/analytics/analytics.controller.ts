@@ -1,5 +1,6 @@
 import { Controller, Get, Logger, Post, Query } from '@nestjs/common';
 import { OrgId } from '../auth/decorators/org-id.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { AnalyticsService } from './analytics.service';
 import { AnalyticsDashboardService } from './analytics-dashboard.service';
 import {
@@ -11,6 +12,7 @@ import { PixelEventsAggregator } from './pixel-events-aggregator.service';
 import { QueryAnalyticsDto, rangeToDays } from './dto/query-analytics.dto';
 import { PrismaService } from '../prisma/prisma.service';
 
+@RequireSection('analytics')
 @Controller('analytics')
 export class AnalyticsController {
   private readonly logger = new Logger(AnalyticsController.name);

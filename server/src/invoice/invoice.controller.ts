@@ -2,6 +2,7 @@ import {
   Controller,
   Delete,
   Get,
+  Patch,
   Post,
   Body,
   Param,
@@ -12,17 +13,22 @@ import type { Response } from 'express';
 import { OrgId } from '../auth/decorators/org-id.decorator';
 import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { BulkCreateInvoicesDto } from './dto/bulk-create-invoices.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { QueryGstReturnDto } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { MarkFiledDto } from './dto/mark-filed.dto';
+import { UpdateInvoiceDto } from './dto/update-invoice.dto';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { ORG_MANAGERS, Roles } from '../auth/decorators/roles.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
+import { Throttle } from '@nestjs/throttler';
 import { attachmentDisposition } from '../common/utils/content-disposition.util';
 import { renderCsvSections } from './gst-return-rows';
 
+@RequireSection('invoices')
 @Controller('invoices')
 export class InvoiceController {
   constructor(private readonly invoiceService: InvoiceService) {}
@@ -32,6 +38,17 @@ export class InvoiceController {
   @Roles(...ORG_MANAGERS)
   create(@OrgId() orgId: string, @Body() dto: CreateInvoiceDto) {
     return this.invoiceService.create(orgId, dto);
+  }
+
+  // POST /api/v1/invoices/bulk — generate GST invoices for selected orders.
+  // Static route, so it is declared before the :id POST routes below. Each
+  // call runs up to MAX_BULK_INVOICES Serializable transactions, so it gets a
+  // tighter limit than the global 60/min.
+  @Post('bulk')
+  @Roles(...ORG_MANAGERS)
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  bulkCreate(@OrgId() orgId: string, @Body() dto: BulkCreateInvoicesDto) {
+    return this.invoiceService.bulkCreate(orgId, dto.orderIds);
   }
 
   // GET /api/v1/invoices/stats — KPI aggregates and filter-chip counts
@@ -217,5 +234,17 @@ export class InvoiceController {
   @Roles(...ORG_MANAGERS)
   cancel(@Param('id') id: string, @OrgId() orgId: string) {
     return this.invoiceService.cancel(id, orgId);
+  }
+
+  // PATCH /api/v1/invoices/:id — correct the non-tax fields of an issued invoice
+  @Patch(':id')
+  @Roles(...ORG_MANAGERS)
+  update(
+    @Param('id') id: string,
+    @OrgId() orgId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: UpdateInvoiceDto,
+  ) {
+    return this.invoiceService.update(id, orgId, dto, user.sub);
   }
 }

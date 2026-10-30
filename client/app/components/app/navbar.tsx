@@ -5,8 +5,6 @@ import {
   ShoppingCart,
   Package,
   Boxes,
-  Megaphone,
-  MessageSquare,
   Users,
   BarChart3,
   Bell,
@@ -14,17 +12,11 @@ import {
   ChevronDown,
   LogOut,
   User,
-  Leaf,
   Receipt,
   ShieldCheck,
   ArrowLeftRight,
   FileText,
-  Truck,
-  ClipboardList,
-  RotateCcw,
-  MapPin,
-  Send,
-  Zap,
+  Lock,
 } from "lucide-react";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 import {
@@ -36,12 +28,14 @@ import {
   DropdownMenuLabel,
 } from "~/components/ui/dropdown-menu";
 import { cn } from "~/lib/utils";
-import { useAuthStore } from "~/stores/auth.store";
+import { BrandLogo } from "~/components/app/brand-logo";
+import { Tip } from "~/components/ui/tooltip";
+import { useAuthStore, normalizeOrganizations } from "~/stores/auth.store";
 import { apiClient } from "~/lib/api-client";
 import { authService } from "~/services/auth.service";
 import { useStopImpersonating } from "~/hooks/use-admin-queries";
+import { useSectionAccess } from "~/hooks/use-section-access";
 import { useCurrentRole } from "~/hooks/use-current-role";
-import { showPreviewModules, isPreviewPath } from "~/lib/feature-flags";
 import { toast } from "sonner";
 
 type NavChild = { label: string; href: string; icon: typeof LayoutDashboard };
@@ -72,53 +66,12 @@ const PRODUCTS_CHILDREN: NavChild[] = [
   { label: "Inventory", href: "/products/inventory", icon: Boxes },
 ];
 
-/**
- * Sub-nav for the Logistics section. Shipment detail stays off the strip and is
- * reached from inside the list, the same way Inventory's ledger and warehouses
- * are.
- */
-const LOGISTICS_CHILDREN: NavChild[] = [
-  { label: "Shipments", href: "/logistics", icon: Truck },
-  { label: "Fulfilment queue", href: "/logistics/orders-to-ship", icon: ClipboardList },
-  { label: "Returns / RTO", href: "/logistics/returns", icon: RotateCcw },
-  { label: "Carriers & rates", href: "/logistics/carriers", icon: Receipt },
-  { label: "Zones", href: "/logistics/zones", icon: MapPin },
-  { label: "Analytics", href: "/logistics/analytics", icon: BarChart3 },
-];
-
-/**
- * Sub-nav for the Campaigns section. Overview keeps the parent href so the pill
- * and the strip's first item agree, matching "All orders" and "All products".
- * The broadcast composer and the automation builder stay off the strip and are
- * reached from inside their lists.
- */
-const CAMPAIGNS_CHILDREN: NavChild[] = [
-  { label: "Overview", href: "/campaigns", icon: Megaphone },
-  { label: "Broadcasts", href: "/campaigns/broadcasts", icon: Send },
-  { label: "Automations", href: "/campaigns/automations", icon: Zap },
-];
-
 const NAV_LINKS: NavItem[] = [
   { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
   { label: "Orders", href: "/orders", icon: ShoppingCart, children: ORDERS_CHILDREN },
   { label: "Products", href: "/products", icon: Package, children: PRODUCTS_CHILDREN },
-  // Chat, Campaigns and Analytics still run on placeholder data rather than a
-  // real backend. Deliberately no badge count on Chat: the old one was
-  // hardcoded to match the sample conversations.
-  { label: "Chat", href: "/conversation", icon: MessageSquare },
-  { label: "Campaigns", href: "/campaigns", icon: Megaphone, children: CAMPAIGNS_CHILDREN },
-  { label: "Logistics", href: "/logistics", icon: Truck, children: LOGISTICS_CHILDREN },
   { label: "Analytics", href: "/analytics", icon: BarChart3 },
 ];
-
-/**
- * NAV_LINKS minus anything owned by a preview module — see feature-flags.ts.
- * Dropping a pill drops its secondary strip with it, since the strip renders
- * from the active entry's children and matchNav only ever searches this list.
- */
-const BASE_NAV_LINKS: NavItem[] = showPreviewModules
-  ? NAV_LINKS
-  : NAV_LINKS.filter((item) => !isPreviewPath(item.href));
 
 /**
  * The nav entry owning `pathname`, longest matching href first — so
@@ -141,32 +94,31 @@ export function Navbar() {
     useAuthStore();
   const stopImpersonating = useStopImpersonating();
 
-  const { isVendor, isInfluencer, can } = useCurrentRole();
+  const { isInfluencer, can } = useCurrentRole();
+  const { canAccess, landingPath, lockReason } = useSectionAccess();
 
-  // Vendors are locked down to Orders + Products only.
-  //
-  // Influencers get whatever their PERMISSIONS name, not a hardcoded list —
+  // Every member sees every pill; the ones they cannot open render locked
+  // rather than hidden (see lib/sections.ts for who can open what). Influencers
+  // are the exception: an outside party sees only what their PERMISSIONS name —
   // Campaigns appears because they hold `campaigns.view`, and revoking that
   // grant removes the pill with no change here. That indirection is deliberate:
   // influencer campaign access is a temporary decision awaiting review, and it
-  // should be revisable as data. Their Settings link lives in the avatar menu,
-  // as it does for every role.
-  //
-  // Otherwise, an extra Super Admin link is visible to real Collabo-team super
-  // admins (never while impersonating — the impersonation token has
-  // isSuperAdmin=false).
-  const navLinks: NavItem[] = isVendor
-    ? [
-      { label: "Orders", href: "/orders", icon: ShoppingCart },
-      { label: "Products", href: "/products", icon: Package },
-    ]
-    : isInfluencer
-      ? NAV_LINKS.filter(
-        (item) => item.href === "/campaigns" && can("campaigns.view"),
-      )
-      : user?.isSuperAdmin && !impersonatedBy
-        ? [...BASE_NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
-        : BASE_NAV_LINKS;
+  // should be revisable as data. An extra Super Admin link is visible to real
+  // Collabo-team super admins (never while impersonating — the impersonation
+  // token has isSuperAdmin=false).
+  const navLinks: NavItem[] = isInfluencer
+    ? NAV_LINKS.filter((item) => item.href === "/campaigns" && can("campaigns.view"))
+    : user?.isSuperAdmin && !impersonatedBy
+      ? [...NAV_LINKS, { label: "Super Admin", href: "/admin/users", icon: ShieldCheck }]
+      : NAV_LINKS;
+
+  // A pill opens its own page, or — when only a sub-page is granted (Customers
+  // without Orders) — the first sub-page the member can open. It is locked only
+  // when nothing under it is reachable.
+  const pillTarget = (item: NavItem): string | null =>
+    canAccess(item.href)
+      ? item.href
+      : item.children?.find((child) => canAccess(child.href))?.href ?? null;
 
   // Longest-prefix match, so a child route keeps its parent pill lit.
   const activeTop = matchNav(navLinks, location.pathname);
@@ -180,29 +132,8 @@ export function Navbar() {
       // Update tokens (new JWT scoped to selected org)
       setTokens(data.accessToken, data.refreshToken);
       // Update org list from backend (freshest data)
-      const normalized = data.organizations.map((o) => ({
-        id: crypto.randomUUID(),
-        organizationId: o.id,
-        role: o.role,
-        isActive: true,
-        organization: {
-          id: o.id,
-          name: o.name,
-          slug: o.slug,
-          type: o.type,
-          logo: null,
-          timezone: "UTC",
-          currency: "USD",
-          industry: null,
-          website: null,
-          billingPlan: "BASIC" as const,
-          billingInterval: null,
-          onboardingStatus: "COMPLETED" as const,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-      }));
-      setOrganizations(normalized);
+      // The store's normaliser, so vendor scope and grants come across too.
+      setOrganizations(normalizeOrganizations(data.organizations));
       setCurrentOrg(orgId);
       // Reload the page to refetch all data with new org context
       window.location.reload();
@@ -232,22 +163,36 @@ export function Navbar() {
       <div className="mx-auto flex h-[72px] max-w-screen-xl items-center justify-between px-6">
 
         {/* ── Logo ──────────────────────────────────────────────────── */}
-        <Link to="/dashboard" className="flex shrink-0 items-center gap-2">
-          {/* <div className="flex size-9 items-center justify-center rounded-xl bg-[#CEF17B] shadow-sm dark:shadow-none">
-            <Leaf className="size-4 text-gray-900" />
-          </div> */}
-          <span className="font-display text-stat text-brand-strong">collabo</span>
+        <Link to={landingPath} className="flex shrink-0 items-center">
+          <BrandLogo className="h-7" />
         </Link>
 
         {/* ── Nav — pill container ─────────────────────────────── */}
         <LayoutGroup id="navbar">
           <nav className="hidden md:flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-full bg-foreground/90 dark:bg-gray-900 px-2 py-1.5 shadow-sm ring-1 ring-black/[0.06] dark:ring-gray-700 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {navLinks.map(({ label, href, icon: Icon, badge }) => {
+            {navLinks.map((item) => {
+              const { label, href, icon: Icon, badge } = item;
               const isActive = activeTop?.href === href;
+              const target = pillTarget(item);
+              if (!target) {
+                return (
+                  <Tip key={href} text={lockReason} side="bottom">
+                    <span
+                      role="link"
+                      aria-disabled="true"
+                      tabIndex={0}
+                      className="flex shrink-0 cursor-not-allowed items-center gap-1 rounded-full p-2.5 text-sm font-medium text-background/40 select-none dark:text-gray-600"
+                    >
+                      <Lock className="size-3" />
+                      {label}
+                    </span>
+                  </Tip>
+                );
+              }
               return (
                 <Link
                   key={href}
-                  to={href}
+                  to={target}
                   className={cn(
                     "relative flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-sm select-none p-2.5",
                     isActive
@@ -405,6 +350,21 @@ export function Navbar() {
             >
               {sectionChildren.map(({ label, href, icon: Icon }) => {
                 const isActive = activeChild?.href === href;
+                if (!canAccess(href)) {
+                  return (
+                    <Tip key={href} text={lockReason} side="bottom">
+                      <span
+                        role="link"
+                        aria-disabled="true"
+                        tabIndex={0}
+                        className="flex cursor-not-allowed items-center gap-1.5 rounded-full p-2.5 text-xs font-medium text-gray-300 select-none dark:text-gray-600"
+                      >
+                        <Lock className="size-3.5" />
+                        {label}
+                      </span>
+                    </Tip>
+                  );
+                }
                 return (
                   <Link
                     key={href}

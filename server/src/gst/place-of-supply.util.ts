@@ -45,6 +45,18 @@ const PROVINCE_TO_STATE_CODE: Record<string, string> = {
   WB: '19',
 };
 
+const STATE_CODE_TO_PROVINCE: Record<string, string> = Object.fromEntries(
+  Object.entries(PROVINCE_TO_STATE_CODE).map(([province, state]) => [state, province]),
+);
+
+/**
+ * Shopify province code for a GST state code ("32" → "KL"), or null.
+ * Derived from the same table as the forward lookup, so the two can't drift.
+ */
+export function stateCodeToProvinceCode(stateCode: string): string | null {
+  return STATE_CODE_TO_PROVINCE[stateCode] ?? null;
+}
+
 /** State code from an address JSON blob, or null when it carries none. */
 export function extractStateFromAddress(address: unknown): string | null {
   if (!address || typeof address !== 'object') return null;

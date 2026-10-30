@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { formatCurrency } from "~/lib/utils";
+import { PhoneInput } from "~/components/app/phone-input";
 import type {
   Customer,
   OfflineCustomerInput,
@@ -258,10 +259,10 @@ function NewCustomerForm({
           value={value.lastName ?? ""}
           onChange={(v) => patch({ lastName: v || undefined })}
         />
-        <Field
+        <PhoneInput
           label="Phone"
-          value={value.phone ?? ""}
-          onChange={(v) => patch({ phone: v || undefined })}
+          value={value.phone}
+          onChange={(v) => patch({ phone: v })}
         />
         <Field
           label="Email"

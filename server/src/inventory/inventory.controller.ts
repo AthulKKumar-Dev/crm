@@ -12,9 +12,13 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import type { JwtPayload } from '../auth/interfaces/jwt-payload.interface';
 import { Roles, ORG_OPERATORS } from '../auth/decorators/roles.decorator';
 import { RequirePermissions } from '../auth/decorators/require-permissions.decorator';
+import { RequireSection } from '../auth/decorators/require-section.decorator';
 import { InventoryService } from './inventory.service';
 import { SkuGeneratorService } from './sku-generator.service';
-import { CreateAdjustmentDto } from './dto/adjustment.dto';
+import {
+  BulkAdjustmentDto,
+  CreateAdjustmentDto,
+} from './dto/adjustment.dto';
 import { QueryLedgerDto, QueryStockDto } from './dto/query-stock.dto';
 import { GenerateCodesDto } from './dto/generate-skus.dto';
 
@@ -26,6 +30,9 @@ import { GenerateCodesDto } from './dto/generate-skus.dto';
  */
 const ORG_MEMBERS: UserRole[] = [...ORG_OPERATORS, UserRole.VIEWER];
 
+// Inventory lives under Products: the section opens the door, the
+// inventory.* keys below still decide what works inside.
+@RequireSection('products')
 @Controller('inventory')
 export class InventoryController {
   constructor(
@@ -36,6 +43,7 @@ export class InventoryController {
   // Status is intentionally permission-free (any member): the client shell
   // uses it to decide whether to show the Inventory nav item / enable CTA.
   @Get('status')
+  @RequireSection()
   @Roles(...ORG_MEMBERS)
   getStatus(@OrgId() orgId: string) {
     return this.inventory.getStatus(orgId);
@@ -84,6 +92,20 @@ export class InventoryController {
     return this.inventory.createAdjustment(orgId, user.sub, dto);
   }
 
+  // Saves every edited quantity on one screen at once. Atomic: see
+  // InventoryService.createAdjustmentsBulk for why a failed line rolls back
+  // the batch instead of leaving it half applied.
+  @Post('adjustments/bulk')
+  @Roles(...ORG_OPERATORS)
+  @RequirePermissions('inventory.adjust')
+  createAdjustmentsBulk(
+    @OrgId() orgId: string,
+    @CurrentUser() user: JwtPayload,
+    @Body() dto: BulkAdjustmentDto,
+  ) {
+    return this.inventory.createAdjustmentsBulk(orgId, user.sub, dto);
+  }
+
   @Get('ledger')
   @Roles(...ORG_MEMBERS)
   @RequirePermissions('inventory.view')
@@ -110,6 +132,14 @@ export class InventoryController {
   @RequirePermissions('inventory.labels')
   generateBarcodes(@OrgId() orgId: string, @Body() dto: GenerateCodesDto) {
     return this.skuGenerator.generateBarcodes(orgId, dto);
+  }
+
+  // Org-wide, deliberately: codes belong to the catalogue, not to a location.
+  @Get('labels/code-status')
+  @Roles(...ORG_MEMBERS)
+  @RequirePermissions('inventory.labels')
+  codeStatus(@OrgId() orgId: string) {
+    return this.skuGenerator.codeStatus(orgId);
   }
 
   @Get('labels/duplicates')

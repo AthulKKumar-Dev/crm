@@ -140,6 +140,8 @@ export interface OrderNode {
    *  instead of re-imported as a duplicate. */
   sourceIdentifier: string | null;
   sourceName: string | null;
+  /** The app that created the order — "Online Store", "Point of Sale", … */
+  app: { name: string } | null;
   createdAt: string;
   updatedAt: string;
   currencyCode: string;
@@ -257,6 +259,7 @@ export const ORDERS_LIST_QUERY = /* GraphQL */ `
         closedAt
         sourceIdentifier
         sourceName
+        app { name }
         createdAt
         updatedAt
         currencyCode
@@ -373,9 +376,13 @@ export interface MailingAddressInput {
   address1?: string | null;
   address2?: string | null;
   city?: string | null;
+  /** @deprecated in Admin API 2026-01 — send `provinceCode`. */
   province?: string | null;
+  /** @deprecated in Admin API 2026-01 — send `countryCode`. */
   country?: string | null;
   countryCode?: string | null;
+  /** ISO region code, e.g. "KL" (Kerala), "QC" (Quebec). */
+  provinceCode?: string | null;
   zip?: string | null;
   firstName?: string | null;
   lastName?: string | null;
@@ -1806,7 +1813,12 @@ export const VARIANT_INVENTORY_LEVELS_QUERY = /* GraphQL */ `
               location {
                 id
               }
-              quantities(names: ["available"]) {
+              # NO BACKTICKS IN HERE — this is a TS template literal and one
+              # would terminate the string.
+              # committed = units Shopify has allocated to placed-but-unfulfilled
+              # orders. Still physically in the building, so without it our
+              # on-hand under-counts by exactly that amount.
+              quantities(names: ["available", "committed"]) {
                 name
                 quantity
               }
@@ -1972,7 +1984,10 @@ export interface ShopifyLiveOption {
   id: string;
   name: string;
   position: number;
+  /** Only values that have a variant. Use `optionValues` for the full list. */
   values: string[];
+  /** Every value, including ones with no variant (`hasVariants: false`). */
+  optionValues?: Array<{ name: string }>;
 }
 
 export interface ShopifyLiveVariantOptions {
@@ -1994,7 +2009,7 @@ export const PRODUCT_OPTIONS_QUERY = /* GraphQL */ `
   query ProductOptionsForPush($id: ID!) {
     product(id: $id) {
       id
-      options { id name position values }
+      options { id name position values optionValues { name } }
       variants(first: 100) {
         nodes {
           id
@@ -2025,7 +2040,7 @@ export const PRODUCT_OPTIONS_CREATE_MUTATION = /* GraphQL */ `
     productOptionsCreate(productId: $productId, options: $options, variantStrategy: $variantStrategy) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id
@@ -2060,7 +2075,7 @@ export const PRODUCT_OPTION_UPDATE_MUTATION = /* GraphQL */ `
     ) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
       }
       userErrors { field message code }
     }
@@ -2087,7 +2102,7 @@ export const PRODUCT_OPTIONS_DELETE_MUTATION = /* GraphQL */ `
       deletedOptionsIds
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id
@@ -2112,7 +2127,7 @@ export const PRODUCT_OPTIONS_REORDER_MUTATION = /* GraphQL */ `
     productOptionsReorder(productId: $productId, options: $options) {
       product {
         id
-        options { id name position values }
+        options { id name position values optionValues { name } }
         variants(first: 100) {
           nodes {
             id
@@ -2139,6 +2154,74 @@ export const INVENTORY_SET_QUANTITIES_MUTATION = /* GraphQL */ `
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
     inventorySetQuantities(input: $input) {
       inventoryAdjustmentGroup { createdAt }
+      userErrors { field message code }
+    }
+  }
+`;
+
+// ─── inventoryDeactivate ────────────────────────────────────────────────────
+// Stops stocking an inventory item at a location. It takes the inventory
+// LEVEL id, not the item + location pair, hence the lookup query. Shopify
+// refuses when the level is the item's only one, or still has committed or
+// incoming stock — reported through userErrors.
+
+export interface InventoryLevelAtLocationResponse {
+  inventoryItem: {
+    inventoryLevel: {
+      id: string;
+      quantities: Array<{ name: string; quantity: number }>;
+    } | null;
+  } | null;
+}
+
+export const INVENTORY_LEVEL_AT_LOCATION_QUERY = /* GraphQL */ `
+  query InventoryLevelAtLocation($inventoryItemId: ID!, $locationId: ID!) {
+    inventoryItem(id: $inventoryItemId) {
+      inventoryLevel(locationId: $locationId) {
+        id
+        quantities(names: ["available", "on_hand", "committed", "incoming"]) {
+          name
+          quantity
+        }
+      }
+    }
+  }
+`;
+
+export interface InventoryDeactivateResponse {
+  inventoryDeactivate: {
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const INVENTORY_DEACTIVATE_MUTATION = /* GraphQL */ `
+  mutation InventoryDeactivate($inventoryLevelId: ID!) {
+    inventoryDeactivate(inventoryLevelId: $inventoryLevelId) {
+      userErrors { field message }
+    }
+  }
+`;
+
+// ─── inventoryActivate ──────────────────────────────────────────────────────
+// Stocks an inventory item at a location (and optionally sets its available
+// quantity). inventorySetQuantities rejects a write to a location the item is
+// not stocked at, so a push to a newly mapped location has to activate first.
+
+export interface InventoryActivateResponse {
+  inventoryActivate: {
+    inventoryLevel: { id: string } | null;
+    userErrors: ShopifyUserError[];
+  };
+}
+
+export const INVENTORY_ACTIVATE_MUTATION = /* GraphQL */ `
+  mutation InventoryActivate($inventoryItemId: ID!, $locationId: ID!, $available: Int) {
+    inventoryActivate(
+      inventoryItemId: $inventoryItemId
+      locationId: $locationId
+      available: $available
+    ) {
+      inventoryLevel { id }
       userErrors { field message }
     }
   }

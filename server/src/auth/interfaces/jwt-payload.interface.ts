@@ -3,6 +3,8 @@ import { UserRole } from '@prisma/client';
 export interface JwtPayload {
     sub: string;
     email: string;
+    /** Server-side session this token belongs to. Deleted on logout/revocation. */
+    sid?: string;
     orgId?: string;
     role?: UserRole;
     /** For VENDOR role: the Product.vendor value this session is scoped to. */
@@ -11,6 +13,11 @@ export interface JwtPayload {
     isSuperAdmin?: boolean;
     /** During impersonation, this is the super admin's user ID. Absent otherwise. */
     impersonatedBy?: string;
+    /**
+     * During impersonation, the super admin's own session it was started from.
+     * The support session only lasts while that session does.
+     */
+    impersonatorSid?: string;
 }
 
 export interface SessionPayload extends JwtPayload {

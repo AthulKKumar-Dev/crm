@@ -1,4 +1,5 @@
 import { apiClient } from "~/lib/api-client";
+import { warnIfExportCutOff } from "~/lib/export-notice";
 import type {
   DashboardOverview,
   DashboardPeriod,
@@ -74,6 +75,22 @@ export interface SalesByCategoryData {
   total: number;
 }
 
+/**
+ * A file download legitimately outlasts a page request: the API client's 30 s
+ * default cut large exports off mid-build and showed "Failed to export".
+ */
+const EXPORT_TIMEOUT_MS = 120_000;
+
+/**
+ * The file, plus a notice when the server cut it off at its row cap. Done here
+ * rather than per caller so every page that downloads this export (the
+ * dashboard and the Orders page) warns the same way.
+ */
+function exportBlob(response: { data: Blob; headers: unknown }): Blob {
+  warnIfExportCutOff(response.headers);
+  return response.data;
+}
+
 export const dashboardService = {
   getOverview: (params?: DashboardQueryParams) =>
     apiClient
@@ -92,11 +109,19 @@ export const dashboardService = {
 
   exportCsv: (params?: DashboardQueryParams) =>
     apiClient
-      .get<Blob>("/dashboard/export/csv", { params, responseType: "blob" })
-      .then((response) => response.data),
+      .get<Blob>("/dashboard/export/csv", {
+        params,
+        responseType: "blob",
+        timeout: EXPORT_TIMEOUT_MS,
+      })
+      .then(exportBlob),
 
   exportJson: (params?: DashboardQueryParams) =>
     apiClient
-      .get<Blob>("/dashboard/export/json", { params, responseType: "blob" })
-      .then((response) => response.data),
+      .get<Blob>("/dashboard/export/json", {
+        params,
+        responseType: "blob",
+        timeout: EXPORT_TIMEOUT_MS,
+      })
+      .then(exportBlob),
 };

@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useExclusiveDownload } from "~/hooks/use-exclusive-download";
 import { dashboardService } from "~/services/dashboard.service";
 import type { DashboardQueryParams } from "~/types/api";
 
@@ -14,11 +14,18 @@ export const dashboardKeys = {
     [...dashboardKeys.all, "sales-by-category", params] as const,
 };
 
-/** Fetch the dashboard overview (stats, top products, recent orders). */
+/**
+ * Fetch the dashboard overview (stats, top products, recent orders).
+ *
+ * The dashboard hooks keep the previous window's data on screen while a new
+ * range loads (`isPlaceholderData`), so a range switch dims the page instead
+ * of dropping it back to skeletons.
+ */
 export function useDashboard(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.overview(params),
     queryFn: () => dashboardService.getOverview(params),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -33,6 +40,7 @@ export function useSalesAndProfit(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.salesAndProfit(params),
     queryFn: () => dashboardService.getSalesAndProfit(params),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -41,37 +49,52 @@ export function useSalesByCategory(params?: DashboardQueryParams) {
   return useQuery({
     queryKey: dashboardKeys.salesByCategory(params),
     queryFn: () => dashboardService.getSalesByCategory(params),
+    placeholderData: keepPreviousData,
   });
 }
 
-/** Imperative helpers for triggering dashboard exports (CSV / JSON). */
+export type DashboardExportKind = "report" | "json";
+
+/**
+ * Dashboard downloads, one at a time — `exporting` names the one in flight.
+ * The lock itself lives in `useExclusiveDownload`.
+ *
+ * "Download Report" is the CSV, "Export JSON" the JSON — the same pairing as
+ * the Orders page, so the brand button means the same file on both.
+ */
 export function useExportDashboard() {
-  const download = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const { running: exporting, run } = useExclusiveDownload<DashboardExportKind>();
 
-  const exportCsv = async (params?: DashboardQueryParams) => {
-    try {
-      const blob = await dashboardService.exportCsv(params);
-      download(blob, "orders-report.csv");
-    } catch {
-      toast.error("Failed to export CSV.");
-    }
-  };
+  // The window is in the name, as on the Orders page: a 7-day file and a
+  // 12-month file used to both land as `dashboard-report.csv`.
+  const downloadReport = (params?: DashboardQueryParams) =>
+    run(
+      "report",
+      () => dashboardService.exportCsv(params),
+      `dashboard-report-${exportWindowLabel(params)}.csv`,
+      "Couldn't download the report. Please try again.",
+    );
 
-  const exportJson = async (params?: DashboardQueryParams) => {
-    try {
-      const blob = await dashboardService.exportJson(params);
-      download(blob, "dashboard-report.json");
-    } catch {
-      toast.error("Failed to export report.");
-    }
-  };
+  const exportJson = (params?: DashboardQueryParams) =>
+    run(
+      "json",
+      () => dashboardService.exportJson(params),
+      `dashboard-export-${exportWindowLabel(params)}.json`,
+      "Couldn't export the JSON. Please try again.",
+    );
 
-  return { exportCsv, exportJson };
+  return { downloadReport, exportJson, exporting };
+}
+
+/**
+ * The part of the file name that says which period it covers. The page
+ * always sends a range; explicit dates are named by their dates so a bounded
+ * request can never save as `-all`.
+ */
+function exportWindowLabel(params?: DashboardQueryParams): string {
+  if (params?.range) return params.range;
+  if (params?.dateFrom || params?.dateTo) {
+    return `${params.dateFrom ?? "start"}-to-${params.dateTo ?? "today"}`;
+  }
+  return "all";
 }

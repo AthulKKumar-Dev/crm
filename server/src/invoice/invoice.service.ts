@@ -4,6 +4,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  HttpException,
   PayloadTooLargeException,
 } from '@nestjs/common';
 import {
@@ -57,6 +58,7 @@ import {
   type ReturnInvoice,
 } from './gst-return.accumulator';
 import { summarizeDocumentSeries } from './document-series.util';
+import { isWithinInvoicingWindow, resolveSupplyDate } from './invoice-date.util';
 import {
   buildGstr1Sections,
   buildGstr3bSections,
@@ -119,6 +121,46 @@ import { QueryGstReturnDto, GstReturnType } from './dto/query-gst-return.dto';
 import { QueryInvoiceStatsDto } from './dto/query-invoice-stats.dto';
 import { CreateCreditNoteDto } from './dto/create-credit-note.dto';
 import { MarkFiledDto } from './dto/mark-filed.dto';
+import {
+  InvoiceBuyerAddressDto,
+  UpdateInvoiceDto,
+} from './dto/update-invoice.dto';
+
+/**
+ * The buyer address as stored: the six postal keys, trimmed, blanks dropped.
+ * A DTO instance carries class metadata and empty strings; neither belongs in
+ * a JSON column that `readAddress` on the client treats as display lines.
+ */
+function pickAddress(address: InvoiceBuyerAddressDto): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of ['address1', 'address2', 'city', 'province', 'zip', 'country'] as const) {
+    const value = address[key];
+    if (typeof value === 'string' && value.trim()) out[key] = value.trim();
+  }
+  return out;
+}
+
+/** `{}` reads as "no address"; keep that and NULL the same thing. */
+function nonEmptyAddress(
+  address: Record<string, string> | null,
+): Record<string, string> | null {
+  return address && Object.keys(address).length > 0 ? address : null;
+}
+
+/** Outcome of `InvoiceService.bulkCreate`, one entry per requested order. */
+export interface BulkInvoiceResult {
+  issued: Array<{
+    orderId: string;
+    orderName: string;
+    invoiceId: string;
+    invoiceNumber: string;
+    invoiceDate: Date;
+  }>;
+  /** Not attempted, or found already invoiced — nothing is wrong with these. */
+  skipped: Array<{ orderId: string; orderName: string | null; reason: string }>;
+  /** Attempted and rejected — the reason is the server's message. */
+  failed: Array<{ orderId: string; orderName: string; reason: string }>;
+}
 
 @Injectable()
 export class InvoiceService {
@@ -158,6 +200,136 @@ export class InvoiceService {
           ),
       },
     );
+  }
+
+  /**
+   * Issue invoices for a batch of selected orders — the Orders list's bulk
+   * action. Only PAID, uncancelled orders without a live invoice are issued;
+   * every other order comes back under `skipped` with the reason.
+   *
+   * Strictly one order at a time, each through `create` in its own
+   * transaction. Numbering is read-max-then-increment under Serializable, so
+   * issuing in parallel would collide on every attempt and could exhaust the
+   * retry; and a single wrapping transaction would let one bad order roll back
+   * the rest. A failure never consumes a serial.
+   *
+   * Eligible orders go oldest supply date first, so within the batch serials
+   * follow the order dates. (An order too old to be dated to its own month is
+   * dated today by `createForOrderTx`, so this is best effort, not a rule.)
+   *
+   * Failures are returned, not written to `order.invoiceError` — the person
+   * who pressed the button sees them at once, as with the single-order flow.
+   */
+  async bulkCreate(orgId: string, orderIds: string[]): Promise<BulkInvoiceResult> {
+    const ids = [...new Set(orderIds)];
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { gstEnabled: true },
+    });
+    if (!org?.gstEnabled) {
+      throw new BadRequestException(
+        'GST is not enabled for this organization. Enable it in Settings → Tax & GST.',
+      );
+    }
+
+    const orders = await this.prisma.order.findMany({
+      where: { id: { in: ids }, organizationId: orgId, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        orderNumber: true,
+        financialStatus: true,
+        cancelledAt: true,
+        externalCreatedAt: true,
+        createdAt: true,
+        invoices: {
+          where: { status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] } },
+          select: { invoiceNumber: true },
+          take: 1,
+        },
+      },
+    });
+    const byId = new Map(orders.map((o) => [o.id, o]));
+
+    const result: BulkInvoiceResult = { issued: [], skipped: [], failed: [] };
+    const eligible: typeof orders = [];
+
+    for (const id of ids) {
+      const order = byId.get(id);
+      if (!order) {
+        result.skipped.push({ orderId: id, orderName: null, reason: 'Order not found' });
+      } else if (order.invoices.length > 0) {
+        result.skipped.push({
+          orderId: id,
+          orderName: order.name,
+          reason: `Already invoiced (${order.invoices[0].invoiceNumber})`,
+        });
+      } else if (order.cancelledAt) {
+        result.skipped.push({ orderId: id, orderName: order.name, reason: 'Order is cancelled' });
+      } else if (order.financialStatus !== OrderFinancialStatus.PAID) {
+        result.skipped.push({
+          orderId: id,
+          orderName: order.name,
+          reason: `Not paid (${order.financialStatus.toLowerCase().replace(/_/g, ' ')})`,
+        });
+      } else {
+        eligible.push(order);
+      }
+    }
+
+    const now = new Date();
+    eligible.sort(
+      (a, b) =>
+        resolveSupplyDate(a, now).getTime() - resolveSupplyDate(b, now).getTime() ||
+        a.orderNumber - b.orderNumber,
+    );
+
+    for (const order of eligible) {
+      try {
+        const invoice = await this.create(orgId, { orderId: order.id } as CreateInvoiceDto);
+        result.issued.push({
+          orderId: order.id,
+          orderName: order.name,
+          invoiceId: invoice.id,
+          invoiceNumber: invoice.invoiceNumber,
+          invoiceDate: invoice.invoiceDate,
+        });
+      } catch (err) {
+        // A concurrent issue (another tab, auto-invoice on a webhook) is
+        // rejected by the duplicate check or the partial unique index. The
+        // order is invoiced either way, so report it as such. This lookup must
+        // not throw: invoices earlier in the batch are already issued, and a
+        // 500 here would hide them from the person who issued them.
+        const live = await this.prisma.invoice
+          .findFirst({
+            where: {
+              orderId: order.id,
+              organizationId: orgId,
+              status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
+            },
+            select: { invoiceNumber: true },
+          })
+          .catch(() => null);
+        if (live) {
+          result.skipped.push({
+            orderId: order.id,
+            orderName: order.name,
+            reason: `Already invoiced (${live.invoiceNumber})`,
+          });
+        } else if (err instanceof HttpException) {
+          result.failed.push({ orderId: order.id, orderName: order.name, reason: err.message });
+        } else {
+          this.logger.error(
+            `Bulk invoice failed for order ${order.id}`,
+            err instanceof Error ? err.stack : String(err),
+          );
+          result.failed.push({ orderId: order.id, orderName: order.name, reason: 'Unexpected error' });
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -309,11 +481,13 @@ export class InvoiceService {
     // the read above — but the 409 below quotes the invoice NUMBER back to the
     // caller, so an unscoped read here is one deleted line away from leaking a
     // different tenant's invoice number.
+    // Credit notes share the original's orderId but are not the order's
+    // invoice — the same set the partial unique index treats as live.
     const existingInvoice = await tx.invoice.findFirst({
       where: {
         orderId,
         organizationId: orgId,
-        status: { not: InvoiceStatus.CANCELLED },
+        status: { notIn: [InvoiceStatus.CANCELLED, InvoiceStatus.CREDIT_NOTE] },
       },
       select: { invoiceNumber: true },
     });
@@ -583,23 +757,70 @@ export class InvoiceService {
 
     
 
-    // 8. Generate invoice number (passes the same tx so it's atomic with the create below)
-    const invoiceDate = new Date();
-    const financialYear = this.calculator.getFinancialYear(
-      invoiceDate,
-      this.gstTimeZone(orgId, org),
-    );
-    // A filed period is closed. Issuing into it would change a return that has
-    // already gone to the government, with no amendment trail.
+    // 8. Date the document, then number it.
+    //
+    // The invoice date decides everything statutory about this document: the
+    // GST period it is reported in, its financial year, and therefore which
+    // consecutive series its serial comes from. This used to be `new Date()`,
+    // so a September order invoiced on 8 October was filed in October, and a
+    // 30 March order invoiced in April drew a new-year serial. The order's own
+    // date is the taxable supply date; "today" is only when the button was
+    // pressed.
+    const now = new Date();
+    const timeZone = this.gstTimeZone(orgId, org);
+    const supplyDate = resolveSupplyDate(order, now);
+    let invoiceDate = supplyDate;
+
+    // A late invoice for a period that has already been filed cannot be added
+    // to that return. The statutory treatment is to issue it dated today, into
+    // the current open period — which is also exactly what every invoice did
+    // before the order date was honoured, so this path cannot regress anyone.
+    //
+    // "Filed" means EITHER a filing recorded here OR a month older than the
+    // previous one. The filings table only knows what was recorded in the CRM;
+    // an org that files on the portal and never marks it here would otherwise
+    // have a year-old imported order mint a serial into a closed year.
+    if (!isWithinInvoicingWindow(supplyDate, now, timeZone)) {
+      this.logger.warn(
+        `Order ${order.id}: supply date ${supplyDate.toISOString()} is older ` +
+          `than the previous GST period — dating the invoice today instead.`,
+      );
+      invoiceDate = now;
+    } else {
+      const filing = await this.findPeriodFiling(
+        tx,
+        orgId,
+        supplyDate,
+        sellerGstin.id,
+        timeZone,
+      );
+      if (filing) {
+        this.logger.warn(
+          `Order ${order.id}: supply date ${supplyDate.toISOString()} falls in ` +
+            `${filing.returnType} ${filing.period}/${filing.financialYear}, which is ` +
+            `already filed — dating the invoice today instead.`,
+        );
+        invoiceDate = now;
+      }
+    }
+
+    const financialYear = this.calculator.getFinancialYear(invoiceDate, timeZone);
+    // Still asserted: today's period could itself be filed (a quarterly filer
+    // who recorded the quarter early), and that must stay a 409.
     await this.assertPeriodOpen(
       tx,
       orgId,
       invoiceDate,
       sellerGstin.id,
-      this.gstTimeZone(orgId, org),
+      timeZone,
       'Issuing an invoice',
     );
 
+    // Serial from the year the invoice is DATED in, so a March order invoiced
+    // in April stays in the old year's run. Back-dating can give a later serial
+    // an earlier date once newer invoices exist; the series is still gapless
+    // and consecutive, which is what Rule 46(b) requires. Chronological order
+    // of serials is not.
     const invoiceNum = await this.invoiceNumber.getNextInvoiceNumber(
       orgId,
       financialYear,
@@ -629,9 +850,14 @@ export class InvoiceService {
     }
 
     const buyerGstin = normalizeGstin(dto.buyerGstin) || customerGstin || null;
-    const buyerName = order.customer
-      ? `${order.customer.firstName || ''} ${order.customer.lastName || ''}`.trim()
-      : 'Guest Customer';
+    // A customer synced with only an email (common for Shopify checkouts) has
+    // no first or last name, and this used to store "" — a tax invoice with a
+    // blank buyer. Fall through to what identifies them, then to the guest
+    // label the no-customer case already uses.
+    const buyerName =
+      `${order.customer?.firstName || ''} ${order.customer?.lastName || ''}`.trim() ||
+      order.customer?.email?.trim() ||
+      'Guest Customer';
     const buyerStateCode =
       this.extractStateFromAddress(order.billingAddress) ||
       order.customer?.billingStateCode ||
@@ -981,24 +1207,159 @@ export class InvoiceService {
   }
 
 
+  // ─── EDIT INVOICE ───
+  /**
+   * Correct the buyer block or the notes on an issued invoice.
+   *
+   * Everything that moves tax is off limits here by construction: the DTO
+   * cannot carry it. A buyer GSTIN still changes which GSTR-1 table the
+   * invoice lands in, so the period lock applies exactly as it does to
+   * cancelling — once filed, the fix is a credit note. The edit is recorded on
+   * the order's timeline: a statutory document changed after issue needs a
+   * who-and-what, the same way cancel and credit note leave one.
+   */
+  async update(
+    id: string,
+    orgId: string,
+    dto: UpdateInvoiceDto,
+    userId?: string,
+  ) {
+    const target = await this.prisma.invoice.findFirst({
+      where: { id, organizationId: orgId },
+      select: {
+        status: true,
+        invoiceDate: true,
+        sellerGstinId: true,
+        orderId: true,
+        invoiceNumber: true,
+        // The current values, so the write and the audit event are a real
+        // diff: the client sends every editable field on every save.
+        buyerName: true,
+        buyerGstin: true,
+        buyerAddress: true,
+        notes: true,
+      },
+    });
+    if (!target) throw new NotFoundException('Invoice not found');
+    if (target.status !== InvoiceStatus.ISSUED) {
+      throw new BadRequestException(
+        `Only an issued invoice can be edited. This one is ${target.status}.`,
+      );
+    }
+
+    const org = await this.prisma.organization.findUnique({
+      where: { id: orgId },
+      select: { timezone: true, gstEnabled: true },
+    });
+    await this.assertPeriodOpen(
+      this.prisma,
+      orgId,
+      target.invoiceDate,
+      target.sellerGstinId,
+      this.gstTimeZone(orgId, org),
+      'Editing this invoice',
+    );
+
+    const data: Prisma.InvoiceUpdateManyMutationInput = {};
+    const changed: string[] = [];
+
+    if (dto.buyerName !== undefined) {
+      const name = dto.buyerName.trim();
+      // The DTO's length check sees the raw string, so "   " gets this far —
+      // and a blank buyer on a tax invoice is the defect issue-time now avoids.
+      if (!name) throw new BadRequestException('Buyer name cannot be blank.');
+      if (name !== target.buyerName) {
+        data.buyerName = name;
+        changed.push('buyer name');
+      }
+    }
+    if (dto.buyerGstin !== undefined) {
+      let gstin: string | null = null;
+      if (dto.buyerGstin?.trim()) {
+        // Same rule as issue time: a valid GSTIN or nothing. Storing junk
+        // would make the list and the return classify the invoice differently.
+        gstin = normalizeGstin(dto.buyerGstin);
+        if (!gstin) {
+          throw new BadRequestException(
+            'Buyer GSTIN must be a valid 15-character GST Identification Number',
+          );
+        }
+      }
+      if (gstin !== target.buyerGstin) {
+        data.buyerGstin = gstin;
+        changed.push('buyer GSTIN');
+        if (gstin) {
+          // The first two digits of a GSTIN ARE the state of registration. The
+          // buyer block must not say Maharashtra under a Karnataka GSTIN.
+          const stateCode = gstin.slice(0, 2);
+          data.buyerStateCode = stateCode;
+          data.buyerStateName = getStateName(stateCode) || stateCode;
+        }
+      }
+    }
+    if (dto.buyerAddress !== undefined) {
+      // Every field blank is "no address", stored as NULL like an invoice that
+      // never had one — not as `{}`, which every reader would then special-case.
+      const next = nonEmptyAddress(dto.buyerAddress ? pickAddress(dto.buyerAddress) : null);
+      const current = nonEmptyAddress(
+        target.buyerAddress && typeof target.buyerAddress === 'object'
+          ? pickAddress(target.buyerAddress as InvoiceBuyerAddressDto)
+          : null,
+      );
+      if (JSON.stringify(next) !== JSON.stringify(current)) {
+        data.buyerAddress = next ?? Prisma.JsonNull;
+        changed.push('buyer address');
+      }
+    }
+    if (dto.notes !== undefined) {
+      const notes = dto.notes?.trim() || null;
+      if (notes !== target.notes) {
+        data.notes = notes;
+        changed.push('notes');
+      }
+    }
+    // Nothing differs: no write, and no audit event claiming one happened.
+    if (changed.length === 0) return this.findOne(id, orgId);
+
+    await this.prisma.$transaction(async (tx) => {
+      // The status is in the WHERE so a cancel that lands between the read
+      // above and this write cannot be overwritten by a stale edit.
+      const claimed = await tx.invoice.updateMany({
+        where: { id, organizationId: orgId, status: InvoiceStatus.ISSUED },
+        data,
+      });
+      if (claimed.count === 0) {
+        throw new ConflictException(
+          'Invoice changed while you were editing it. Reload and try again.',
+        );
+      }
+      await tx.orderTimelineEvent.create({
+        data: {
+          orderId: target.orderId,
+          actorId: userId ?? null,
+          action: 'invoice_edited',
+          message: `Invoice ${target.invoiceNumber} edited: ${changed.join(', ')}`,
+          metadata: { invoiceId: id, fields: changed },
+        },
+      });
+    });
+
+    return this.findOne(id, orgId);
+  }
+
   // ─── FILING STATE ───
   /**
-   * Refuse to change a period that has already been filed.
-   *
-   * Nothing recorded a filing before, so GSTR-1/3B were recomputed from
-   * `invoices` on every request — issuing or cancelling an invoice inside an
-   * already-filed month silently rewrote history with no amendment trail. The
-   * statutory correction for a filed period is a credit note or an amendment,
-   * never an edit.
+   * The filing that locks the period `invoiceDate` falls in, or null when the
+   * period is open. Shared by `assertPeriodOpen`, which throws, and the
+   * late-invoice fallback in `createForOrderTx`, which re-dates.
    */
-  private async assertPeriodOpen(
+  private async findPeriodFiling(
     client: Prisma.TransactionClient | PrismaService,
     orgId: string,
     invoiceDate: Date,
     sellerGstinId: string,
     timeZone: string,
-    action: string,
-  ): Promise<void> {
+  ) {
     const financialYear = getFinancialYear(invoiceDate, timeZone);
     const month = String(zonedParts(invoiceDate, timeZone).month).padStart(2, '0');
 
@@ -1019,7 +1380,35 @@ export class InvoiceService {
       select: { returnType: true, period: true, filedAt: true, arn: true },
     });
 
+    return filing ? { ...filing, financialYear } : null;
+  }
+
+  /**
+   * Refuse to change a period that has already been filed.
+   *
+   * Nothing recorded a filing before, so GSTR-1/3B were recomputed from
+   * `invoices` on every request — issuing or cancelling an invoice inside an
+   * already-filed month silently rewrote history with no amendment trail. The
+   * statutory correction for a filed period is a credit note or an amendment,
+   * never an edit.
+   */
+  private async assertPeriodOpen(
+    client: Prisma.TransactionClient | PrismaService,
+    orgId: string,
+    invoiceDate: Date,
+    sellerGstinId: string,
+    timeZone: string,
+    action: string,
+  ): Promise<void> {
+    const filing = await this.findPeriodFiling(
+      client,
+      orgId,
+      invoiceDate,
+      sellerGstinId,
+      timeZone,
+    );
     if (!filing) return;
+    const { financialYear } = filing;
 
     // returnType is deliberately NOT part of the predicate: whichever return
     // went in, the underlying documents for that period are now on record.

@@ -1,5 +1,9 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Docker Compose for the NestJS API + Caddy reverse proxy (HTTPS via sslip.io).
+# Docker Compose for the NestJS API + Redis + Caddy reverse proxy (HTTPS via sslip.io).
+#
+# The `api` image is built by GitHub Actions on every push to `production`
+# (.github/workflows/deploy.yml) and pushed to GHCR; the droplet only pulls it.
+# `build:` is kept as a manual fallback (docker compose build api).
 #
 # The `api` service is internal-only (no host port binding). Caddy publishes
 # 80 and 443 and reverse-proxies to api:5000 over the internal `webnet` docker
@@ -11,13 +15,14 @@
 #   CADDY_ACME_EMAIL   — for Let's Encrypt renewal notices
 #
 # Usage:
-#   docker compose up -d --build
+#   docker compose up -d             # start everything (deploy.sh handles pulling the api image)
 #   docker compose logs -f caddy     # watch TLS provisioning
 #   docker compose down
 # ──────────────────────────────────────────────────────────────────────────────
 
 services:
   api:
+    image: ghcr.io/collabo-digital/crm-api:production
     build:
       context: .
       dockerfile: Dockerfile
@@ -38,6 +43,20 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: collabo-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - webnet
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   caddy:
     image: caddy:2-alpine
@@ -66,3 +85,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  redis_data:

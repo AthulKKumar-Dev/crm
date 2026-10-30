@@ -3,6 +3,17 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { REDIS_PREFIX, REDIS_KEYS, REDIS_TTL, LOGIN_RATE_LIMIT } from './redis.constants';
 
+const REFRESH_ROTATION_PENDING = 'pending';
+
+/** KEYS[1] refresh token, KEYS[2] rotation marker, ARGV[1] marker TTL (s). */
+const CONSUME_REFRESH_TOKEN_LUA = `
+local value = redis.call('GET', KEYS[1])
+if value then
+    redis.call('DEL', KEYS[1])
+    redis.call('SET', KEYS[2], '${REFRESH_ROTATION_PENDING}', 'EX', ARGV[1])
+end
+return value`;
+
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
     private readonly logger = new Logger(RedisService.name);
@@ -144,6 +155,50 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
         return raw ? (JSON.parse(raw) as T) : null;
     }
 
+    /**
+     * Read a refresh token and delete it in one atomic step, so it can be
+     * spent exactly once. With a separate get and del, two concurrent refreshes
+     * both read it before either deleted it and both were issued new tokens.
+     *
+     * The caller that gets the data also leaves a short-lived 'pending' marker
+     * (see getRefreshRotation) so a duplicate of the same request can wait for
+     * its result. A script rather than GETDEL, which needs Redis 6.2+.
+     */
+    async consumeRefreshToken<T>(token: string): Promise<T | null> {
+        const raw = (await this.client.eval(
+            CONSUME_REFRESH_TOKEN_LUA,
+            2,
+            this.key(REDIS_KEYS.REFRESH_TOKEN, token),
+            this.key(REDIS_KEYS.REFRESH_ROTATION, token),
+            REDIS_TTL.REFRESH_ROTATION,
+        )) as string | null;
+        return raw ? (JSON.parse(raw) as T) : null;
+    }
+
+    // ─── REFRESH ROTATION GRACE ───
+    // Two tabs share one refresh token and refresh at the same moment (wake
+    // from sleep, network back). Only one may rotate it; the other is handed
+    // the same replacement for a few seconds instead of being signed out.
+
+    /** `'pending'` while the winning refresh is in flight, then its result. */
+    async getRefreshRotation<T>(token: string): Promise<T | 'pending' | null> {
+        const raw = await this.client.get(this.key(REDIS_KEYS.REFRESH_ROTATION, token));
+        if (!raw) return null;
+        return raw === REFRESH_ROTATION_PENDING ? 'pending' : (JSON.parse(raw) as T);
+    }
+
+    async setRefreshRotationResult(token: string, result: Record<string, unknown>): Promise<void> {
+        await this.client.setex(
+            this.key(REDIS_KEYS.REFRESH_ROTATION, token),
+            REDIS_TTL.REFRESH_ROTATION,
+            JSON.stringify(result),
+        );
+    }
+
+    async clearRefreshRotation(token: string): Promise<void> {
+        await this.client.del(this.key(REDIS_KEYS.REFRESH_ROTATION, token));
+    }
+
     async deleteRefreshToken(token: string): Promise<void> {
         await this.client.del(this.key(REDIS_KEYS.REFRESH_TOKEN, token));
     }
@@ -166,5 +221,53 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
             pipeline.del(setKey);
             await pipeline.exec();
         }
+    }
+
+    // ─── AUTH SESSIONS (revocable access tokens) ───
+
+    /**
+     * An access token is only honoured while its `sid` is present here. Lives
+     * as long as a refresh token, and is extended on every rotation.
+     */
+    async setAuthSession(sid: string, userId: string): Promise<void> {
+        const setKey = this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId);
+        await this.client
+            .multi()
+            .setex(this.key(REDIS_KEYS.AUTH_SESSION, sid), REDIS_TTL.REFRESH_TOKEN, userId)
+            .sadd(setKey, sid)
+            .expire(setKey, REDIS_TTL.REFRESH_TOKEN)
+            .exec();
+    }
+
+    /**
+     * Extend a live session. Returns false when it has been revoked — it is
+     * never re-created here, so a refresh racing a logout cannot resurrect it.
+     */
+    async touchAuthSession(sid: string, userId: string): Promise<boolean> {
+        const alive = await this.client.expire(this.key(REDIS_KEYS.AUTH_SESSION, sid), REDIS_TTL.REFRESH_TOKEN);
+        if (alive !== 1) return false;
+        await this.client.expire(this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId), REDIS_TTL.REFRESH_TOKEN);
+        return true;
+    }
+
+    async isAuthSessionActive(sid: string, userId: string): Promise<boolean> {
+        return (await this.client.get(this.key(REDIS_KEYS.AUTH_SESSION, sid))) === userId;
+    }
+
+    async deleteAuthSession(sid: string, userId: string): Promise<void> {
+        await this.client.del(this.key(REDIS_KEYS.AUTH_SESSION, sid));
+        await this.client.srem(this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId), sid);
+    }
+
+    async deleteAllAuthSessions(userId: string): Promise<void> {
+        const setKey = this.key(REDIS_KEYS.USER_AUTH_SESSIONS, userId);
+        const sids = await this.client.smembers(setKey);
+
+        const pipeline = this.client.pipeline();
+        for (const sid of sids) {
+            pipeline.del(this.key(REDIS_KEYS.AUTH_SESSION, sid));
+        }
+        pipeline.del(setKey);
+        await pipeline.exec();
     }
 }

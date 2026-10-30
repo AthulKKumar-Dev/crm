@@ -25,6 +25,13 @@ describe('IsUqcConstraint', () => {
         expect(validator.validate('EACH')).toBe(false);
     });
 
+    it('accepts blank as "use the default unit"', () => {
+        // What the edit forms send for "Default (NOS)". Rejecting it made every
+        // save of a product with no unit fail with the UQC message.
+        expect(validator.validate('')).toBe(true);
+        expect(validator.validate('   ')).toBe(true);
+    });
+
     it('rejects non-strings', () => {
         expect(validator.validate(undefined)).toBe(false);
         expect(validator.validate(null)).toBe(false);

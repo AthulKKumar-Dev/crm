@@ -5,7 +5,8 @@ import { isAxiosError } from "axios";
 import { authService } from "~/services/auth.service";
 import { useAuthStore } from "~/stores/auth.store";
 import { handleMutationError } from "~/lib/handle-mutation-error";
-import { defaultGrantsForRole } from "~/lib/permissions";
+import { readTokenOrgId } from "~/lib/jwt";
+import { getLandingPath } from "~/lib/sections";
 import type {
   SignupRequest,
   LoginRequest,
@@ -19,11 +20,27 @@ import type {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function resolvePostAuthRoute(nextStep: string | null): string {
-  if (nextStep !== "choose-plan") return "/dashboard";
+  // The member's first accessible section — /dashboard unless it is locked.
+  if (nextStep !== "choose-plan") return getLandingPath();
   // Users who pick a plan but close the tab before creating their org can log
   // back in without re-picking — skip ahead to account-type.
   const { pendingPlan } = useAuthStore.getState();
   return pendingPlan ? "/onboarding/account-type" : "/onboarding/choose-plan";
+}
+
+/**
+ * The org to select right after sign-in: the one the access token was minted
+ * for, since that is the tenant the server will answer for. `organizations[0]`
+ * is only a fallback — picking it by position could show one org's name over
+ * another org's data.
+ */
+function initialOrgId(
+  accessToken: string,
+  organizations: { id: string }[],
+): string | null {
+  const tokenOrgId = readTokenOrgId(accessToken);
+  const fromToken = organizations.find((o) => o.id === tokenOrgId);
+  return (fromToken ?? organizations[0])?.id ?? null;
 }
 
 // ─── Signup ──────────────────────────────────────────────────────────────────
@@ -67,10 +84,9 @@ export function useLoginMutation(next?: string | null) {
       setAuth(data.user, data.accessToken, data.refreshToken, data.organizations);
       // Backend returns flat orgs: { id, name, slug, type, role }
       // setAuth normalizes them — use the org id directly
-      if (data.organizations.length > 0) {
-        useAuthStore.getState().setCurrentOrg(data.organizations[0].id);
-      }
-      // An invitation sends people here to prove who they are, then expects
+      const orgId = initialOrgId(data.accessToken, data.organizations);
+      if (orgId) useAuthStore.getState().setCurrentOrg(orgId);
+      // An invitation can send people here to prove who they are, then expect
       // them back. Without this the token is lost at the login screen and the
       // invitation looks broken.
       navigate(safeNext(next) ?? resolvePostAuthRoute(data.nextStep));
@@ -110,9 +126,8 @@ export function useVerifyEmailMutation() {
     onSuccess: (data) => {
       setAuth(data.user, data.accessToken, data.refreshToken, data.organizations);
       // Backend returns flat orgs: { id, name, slug, type, role }
-      if (data.organizations.length > 0) {
-        useAuthStore.getState().setCurrentOrg(data.organizations[0].id);
-      }
+      const orgId = initialOrgId(data.accessToken, data.organizations);
+      if (orgId) useAuthStore.getState().setCurrentOrg(orgId);
       toast.success("Email verified successfully!");
       navigate(resolvePostAuthRoute(data.nextStep));
     },
@@ -196,8 +211,9 @@ export function useAcceptInviteMutation() {
       const invitedOrgMembership = {
         id: crypto.randomUUID(),
         organizationId: data.organization.id,
-        role: data.role,
-        permissions: defaultGrantsForRole(data.role),
+        role: data.organization.role ?? ("AGENT" as const),
+        vendorScope: data.organization.vendorScope ?? null,
+        permissions: data.organization.permissions ?? [],
         isActive: true,
         organization: {
           id: data.organization.id,
@@ -228,10 +244,9 @@ export function useAcceptInviteMutation() {
       setAuth(user, data.accessToken, data.refreshToken, mergedOrgs);
       useAuthStore.getState().setCurrentOrg(data.organization.id);
       toast.success(`Joined ${data.organization.name} successfully!`);
-      // An influencer has no dashboard: it is one of the sections their role
-      // cannot reach, so landing there would bounce them straight out again.
-      // Send them where their work actually starts.
-      navigate(data.role === "INFLUENCER" ? "/settings/channels" : "/dashboard");
+      // An influencer's work starts at their channels page, not on a dashboard
+      // their role cannot reach; everyone else lands on their first open section.
+      navigate(data.organization.role === "INFLUENCER" ? "/settings/channels" : getLandingPath());
     },
     onError: (error) => handleMutationError(error),
   });

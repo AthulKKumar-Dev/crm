@@ -1,4 +1,11 @@
 import { useState } from "react";
+import { isString, useSessionState } from "~/hooks/use-session-state";
+import {
+  type DateRangePreset,
+  type OrderRangePreset,
+  orderRangeDates,
+  useDateRangeFilter,
+} from "~/hooks/use-date-range-filter";
 import { Link } from "react-router";
 import { Search } from "lucide-react";
 
@@ -11,6 +18,7 @@ import {
   SelectValue,
 } from "~/components/ui/select";
 import { Skeleton } from "~/components/ui/skeleton";
+import { DateRangeFilter } from "~/components/app/date-range-filter";
 import { ChannelBadge } from "~/components/app/channel-badge";
 import { EmptyState } from "~/components/app/empty-state";
 import { QueryErrorState } from "~/components/app/query-error-state";
@@ -18,6 +26,8 @@ import { NotYet } from "~/components/app/not-yet";
 import { useChannels } from "~/hooks/use-channel-queries";
 import { useDebounced } from "~/hooks/use-debounced";
 import { useOrder, useOrders } from "~/hooks/use-order-queries";
+import { useCurrentOrg } from "~/hooks/use-org-queries";
+import { reportingTimeZone, todayIn } from "~/lib/reporting-date";
 import {
   FINANCIAL_CLASSES,
   FINANCIAL_LABELS,
@@ -30,18 +40,12 @@ import type { Order, OrderListParams } from "~/types/api";
 const PAGE_SIZE = 5;
 
 /** Same ranges as the Orders list page, so the two read alike. */
-const DATE_RANGE_MAP: Record<string, number | null> = {
-  all: null,
-  "7d": 7,
-  "30d": 30,
-  "90d": 90,
-};
-
-function daysAgo(days: number): string {
-  const date = new Date();
-  date.setDate(date.getDate() - days);
-  return date.toISOString().split("T")[0];
-}
+const DATE_RANGE_PRESETS: ReadonlyArray<DateRangePreset<OrderRangePreset>> = [
+  { value: "all", label: "All time" },
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "90d", label: "Last 90 days" },
+];
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return "—";
@@ -91,22 +95,39 @@ export function CustomerOrdersPanel({
   currency: string;
 }) {
   const [search, setSearch] = useState("");
-  const [dateRange, setDateRange] = useState("all");
-  const [channelId, setChannelId] = useState("all");
+  // Remembered per customer for the browser session. This panel unmounts when
+  // the page's tab changes, which used to wipe both filters.
+  const dateRange = useDateRangeFilter<OrderRangePreset>(
+    `customer-orders.${customerId}.range`,
+    "all",
+    DATE_RANGE_PRESETS,
+  );
+  const [savedChannelId, setChannelId] = useSessionState(
+    `customer-orders.${customerId}.channel`,
+    "all",
+    isString,
+  );
   const [page, setPage] = useState(1);
 
-  const { data: channels = [] } = useChannels();
+  const { data: channels = [], isSuccess: channelsLoaded } = useChannels();
+  // A remembered channel that has since been disconnected would filter to an
+  // empty list behind a blank select.
+  const channelId =
+    channelsLoaded && !channels.some((channel) => channel.id === savedChannelId)
+      ? "all"
+      : savedChannelId;
+  const { data: org } = useCurrentOrg();
 
   // Debounced into the query key only, so typing stays instant.
   const debouncedSearch = useDebounced(search, 350);
-  const daysBack = DATE_RANGE_MAP[dateRange];
+  const timeZone = reportingTimeZone(org?.timezone);
 
   const params: OrderListParams = {
     customerId,
     page,
     limit: PAGE_SIZE,
     search: debouncedSearch || undefined,
-    dateFrom: daysBack != null ? daysAgo(daysBack) : undefined,
+    ...orderRangeDates(dateRange, timeZone),
     channelId: channelId !== "all" ? channelId : undefined,
   };
 
@@ -137,17 +158,16 @@ export function CustomerOrdersPanel({
           />
         </div>
 
-        <Select value={dateRange} onValueChange={reset(setDateRange)}>
-          <SelectTrigger className="h-8 w-28 rounded-lg bg-card text-caption">
-            <SelectValue placeholder="Duration" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All time</SelectItem>
-            <SelectItem value="7d">Last 7 days</SelectItem>
-            <SelectItem value="30d">Last 30 days</SelectItem>
-            <SelectItem value="90d">Last 90 days</SelectItem>
-          </SelectContent>
-        </Select>
+        <DateRangeFilter
+          presets={DATE_RANGE_PRESETS}
+          preset={dateRange.preset}
+          custom={dateRange.custom}
+          label={dateRange.label}
+          today={todayIn(timeZone)}
+          onPresetChange={reset(dateRange.selectPreset)}
+          onCustomApply={reset(dateRange.applyCustom)}
+          className="shadow-none"
+        />
 
         <Select value={channelId} onValueChange={reset(setChannelId)}>
           <SelectTrigger className="h-8 w-32 rounded-lg bg-card text-caption">
@@ -190,7 +210,7 @@ export function CustomerOrdersPanel({
           <EmptyState
             title="No orders found"
             description={
-              debouncedSearch || dateRange !== "all" || channelId !== "all"
+              debouncedSearch || dateRange.custom || dateRange.preset !== "all" || channelId !== "all"
                 ? "Try adjusting your search or filters."
                 : "Orders will appear here once this customer buys something."
             }

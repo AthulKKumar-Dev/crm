@@ -1,10 +1,36 @@
-import type { ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Link } from "react-router";
 import { ArrowRight, TrendingUp, TrendingDown } from "lucide-react";
 
 import { Skeleton } from "~/components/ui/skeleton";
 import { cn } from "~/lib/utils";
-import { ChartLineDefault, type SparklinePoint } from "./chart-line-default";
+import type { SparklinePoint } from "./chart-line-default";
+
+// Lazy on purpose: a static import here put all of recharts into the chunk of
+// every route that renders a StatCard — most of which never draw a sparkline.
+const ChartLineDefault = lazy(() =>
+    import("./chart-line-default").then((m) => ({ default: m.ChartLineDefault }))
+);
+
+/** Same box the sparkline reserves when it has no data, so nothing shifts. */
+const sparklineFallback = <div className="h-16 w-full" aria-hidden />;
+
+/**
+ * Without a series the chart would only draw that empty box, so the chunk is
+ * not requested at all — a card with nothing to plot never downloads recharts.
+ */
+function Sparkline(props: {
+    data?: SparklinePoint[];
+    variant?: "line" | "area";
+    tone?: "brand";
+}) {
+    if (!props.data?.length) return sparklineFallback;
+    return (
+        <Suspense fallback={sparklineFallback}>
+            <ChartLineDefault {...props} />
+        </Suspense>
+    );
+}
 
 interface StatCardProps {
     label: string;
@@ -104,7 +130,7 @@ export function StatCard({
                         </div>
                     </div>
                     <div className="w-full flex-1">
-                        <ChartLineDefault data={sparklineData} />
+                        <Sparkline data={sparklineData} />
                     </div>
                 </div>
                 {changeLabel && (
@@ -155,7 +181,7 @@ export function StatCard({
 
                 {sparkline && (
                     <div className="w-full flex-2">
-                        <ChartLineDefault variant="area" tone="brand" data={sparklineData} />
+                        <Sparkline variant="area" tone="brand" data={sparklineData} />
                     </div>
                 )}
             </div>

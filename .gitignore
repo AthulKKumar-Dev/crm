@@ -1,6 +1,7 @@
 .claude
 node_modules
 .react-router
-.env
+.env*
+!.env.example
 
 grep.exe

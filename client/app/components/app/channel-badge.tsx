@@ -1,7 +1,7 @@
 import ShopifyIcon from "~/assests/icon/shopifyIcon";
 import InstagramIcon from "~/assests/icon/instagramIcon";
 import WhatsappIcon from "~/assests/icon/whatsappIcon";
-import MailIcon from "~/assests/icon/mailIcon";
+import CollaboIcon from "~/assests/icon/collaboIcon";
 import { cn } from "~/lib/utils";
 import type { ChannelPlatform } from "~/types/api";
 
@@ -16,7 +16,8 @@ export const CHANNEL_ICON: Partial<Record<ChannelPlatform, IconCmp>> = {
   SHOPIFY: ShopifyIcon,
   INSTAGRAM: InstagramIcon,
   WHATSAPP: WhatsappIcon,
-  MANUAL: MailIcon,
+  // Orders created in this CRM are labelled "Collabo", so they carry its mark.
+  MANUAL: CollaboIcon,
 };
 
 export const CHANNEL_LABEL: Record<ChannelPlatform, string> = {

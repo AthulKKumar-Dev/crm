@@ -1,5 +1,6 @@
 import { Navigate, useLocation } from "react-router";
 import { useAuthStore } from "~/stores/auth.store";
+import { getLandingPath } from "~/lib/sections";
 
 /**
  * Protects /auth/* routes from authenticated users.
@@ -22,7 +23,7 @@ export function GuestGuard({ children }: { children: React.ReactNode }) {
   }
 
   if (isAuthenticated && organizations.length > 0) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={getLandingPath()} replace />;
   }
 
   if (isAuthenticated && organizations.length === 0) {

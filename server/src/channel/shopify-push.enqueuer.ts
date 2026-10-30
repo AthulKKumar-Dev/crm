@@ -77,15 +77,25 @@ export class ShopifyPushEnqueuer {
     }
   }
 
-  /** Push a single CRM-native product (one-off, e.g. created while Shopify is connected). */
+  /**
+   * Push a single CRM-native product.
+   *
+   * Same contract as `enqueueOrderPush`, for the same reasons. It used to
+   * swallow a queue failure and return nothing, so the caller stamped the
+   * product PENDING with no job behind it — "Syncing" for ever. And with no
+   * per-product id, a Sync press while the worker was between retries (status
+   * reads FAILED there) queued a second job that could create the product on
+   * Shopify twice.
+   */
   async enqueueProductPush(
     data: Extract<ShopifyPushJobData, { type: 'product' }>,
     priority: Priority = Priority.NORMAL,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
-      await this.addDeduped('push-product', data, pushJobId.product(data.productId), priority);
+      return await this.addDeduped('push-product', data, pushJobId.product(data.productId), priority);
     } catch (err) {
       this.logger.error(`Failed to enqueue Shopify product push for ${data.productId}: ${err}`);
+      return false;
     }
   }
 

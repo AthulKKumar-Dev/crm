@@ -1,6 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { pollWhile } from "~/lib/poll-while";
+import { isStalePendingSync, orderShopifySyncOf } from "~/lib/shopify-sync";
 import { orderService } from "~/services/order.service";
-import type { OrderListParams, DashboardQueryParams } from "~/types/api";
+import type {
+  DashboardQueryParams,
+  Order,
+  OrderDetail,
+  OrderListParams,
+  PaginatedResponse,
+} from "~/types/api";
 
 /** React Query key factory for all order-related queries. */
 export const orderKeys = {
@@ -13,11 +21,36 @@ export const orderKeys = {
   slipData: (ids: string[]) => [...orderKeys.all, "slip-data", ids] as const,
 };
 
+/**
+ * A push to Shopify is in flight, and not so old that the job is clearly lost.
+ *
+ * Read through `orderShopifySyncOf`: the list carries the record as
+ * `shopifySync`, the detail inside `metadata`. This used to read `metadata`
+ * only, which the list endpoint never returned, so the list's polling below
+ * never once fired and the page only caught up on a reload.
+ */
+function isPushPending(order: Pick<Order, "metadata" | "shopifySync"> | undefined): boolean {
+  if (!order) return false;
+  const sync = orderShopifySyncOf(order);
+  return sync?.status === "PENDING" && !isStalePendingSync(sync);
+}
+
+// A manual order shows its push to Shopify as pending until the worker
+// finishes. Nothing re-read the order afterwards, so the state only changed on
+// a page reload.
+const pollWhileAnyOrderPushing = pollWhile<PaginatedResponse<Order>>(
+  (page) => page?.data.some(isPushPending) ?? false,
+);
+const pollWhileOrderPushing = pollWhile<OrderDetail>(isPushPending);
+
 /** Fetch a paginated list of orders with optional filters. */
 export function useOrders(params?: OrderListParams) {
   return useQuery({
     queryKey: orderKeys.list(params),
     queryFn: () => orderService.list(params),
+    refetchInterval: pollWhileAnyOrderPushing,
+    // The previous page stays on screen, dimmed, while the next one loads.
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -35,6 +68,7 @@ export function useOrder(id?: string | null) {
     queryKey: orderKeys.detail(id!),
     queryFn: () => orderService.get(id!),
     enabled: !!id,
+    refetchInterval: pollWhileOrderPushing,
   });
 }
 

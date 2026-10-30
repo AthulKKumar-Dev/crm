@@ -140,7 +140,7 @@ export class OrganizationService {
       include: { organization: true },
     });
 
-    if (!membership || !membership.isActive) {
+    if (!membership || !membership.isActive || membership.organization.deletedAt) {
       throw new ForbiddenException('You are not a member of this organization');
     }
 
@@ -219,6 +219,15 @@ export class OrganizationService {
       data: { deletedAt: new Date() },
     });
 
+    // Drop every member's cached session. The cache is what requests are
+    // served from for up to 15 minutes; without this, members keep working
+    // in the deleted workspace until it expires.
+    const members = await this.prisma.organizationMember.findMany({
+      where: { organizationId: orgId },
+      select: { userId: true },
+    });
+    await Promise.all(members.map((m) => this.redis.deleteSession(m.userId)));
+
     return { message: 'Organization deleted' };
   }
 
@@ -228,9 +237,11 @@ export class OrganizationService {
   async requireRole(orgId: string, userId: string, roles: UserRole[]) {
     const membership = await this.prisma.organizationMember.findUnique({
       where: { organizationId_userId: { organizationId: orgId, userId } },
+      include: { organization: { select: { deletedAt: true } } },
     });
 
-    if (!membership || !membership.isActive) {
+    // A deleted workspace is closed to everyone, whatever their role in it.
+    if (!membership || !membership.isActive || membership.organization.deletedAt) {
       throw new ForbiddenException('You are not a member of this organization');
     }
 

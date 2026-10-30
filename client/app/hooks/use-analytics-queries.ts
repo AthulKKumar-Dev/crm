@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   analyticsService,
@@ -17,6 +17,7 @@ export function useAnalyticsDashboard(params?: AnalyticsQueryParams) {
   return useQuery({
     queryKey: analyticsKeys.dashboard(params),
     queryFn: () => analyticsService.getDashboard(params),
+    placeholderData: keepPreviousData,
   });
 }
 

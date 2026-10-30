@@ -1,8 +1,9 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrganizationSettingsService } from '../organization-settings/organization-settings.service';
 import { GenerateCodesDto } from './dto/generate-skus.dto';
+import { productsOutOfSyncStampSql } from '../channel/product-sync-stamp.util';
 
 /**
  * SKU / barcode generation.
@@ -27,6 +28,8 @@ import { GenerateCodesDto } from './dto/generate-skus.dto';
  */
 @Injectable()
 export class SkuGeneratorService {
+  private readonly logger = new Logger(SkuGeneratorService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly settings: OrganizationSettingsService,
@@ -54,32 +57,47 @@ export class SkuGeneratorService {
     let seq = startSeq;
     let generated = 0;
     const conflicts: Array<{ variantId: string; reason: string }> = [];
+    const touched = new Set<string>();
 
-    for (const v of variants) {
-      const productCode = this.mnemonic(v.product.title);
-      const optionPart = [v.option1, v.option2, v.option3]
-        .filter((o): o is string => !!o && o !== 'Default Title')
-        .map((o) => this.mnemonic(o, 2))
-        .join('-');
-
-      // Skip-and-increment: hand-typed SKUs may already occupy a code the
-      // sequence reaches. The set probe is O(1); the sequence was claimed
-      // beyond our batch size, so running over is fine — sequence gaps are
-      // harmless.
-      let candidate: string;
-      do {
-        candidate = [prefix, productCode, String(seq).padStart(3, '0'), optionPart]
-          .filter(Boolean)
+    // The writes are not one transaction (each variant is its own UPDATE),
+    // so a throw mid-batch leaves earlier rows written. The stamp runs in
+    // `finally` so those rows are still flagged — a written-but-unflagged
+    // code is exactly the silent divergence this stamping exists to close.
+    try {
+      for (const v of variants) {
+        const productCode = this.mnemonic(v.product.title);
+        const optionPart = [v.option1, v.option2, v.option3]
+          .filter((o): o is string => !!o && o !== 'Default Title')
+          .map((o) => this.mnemonic(o, 2))
           .join('-');
-        seq++;
-      } while (existing.has(candidate));
-      existing.add(candidate);
 
-      await this.prisma.productVariant.update({
-        where: { id: v.id },
-        data: { sku: candidate },
-      });
-      generated++;
+        // Skip-and-increment: hand-typed SKUs may already occupy a code the
+        // sequence reaches. The set probe is O(1); the sequence was claimed
+        // beyond our batch size, so running over is fine — sequence gaps are
+        // harmless.
+        let candidate: string;
+        do {
+          candidate = [prefix, productCode, String(seq).padStart(3, '0'), optionPart]
+            .filter(Boolean)
+            .join('-');
+          seq++;
+        } while (existing.has(candidate));
+        existing.add(candidate);
+
+        await this.prisma.productVariant.update({
+          where: { id: v.id },
+          data: { sku: candidate },
+        });
+        generated++;
+        touched.add(v.productId);
+      }
+    } finally {
+      // A SKU is always part of the push payload, so a synced product now
+      // differs from its Shopify copy. (Until it is pushed, a pull can still
+      // overwrite the local SKU with Shopify's — the long-standing "sync
+      // reverts CRM edits" gap; the flag at least makes the product show as
+      // needing a push.)
+      await this.flagForPush(touched, 'sku');
     }
 
     // Sequence may have run past the claim (collision skips) — re-claim the
@@ -107,17 +125,26 @@ export class SkuGeneratorService {
     const variants = await this.loadTargets(orgId, dto, 'barcode');
     let generated = 0;
     const conflicts: Array<{ variantId: string; reason: string }> = [];
+    const touched = new Set<string>();
 
-    for (const v of variants) {
-      if (!v.sku) {
-        conflicts.push({ variantId: v.id, reason: 'No SKU — generate SKUs first.' });
-        continue;
+    try {
+      for (const v of variants) {
+        if (!v.sku) {
+          conflicts.push({
+            variantId: v.id,
+            reason: 'No SKU — generate SKUs first.',
+          });
+          continue;
+        }
+        await this.prisma.productVariant.update({
+          where: { id: v.id },
+          data: { barcode: v.sku, barcodeSource: 'GENERATED' },
+        });
+        generated++;
+        touched.add(v.productId);
       }
-      await this.prisma.productVariant.update({
-        where: { id: v.id },
-        data: { barcode: v.sku, barcodeSource: 'GENERATED' },
-      });
-      generated++;
+    } finally {
+      await this.flagGeneratedBarcodesForPush(orgId, touched);
     }
     return { generated, skipped: conflicts.length, conflicts };
   }
@@ -167,63 +194,165 @@ export class SkuGeneratorService {
     let seq = startSeq;
     let generated = 0;
     const conflicts: Array<{ variantId: string; reason: string }> = [];
+    const touched = new Set<string>();
 
-    for (const v of variants) {
-      // Skip-and-increment, same as generateSkus.
-      let candidate: string;
-      do {
-        candidate = String(seq).padStart(6, '0');
-        seq++;
-      } while (existing.has(candidate));
+    try {
+      for (const v of variants) {
+        // Skip-and-increment, same as generateSkus.
+        let candidate: string;
+        do {
+          candidate = String(seq).padStart(6, '0');
+          seq++;
+        } while (existing.has(candidate));
 
-      // Past 999999 the code would gain a seventh digit — still valid Code 128,
-      // but it silently breaks the width guarantee the whole feature rests on.
-      // Refuse rather than print something that no longer fits the stock.
-      if (candidate.length > 6) {
-        conflicts.push({
-          variantId: v.id,
-          reason: 'Short-code range exhausted (999999). Reset the sequence or use SKU barcodes.',
+        // Past 999999 the code would gain a seventh digit — still valid Code 128,
+        // but it silently breaks the width guarantee the whole feature rests on.
+        // Refuse rather than print something that no longer fits the stock.
+        if (candidate.length > 6) {
+          conflicts.push({
+            variantId: v.id,
+            reason: 'Short-code range exhausted (999999). Reset the sequence or use SKU barcodes.',
+          });
+          continue;
+        }
+
+        existing.add(candidate);
+
+        // Re-check at write time, not just against the batch-start snapshot.
+        // `existing` is built once and held in memory, so two concurrent runs —
+        // or a run racing a CSV import or a product duplicate — could otherwise
+        // mint the same code. There is deliberately no DB unique constraint
+        // (Shopify legally syncs duplicate barcodes in), and the scan resolver
+        // uses findFirst, so a duplicate would silently resolve to whichever row
+        // Postgres returned. Losing a code to a race is recoverable; an
+        // ambiguous scan is not.
+        const taken = await this.prisma.productVariant.findFirst({
+          where: {
+            organizationId: orgId,
+            OR: [{ sku: candidate }, { barcode: candidate }],
+            id: { not: v.id },
+          },
+          select: { id: true },
         });
-        continue;
-      }
+        if (taken) {
+          conflicts.push({
+            variantId: v.id,
+            reason: `Code ${candidate} was claimed concurrently — re-run to assign a fresh one.`,
+          });
+          continue;
+        }
 
-      existing.add(candidate);
-
-      // Re-check at write time, not just against the batch-start snapshot.
-      // `existing` is built once and held in memory, so two concurrent runs —
-      // or a run racing a CSV import or a product duplicate — could otherwise
-      // mint the same code. There is deliberately no DB unique constraint
-      // (Shopify legally syncs duplicate barcodes in), and the scan resolver
-      // uses findFirst, so a duplicate would silently resolve to whichever row
-      // Postgres returned. Losing a code to a race is recoverable; an
-      // ambiguous scan is not.
-      const taken = await this.prisma.productVariant.findFirst({
-        where: {
-          organizationId: orgId,
-          OR: [{ sku: candidate }, { barcode: candidate }],
-          id: { not: v.id },
-        },
-        select: { id: true },
-      });
-      if (taken) {
-        conflicts.push({
-          variantId: v.id,
-          reason: `Code ${candidate} was claimed concurrently — re-run to assign a fresh one.`,
+        await this.prisma.productVariant.update({
+          where: { id: v.id },
+          data: { barcode: candidate, barcodeSource: 'GENERATED' },
         });
-        continue;
+        generated++;
+        touched.add(v.productId);
       }
-
-      await this.prisma.productVariant.update({
-        where: { id: v.id },
-        data: { barcode: candidate, barcodeSource: 'GENERATED' },
-      });
-      generated++;
+    } finally {
+      await this.flagGeneratedBarcodesForPush(orgId, touched);
     }
 
     const overrun = seq - startSeq - variants.length;
     if (overrun > 0) await this.claimSequence(orgId, overrun);
 
     return { generated, skipped: variants.length - generated, conflicts };
+  }
+
+  /**
+   * Tell the sync layer the products changed.
+   *
+   * These generators write straight to the variant row, bypassing the
+   * product service and its `markOutOfSyncIfNeeded`. Nothing else ever
+   * re-flags a SYNCED product, and the pull that "Sync Now" runs first
+   * re-stamps it SYNCED, so a code minted here stayed local for ever: on
+   * 2026-10-08 Shrishti had 4,308 generated barcodes and two Sync Now runs
+   * that each found "no products pending". The stamp is a no-op for products
+   * that were never pushed (no sync record), which is what every freshly
+   * created product is when `ProductService.create` mints its codes.
+   */
+  private async flagForPush(productIds: Set<string>, what: 'sku' | 'barcode'): Promise<void> {
+    if (productIds.size === 0) return;
+    const flagged = await this.prisma.$executeRaw(productsOutOfSyncStampSql([...productIds]));
+    // The whole reason this exists is a no-op nobody noticed for two months;
+    // say what happened. Fewer flagged than touched is normal (never-pushed
+    // products have no record to flip), so it is not a warning.
+    this.logger.log(
+      `Generated ${what}s on ${productIds.size} product(s); ${flagged} synced product(s) marked OUT_OF_SYNC for the next Shopify push.`,
+    );
+  }
+
+  /**
+   * Same, gated the way the push itself is gated: a GENERATED barcode only
+   * leaves the CRM when `inventorySettings.pushGeneratedBarcodes` is on
+   * (`ShopifyPushService.barcodeForPush`). With the flag off the push would
+   * send nothing for it, so an amber "out of sync" pill would be a lie — and
+   * when the flag is later switched on, `updateInventorySettings` flags the
+   * backlog in one sweep.
+   */
+  private async flagGeneratedBarcodesForPush(
+    orgId: string,
+    productIds: Set<string>,
+  ): Promise<void> {
+    if (productIds.size === 0) return;
+    const settings = await this.settings.getInventorySettings(orgId);
+    if (!settings.pushGeneratedBarcodes) return;
+    await this.flagForPush(productIds, 'barcode');
+  }
+
+  /**
+   * Org-wide counts behind the merchant-facing "Product codes" dialog.
+   *
+   * Deliberately computed here rather than on the client. The Inventory table
+   * is paginated AND scoped to one location, so a count taken from its rows
+   * described a different set from the one the generate call then changed —
+   * the button could claim "12" and rewrite 300.
+   *
+   * Each figure is the exact target set of one action, so a zero means the
+   * action has nothing to do and its row is not offered at all.
+   */
+  async codeStatus(orgId: string) {
+    const [row] = await this.prisma.$queryRaw<
+      Array<{
+        total: bigint;
+        missing_sku: bigint;
+        missing_barcode: bigint;
+        long_barcode: bigint;
+      }>
+    >(Prisma.sql`
+      SELECT COUNT(*) AS total,
+             COUNT(*) FILTER (WHERE v."sku" IS NULL OR v."sku" = '')
+               AS missing_sku,
+             COUNT(*) FILTER (WHERE v."barcode" IS NULL OR v."barcode" = '')
+               AS missing_barcode,
+             -- Exactly what filter 'missing-or-generated' + format 'short'
+             -- rewrites, minus the gaps counted above. GENERATED is the only
+             -- source we may replace: SHOPIFY is a real GTIN and MANUAL was
+             -- typed by a person. The 6-digit test excludes codes this
+             -- generator already shortened, so the count falls to zero once
+             -- the catalogue is clean and the action stops being offered.
+             COUNT(*) FILTER (WHERE v."barcode_source" = 'GENERATED'
+                                AND v."barcode" !~ '^[0-9]{6}$')
+               AS long_barcode
+      FROM "product_variants" v
+      JOIN "products" p ON p."id" = v."product_id"
+      WHERE v."organization_id" = ${orgId}
+        AND p."deleted_at" IS NULL
+    `);
+    // The RESOLVED prefix, not the configured one. Most orgs leave the setting
+    // empty and fall back to a mnemonic of their name, so returning the raw
+    // setting made the dialog preview a generated SKU as "———-SAR-001". The
+    // client must not re-derive this: the fallback rule lives in resolvePrefix
+    // and would drift.
+    const skuPrefix = await this.resolvePrefix(orgId);
+
+    return {
+      totalVariants: Number(row?.total ?? 0),
+      missingSku: Number(row?.missing_sku ?? 0),
+      missingBarcode: Number(row?.missing_barcode ?? 0),
+      longBarcode: Number(row?.long_barcode ?? 0),
+      skuPrefix,
+    };
   }
 
   /** Duplicate SKU/barcode report — surfaces imported collisions for cleanup. */
@@ -271,11 +400,7 @@ export class SkuGeneratorService {
 
   // ─────────────────────────── internals ───────────────────────────
 
-  private async loadTargets(
-    orgId: string,
-    dto: GenerateCodesDto,
-    target: 'sku' | 'barcode',
-  ) {
+  private async loadTargets(orgId: string, dto: GenerateCodesDto, target: 'sku' | 'barcode') {
     const filter = dto.filter ?? (target === 'sku' ? 'missing-sku' : 'missing-barcode');
     const where: Prisma.ProductVariantWhereInput = {
       organizationId: orgId,
@@ -295,9 +420,7 @@ export class SkuGeneratorService {
       } else {
         // 'all' without overwrite still only fills gaps in the target column.
         where.OR =
-          target === 'sku'
-            ? [{ sku: null }, { sku: '' }]
-            : [{ barcode: null }, { barcode: '' }];
+          target === 'sku' ? [{ sku: null }, { sku: '' }] : [{ barcode: null }, { barcode: '' }];
       }
     }
     return this.prisma.productVariant.findMany({
@@ -306,6 +429,7 @@ export class SkuGeneratorService {
       orderBy: { id: 'asc' },
       select: {
         id: true,
+        productId: true,
         sku: true,
         barcode: true,
         option1: true,
